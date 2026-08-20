@@ -172,12 +172,16 @@ it("requires 2 confirmed guarantors before a loan can be approved", async () => 
     await makeMember(G2_PHONE, coop.id, { pin: "2222" });
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin", pin: "9999" });
 
-    // Apply for a loan — bot should ask for guarantor 1.
+    // Apply for a loan — bot collects bank details, then asks for guarantor 1.
     await handleMessage(PHONE, "loan 50000 2");
+    await handleMessage(PHONE, "0123456789"); // bank account
+    await handleMessage(PHONE, "Access"); // bank name
 
     let loan = await prisma.loan.findFirst({ where: { memberId: borrower.id } });
     expect(loan).not.toBeNull();
     expect(loan!.status).toBe("pending");
+    expect(loan!.bankAccountNumber).toBe("0123456789");
+    expect(loan!.bankCode).toBe("044");
 
     // Admin tries to approve before guarantors -> must be rejected.
     const shortId = loan!.id.slice(-6);

@@ -122,6 +122,11 @@ model Loan {
   status         String     @default("pending") // pending | guaranteed | approved | disbursed | rejected | paid
   balance        Float
   monthlyPayment Float?     // installment amount after approval
+  bankAccountNumber String? // member's bank account for disbursement
+  bankCode          String? // provider bank code
+  bankName          String? // bank display name
+  disbursementStatus String? // pending | successful | failed | name_mismatch
+  disbursementError  String? // provider error or name-mismatch detail
   disbursedAt    DateTime?
   dueDate        DateTime?  // next installment due date
   memberId       String

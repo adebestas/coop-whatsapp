@@ -120,6 +120,23 @@ can be approved:
 Rules enforced: you can't be your own guarantor, a member can only appear
 once per loan, and unknown member codes are rejected.
 
+## Loan disbursement
+
+Loan applications also collect the member's **bank account number and bank**
+(by name — Access, GTB, Zenith, etc. — or the bank code). On approval the
+system auto-disburses to that account:
+
+1. The payment provider resolves the account holder's name.
+2. The name is compared against the member's **registered name** (case and
+   punctuation-insensitive; extra titles like "Chief" are ignored).
+3. If it **matches** → the loan is `disbursed` and the money is sent to the
+   bank account. A payout record is created and the member is notified.
+4. If it **doesn't match** (or the account can't be resolved) → the money is
+   **not sent**. The loan stays `approved` with a `name_mismatch` /
+   `failed` disbursement status so an admin can investigate.
+
+The admin's `approve` reply includes the disbursement result.
+
 ## Workplaces (units)
 
 Members can be grouped by workplace. Each workplace has its own code and an

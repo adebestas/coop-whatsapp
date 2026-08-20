@@ -60,11 +60,27 @@ export interface PayoutResult {
   error?: string;
 }
 
+export interface ResolveAccountParams {
+  /** Recipient bank account number */
+  accountNumber: string;
+  /** Recipient bank code (provider-specific) */
+  bankCode: string;
+}
+
+export interface ResolveAccountResult {
+  ok: boolean;
+  /** The name registered on the account (for verification) */
+  name?: string;
+  error?: string;
+}
+
 export interface ProviderAdapter {
   name: string;
   createVirtualAccount(params: CreateVirtualAccountParams): Promise<VirtualAccountData>;
   /** Send a payout/transfer to a bank account */
   payout?(params: PayoutParams): Promise<PayoutResult>;
+  /** Resolve an account and return the registered account name */
+  resolveAccount?(params: ResolveAccountParams): Promise<ResolveAccountResult>;
   /** Validate an incoming webhook request (signature/headers) */
   verifyWebhook(body: unknown, headers: Record<string, string | string[] | undefined>): boolean;
   /** Parse a raw webhook body into a PaymentNotification, or null if irrelevant */

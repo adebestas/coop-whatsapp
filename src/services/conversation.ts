@@ -26,6 +26,8 @@ export type BotState =
   | "awaiting_save_amount"
   | "awaiting_loan_amount"
   | "awaiting_loan_months"
+  | "awaiting_loan_bank_account"
+  | "awaiting_loan_bank_code"
   | "awaiting_guarantor_1"
   | "awaiting_guarantor_2";
 
@@ -35,6 +37,10 @@ interface FlowData {
   name?: string;
   contactPhone?: string;
   loanAmount?: number;
+  loanMonths?: number;
+  loanAccount?: string;
+  loanBankCode?: string;
+  loanBankName?: string;
   loanId?: string;
 }
 
@@ -332,7 +338,52 @@ async function handleAwaitingInput(
         await sendText({ to: phone, text: "Months must be between 1 and 12, e.g. *3*." });
         return;
       }
-      const result = await applyForLoan(phone, data.loanAmount ?? 0, months);
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_loan_bank_account", data: JSON.stringify({ ...data, loanMonths: months }) },
+        update: { state: "awaiting_loan_bank_account", data: JSON.stringify({ ...data, loanMonths: months }) },
+      });
+      await sendText({
+        to: phone,
+        text:
+          `Perfect. The loan will be paid directly into your bank account.\n\n` +
+          `What's your *bank account number*? (10 digits, e.g. *0123456789*)`,
+      });
+      break;
+    }
+
+    case "awaiting_loan_bank_account": {
+      const account = text.trim().replace(/[^0-9]/g, "");
+      if (!/^\d{10}$/.test(account)) {
+        await sendText({ to: phone, text: "Account numbers are 10 digits. Please re-enter, e.g. *0123456789*." });
+        return;
+      }
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_loan_bank_code", data: JSON.stringify({ ...data, loanAccount: account }) },
+        update: { state: "awaiting_loan_bank_code", data: JSON.stringify({ ...data, loanAccount: account }) },
+      });
+      await sendText({
+        to: phone,
+        text: `Which bank? (e.g. *Access*, *GTB*, *Zenith*, *UBA*, *First Bank*, *Kuda*, *Opay*)`,
+      });
+      break;
+    }
+
+    case "awaiting_loan_bank_code": {
+      const bank = resolveBankCode(text);
+      if (!bank) {
+        await sendText({
+          to: phone,
+          text: `We don't recognise that bank. Try e.g. *Access*, *GTB*, *Zenith*, *UBA*, *First Bank*, *Kuda*, or reply with the 5-digit bank code directly.`,
+        });
+        return;
+      }
+      const result = await applyForLoan(phone, data.loanAmount ?? 0, data.loanMonths ?? 1, {
+        accountNumber: data.loanAccount ?? "",
+        bankCode: bank.code,
+        bankName: bank.name,
+      });
       if (!result.ok || !result.loanId) {
         await sendText({ to: phone, text: result.message });
         await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
@@ -442,23 +493,18 @@ async function handleLoan(phone: string, args: string[]): Promise<void> {
     await sendText({ to: phone, text: "For how many months? (1–12)" });
     return;
   }
-  const result = await applyForLoan(phone, amount, months);
-  if (result.ok && result.loanId) {
-    await prisma.session.upsert({
-      where: { phone },
-      create: { phone, state: "awaiting_guarantor_1", data: JSON.stringify({ loanId: result.loanId }) },
-      update: { state: "awaiting_guarantor_1", data: JSON.stringify({ loanId: result.loanId }) },
-    });
-    await sendText({ to: phone, text: result.message });
-    await sendText({
-      to: phone,
-      text:
-        `You need *2 guarantors* who are members of the cooperative.\n\n` +
-        `Send the *member code* of your first guarantor (e.g. *ABC123-DEFG*).`,
-    });
-    return;
-  }
-  await sendText({ to: phone, text: result.message });
+  // Amount + months known — now collect the bank account for disbursement.
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_loan_bank_account", data: JSON.stringify({ loanAmount: amount, loanMonths: months }) },
+    update: { state: "awaiting_loan_bank_account", data: JSON.stringify({ loanAmount: amount, loanMonths: months }) },
+  });
+  await sendText({
+    to: phone,
+    text:
+      `Great. The loan will be paid directly into your bank account.\n\n` +
+      `What's your *bank account number*? (10 digits, e.g. *0123456789*)`,
+  });
 }
 
 async function handleRepay(phone: string, _args: string[]): Promise<void> {
@@ -563,6 +609,49 @@ function parseNaira(raw?: string): number | null {
   if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
   const n = Number(cleaned);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Common Nigerian bank names -> provider bank codes.
+const BANK_CODES: Record<string, string> = {
+  access: "044",
+  gtb: "058",
+  gtbank: "058",
+  guarantee: "058",
+  zenith: "057",
+  uba: "033",
+  firstbank: "011",
+  first: "011",
+  fbn: "011",
+  union: "032",
+  fidelity: "070",
+  fcmb: "214",
+  stanbic: "221",
+  ibtc: "221",
+  ecobank: "050",
+  sterling: "232",
+  wema: "035",
+  polaris: "076",
+  keystone: "082",
+  unity: "215",
+  jaiz: "301",
+  providus: "101",
+  kuda: "50211",
+  opay: "50212",
+  palmpay: "999992",
+  moniepoint: "50515",
+  fairmoney: "51318",
+};
+
+/** Resolve a bank code from a name (or accept a raw numeric code). */
+function resolveBankCode(input: string): { code: string; name: string } | null {
+  const cleaned = input.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!cleaned) return null;
+  if (/^\d+$/.test(cleaned)) {
+    return { code: cleaned, name: input.trim() };
+  }
+  const code = BANK_CODES[cleaned];
+  if (!code) return null;
+  return { code, name: input.trim() };
 }
 
 function safeParse(json: string): unknown {

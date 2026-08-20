@@ -5,6 +5,8 @@ import type {
   PayoutResult,
   PaymentNotification,
   ProviderAdapter,
+  ResolveAccountParams,
+  ResolveAccountResult,
   VirtualAccountData,
 } from "./index.js";
 
@@ -42,6 +44,18 @@ async function api<T>(path: string, method: string, body?: unknown): Promise<T> 
  */
 export const paystackAdapter: ProviderAdapter = {
   name: "paystack",
+
+  async resolveAccount(params: ResolveAccountParams): Promise<ResolveAccountResult> {
+    try {
+      const res = await api<any>(
+        `/bank/resolve?account_number=${encodeURIComponent(params.accountNumber)}&bank_code=${encodeURIComponent(params.bankCode)}`,
+        "GET",
+      );
+      return { ok: true, name: res.data?.account_name ?? undefined };
+    } catch (err: any) {
+      return { ok: false, error: err.message ?? "account resolution failed" };
+    }
+  },
 
   async payout(params: PayoutParams): Promise<PayoutResult> {
     try {

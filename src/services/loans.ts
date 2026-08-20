@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
+import { disburseLoan } from "./disbursements.js";
 
 export interface ApplyLoanResult {
   ok: boolean;
@@ -12,6 +13,7 @@ export async function applyForLoan(
   phone: string,
   amount: number,
   tenureMonths: number,
+  bank?: { accountNumber: string; bankCode: string; bankName?: string },
   interestRate = 2,
 ): Promise<ApplyLoanResult> {
   const member = await prisma.member.findFirst({ where: { phone } });
@@ -31,6 +33,9 @@ export async function applyForLoan(
       balance: amount,
       memberId: member.id,
       cooperativeId: member.cooperativeId,
+      bankAccountNumber: bank?.accountNumber,
+      bankCode: bank?.bankCode,
+      bankName: bank?.bankName,
     },
   });
 
@@ -105,10 +110,12 @@ export async function approveLoan(loanId: string, interestRate?: number): Promis
     },
   });
 
-  return {
-    ok: true,
-    message: `Loan *${loan.id.slice(-6)}* approved for ${loan.member.name}. ${formatBalance(loan.amount)} @ ${rate}%/mo for ${loan.tenureMonths} months. Monthly: ${formatBalance(Math.round(monthly))}.`,
-  };
+  const approvedMsg =
+    `Loan *${loan.id.slice(-6)}* approved for ${loan.member.name}. ${formatBalance(loan.amount)} @ ${rate}%/mo for ${loan.tenureMonths} months. Monthly: ${formatBalance(Math.round(monthly))}.`;
+
+  // Auto-disburse to the member's bank account (name-verified by the provider).
+  const disbursement = await disburseLoan(loan.id);
+  return { ok: true, message: `${approvedMsg}\n\n${disbursement.message}` };
 }
 
 export async function rejectLoan(loanId: string): Promise<{ ok: boolean; message: string }> {
