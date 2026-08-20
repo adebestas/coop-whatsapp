@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---- Cooperatives (multi-tenant orgs) ----
+model Cooperative {
+  id            String     @id @default(cuid())
+  name          String
+  code          String     @unique // e.g. TEST01 — used to join via WhatsApp
+  description   String?
+  state         String?    // Nigerian state (or country for global scope)
+  country       String     @default("NG")
+  currency      String     @default("NGN")
+  adminPhone    String?    // WhatsApp number of the coop admin
+  status        String     @default("active") // active | suspended
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  members       Member[]
+  contributions Contribution[]
+  loans         Loan[]
+  payouts       Payout[]
+}
+
+// ---- Members (users) ----
+model Member {
+  id            String     @id @default(cuid())
+  phone         String // WhatsApp number, E.164 format
+  name          String
+  bvn           String?
+  role          String     @default("member") // member | admin
+  state         String?    // member's home state/LGA grouping
+  lga           String?
+  pin           String?    // 4-digit transaction PIN (hashed)
+  status        String     @default("active") // pending | active | suspended
+  virtualAccountNumber String? // provider-issued account number for top-ups
+  virtualAccountBank    String?
+  virtualAccountProvider String?
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  wallet        Wallet?
+  contributions Contribution[]
+  loans         Loan[]
+  payouts       Payout[]
+
+  @@unique([cooperativeId, phone])
+  @@index([phone])
+}
+
+model Wallet {
+  id         String     @id @default(cuid())
+  balance    Float      @default(0) // in minor? store as float cents-safe in NGN with 2dp
+  totalSaved Float      @default(0)
+  memberId   String     @unique
+  member     Member     @relation(fields: [memberId], references: [id])
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+}
+
+// ---- Savings / contributions ----
+model Contribution {
+  id          String       @id @default(cuid())
+  amount      Float
+  type        String       @default("savings") // savings | weekly | monthly | emergency
+  note        String?
+  reference   String       @unique // merchant ref for reconciliation
+  status      String       @default("pending") // pending | confirmed | failed
+  paidAt      DateTime?
+  memberId    String
+  member      Member       @relation(fields: [memberId], references: [id])
+  cooperativeId String
+  cooperative Cooperative @relation(fields: [cooperativeId], references: [id])
+  createdAt   DateTime     @default(now())
+}
+
+// ---- Loans ----
+model Loan {
+  id             String     @id @default(cuid())
+  amount         Float
+  interestRate   Float      @default(0) // monthly %
+  tenureMonths   Int        @default(1)
+  status         String     @default("pending") // pending | approved | disbursed | rejected | paid
+  balance        Float
+  monthlyPayment Float?     // installment amount after approval
+  disbursedAt    DateTime?
+  dueDate        DateTime?  // next installment due date
+  memberId       String
+  member         Member     @relation(fields: [memberId], references: [id])
+  cooperativeId  String
+  cooperative    Cooperative @relation(fields: [cooperativeId], references: [id])
+  createdAt      DateTime   @default(now())
+  approvedAt     DateTime?
+  repayments     LoanRepayment[]
+}
+
+model LoanRepayment {
+  id        String   @id @default(cuid())
+  amount    Float
+  loanId    String
+  loan      Loan     @relation(fields: [loanId], references: [id])
+  paidAt    DateTime @default(now())
+}
+
+// ---- Payouts (admin disbursements to members) ----
+model Payout {
+  id            String      @id @default(cuid())
+  amount        Float
+  reference     String      @unique
+  status        String      @default("pending") // pending | processing | successful | failed
+  provider      String?     // flutterwave | paystack
+  providerRef   String?     // provider-side reference/id
+  note          String?
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id])
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+// ---- Chat state machine (multi-turn onboarding / flows) ----
+model Session {
+  id         String   @id @default(cuid())
+  phone      String   @unique
+  state      String   @default("idle") // idle | awaiting_name | awaiting_coop | awaiting_pin | ...
+  data       String   @default("{}") // JSON payload for the current flow
+  updatedAt  DateTime @updatedAt
+}
