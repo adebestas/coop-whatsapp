@@ -61,6 +61,26 @@ tests/                   # vitest smoke tests
 Multi-turn onboarding: `join TEST01` → name → set 4-digit PIN → confirm →
 done. You receive a short **member code** on joining.
 
+## Channels: WhatsApp + Telegram
+
+The bot runs on **both platforms** from the same codebase and database, so a
+cooperative's members can mix freely between them.
+
+- **WhatsApp** — Meta Cloud API webhook (`/webhooks/whatsapp`).
+- **Telegram** — long-polling against the Bot API (no public URL needed).
+
+A user is identified by channel-scoped id: a WhatsApp phone (`2348012345678`)
+or a Telegram chat id (`tg:123456789`). All flows — onboarding, savings,
+loans, guarantors, admin commands — are shared. To enable Telegram:
+
+1. Create a bot with [@BotFather](https://t.me/BotFather), copy the token.
+2. Set `TELEGRAM_BOT_TOKEN=<token>` in `.env`.
+3. Start the server; the bot begins polling automatically.
+
+Known limitation: virtual-account top-ups key off a phone number, so a
+Telegram-only member should still share their phone number (via admin) when
+they need to fund by transfer.
+
 ## Loan guarantor flow
 
 Every loan requires **2 guarantors**, and each must confirm before the loan

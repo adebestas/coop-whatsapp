@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/whatsapp.js";
+import { sendText } from "../lib/messaging.js";
 import { approveLoan, listPendingLoans, rejectLoan } from "./loans.js";
 import { formatBalance } from "./cooperative.js";
 import { resolveProvider } from "./payments/index.js";

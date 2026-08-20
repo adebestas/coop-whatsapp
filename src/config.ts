@@ -8,6 +8,9 @@ export const config = {
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID ?? "",
     verifyToken: process.env.WHATSAPP_VERIFY_TOKEN ?? "dev-verify-token",
   },
+  telegram: {
+    token: process.env.TELEGRAM_BOT_TOKEN ?? "",
+  },
   allowedTestNumbers: (process.env.ALLOWED_TEST_NUMBERS ?? "")
     .split(",")
     .map((n) => n.trim())

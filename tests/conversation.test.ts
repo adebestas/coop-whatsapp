@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../src/lib/prisma.js";
 import { handleMessage } from "../src/services/conversation.js";
-import { sendText } from "../src/lib/whatsapp.js";
+import { sendText } from "../src/lib/messaging.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
-vi.mock("../src/lib/whatsapp.js", () => ({
+vi.mock("../src/lib/messaging.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
 }));
 
@@ -138,7 +138,28 @@ describe("coop whatsapp bot", () => {
     expect(after!.wallet!.balance).toBe(10000);
   });
 
-  it("requires 2 confirmed guarantors before a loan can be approved", async () => {
+  it("serves Telegram users through the same flow, tagged with tg: ids", async () => {
+    const coop = await makeCoop("TEST05", "Test Coop");
+    const TG = "tg:123456789";
+
+    await handleMessage(TG, "join TEST05");
+    await handleMessage(TG, "Bola Musa");
+    await handleMessage(TG, "5555");
+    await handleMessage(TG, "5555");
+
+    const member = await prisma.member.findUnique({
+      where: { cooperativeId_phone: { cooperativeId: coop.id, phone: TG } },
+      include: { wallet: true },
+    });
+    expect(member).not.toBeNull();
+    expect(member!.code).toMatch(/^[A-Z2-9]{6}-[A-Z2-9]{4}$/);
+
+    // Replies are addressed to the tg: id, not a phone.
+    const calls = vi.mocked(sendText).mock.calls;
+    expect(calls.some((c) => c[0].to === TG)).toBe(true);
+    expect(calls.every((c) => c[0].to.startsWith("tg:"))).toBe(true);
+  });
+it("requires 2 confirmed guarantors before a loan can be approved", async () => {
     const coop = await makeCoop("TEST04", "Test Coop", ADMIN_PHONE);
     const borrower = await makeMember(PHONE, coop.id, { pin: "1234" });
     await makeMember(G1_PHONE, coop.id, { pin: "1111" });

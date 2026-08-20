@@ -1,6 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { generateGuarantorCode } from "../lib/security.js";
-import { sendText } from "../lib/whatsapp.js";
+import { sendText } from "../lib/messaging.js";
 import { getMemberByPhone } from "./cooperative.js";
 
 export const REQUIRED_GUARANTORS = 2;
