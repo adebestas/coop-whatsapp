@@ -144,6 +144,7 @@ describe("coop whatsapp bot", () => {
 
     await handleMessage(TG, "join TEST05");
     await handleMessage(TG, "Bola Musa");
+    await handleMessage(TG, "08012345678");
     await handleMessage(TG, "5555");
     await handleMessage(TG, "5555");
 
@@ -153,6 +154,7 @@ describe("coop whatsapp bot", () => {
     });
     expect(member).not.toBeNull();
     expect(member!.code).toMatch(/^[A-Z2-9]{6}-[A-Z2-9]{4}$/);
+    expect(member!.contactPhone).toBe("2348012345678");
 
     // Replies are addressed to the tg: id, not a phone.
     const calls = vi.mocked(sendText).mock.calls;

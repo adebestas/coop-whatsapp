@@ -30,7 +30,8 @@ model Cooperative {
 model Member {
   id            String     @id @default(cuid())
   code          String     @unique // short human-friendly code (e.g. A1B2C3) for guarantor/reference
-  phone         String // WhatsApp number, E.164 format
+  phone         String // channel id: WhatsApp E.164 number, or "tg:<chatId>" for Telegram
+  contactPhone  String?   // real phone number (E.164) used for top-ups, payouts, KYC
   name          String
   bvn           String?
   role          String     @default("member") // member | admin

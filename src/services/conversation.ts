@@ -10,11 +10,13 @@ import { applyForLoan, repayLoan } from "./loans.js";
 import { handleAdminCommand } from "./admin.js";
 import { provisionVirtualAccount } from "./payments/topup.js";
 import { addGuarantor, confirmGuarantee } from "./guarantors.js";
+import { normalizePhone } from "../lib/phones.js";
 
 export type BotState =
   | "idle"
   | "awaiting_name"
   | "awaiting_coop_code"
+  | "awaiting_phone"
   | "awaiting_pin"
   | "awaiting_pin_confirm"
   | "awaiting_save_amount"
@@ -27,6 +29,7 @@ interface FlowData {
   joinCode?: string;
   pin?: string;
   name?: string;
+  contactPhone?: string;
   loanAmount?: number;
   loanId?: string;
 }
@@ -101,6 +104,10 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
       await handleCode(phone);
       break;
 
+    case "phone":
+      await handlePhone(phone, args);
+      break;
+
     default:
       await sendText({
         to: phone,
@@ -131,6 +138,7 @@ function buildMenu(member: { name: string; cooperative: { name: string }; wallet
       `• *repay* — repay your loan monthly installment\n` +
       `• *code* — see your member code (share it for guarantor requests)\n` +
       `• *confirm <code>* — accept a guarantor request\n` +
+      `• *phone <number>* — add/update your real phone number (needed for funding)\n` +
       `• *menu* — show this menu\n\n` +
       `Admins: try *pending*, *approve <id>*, *reject <id>*, *payout <amount> <phone>*`
   );
@@ -189,13 +197,41 @@ async function handleAwaitingInput(
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_pin", data: JSON.stringify({ ...data, name }) },
-        update: { state: "awaiting_pin", data: JSON.stringify({ ...data, name }) },
+        create: { phone, state: "awaiting_phone", data: JSON.stringify({ ...data, name }) },
+        update: { state: "awaiting_phone", data: JSON.stringify({ ...data, name }) },
       });
-      await sendText({
-        to: phone,
-        text: `Thanks, *${name}*! Now choose a 4-digit PIN. You'll use it to approve transactions.`,
+      if (phone.startsWith("tg:")) {
+        await sendText({
+          to: phone,
+          text: `Thanks, *${name}*! What's your real phone number? We need it for funding your wallet by bank transfer (e.g. *08012345678*).`,
+        });
+      } else {
+        // WhatsApp members are already on a phone number — skip straight to PIN.
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "awaiting_pin", data: JSON.stringify({ ...data, name }) },
+          update: { state: "awaiting_pin", data: JSON.stringify({ ...data, name }) },
+        });
+        await sendText({
+          to: phone,
+          text: `Thanks, *${name}*! Now choose a 4-digit PIN. You'll use it to approve transactions.`,
+        });
+      }
+      break;
+    }
+
+    case "awaiting_phone": {
+      const contactPhone = normalizePhone(text);
+      if (!contactPhone) {
+        await sendText({ to: phone, text: "That doesn't look like a valid number. Try e.g. *08012345678* or *+2348012345678*." });
+        return;
+      }
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_pin", data: JSON.stringify({ ...data, contactPhone }) },
+        update: { state: "awaiting_pin", data: JSON.stringify({ ...data, contactPhone }) },
       });
+      await sendText({ to: phone, text: `Got it. Now choose a 4-digit PIN. You'll use it to approve transactions.` });
       break;
     }
 
@@ -223,7 +259,7 @@ async function handleAwaitingInput(
         });
         return;
       }
-      const result = await findOrCreateMember(phone, data.joinCode ?? "", data.name ?? "", text.trim());
+      const result = await findOrCreateMember(phone, data.joinCode ?? "", data.name ?? "", text.trim(), data.contactPhone);
       await prisma.session.upsert({
         where: { phone },
         create: { phone, state: "idle" },
@@ -420,6 +456,27 @@ async function handleCode(phone: string): Promise<void> {
     to: phone,
     text: `Your member code is *${member.code}*. Share it with members who want you as a guarantor.`,
   });
+}
+
+async function handlePhone(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const contactPhone = normalizePhone(args.join(""));
+  if (!contactPhone) {
+    await sendText({
+      to: phone,
+      text: "Reply *phone <number>* with a valid number, e.g. *phone 08012345678* or *phone +2348012345678*.",
+    });
+    return;
+  }
+  await prisma.member.update({
+    where: { id: member.id },
+    data: { contactPhone },
+  });
+  await sendText({ to: phone, text: `Thanks! Your phone is now set to *${contactPhone}*. Reply *fund* to get your funding account.` });
 }
 
 function parseNaira(raw?: string): number | null {

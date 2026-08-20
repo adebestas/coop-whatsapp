@@ -77,9 +77,10 @@ loans, guarantors, admin commands — are shared. To enable Telegram:
 2. Set `TELEGRAM_BOT_TOKEN=<token>` in `.env`.
 3. Start the server; the bot begins polling automatically.
 
-Known limitation: virtual-account top-ups key off a phone number, so a
-Telegram-only member should still share their phone number (via admin) when
-they need to fund by transfer.
+**Real phone numbers:** Telegram users are asked for their phone number
+during onboarding (and can update it anytime with `phone <number>`). It's
+used for KYC when provisioning virtual-account top-ups and payouts. WhatsApp
+members already are identified by their number, so no extra step is needed.
 
 ## Loan guarantor flow
 

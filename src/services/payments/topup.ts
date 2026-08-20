@@ -20,9 +20,23 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
   }
 
   const provider = resolveProvider();
+
+  // Real phone for the provider KYC. WhatsApp members have it on `phone`;
+  // Telegram members must have set `contactPhone` (collected at onboarding
+  // or via the `phone <number>` command).
+  const kycPhone =
+    member.contactPhone ?? (member.phone.startsWith("tg:") ? null : member.phone);
+  if (!kycPhone) {
+    return {
+      ok: false,
+      message:
+        "We need your real phone number to set up a funding account. Reply with *phone 08012345678* and try *fund* again.",
+    };
+  }
+
   try {
     const va = await provider.createVirtualAccount({
-      phone: member.phone,
+      phone: kycPhone,
       name: member.name,
       reference: `MEM-${member.id}`,
       currency: "NGN",
