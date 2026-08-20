@@ -52,14 +52,35 @@ tests/                   # vitest smoke tests
 | `join <code>` | Join a cooperative by its code |
 | `balance` | Check savings balance |
 | `save <amount>` | Make a contribution (e.g. `save 2000`) |
+| `plan <amount> <weekly\|monthly>` | Set a recurring contribution plan |
 | `fund` | Get your personal virtual account number for top-ups |
 | `loan <amount> <months>` | Apply for a loan (e.g. `loan 50000 3`) |
 | `repay` | Pay the monthly installment on your active loan |
+| `history` | Your personal transaction statement |
+| `ledger` | Cooperative ledger — transparency for all members |
+| `dividend <rate>` | Real-time dividend calculator |
+| `joinunit <code>` | Join your workplace/unit |
 | `code` | See your member code (share it for guarantor requests) |
 | `confirm <code>` | Accept a guarantor request |
+| `phone <number>` | Add/update your real phone number (needed for funding) |
 
-Multi-turn onboarding: `join TEST01` → name → set 4-digit PIN → confirm →
-done. You receive a short **member code** on joining.
+Multi-turn onboarding: `join TEST01` → name → (Telegram: phone) → set 4-digit
+PIN → confirm → done. You receive a short **member code** on joining.
+
+## Admin commands
+
+| Command | What it does |
+| --- | --- |
+| `pending` | List loan applications (workplace admins see their unit only) |
+| `approve <id>` / `reject <id>` | Approve / reject a guaranteed loan (coop admin) |
+| `payout <amount> <phone>` | Disburse money to a member (coop admin) |
+| `broadcast <msg>` | Message all members (`broadcast unit <msg>` for your workplace) |
+| `addunit <name> <code>` | Create a workplace/unit |
+| `unitadmin <unitcode> <membercode>` | Assign a workplace admin |
+| `units` | List workplaces |
+| `interest <rate%>` | Set monthly interest on savings |
+| `dividend <rate>` | Dividend calculator (real-time) |
+| `paydividend <rate%>` | Distribute a dividend to all members |
 
 ## Channels: WhatsApp + Telegram
 
@@ -98,6 +119,32 @@ can be approved:
 
 Rules enforced: you can't be your own guarantor, a member can only appear
 once per loan, and unknown member codes are rejected.
+
+## Workplaces (units)
+
+Members can be grouped by workplace. Each workplace has its own code and an
+assigned admin. Cooperative rules still apply across the whole cooperative;
+units are an organizational layer for communication and visibility.
+
+- Admin: `addunit <name> <code>` → `unitadmin <code> <membercode>` →
+  members join with `joinunit <code>`.
+- Workplace admins can broadcast to their unit and see unit loan/pending
+  lists, but only the coop admin can approve loans / make payouts.
+
+## Recurring contributions & interest
+
+- `plan <amount> weekly|monthly` sets a recurring contribution. A background
+  scheduler nudges members when each instalment is due (they reply `save X`
+  to pay). `plan off` cancels.
+- Admin sets `interest <rate%>` and savings earn that rate monthly; interest
+  accrues to wallets on the 1st of each month.
+
+## Dividends
+
+- `dividend <rate>` shows a real-time calculator: the pool and each member's
+  share, proportional to their lifetime savings.
+- `paydividend <rate>` distributes it — wallets are credited and it appears
+  in each member's statement.
 
 ## Admin WhatsApp commands
 

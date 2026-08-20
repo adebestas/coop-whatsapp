@@ -45,13 +45,17 @@ async function makeMember(
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  await prisma.contribution.deleteMany();
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
   await prisma.payout.deleteMany();
-  await prisma.contribution.deleteMany();
+  await prisma.dividendEntry.deleteMany();
+  await prisma.dividend.deleteMany();
+  await prisma.broadcast.deleteMany();
   await prisma.wallet.deleteMany();
   await prisma.member.deleteMany();
+  await prisma.unit.deleteMany();
   await prisma.cooperative.deleteMany();
   await prisma.session.deleteMany();
 });

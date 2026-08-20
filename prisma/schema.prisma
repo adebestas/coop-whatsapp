@@ -18,12 +18,16 @@ model Cooperative {
   currency      String     @default("NGN")
   adminPhone    String?    // WhatsApp number of the coop admin
   status        String     @default("active") // active | suspended
+  interestRate  Float      @default(0) // monthly % paid on member savings
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   members       Member[]
   contributions Contribution[]
   loans         Loan[]
   payouts       Payout[]
+  units         Unit[]
+  dividends     Dividend[]
+  broadcasts    Broadcast[]
 }
 
 // ---- Members (users) ----
@@ -42,6 +46,13 @@ model Member {
   virtualAccountNumber String? // provider-issued account number for top-ups
   virtualAccountBank    String?
   virtualAccountProvider String?
+  unitId        String?
+  unit          Unit?     @relation("UnitMembership", fields: [unitId], references: [id], onDelete: SetNull)
+  adminOf       Unit[]    @relation("UnitAdmin")
+  autoSaveAmount  Float?   // recurring contribution amount
+  autoSaveInterval String? // weekly | monthly
+  autoSaveNextDue  DateTime? // when the next reminder should fire
+  autoSaveEnabled  Boolean  @default(false)
   cooperativeId String
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
   createdAt     DateTime   @default(now())
@@ -51,9 +62,29 @@ model Member {
   loans         Loan[]
   payouts       Payout[]
   guarantorFor  Guarantor[]
+  dividendEntries DividendEntry[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
+}
+
+// ---- Units / workplaces ----
+// Members of a cooperative are grouped into workplaces ("units"). Each unit
+// has its own code and an assigned admin. Cooperative rules (savings, loans,
+// guarantors, dividends) still apply across the whole cooperative.
+model Unit {
+  id            String   @id @default(cuid())
+  name          String
+  code          String   // e.g. LAG01 — used to join the unit
+  adminMemberId String?
+  adminMember   Member?  @relation("UnitAdmin", fields: [adminMemberId], references: [id], onDelete: SetNull)
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  members       Member[] @relation("UnitMembership")
+  broadcasts    Broadcast[]
+  createdAt     DateTime @default(now())
+
+  @@unique([cooperativeId, code])
 }
 
 model Wallet {
@@ -144,6 +175,50 @@ model Payout {
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
+}
+
+// ---- Dividends ----
+// A dividend run: admin sets a rate and the pool is shared proportionally to
+// each member's lifetime savings (totalSaved). `paydividend` credits wallets.
+model Dividend {
+  id            String          @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative     @relation(fields: [cooperativeId], references: [id])
+  reference     String          @unique
+  rate          Float           // percentage of totalSaved
+  totalPool     Float
+  status        String          @default("pending") // pending | distributed
+  createdAt     DateTime        @default(now())
+  distributedAt DateTime?
+  entries       DividendEntry[]
+}
+
+model DividendEntry {
+  id        String   @id @default(cuid())
+  dividendId String
+  dividend  Dividend @relation(fields: [dividendId], references: [id], onDelete: Cascade)
+  memberId  String
+  member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  amount    Float
+  status    String   @default("pending") // pending | paid
+  paidAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@unique([dividendId, memberId])
+}
+
+// ---- Broadcasts (admin announcements) ----
+model Broadcast {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  senderId      String
+  senderName    String
+  message       String
+  scope         String   @default("coop") // coop | unit
+  unitId        String?  // set when scope = unit
+  unit          Unit?    @relation(fields: [unitId], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
 }
 
 // ---- Chat state machine (multi-turn onboarding / flows) ----

@@ -17,6 +17,8 @@ async function main() {
   const adminName = arg("admin-name");
   const adminPhone = arg("admin-phone")?.replace(/[^0-9]/g, "");
   const adminPin = arg("admin-pin");
+  const unitName = arg("unit-name");
+  const unitCode = arg("unit-code");
 
   if (!name || !coopCode || !adminName || !adminPhone || !adminPin) {
     console.error(
@@ -54,6 +56,15 @@ async function main() {
     },
     update: { role: "admin", name: adminName },
   });
+
+  if (unitName && unitCode) {
+    await prisma.unit.upsert({
+      where: { cooperativeId_code: { cooperativeId: coop.id, code: unitCode.toUpperCase() } },
+      create: { name: unitName, code: unitCode.toUpperCase(), cooperativeId: coop.id },
+      update: { name: unitName },
+    });
+    console.log(`Created workplace "${unitName}" (${unitCode}).`);
+  }
 
   console.log(`Created cooperative "${coop.name}" (${coopCode}) with admin ${adminName} (${adminPhone}, code ${memberCode}).`);
   await prisma.$disconnect();

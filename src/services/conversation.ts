@@ -11,6 +11,10 @@ import { handleAdminCommand } from "./admin.js";
 import { provisionVirtualAccount } from "./payments/topup.js";
 import { addGuarantor, confirmGuarantee } from "./guarantors.js";
 import { normalizePhone } from "../lib/phones.js";
+import { showLedger, showHistory } from "./statements.js";
+import { computeDividendPreview } from "./dividends.js";
+import { setAutoSave } from "./scheduler.js";
+import { joinUnit } from "./units.js";
 
 export type BotState =
   | "idle"
@@ -108,6 +112,27 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
       await handlePhone(phone, args);
       break;
 
+    case "ledger":
+      await handleLedger(phone);
+      break;
+
+    case "history":
+    case "statement":
+      await handleHistory(phone);
+      break;
+
+    case "plan":
+      await handlePlan(phone, args);
+      break;
+
+    case "dividend":
+      await handleDividend(phone, args);
+      break;
+
+    case "joinunit":
+      await handleJoinUnit(phone, args);
+      break;
+
     default:
       await sendText({
         to: phone,
@@ -133,14 +158,19 @@ function buildMenu(member: { name: string; cooperative: { name: string }; wallet
       `Commands:\n` +
       `• *balance* — check your savings balance\n` +
       `• *save <amount>* — make a contribution (e.g. *save 2000*)\n` +
+      `• *plan <amount> <weekly|monthly>* — set a recurring contribution\n` +
       `• *fund* — get your personal top-up account number\n` +
       `• *loan <amount> <months>* — apply for a loan (e.g. *loan 50000 3*)\n` +
       `• *repay* — repay your loan monthly installment\n` +
+      `• *history* — your transaction statement\n` +
+      `• *ledger* — cooperative ledger (transparency)\n` +
+      `• *dividend <rate>* — dividend calculator (real-time)\n` +
+      `• *joinunit <code>* — join your workplace/unit\n` +
       `• *code* — see your member code (share it for guarantor requests)\n` +
       `• *confirm <code>* — accept a guarantor request\n` +
       `• *phone <number>* — add/update your real phone number (needed for funding)\n` +
       `• *menu* — show this menu\n\n` +
-      `Admins: try *pending*, *approve <id>*, *reject <id>*, *payout <amount> <phone>*`
+      `Admins: try *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *dividend <rate>*, *interest <rate>*, *units*, *addunit <name> <code>*, *payout <amount> <phone>*`
   );
 }
 
@@ -477,6 +507,54 @@ async function handlePhone(phone: string, args: string[]): Promise<void> {
     data: { contactPhone },
   });
   await sendText({ to: phone, text: `Thanks! Your phone is now set to *${contactPhone}*. Reply *fund* to get your funding account.` });
+}
+
+async function handleLedger(phone: string): Promise<void> {
+  const result = await showLedger(phone);
+  await sendText({ to: phone, text: result.message });
+}
+
+async function handleHistory(phone: string): Promise<void> {
+  const result = await showHistory(phone);
+  await sendText({ to: phone, text: result.message });
+}
+
+async function handlePlan(phone: string, args: string[]): Promise<void> {
+  if (args[0]?.toLowerCase() === "off") {
+    const result = await setAutoSave(phone, null);
+    await sendText({ to: phone, text: result.message });
+    return;
+  }
+  const amount = parseNaira(args[0]);
+  const interval = args[1]?.toLowerCase();
+  if (amount === null || (interval !== "weekly" && interval !== "monthly")) {
+    await sendText({
+      to: phone,
+      text: "Usage: *plan <amount> <weekly|monthly>*, e.g. *plan 2000 weekly*. Or *plan off* to stop.",
+    });
+    return;
+  }
+  const result = await setAutoSave(phone, amount, interval);
+  await sendText({ to: phone, text: result.message });
+}
+
+async function handleDividend(phone: string, args: string[]): Promise<void> {
+  const rate = parseNaira(args[0]);
+  if (rate === null) {
+    await sendText({ to: phone, text: "Usage: *dividend <rate>*, e.g. *dividend 5* for a 5% dividend calculation." });
+    return;
+  }
+  const result = await computeDividendPreview(phone, rate);
+  await sendText({ to: phone, text: result.message });
+}
+
+async function handleJoinUnit(phone: string, args: string[]): Promise<void> {
+  if (!args[0]) {
+    await sendText({ to: phone, text: "Usage: *joinunit <code>*, e.g. *joinunit LAG01*." });
+    return;
+  }
+  const result = await joinUnit(phone, args[0]);
+  await sendText({ to: phone, text: result.message });
 }
 
 function parseNaira(raw?: string): number | null {

@@ -55,7 +55,7 @@ export async function listPendingLoans(cooperativeId: string, limit = 20) {
   return prisma.loan.findMany({
     where: { cooperativeId, status: { in: ["pending", "guaranteed"] } },
     include: {
-      member: { select: { name: true, phone: true } },
+      member: { select: { name: true, phone: true, unitId: true } },
       guarantors: { include: { member: { select: { name: true, phone: true } } } },
     },
     orderBy: { createdAt: "asc" },
