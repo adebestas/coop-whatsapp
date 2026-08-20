@@ -55,9 +55,28 @@ tests/                   # vitest smoke tests
 | `fund` | Get your personal virtual account number for top-ups |
 | `loan <amount> <months>` | Apply for a loan (e.g. `loan 50000 3`) |
 | `repay` | Pay the monthly installment on your active loan |
+| `code` | See your member code (share it for guarantor requests) |
+| `confirm <code>` | Accept a guarantor request |
 
 Multi-turn onboarding: `join TEST01` → name → set 4-digit PIN → confirm →
-done.
+done. You receive a short **member code** on joining.
+
+## Loan guarantor flow
+
+Every loan requires **2 guarantors**, and each must confirm before the loan
+can be approved:
+
+1. `loan <amount> <months>` creates the application.
+2. The bot asks for guarantor 1's member code, then guarantor 2's.
+3. For each valid guarantor, the system **auto-generates a unique code**
+   (e.g. `GT-A1B2C3`) and sends it to that guarantor's WhatsApp.
+4. Each guarantor replies `confirm <code>` to accept.
+5. The loan only becomes `guaranteed` (approvable) once **both** guarantors
+   confirm. Admins can't approve earlier.
+6. Admin replies `approve <id>` (or uses the dashboard) to approve.
+
+Rules enforced: you can't be your own guarantor, a member can only appear
+once per loan, and unknown member codes are rejected.
 
 ## Admin WhatsApp commands
 

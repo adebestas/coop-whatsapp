@@ -29,6 +29,7 @@ model Cooperative {
 // ---- Members (users) ----
 model Member {
   id            String     @id @default(cuid())
+  code          String     @unique // short human-friendly code (e.g. A1B2C3) for guarantor/reference
   phone         String // WhatsApp number, E.164 format
   name          String
   bvn           String?
@@ -48,6 +49,7 @@ model Member {
   contributions Contribution[]
   loans         Loan[]
   payouts       Payout[]
+  guarantorFor  Guarantor[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -85,7 +87,7 @@ model Loan {
   amount         Float
   interestRate   Float      @default(0) // monthly %
   tenureMonths   Int        @default(1)
-  status         String     @default("pending") // pending | approved | disbursed | rejected | paid
+  status         String     @default("pending") // pending | guaranteed | approved | disbursed | rejected | paid
   balance        Float
   monthlyPayment Float?     // installment amount after approval
   disbursedAt    DateTime?
@@ -96,7 +98,26 @@ model Loan {
   cooperative    Cooperative @relation(fields: [cooperativeId], references: [id])
   createdAt      DateTime   @default(now())
   approvedAt     DateTime?
+  guarantors     Guarantor[]
   repayments     LoanRepayment[]
+}
+
+// ---- Guarantors ----
+// A loan requires 2 guarantors. Each guarantor is a member, and the system
+// generates a unique confirmation code for each before the loan can be approved.
+model Guarantor {
+  id          String   @id @default(cuid())
+  loanId      String
+  loan        Loan     @relation(fields: [loanId], references: [id])
+  memberId    String
+  member      Member   @relation(fields: [memberId], references: [id])
+  code        String   @unique // auto-generated unique confirmation code
+  status      String   @default("pending") // pending | confirmed | declined
+  confirmedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  @@unique([loanId, memberId])
+  @@index([code])
 }
 
 model LoanRepayment {

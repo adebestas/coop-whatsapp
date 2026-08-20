@@ -77,10 +77,14 @@ async function sendPendingLoans(phone: string, coopId: string): Promise<void> {
     return;
   }
   const body = loans
-    .map(
-      (l, i) =>
-        `${i + 1}. *${l.id.slice(-6)}* — ${l.member.name} — ${formatBalance(l.amount)} for ${l.tenureMonths}mo\n   Reply *approve ${l.id.slice(-6)}* or *reject ${l.id.slice(-6)}*`,
-    )
+    .map((l) => {
+      const g = l.guarantors.map((x) => `${x.member.name} (${x.status})`).join(", ") || "none yet";
+      return (
+        `• *${l.id.slice(-6)}* — ${l.member.name} — ${formatBalance(l.amount)} for ${l.tenureMonths}mo\n` +
+        `   Guarantors: ${g}\n` +
+        `   ${l.status === "guaranteed" ? `Reply *approve ${l.id.slice(-6)}*` : "⏳ waiting for guarantors"}`
+      );
+    })
     .join("\n");
   await sendText({
     to: phone,

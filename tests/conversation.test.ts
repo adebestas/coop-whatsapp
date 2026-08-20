@@ -3,6 +3,7 @@ import { prisma } from "../src/lib/prisma.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { sendText } from "../src/lib/whatsapp.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
+import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
 vi.mock("../src/lib/whatsapp.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
@@ -10,6 +11,8 @@ vi.mock("../src/lib/whatsapp.js", () => ({
 
 const PHONE = "2348012345678";
 const ADMIN_PHONE = "2348099999999";
+const G1_PHONE = "2348071111111";
+const G2_PHONE = "2348072222222";
 
 async function makeCoop(code: string, name: string, adminPhone?: string) {
   return prisma.cooperative.create({
@@ -17,14 +20,23 @@ async function makeCoop(code: string, name: string, adminPhone?: string) {
   });
 }
 
-async function makeMember(phone: string, coopId: string, opts: { role?: string; pin?: string; vaNumber?: string } = {}) {
+async function makeMember(
+  phone: string,
+  coopId: string,
+  opts: { role?: string; pin?: string; vaNumber?: string } = {},
+) {
+  let code = generateMemberCode();
+  while (await prisma.member.findUnique({ where: { code } })) {
+    code = generateMemberCode();
+  }
   return prisma.member.create({
     data: {
+      code,
       phone,
       name: `Member ${phone.slice(-4)}`,
       cooperativeId: coopId,
       role: opts.role ?? "member",
-      pin: opts.pin ?? "1234",
+      pin: opts.pin ? hashPin(opts.pin) : hashPin("1234"),
       ...(opts.vaNumber ? { virtualAccountNumber: opts.vaNumber } : {}),
       wallet: { create: {} },
     },
@@ -34,6 +46,7 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
 beforeEach(async () => {
   vi.clearAllMocks();
   await prisma.loanRepayment.deleteMany();
+  await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
   await prisma.payout.deleteMany();
   await prisma.contribution.deleteMany();
@@ -59,6 +72,7 @@ describe("coop whatsapp bot", () => {
     });
     expect(member).not.toBeNull();
     expect(member!.wallet!.balance).toBe(0);
+    expect(member!.code).toMatch(/^[A-Z2-9]{6}-[A-Z2-9]{4}$/);
 
     const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text);
     expect(texts.some((t) => t.includes("Ada Obi"))).toBe(true);
@@ -124,30 +138,63 @@ describe("coop whatsapp bot", () => {
     expect(after!.wallet!.balance).toBe(10000);
   });
 
-  it("applies for a loan, admin approves it, and the member repays", async () => {
+  it("requires 2 confirmed guarantors before a loan can be approved", async () => {
     const coop = await makeCoop("TEST04", "Test Coop", ADMIN_PHONE);
-    await makeMember(PHONE, coop.id);
-    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const borrower = await makeMember(PHONE, coop.id, { pin: "1234" });
+    await makeMember(G1_PHONE, coop.id, { pin: "1111" });
+    await makeMember(G2_PHONE, coop.id, { pin: "2222" });
+    await makeMember(ADMIN_PHONE, coop.id, { role: "admin", pin: "9999" });
 
+    // Apply for a loan — bot should ask for guarantor 1.
     await handleMessage(PHONE, "loan 50000 2");
 
-    let loan = await prisma.loan.findFirst({ where: { status: "pending" } });
+    let loan = await prisma.loan.findFirst({ where: { memberId: borrower.id } });
     expect(loan).not.toBeNull();
-    expect(loan!.amount).toBe(50000);
+    expect(loan!.status).toBe("pending");
 
-    const loanIdShort = loan!.id.slice(-6);
-    await handleMessage(ADMIN_PHONE, `approve ${loanIdShort}`);
+    // Admin tries to approve before guarantors -> must be rejected.
+    const shortId = loan!.id.slice(-6);
+    await handleMessage(ADMIN_PHONE, `approve ${shortId}`);
+    loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
+    expect(loan!.status).toBe("pending");
 
+    // Add guarantor 1 by member code.
+    const g1 = await prisma.member.findFirst({ where: { phone: G1_PHONE } });
+    const g2 = await prisma.member.findFirst({ where: { phone: G2_PHONE } });
+    await handleMessage(PHONE, g1!.code);
+    await handleMessage(PHONE, g2!.code);
+
+    const guarantors = await prisma.guarantor.findMany({
+      where: { loanId: loan!.id },
+      include: { member: true },
+    });
+    expect(guarantors).toHaveLength(2);
+    expect(guarantors.map((g) => g.status)).toEqual(["pending", "pending"]);
+    expect(new Set(guarantors.map((g) => g.code)).size).toBe(2); // unique codes
+
+    // Admin still can't approve — guarantors haven't confirmed.
+    await handleMessage(ADMIN_PHONE, `approve ${shortId}`);
+    loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
+    expect(loan!.status).toBe("pending");
+
+    // Guarantors confirm with their codes.
+    for (const g of guarantors) {
+      await handleMessage(g.member.phone, `confirm ${g.code}`);
+    }
+
+    loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
+    expect(loan!.status).toBe("guaranteed");
+
+    // Now the admin can approve.
+    await handleMessage(ADMIN_PHONE, `approve ${shortId}`);
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("approved");
     expect(loan!.monthlyPayment).toBeGreaterThan(0);
 
-    // Fund the member wallet then repay.
+    // Fund the wallet then repay.
     await prisma.wallet.updateMany({ data: { balance: { increment: 100000 } } });
     await handleMessage(PHONE, "repay");
-
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
-    expect(loan!.status).toBe("approved"); // still paying, balance reduced
     expect(loan!.balance).toBeLessThan(50000 * 1.04);
   });
 });

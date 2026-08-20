@@ -179,6 +179,7 @@ interface LoanRow {
   monthlyPayment: number | null;
   createdAt: string;
   member: { name: string; phone: string };
+  guarantors: { id: string; status: string; member: { name: string; phone: string } }[];
 }
 
 function LoansView({ api }: { api: (path: string, init?: RequestInit) => Promise<any> }) {
@@ -204,7 +205,7 @@ function LoansView({ api }: { api: (path: string, init?: RequestInit) => Promise
             <th>Member</th>
             <th>Amount</th>
             <th>Months</th>
-            <th>Rate</th>
+            <th>Guarantors</th>
             <th>Balance</th>
             <th>Status</th>
             <th>Action</th>
@@ -217,11 +218,15 @@ function LoansView({ api }: { api: (path: string, init?: RequestInit) => Promise
               <td>{l.member.name}</td>
               <td>{naira(l.amount)}</td>
               <td>{l.tenureMonths}</td>
-              <td>{l.interestRate}%/mo</td>
+              <td>
+                {l.guarantors.length === 0
+                  ? "—"
+                  : l.guarantors.map((g) => `${g.member.name} (${g.status})`).join(", ")}
+              </td>
               <td>{naira(l.balance)}</td>
               <td>{l.status}</td>
               <td>
-                {l.status === "pending" && (
+                {l.status === "guaranteed" && (
                   <>
                     <button onClick={() => act(l.id, "approve")} style={{ ...buttonStyle, background: "#16a34a", marginRight: 6 }}>
                       Approve
@@ -231,6 +236,7 @@ function LoansView({ api }: { api: (path: string, init?: RequestInit) => Promise
                     </button>
                   </>
                 )}
+                {l.status === "pending" && <span style={{ color: "#6b7280" }}>awaiting guarantors</span>}
               </td>
             </tr>
           ))}

@@ -47,14 +47,17 @@ export async function applyForLoan(
       `Interest: *${interestRate}%/month*\n` +
       `Estimated total: *${formatBalance(Math.round(total))}*\n` +
       `Estimated monthly: *${formatBalance(Math.round(monthly))}*\n\n` +
-      `Your cooperative admin will review it. Reply *menu* to see other options.`,
+      `You still need to add *2 guarantors* before the loan can be approved.`,
   };
 }
 
 export async function listPendingLoans(cooperativeId: string, limit = 20) {
   return prisma.loan.findMany({
-    where: { cooperativeId, status: "pending" },
-    include: { member: { select: { name: true, phone: true } } },
+    where: { cooperativeId, status: { in: ["pending", "guaranteed"] } },
+    include: {
+      member: { select: { name: true, phone: true } },
+      guarantors: { include: { member: { select: { name: true, phone: true } } } },
+    },
     orderBy: { createdAt: "asc" },
     take: limit,
   });
@@ -70,14 +73,19 @@ async function findLoan(shortId: string) {
         { id: { endsWith: shortId } },
       ],
     },
-    include: { member: true },
+    include: { member: true, guarantors: { include: { member: true } } },
   });
 }
 
 export async function approveLoan(loanId: string, interestRate?: number): Promise<{ ok: boolean; message: string }> {
   const loan = await findLoan(loanId);
   if (!loan) return { ok: false, message: "Loan not found. Check the id and try again." };
-  if (loan.status !== "pending") return { ok: false, message: `Loan is already ${loan.status}.` };
+  if (loan.status !== "guaranteed") {
+    return {
+      ok: false,
+      message: `Loan *${loan.id.slice(-6)}* can't be approved yet. It must have 2 confirmed guarantors (current status: ${loan.status}).`,
+    };
+  }
 
   const rate = interestRate ?? loan.interestRate;
   const total = loan.amount * (1 + (rate / 100) * loan.tenureMonths);

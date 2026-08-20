@@ -1,4 +1,5 @@
 import { prisma } from "../lib/prisma.js";
+import { generateMemberCode, hashPin } from "../lib/security.js";
 
 export interface JoinResult {
   ok: boolean;
@@ -27,11 +28,17 @@ export async function findOrCreateMember(
     return { ok: false, message: `You're already a member of *${coop.name}*. Reply *menu* to see what you can do.` };
   }
 
+  let code = generateMemberCode();
+  while (await prisma.member.findUnique({ where: { code } })) {
+    code = generateMemberCode();
+  }
+
   const member = await prisma.member.create({
     data: {
       phone,
       name,
-      pin,
+      code,
+      pin: hashPin(pin),
       cooperativeId: coop.id,
       wallet: { create: {} },
     },
@@ -40,7 +47,7 @@ export async function findOrCreateMember(
   return {
     ok: true,
     memberId: member.id,
-    message: `Welcome, *${name}*! You're now a member of *${coop.name}*.\n\nReply *menu* to see what you can do, or type *save 2000* to make your first contribution.`,
+    message: `Welcome, *${name}*! You're now a member of *${coop.name}*.\n\nYour member code is *${code}* — you'll share this with friends who need you as a guarantor.\n\nReply *menu* to see what you can do, or type *save 2000* to make your first contribution.`,
   };
 }
 

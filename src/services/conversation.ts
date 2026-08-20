@@ -9,6 +9,7 @@ import {
 import { applyForLoan, repayLoan } from "./loans.js";
 import { handleAdminCommand } from "./admin.js";
 import { provisionVirtualAccount } from "./payments/topup.js";
+import { addGuarantor, confirmGuarantee } from "./guarantors.js";
 
 export type BotState =
   | "idle"
@@ -18,13 +19,16 @@ export type BotState =
   | "awaiting_pin_confirm"
   | "awaiting_save_amount"
   | "awaiting_loan_amount"
-  | "awaiting_loan_months";
+  | "awaiting_loan_months"
+  | "awaiting_guarantor_1"
+  | "awaiting_guarantor_2";
 
 interface FlowData {
   joinCode?: string;
   pin?: string;
   name?: string;
   loanAmount?: number;
+  loanId?: string;
 }
 
 function isAwaitingState(state: BotState): boolean {
@@ -89,6 +93,14 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
       await handleRepay(phone, args);
       break;
 
+    case "confirm":
+      await handleConfirm(phone, args);
+      break;
+
+    case "code":
+      await handleCode(phone);
+      break;
+
     default:
       await sendText({
         to: phone,
@@ -117,6 +129,8 @@ function buildMenu(member: { name: string; cooperative: { name: string }; wallet
       `• *fund* — get your personal top-up account number\n` +
       `• *loan <amount> <months>* — apply for a loan (e.g. *loan 50000 3*)\n` +
       `• *repay* — repay your loan monthly installment\n` +
+      `• *code* — see your member code (share it for guarantor requests)\n` +
+      `• *confirm <code>* — accept a guarantor request\n` +
       `• *menu* — show this menu\n\n` +
       `Admins: try *pending*, *approve <id>*, *reject <id>*, *payout <amount> <phone>*`
   );
@@ -253,8 +267,45 @@ async function handleAwaitingInput(
         return;
       }
       const result = await applyForLoan(phone, data.loanAmount ?? 0, months);
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+      if (!result.ok || !result.loanId) {
+        await sendText({ to: phone, text: result.message });
+        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+        return;
+      }
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_guarantor_1", data: JSON.stringify({ loanId: result.loanId }) },
+        update: { state: "awaiting_guarantor_1", data: JSON.stringify({ loanId: result.loanId }) },
+      });
       await sendText({ to: phone, text: result.message });
+      await sendText({
+        to: phone,
+        text:
+          `To complete your application, you need *2 guarantors* who are members of the cooperative.\n\n` +
+          `Send the *member code* of your first guarantor (e.g. *ABC123-DEFG*).`,
+      });
+      break;
+    }
+
+    case "awaiting_guarantor_1": {
+      const result = await addGuarantor(phone, data.loanId ?? "", text);
+      await sendText({ to: phone, text: result.message });
+      if (result.ok) {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "awaiting_guarantor_2", data: JSON.stringify({ loanId: data.loanId }) },
+          update: { state: "awaiting_guarantor_2", data: JSON.stringify({ loanId: data.loanId }) },
+        });
+      }
+      break;
+    }
+
+    case "awaiting_guarantor_2": {
+      const result = await addGuarantor(phone, data.loanId ?? "", text);
+      await sendText({ to: phone, text: result.message });
+      if (result.ok) {
+        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+      }
       break;
     }
 
@@ -326,12 +377,49 @@ async function handleLoan(phone: string, args: string[]): Promise<void> {
     return;
   }
   const result = await applyForLoan(phone, amount, months);
+  if (result.ok && result.loanId) {
+    await prisma.session.upsert({
+      where: { phone },
+      create: { phone, state: "awaiting_guarantor_1", data: JSON.stringify({ loanId: result.loanId }) },
+      update: { state: "awaiting_guarantor_1", data: JSON.stringify({ loanId: result.loanId }) },
+    });
+    await sendText({ to: phone, text: result.message });
+    await sendText({
+      to: phone,
+      text:
+        `You need *2 guarantors* who are members of the cooperative.\n\n` +
+        `Send the *member code* of your first guarantor (e.g. *ABC123-DEFG*).`,
+    });
+    return;
+  }
   await sendText({ to: phone, text: result.message });
 }
 
 async function handleRepay(phone: string, _args: string[]): Promise<void> {
   const result = await repayLoan(phone);
   await sendText({ to: phone, text: result.message });
+}
+
+async function handleConfirm(phone: string, args: string[]): Promise<void> {
+  const code = args[0];
+  if (!code) {
+    await sendText({ to: phone, text: "To accept a guarantor request, reply *confirm <code>* with the code you received." });
+    return;
+  }
+  const result = await confirmGuarantee(phone, code);
+  await sendText({ to: phone, text: result.message });
+}
+
+async function handleCode(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  await sendText({
+    to: phone,
+    text: `Your member code is *${member.code}*. Share it with members who want you as a guarantor.`,
+  });
 }
 
 function parseNaira(raw?: string): number | null {

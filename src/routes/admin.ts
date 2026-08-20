@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../lib/prisma.js";
+import { verifyPin } from "../lib/security.js";
 
 /**
  * Minimal admin auth for the dashboard: members log in with their WhatsApp
@@ -40,10 +41,10 @@ export async function adminApiRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "phone and pin required" });
     }
     const member = await prisma.member.findFirst({
-      where: { phone, pin, role: "admin" },
+      where: { phone, role: "admin" },
       include: { cooperative: true },
     });
-    if (!member) {
+    if (!member || !member.pin || !verifyPin(pin, member.pin)) {
       return reply.code(401).send({ error: "invalid credentials" });
     }
 
@@ -118,7 +119,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const status = (req.query as { status?: string }).status;
     return prisma.loan.findMany({
       where: { cooperativeId: coopId, ...(status ? { status } : {}) },
-      include: { member: { select: { name: true, phone: true } }, repayments: true },
+      include: {
+        member: { select: { name: true, phone: true } },
+        guarantors: { include: { member: { select: { name: true, phone: true } } } },
+        repayments: true,
+      },
       orderBy: { createdAt: "desc" },
       take: 200,
     });
@@ -129,7 +134,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
     if (!loan) return reply.code(404).send({ error: "loan not found" });
-    if (loan.status !== "pending") return reply.code(400).send({ error: `loan is ${loan.status}` });
+    if (loan.status !== "guaranteed") {
+      return reply.code(400).send({ error: `loan must have 2 confirmed guarantors first (current: ${loan.status})` });
+    }
 
     const rate = loan.interestRate;
     const total = loan.amount * (1 + (rate / 100) * loan.tenureMonths);
