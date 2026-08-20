@@ -15,12 +15,16 @@ import { showLedger, showHistory } from "./statements.js";
 import { computeDividendPreview } from "./dividends.js";
 import { setAutoSave } from "./scheduler.js";
 import { joinUnit } from "./units.js";
+import { withdrawToBank, withdrawLimit } from "./withdrawals.js";
+import { verifyPin } from "../lib/security.js";
 
 export type BotState =
   | "idle"
   | "awaiting_name"
   | "awaiting_coop_code"
   | "awaiting_phone"
+  | "awaiting_email"
+  | "awaiting_birthday"
   | "awaiting_pin"
   | "awaiting_pin_confirm"
   | "awaiting_save_amount"
@@ -29,19 +33,29 @@ export type BotState =
   | "awaiting_loan_bank_account"
   | "awaiting_loan_bank_code"
   | "awaiting_guarantor_1"
-  | "awaiting_guarantor_2";
+  | "awaiting_guarantor_2"
+  | "awaiting_withdraw_amount"
+  | "awaiting_withdraw_account"
+  | "awaiting_withdraw_bank"
+  | "awaiting_withdraw_pin";
 
 interface FlowData {
   joinCode?: string;
   pin?: string;
   name?: string;
   contactPhone?: string;
+  email?: string;
+  dateOfBirth?: string; // ISO date string
   loanAmount?: number;
   loanMonths?: number;
   loanAccount?: string;
   loanBankCode?: string;
   loanBankName?: string;
   loanId?: string;
+  withdrawAmount?: number;
+  withdrawAccount?: string;
+  withdrawBankCode?: string;
+  withdrawBankName?: string;
 }
 
 function isAwaitingState(state: BotState): boolean {
@@ -139,6 +153,10 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
       await handleJoinUnit(phone, args);
       break;
 
+    case "withdraw":
+      await handleWithdraw(phone, args);
+      break;
+
     default:
       await sendText({
         to: phone,
@@ -164,6 +182,7 @@ function buildMenu(member: { name: string; cooperative: { name: string }; wallet
       `Commands:\n` +
       `• *balance* — check your savings balance\n` +
       `• *save <amount>* — make a contribution (e.g. *save 2000*)\n` +
+      `• *withdraw <amount>* — withdraw up to 45% of your savings\n` +
       `• *plan <amount> <weekly|monthly>* — set a recurring contribution\n` +
       `• *fund* — get your personal top-up account number\n` +
       `• *loan <amount> <months>* — apply for a loan (e.g. *loan 50000 3*)\n` +
@@ -242,16 +261,7 @@ async function handleAwaitingInput(
           text: `Thanks, *${name}*! What's your real phone number? We need it for funding your wallet by bank transfer (e.g. *08012345678*).`,
         });
       } else {
-        // WhatsApp members are already on a phone number — skip straight to PIN.
-        await prisma.session.upsert({
-          where: { phone },
-          create: { phone, state: "awaiting_pin", data: JSON.stringify({ ...data, name }) },
-          update: { state: "awaiting_pin", data: JSON.stringify({ ...data, name }) },
-        });
-        await sendText({
-          to: phone,
-          text: `Thanks, *${name}*! Now choose a 4-digit PIN. You'll use it to approve transactions.`,
-        });
+        await askEmail(phone, { ...data, name });
       }
       break;
     }
@@ -264,10 +274,49 @@ async function handleAwaitingInput(
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_pin", data: JSON.stringify({ ...data, contactPhone }) },
-        update: { state: "awaiting_pin", data: JSON.stringify({ ...data, contactPhone }) },
+        create: { phone, state: "awaiting_email", data: JSON.stringify({ ...data, contactPhone }) },
+        update: { state: "awaiting_email", data: JSON.stringify({ ...data, contactPhone }) },
       });
-      await sendText({ to: phone, text: `Got it. Now choose a 4-digit PIN. You'll use it to approve transactions.` });
+      await askEmail(phone, { ...data, contactPhone });
+      break;
+    }
+
+    case "awaiting_email": {
+      const email = text.trim().toLowerCase();
+      if (email === "skip" || email === "0" || email === "-" || email === "none") {
+        await askBirthday(phone, data);
+        return;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        await sendText({ to: phone, text: "That doesn't look like a valid email. Reply *skip* to skip this step, or enter an email like *ada@example.com*." });
+        return;
+      }
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_birthday", data: JSON.stringify({ ...data, email }) },
+        update: { state: "awaiting_birthday", data: JSON.stringify({ ...data, email }) },
+      });
+      await askBirthday(phone, { ...data, email });
+      break;
+    }
+
+    case "awaiting_birthday": {
+      const raw = text.trim();
+      if (raw === "skip" || raw === "0" || raw === "-" || raw === "none") {
+        await askPin(phone, data);
+        return;
+      }
+      const dob = parseBirthday(raw);
+      if (!dob) {
+        await sendText({ to: phone, text: "Please use the format *DD/MM*, e.g. *15/08*, or reply *skip* to skip." });
+        return;
+      }
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_pin", data: JSON.stringify({ ...data, dateOfBirth: dob.toISOString() }) },
+        update: { state: "awaiting_pin", data: JSON.stringify({ ...data, dateOfBirth: dob.toISOString() }) },
+      });
+      await askPin(phone, { ...data, dateOfBirth: dob.toISOString() });
       break;
     }
 
@@ -295,7 +344,15 @@ async function handleAwaitingInput(
         });
         return;
       }
-      const result = await findOrCreateMember(phone, data.joinCode ?? "", data.name ?? "", text.trim(), data.contactPhone);
+      const result = await findOrCreateMember(
+        phone,
+        data.joinCode ?? "",
+        data.name ?? "",
+        text.trim(),
+        data.contactPhone,
+        data.email,
+        data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
+      );
       await prisma.session.upsert({
         where: { phone },
         create: { phone, state: "idle" },
@@ -426,6 +483,80 @@ async function handleAwaitingInput(
       break;
     }
 
+    case "awaiting_withdraw_amount": {
+      const amount = parseNaira(text);
+      if (amount === null) {
+        await sendText({ to: phone, text: "Please enter a valid amount, e.g. *withdraw 5000*." });
+        return;
+      }
+      const member = await getMemberByPhone(phone);
+      if (member?.bankAccountNumber && member.bankCode) {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "awaiting_withdraw_pin", data: JSON.stringify({ ...data, withdrawAmount: amount }) },
+          update: { state: "awaiting_withdraw_pin", data: JSON.stringify({ ...data, withdrawAmount: amount }) },
+        });
+        await sendText({ to: phone, text: "Enter your 4-digit PIN to confirm the withdrawal." });
+      } else {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "awaiting_withdraw_account", data: JSON.stringify({ ...data, withdrawAmount: amount }) },
+          update: { state: "awaiting_withdraw_account", data: JSON.stringify({ ...data, withdrawAmount: amount }) },
+        });
+        await sendText({
+          to: phone,
+          text: `Your savings will go to your bank account. What's your *bank account number*? (10 digits, e.g. *0123456789*)`,
+        });
+      }
+      break;
+    }
+
+    case "awaiting_withdraw_account": {
+      const account = text.trim().replace(/[^0-9]/g, "");
+      if (!/^\d{10}$/.test(account)) {
+        await sendText({ to: phone, text: "Account numbers are 10 digits. Please re-enter, e.g. *0123456789*." });
+        return;
+      }
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_withdraw_bank", data: JSON.stringify({ ...data, withdrawAccount: account }) },
+        update: { state: "awaiting_withdraw_bank", data: JSON.stringify({ ...data, withdrawAccount: account }) },
+      });
+      await sendText({ to: phone, text: `Which bank? (e.g. *Access*, *GTB*, *Zenith*, *UBA*, *Kuda*)` });
+      break;
+    }
+
+    case "awaiting_withdraw_bank": {
+      const bank = resolveBankCode(text);
+      if (!bank) {
+        await sendText({ to: phone, text: "We don't recognise that bank. Try e.g. *Access*, *GTB*, *Zenith*, *Kuda*, or the 5-digit bank code." });
+        return;
+      }
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_withdraw_pin", data: JSON.stringify({ ...data, withdrawBankCode: bank.code, withdrawBankName: bank.name }) },
+        update: { state: "awaiting_withdraw_pin", data: JSON.stringify({ ...data, withdrawBankCode: bank.code, withdrawBankName: bank.name }) },
+      });
+      await sendText({ to: phone, text: "Enter your 4-digit PIN to confirm the withdrawal." });
+      break;
+    }
+
+    case "awaiting_withdraw_pin": {
+      const member = await getMemberByPhone(phone);
+      if (!member || !member.pin || !verifyPin(text.trim(), member.pin)) {
+        await sendText({ to: phone, text: "Incorrect PIN. Try again, or reply *menu* to cancel." });
+        return;
+      }
+      const bank =
+        data.withdrawAccount && data.withdrawBankCode
+          ? { accountNumber: data.withdrawAccount, bankCode: data.withdrawBankCode, bankName: data.withdrawBankName }
+          : undefined;
+      const result = await withdrawToBank(phone, data.withdrawAmount ?? 0, bank);
+      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
     default:
       await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
       await sendText({ to: phone, text: buildMenu(null) });
@@ -470,6 +601,53 @@ async function handleFund(phone: string): Promise<void> {
   }
   const result = await provisionVirtualAccount(member.id);
   await sendText({ to: phone, text: result.message });
+}
+
+async function handleWithdraw(phone: string, args: string[]): Promise<void> {
+  const amount = parseNaira(args[0]);
+  if (amount === null) {
+    await prisma.session.upsert({
+      where: { phone },
+      create: { phone, state: "awaiting_withdraw_amount" },
+      update: { state: "awaiting_withdraw_amount" },
+    });
+    await sendText({
+      to: phone,
+      text: "How much would you like to withdraw? You can take out up to *45%* of your savings at once (e.g. *withdraw 5000*).",
+    });
+    return;
+  }
+  const limit = await withdrawLimit(phone);
+  if (!limit) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  if (amount > limit.max) {
+    await sendText({
+      to: phone,
+      text: `You can withdraw at most *${formatBalance(limit.max)}* (45% of your ${formatBalance(limit.balance)} balance).`,
+    });
+    return;
+  }
+  const member = await getMemberByPhone(phone);
+  if (member?.bankAccountNumber && member.bankCode) {
+    await prisma.session.upsert({
+      where: { phone },
+      create: { phone, state: "awaiting_withdraw_pin", data: JSON.stringify({ withdrawAmount: amount }) },
+      update: { state: "awaiting_withdraw_pin", data: JSON.stringify({ withdrawAmount: amount }) },
+    });
+    await sendText({ to: phone, text: `Withdraw ${amount.toLocaleString()} to ${member.bankName ?? member.bankCode} ****${member.bankAccountNumber.slice(-4)}? Enter your 4-digit PIN to confirm.` });
+    return;
+  }
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_withdraw_account", data: JSON.stringify({ withdrawAmount: amount }) },
+    update: { state: "awaiting_withdraw_account", data: JSON.stringify({ withdrawAmount: amount }) },
+  });
+  await sendText({
+    to: phone,
+    text: "Your savings will go to your bank account. What's your *bank account number*? (10 digits, e.g. *0123456789*)",
+  });
 }
 
 async function handleLoan(phone: string, args: string[]): Promise<void> {
@@ -652,6 +830,53 @@ function resolveBankCode(input: string): { code: string; name: string } | null {
   const code = BANK_CODES[cleaned];
   if (!code) return null;
   return { code, name: input.trim() };
+}
+
+/** Parse DD/MM (or DD-MM) into a date. Year is arbitrary — only month/day matter. */
+function parseBirthday(raw: string): Date | null {
+  const m = raw.trim().match(/^(\d{1,2})[\/\-](\d{1,2})$/);
+  if (!m) return null;
+  const day = Number(m[1]);
+  const month = Number(m[2]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = new Date(2000, month - 1, day);
+  return date;
+}
+
+async function askEmail(phone: string, data: FlowData): Promise<void> {
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_email", data: JSON.stringify({ ...data, name: data.name }) },
+    update: { state: "awaiting_email", data: JSON.stringify({ ...data, name: data.name }) },
+  });
+  await sendText({
+    to: phone,
+    text: `Thanks, *${data.name}*! What's your email? *(optional)* We'll send your monthly statement there. Reply *skip* to skip.`,
+  });
+}
+
+async function askBirthday(phone: string, data: FlowData): Promise<void> {
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_birthday", data: JSON.stringify(data) },
+    update: { state: "awaiting_birthday", data: JSON.stringify(data) },
+  });
+  await sendText({
+    to: phone,
+    text: `Almost done — when's your birthday? *(optional, e.g. *15/08*)* We'll send you a special message. Reply *skip* to skip.`,
+  });
+}
+
+async function askPin(phone: string, data: FlowData): Promise<void> {
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_pin", data: JSON.stringify(data) },
+    update: { state: "awaiting_pin", data: JSON.stringify(data) },
+  });
+  await sendText({
+    to: phone,
+    text: `Now choose a 4-digit PIN. You'll use it to approve transactions.`,
+  });
 }
 
 function safeParse(json: string): unknown {

@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { sendText } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
+import { showHistory } from "./statements.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -129,4 +130,60 @@ export async function setInterestRate(
     ok: true,
     message: `Monthly interest rate set to *${rate}%*. Interest accrues on savings on the 1st of each month.`,
   };
+}
+
+/**
+ * Send every active member their monthly statement on the 1st of the month.
+ * Each member receives at most one statement per calendar month.
+ */
+export async function runMonthlyStatements(now = new Date()): Promise<number> {
+  if (now.getDate() !== 1) return 0;
+
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const members = await prisma.member.findMany({
+    where: {
+      status: "active",
+      OR: [{ lastStatementSentAt: null }, { lastStatementSentAt: { lt: monthStart } }],
+    },
+    include: { cooperative: true },
+  });
+
+  let sent = 0;
+  for (const m of members) {
+    if (!m.phone) continue;
+    const stmt = await showHistory(m.phone);
+    if (!stmt.ok) continue;
+    const text = `${stmt.message}\n\n_Generated ${now.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })} — reply *menu* for options._`;
+    await sendText({ to: m.phone, text }).catch(() => {});
+    await prisma.member.update({ where: { id: m.id }, data: { lastStatementSentAt: now } });
+    sent++;
+  }
+  return sent;
+}
+
+/** Send a birthday greeting to members whose birthday is today (once per year). */
+export async function runBirthdayGreetings(now = new Date()): Promise<number> {
+  const members = await prisma.member.findMany({
+    where: {
+      status: "active",
+      dateOfBirth: { not: null },
+      OR: [{ lastBirthdayGreetedYear: null }, { lastBirthdayGreetedYear: { not: now.getFullYear() } }],
+    },
+  });
+
+  let sent = 0;
+  for (const m of members) {
+    if (!m.dateOfBirth) continue;
+    if (m.dateOfBirth.getMonth() !== now.getMonth() || m.dateOfBirth.getDate() !== now.getDate()) continue;
+    await sendText({
+      to: m.phone,
+      text: `🎂 *Happy Birthday, ${m.name}!* 🎉\n\nMay your new year be full of blessings and growth. Your cooperative family celebrates you today. 🥳`,
+    }).catch(() => {});
+    await prisma.member.update({
+      where: { id: m.id },
+      data: { lastBirthdayGreetedYear: now.getFullYear() },
+    });
+    sent++;
+  }
+  return sent;
 }

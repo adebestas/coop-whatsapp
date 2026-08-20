@@ -52,6 +52,7 @@ tests/                   # vitest smoke tests
 | `join <code>` | Join a cooperative by its code |
 | `balance` | Check savings balance |
 | `save <amount>` | Make a contribution (e.g. `save 2000`) |
+| `withdraw <amount>` | Withdraw up to 45% of savings to your bank account |
 | `plan <amount> <weekly\|monthly>` | Set a recurring contribution plan |
 | `fund` | Get your personal virtual account number for top-ups |
 | `loan <amount> <months>` | Apply for a loan (e.g. `loan 50000 3`) |
@@ -64,8 +65,10 @@ tests/                   # vitest smoke tests
 | `confirm <code>` | Accept a guarantor request |
 | `phone <number>` | Add/update your real phone number (needed for funding) |
 
-Multi-turn onboarding: `join TEST01` → name → (Telegram: phone) → set 4-digit
-PIN → confirm → done. You receive a short **member code** on joining.
+Multi-turn onboarding: `join TEST01` → name → (Telegram: phone) → email
+*(optional)* → birthday *(optional)* → set 4-digit PIN → confirm → done.
+You receive a short **member code** on joining. Email + birthday can be skipped
+with `skip` and only power monthly statements and birthday greetings.
 
 ## Admin commands
 
@@ -163,6 +166,23 @@ units are an organizational layer for communication and visibility.
 - `paydividend <rate>` distributes it — wallets are credited and it appears
   in each member's statement.
 
+## Withdrawals
+
+- `withdraw <amount>` lets a member take out up to **45% of their current
+  savings** at once, to their bank account.
+- The bot collects (or reuses) the member's bank account + bank, asks for the
+  **4-digit PIN**, and — like loans — verifies the account holder's name
+  against the member's registered name before any money moves. On success the
+  wallet is debited and a payout record is created.
+
+## Monthly statements & birthdays
+
+- On the **1st** of each month the scheduler sends every active member their
+  personal statement (`history`) automatically — at most once per calendar
+  month.
+- Members who shared a birthday during onboarding get a **birthday greeting**
+  on the day, once per year. Both steps are optional and skippable (`skip`).
+
 ## Admin WhatsApp commands
 
 Admins (members with `role: admin`) get extra commands:
@@ -226,9 +246,11 @@ npx tsx -e "import { prisma } from './src/lib/prisma.js'; await prisma.cooperati
 
 - [x] Phase 1: onboarding, balance, savings (this repo)
 - [x] Phase 2: payment adapter (Flutterwave + Paystack), virtual-account top-ups,
-      loans + approvals, admin dashboard, admin WhatsApp commands, payouts
-- [ ] Phase 3: dividends, marketplace, state/LGA grouping, Pidgin
-- [ ] Phase 4: scale, more languages, other countries
+  loans + approvals, admin dashboard, admin WhatsApp commands, payouts
+- [x] Phase 3: guarantors, auto-disbursement + name verification, units,
+  dividends, interest, broadcasts, recurring plans, withdrawals, statements,
+  birthday greetings
+- [ ] Phase 4: marketplace, state/LGA grouping, Pidgin, scale, more languages
 
 ## Tests
 

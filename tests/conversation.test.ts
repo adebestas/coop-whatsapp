@@ -66,6 +66,8 @@ describe("coop whatsapp bot", () => {
 
     await handleMessage(PHONE, "join TEST01");
     await handleMessage(PHONE, "Ada Obi");
+    await handleMessage(PHONE, "skip"); // email is optional
+    await handleMessage(PHONE, "skip"); // birthday is optional
     await handleMessage(PHONE, "1234");
     await handleMessage(PHONE, "1234");
 
@@ -81,6 +83,22 @@ describe("coop whatsapp bot", () => {
     const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text);
     expect(texts.some((t) => t.includes("Ada Obi"))).toBe(true);
     expect(texts.some((t) => t.includes("member of *Test Farmers Coop*"))).toBe(true);
+  });
+
+  it("captures an optional email and birthday during onboarding", async () => {
+    await makeCoop("TEST06", "Test Coop");
+
+    await handleMessage(PHONE, "join TEST06");
+    await handleMessage(PHONE, "Ada Obi");
+    await handleMessage(PHONE, "ada@example.com");
+    await handleMessage(PHONE, "15/08");
+    await handleMessage(PHONE, "1234");
+    await handleMessage(PHONE, "1234");
+
+    const member = await prisma.member.findFirst({ where: { phone: PHONE } });
+    expect(member!.email).toBe("ada@example.com");
+    expect(member!.dateOfBirth!.getMonth()).toBe(7); // August
+    expect(member!.dateOfBirth!.getDate()).toBe(15);
   });
 
   it("records a contribution and updates the balance", async () => {
@@ -149,6 +167,8 @@ describe("coop whatsapp bot", () => {
     await handleMessage(TG, "join TEST05");
     await handleMessage(TG, "Bola Musa");
     await handleMessage(TG, "08012345678");
+    await handleMessage(TG, "skip"); // email is optional
+    await handleMessage(TG, "skip"); // birthday is optional
     await handleMessage(TG, "5555");
     await handleMessage(TG, "5555");
 

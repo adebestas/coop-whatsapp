@@ -171,3 +171,69 @@ describe("namesMatch", () => {
     expect(namesMatch("SADE BALOGUN", "Ada Obi")).toBe(false);
   });
 });
+
+describe("withdrawals", () => {
+  it("withdraws up to 45% of savings to the member's bank after PIN confirmation", async () => {
+    const coop = await makeCoop("TEST22");
+    const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 10000 } });
+
+    await handleMessage(PHONE, "withdraw 4000");
+    await handleMessage(PHONE, "0123456789"); // account
+    await handleMessage(PHONE, "Access"); // bank
+    await handleMessage(PHONE, "1234"); // PIN
+
+    const updated = await prisma.member.findUnique({
+      where: { id: member.id },
+      include: { wallet: true },
+    });
+    expect(updated!.wallet!.balance).toBe(6000);
+    expect(updated!.bankAccountNumber).toBe("0123456789");
+    expect(updated!.bankCode).toBe("044");
+
+    const payout = await prisma.payout.findFirst({ where: { memberId: member.id } });
+    expect(payout).not.toBeNull();
+    expect(payout!.amount).toBe(4000);
+    expect(payout!.status).toBe("successful");
+
+    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    expect(texts).toContain("Withdrew");
+  });
+
+  it("rejects a withdrawal above the 45% cap without touching the wallet", async () => {
+    const coop = await makeCoop("TEST23");
+    const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 10000 } });
+
+    await handleMessage(PHONE, "withdraw 5000"); // max is 4500
+
+    const updated = await prisma.member.findUnique({
+      where: { id: member.id },
+      include: { wallet: true },
+    });
+    expect(updated!.wallet!.balance).toBe(10000);
+    expect(await prisma.payout.count()).toBe(0);
+
+    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    expect(texts).toContain("45%");
+  });
+
+  it("does not pay out when the withdrawal account name does not match", async () => {
+    const coop = await makeCoop("TEST24");
+    const member = await makeMember(PHONE, coop.id, { name: "Chinedu Eze" });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 10000 } });
+    state.resolveName = "SADE BALOGUN";
+
+    await handleMessage(PHONE, "withdraw 4000");
+    await handleMessage(PHONE, "0123456789");
+    await handleMessage(PHONE, "Access");
+    await handleMessage(PHONE, "1234");
+
+    const updated = await prisma.member.findUnique({
+      where: { id: member.id },
+      include: { wallet: true },
+    });
+    expect(updated!.wallet!.balance).toBe(10000); // money never left
+    expect(await prisma.payout.count()).toBe(0);
+  });
+});

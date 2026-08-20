@@ -16,6 +16,8 @@ export async function findOrCreateMember(
   name: string,
   pin: string,
   contactPhone?: string,
+  email?: string,
+  dateOfBirth?: Date,
 ): Promise<JoinResult> {
   const coop = await prisma.cooperative.findUnique({ where: { code: coopCode } });
   if (!coop) {
@@ -40,6 +42,8 @@ export async function findOrCreateMember(
       // WhatsApp members are identified by their number already; only
       // Telegram users need a separately-collected real phone.
       contactPhone: contactPhone ?? (phone.startsWith("tg:") ? null : phone),
+      email,
+      dateOfBirth,
       name,
       code,
       pin: hashPin(pin),

@@ -36,6 +36,8 @@ model Member {
   code          String     @unique // short human-friendly code (e.g. A1B2C3) for guarantor/reference
   phone         String // channel id: WhatsApp E.164 number, or "tg:<chatId>" for Telegram
   contactPhone  String?   // real phone number (E.164) used for top-ups, payouts, KYC
+  email         String?   // optional — statements can be sent here
+  dateOfBirth   DateTime? // optional — used for birthday greetings (month/day only)
   name          String
   bvn           String?
   role          String     @default("member") // member | admin
@@ -43,6 +45,11 @@ model Member {
   lga           String?
   pin           String?    // 4-digit transaction PIN (hashed)
   status        String     @default("active") // pending | active | suspended
+  bankAccountNumber String? // member's bank account for withdrawals
+  bankCode          String?
+  bankName          String?
+  lastStatementSentAt DateTime? // month marker for monthly statements
+  lastBirthdayGreetedYear Int?  // year marker so birthdays only fire once a year
   virtualAccountNumber String? // provider-issued account number for top-ups
   virtualAccountBank    String?
   virtualAccountProvider String?

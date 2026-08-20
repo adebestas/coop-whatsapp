@@ -5,7 +5,7 @@ import { sendText } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { createUnit, joinUnit, setUnitAdmin, broadcastToScope } from "../src/services/units.js";
 import { computeDividendPreview, distributeDividend } from "../src/services/dividends.js";
-import { runAutoSaveReminders, runMonthlyInterest, setAutoSave, setInterestRate } from "../src/services/scheduler.js";
+import { runAutoSaveReminders, runMonthlyInterest, runMonthlyStatements, runBirthdayGreetings, setAutoSave, setInterestRate } from "../src/services/scheduler.js";
 import { createContribution } from "../src/services/cooperative.js";
 
 vi.mock("../src/lib/messaging.js", () => ({
@@ -195,5 +195,71 @@ describe("dividends", () => {
 
     const dividend = await prisma.dividend.findFirst();
     expect(dividend!.status).toBe("distributed");
+  });
+});
+
+describe("monthly statements + birthday greetings", () => {
+  it("sends each active member a statement on the 1st of the month", async () => {
+    const coop = await makeCoop("TEST17", "Test Coop");
+    await makeMember(PHONE, coop.id);
+    await createContribution(PHONE, 5000);
+
+    const sent = await runMonthlyStatements(new Date("2026-08-01"));
+    expect(sent).toBe(1);
+
+    const member = await prisma.member.findFirst({ where: { phone: PHONE } });
+    expect(member!.lastStatementSentAt).not.toBeNull();
+
+    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    expect(texts).toContain("statement");
+    expect(texts).toContain("NGN 5,000.00");
+
+    // Same month: no duplicate statement.
+    vi.clearAllMocks();
+    const again = await runMonthlyStatements(new Date("2026-08-15"));
+    expect(again).toBe(0);
+  });
+
+  it("does nothing outside the 1st of the month", async () => {
+    const coop = await makeCoop("TEST18", "Test Coop");
+    await makeMember(PHONE, coop.id);
+
+    const sent = await runMonthlyStatements(new Date("2026-08-15"));
+    expect(sent).toBe(0);
+  });
+
+  it("greets a member on their birthday exactly once per year", async () => {
+    const coop = await makeCoop("TEST19", "Test Coop");
+    const member = await makeMember(PHONE, coop.id);
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { dateOfBirth: new Date(2000, 7, 15) }, // 15 August
+    });
+
+    const sent = await runBirthdayGreetings(new Date("2026-08-15"));
+    expect(sent).toBe(1);
+
+    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    expect(texts).toContain("Happy Birthday");
+
+    const updated = await prisma.member.findUnique({ where: { id: member.id } });
+    expect(updated!.lastBirthdayGreetedYear).toBe(2026);
+
+    // Running again the same year must not double-greet.
+    vi.clearAllMocks();
+    const again = await runBirthdayGreetings(new Date("2026-08-15"));
+    expect(again).toBe(0);
+  });
+
+  it("does not greet members whose birthday is not today", async () => {
+    const coop = await makeCoop("TEST20", "Test Coop");
+    const member = await makeMember(PHONE, coop.id);
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { dateOfBirth: new Date(2000, 0, 1) },
+    });
+
+    const sent = await runBirthdayGreetings(new Date("2026-08-15"));
+    expect(sent).toBe(0);
   });
 });
