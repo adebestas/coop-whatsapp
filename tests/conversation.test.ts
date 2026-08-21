@@ -13,6 +13,7 @@ const PHONE = "2348012345678";
 const ADMIN_PHONE = "2348099999999";
 const G1_PHONE = "2348071111111";
 const G2_PHONE = "2348072222222";
+const SUPER_PHONE = "2348073333333";
 
 async function makeCoop(code: string, name: string, adminPhone?: string) {
   return prisma.cooperative.create({
@@ -45,6 +46,14 @@ async function makeMember(
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  await prisma.voteBallot.deleteMany();
+  await prisma.voteCandidate.deleteMany();
+  await prisma.vote.deleteMany();
+  await prisma.supportTicket.deleteMany();
+  await prisma.auditLog.deleteMany();
+  await prisma.deathValidation.deleteMany();
+  await prisma.deathClaim.deleteMany();
+  await prisma.withdrawalRequest.deleteMany();
   await prisma.contribution.deleteMany();
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
@@ -68,6 +77,8 @@ describe("coop whatsapp bot", () => {
     await handleMessage(PHONE, "Ada Obi");
     await handleMessage(PHONE, "skip"); // email is optional
     await handleMessage(PHONE, "skip"); // birthday is optional
+    await handleMessage(PHONE, "Chidi Okafor"); // next of kin
+    await handleMessage(PHONE, "08087654321");
     await handleMessage(PHONE, "1234");
     await handleMessage(PHONE, "1234");
 
@@ -79,6 +90,8 @@ describe("coop whatsapp bot", () => {
     expect(member).not.toBeNull();
     expect(member!.wallet!.balance).toBe(0);
     expect(member!.code).toMatch(/^[A-Z2-9]{6}-[A-Z2-9]{4}$/);
+    expect(member!.nextOfKinName).toBe("Chidi Okafor");
+    expect(member!.nextOfKinPhone).toBe("2348087654321");
 
     const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text);
     expect(texts.some((t) => t.includes("Ada Obi"))).toBe(true);
@@ -92,6 +105,8 @@ describe("coop whatsapp bot", () => {
     await handleMessage(PHONE, "Ada Obi");
     await handleMessage(PHONE, "ada@example.com");
     await handleMessage(PHONE, "15/08");
+    await handleMessage(PHONE, "Ngozi Obi");
+    await handleMessage(PHONE, "08087654321");
     await handleMessage(PHONE, "1234");
     await handleMessage(PHONE, "1234");
 
@@ -169,6 +184,8 @@ describe("coop whatsapp bot", () => {
     await handleMessage(TG, "08012345678");
     await handleMessage(TG, "skip"); // email is optional
     await handleMessage(TG, "skip"); // birthday is optional
+    await handleMessage(TG, "Musa Elder"); // next of kin
+    await handleMessage(TG, "08081112222");
     await handleMessage(TG, "5555");
     await handleMessage(TG, "5555");
 
@@ -179,18 +196,23 @@ describe("coop whatsapp bot", () => {
     expect(member).not.toBeNull();
     expect(member!.code).toMatch(/^[A-Z2-9]{6}-[A-Z2-9]{4}$/);
     expect(member!.contactPhone).toBe("2348012345678");
+    expect(member!.phoneVerified).toBe(false); // no WhatsApp channel to deliver the OTP to
 
     // Replies are addressed to the tg: id, not a phone.
     const calls = vi.mocked(sendText).mock.calls;
     expect(calls.some((c) => c[0].to === TG)).toBe(true);
     expect(calls.every((c) => c[0].to.startsWith("tg:"))).toBe(true);
   });
-it("requires 2 confirmed guarantors before a loan can be approved", async () => {
-    const coop = await makeCoop("TEST04", "Test Coop", ADMIN_PHONE);
+it("requires guarantor confirmation and two-step admin approval for loans", async () => {
+    const coop = await makeCoop("TEST04", "Test Coop"); // no adminPhone -> plain admins stay plain
     const borrower = await makeMember(PHONE, coop.id, { pin: "1234" });
     await makeMember(G1_PHONE, coop.id, { pin: "1111" });
     await makeMember(G2_PHONE, coop.id, { pin: "2222" });
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin", pin: "9999" });
+    await makeMember(SUPER_PHONE, coop.id, { role: "superadmin", pin: "8888" });
+
+    // Loans are capped at 2x savings — give the borrower some history first.
+    await handleMessage(PHONE, "save 30000");
 
     // Apply for a loan — bot collects bank details, then asks for guarantor 1.
     await handleMessage(PHONE, "loan 50000 2");
@@ -236,16 +258,59 @@ it("requires 2 confirmed guarantors before a loan can be approved", async () => 
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("guaranteed");
 
-    // Now the admin can approve.
+    // Step 1: plain admin approves -> waiting on the super admin.
     await handleMessage(ADMIN_PHONE, `approve ${shortId}`);
+    loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
+    expect(loan!.status).toBe("admin_approved");
+
+    // A second admin approval can't replace the super admin's sign-off.
+    await handleMessage(ADMIN_PHONE, `approve ${shortId}`);
+    loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
+    expect(loan!.status).toBe("admin_approved");
+
+    // Step 2: super admin gives the final approval (disbursement fails
+    // gracefully in tests — no provider keys — so the loan stays approved).
+    await handleMessage(SUPER_PHONE, `approve ${shortId}`);
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("approved");
     expect(loan!.monthlyPayment).toBeGreaterThan(0);
+    expect(loan!.finalApprovedById).not.toBeNull();
 
     // Fund the wallet then repay.
     await prisma.wallet.updateMany({ data: { balance: { increment: 100000 } } });
     await handleMessage(PHONE, "repay");
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.balance).toBeLessThan(50000 * 1.04);
+  });
+
+  it("lets an admin borrow with a single guarantor, finalized by the super admin", async () => {
+    const coop = await makeCoop("TEST07", "Test Coop");
+    await makeMember(G1_PHONE, coop.id, { pin: "1111" });
+    await makeMember(ADMIN_PHONE, coop.id, { role: "admin", pin: "9999" });
+    await makeMember(SUPER_PHONE, coop.id, { role: "superadmin", pin: "8888" });
+
+    // Admins need savings too (2x cap) — and only 1 guarantor.
+    await handleMessage(ADMIN_PHONE, "save 10000");
+    await handleMessage(ADMIN_PHONE, "loan 20000 2");
+    await handleMessage(ADMIN_PHONE, "0123456789");
+    await handleMessage(ADMIN_PHONE, "Access");
+
+    const loan = await prisma.loan.findFirst({ where: { member: { phone: ADMIN_PHONE } } });
+    expect(loan).not.toBeNull();
+
+    const g1 = await prisma.member.findFirst({ where: { phone: G1_PHONE } });
+    await handleMessage(ADMIN_PHONE, g1!.code);
+    const gs = await prisma.guarantor.findMany({ where: { loanId: loan!.id } });
+    expect(gs).toHaveLength(1);
+    await handleMessage(G1_PHONE, `confirm ${gs[0].code}`);
+
+    const guaranteed = await prisma.loan.findUnique({ where: { id: loan!.id } });
+    expect(guaranteed!.status).toBe("guaranteed");
+
+    const shortId = loan!.id.slice(-6);
+    await handleMessage(ADMIN_PHONE, `approve ${shortId}`);
+    await handleMessage(SUPER_PHONE, `approve ${shortId}`);
+    const done = await prisma.loan.findUnique({ where: { id: loan!.id } });
+    expect(done!.status).toBe("approved");
   });
 });

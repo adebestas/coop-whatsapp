@@ -87,17 +87,48 @@ export interface ProviderAdapter {
   parseNotification(body: unknown): PaymentNotification | null;
 }
 
-/** Adapter resolution. Controlled by PAYMENT_PROVIDER env var. */
-export function resolveProvider(): ProviderAdapter {
-  const name = (process.env.PAYMENT_PROVIDER ?? "flutterwave").toLowerCase();
-  switch (name) {
+import { flutterwaveAdapter } from "./flutterwave.js";
+import { paystackAdapter } from "./paystack.js";
+
+/**
+ * Provider availability (circuit breaker). When a provider fails — network
+ * outage, downtime — we mark it down for a cooldown and route to the other
+ * provider automatically.
+ */
+const PROVIDER_COOLDOWN_MS = 5 * 60 * 1000;
+const providerDownUntil = new Map<string, number>();
+
+export function markProviderDown(name: string): void {
+  providerDownUntil.set(name.toLowerCase(), Date.now() + PROVIDER_COOLDOWN_MS);
+}
+
+export function isProviderAvailable(name: string): boolean {
+  const until = providerDownUntil.get(name.toLowerCase());
+  return !until || until < Date.now();
+}
+
+function adapterFor(name: string): ProviderAdapter | null {
+  switch (name.toLowerCase()) {
     case "paystack":
       return paystackAdapter;
     case "flutterwave":
-    default:
       return flutterwaveAdapter;
+    default:
+      return null;
   }
 }
 
-import { flutterwaveAdapter } from "./flutterwave.js";
-import { paystackAdapter } from "./paystack.js";
+const ALL_PROVIDERS = ["flutterwave", "paystack"];
+
+/** Preferred provider first (env or explicit), then any healthy fallback. */
+export function resolveProvider(preferred?: string): ProviderAdapter {
+  const configured = (preferred ?? process.env.PAYMENT_PROVIDER ?? "flutterwave").toLowerCase();
+  const order = [configured, ...ALL_PROVIDERS.filter((p) => p !== configured)];
+  for (const name of order) {
+    const adapter = adapterFor(name);
+    if (adapter && isProviderAvailable(name)) return adapter;
+  }
+  // Everything is marked down — fall back to the configured one and let the
+  // caller surface the error.
+  return adapterFor(configured) ?? flutterwaveAdapter;
+}

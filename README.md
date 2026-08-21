@@ -64,26 +64,57 @@ tests/                   # vitest smoke tests
 | `code` | See your member code (share it for guarantor requests) |
 | `confirm <code>` | Accept a guarantor request |
 | `phone <number>` | Add/update your real phone number (needed for funding) |
+| `support <issue>` | Open a support ticket with customer service |
+| `vote <election id> <member code>` | Vote in an open election |
 
-Multi-turn onboarding: `join TEST01` → name → (Telegram: phone) → email
-*(optional)* → birthday *(optional)* → set 4-digit PIN → confirm → done.
+Multi-turn onboarding: `join TEST01` → name → (Telegram: phone → OTP if the
+number is already on WhatsApp) → email *(optional)* → birthday *(optional)* →
+**next of kin (name + phone)** → set 4-digit PIN → confirm → done.
 You receive a short **member code** on joining. Email + birthday can be skipped
-with `skip` and only power monthly statements and birthday greetings.
+with `skip` and only power monthly statements and birthday greetings. The next
+of kin is required — death claims are settled with them.
+
+## Roles
+
+| Role | Powers |
+| --- | --- |
+| `member` | Save, withdraw, loans, vote |
+| `support` | Customer service: view & resolve tickets |
+| `admin` | Unit or coop-wide admin: approve loans (step 1), withdrawals, claims intake, broadcasts, elections |
+| `superadmin` | Final approval on **all** money movement, payouts, dividends, roles (`setrole`), audit trail |
+
+The super admin is any member with the `superadmin` role **or** the
+cooperative's registered `adminPhone`. Every money/admin action is written to
+an append-only **audit log** (`audit` command shows the latest entries).
 
 ## Admin commands
 
-| Command | What it does |
-| --- | --- |
-| `pending` | List loan applications (workplace admins see their unit only) |
-| `approve <id>` / `reject <id>` | Approve / reject a guaranteed loan (coop admin) |
-| `payout <amount> <phone>` | Disburse money to a member (coop admin) |
-| `broadcast <msg>` | Message all members (`broadcast unit <msg>` for your workplace) |
-| `addunit <name> <code>` | Create a workplace/unit |
-| `unitadmin <unitcode> <membercode>` | Assign a workplace admin |
-| `units` | List workplaces |
-| `interest <rate%>` | Set monthly interest on savings |
-| `dividend <rate>` | Dividend calculator (real-time) |
-| `paydividend <rate%>` | Distribute a dividend to all members |
+| Command | Who | What it does |
+| --- | --- | --- |
+| `pending` | all admins | List loan applications (workplace admins see their unit only) |
+| `approve <id>` / `reject <id>` | admin + super | Two-step loan approval: admin approves, **super admin finalizes & disburses** |
+| `approvewdraw <id>` | admin + super | Approve a withdrawal request (super approval pays immediately) |
+| `finalize <id>` | super only | Final approval that sends a withdrawal |
+| `rejectwithdraw <id>` | admin + super | Reject a withdrawal request |
+| `overridewithdrawal <phone>` | admin + super | Let a member withdraw before the 6-month window |
+| `pendingwithdraw` | admin + super | List pending withdrawal requests |
+| `deathclaim <membercode>` | admin + super | Open a death claim (then send the certificate) |
+| `claimbank <claim id> <account> <bank>` | admin + super | Set the family's payout account |
+| `approveclaim <id>` | super only | Pay the validated claim to the family |
+| `rejectclaim <id>` | admin + super | Reject a death claim |
+| `pendingclaims` | admin + super | List death claims in progress |
+| `payout <amount> <phone>` | super only | Pay from a member's wallet to their bank on file (name-checked, audited) |
+| `setrole <code> <member\|admin\|superadmin\|support>` | super only | Assign roles |
+| `tickets` / `resolve <id> <note>` | support + admins | Work support tickets |
+| `startvote unit <unitcode> <title>` / `startvote exec <position> <title>` | admin + super | Open an election |
+| `candidate <election id> <member code>` | admin + super | Add a candidate |
+| `closevote <election id>` | admin + super | Tally ballots; unit elections install the winner as unit admin |
+| `results <election id>` | everyone | Live tallies |
+| `broadcast <msg>` | all admins | Message all members (`broadcast unit <msg>` for your workplace) |
+| `addunit <name> <code>` / `unitadmin <unit> <member>` / `units` | all admins | Manage workplaces |
+| `interest <rate%>` | all admins | Set monthly interest on **loans** |
+| `paydividend <rate%>` | super only | Distribute a dividend to all members |
+| `audit` | admin + super | Recent audit-trail entries |
 
 ## Channels: WhatsApp + Telegram
 
@@ -108,37 +139,50 @@ members already are identified by their number, so no extra step is needed.
 
 ## Loan guarantor flow
 
-Every loan requires **2 guarantors**, and each must confirm before the loan
-can be approved:
+Loans require **2 guarantors** by default — admins and superadmins only need
+**1** — and each must confirm before the loan can be approved:
 
 1. `loan <amount> <months>` creates the application.
-2. The bot asks for guarantor 1's member code, then guarantor 2's.
+2. The bot asks for each guarantor's member code in turn.
 3. For each valid guarantor, the system **auto-generates a unique code**
-   (e.g. `GT-A1B2C3`) and sends it to that guarantor's WhatsApp.
+   (e.g. `GT-A1B2C3`) and sends it to their chat.
 4. Each guarantor replies `confirm <code>` to accept.
-5. The loan only becomes `guaranteed` (approvable) once **both** guarantors
-   confirm. Admins can't approve earlier.
-6. Admin replies `approve <id>` (or uses the dashboard) to approve.
+5. The loan only becomes `guaranteed` (approvable) once every guarantor has
+   confirmed. Admins can't approve earlier.
 
-Rules enforced: you can't be your own guarantor, a member can only appear
-once per loan, and unknown member codes are rejected.
+Rules enforced:
+
+- You can't be your own guarantor; one appearance per loan; unknown codes are
+  rejected.
+- A member can stand guarantor for at most **2 active loans** at a time.
+- Once the cooperative passes **100 members**, guarantors are additionally
+  liable up to **2x their own lifetime savings** (`GUARANTOR_EXPOSURE_RATIO`),
+  and borrowers need **100 days of membership** before taking a loan.
+- A loan can't exceed **2x the borrower's lifetime savings**
+  (`LOAN_TO_SAVINGS_RATIO`).
+- Members with an overdue loan (**defaulters**) can't borrow again until they
+  repay.
+- Late instalments attract a fine: `LATE_FINE_RATE`% (default 2%) of the
+  installment per month overdue, deducted together with the repayment and
+  recorded as a `fine` entry in the ledger.
 
 ## Loan disbursement
 
-Loan applications also collect the member's **bank account number and bank**
-(by name — Access, GTB, Zenith, etc. — or the bank code). On approval the
-system auto-disburses to that account:
+Approval is **two-step**: an admin's `approve <id>` marks the loan
+`admin_approved`; only the super admin's approval finalizes it. On finalize
+the system auto-disburses to the account on file:
 
 1. The payment provider resolves the account holder's name.
 2. The name is compared against the member's **registered name** (case and
    punctuation-insensitive; extra titles like "Chief" are ignored).
-3. If it **matches** → the loan is `disbursed` and the money is sent to the
-   bank account. A payout record is created and the member is notified.
+3. If it **matches** → the loan is `disbursed`, the wallet is debited
+   atomically, and the money is sent to the bank account. A payout record is
+   created and the member is notified.
 4. If it **doesn't match** (or the account can't be resolved) → the money is
-   **not sent**. The loan stays `approved` with a `name_mismatch` /
-   `failed` disbursement status so an admin can investigate.
+   **not sent**. The loan stays approved with a `name_mismatch` / `failed`
+   disbursement status so an admin can investigate.
 
-The admin's `approve` reply includes the disbursement result.
+The admin's approve reply includes the disbursement result.
 
 ## Workplaces (units)
 
@@ -156,24 +200,62 @@ units are an organizational layer for communication and visibility.
 - `plan <amount> weekly|monthly` sets a recurring contribution. A background
   scheduler nudges members when each instalment is due (they reply `save X`
   to pay). `plan off` cancels.
-- Admin sets `interest <rate%>` and savings earn that rate monthly; interest
-  accrues to wallets on the 1st of each month.
+- Admin sets `interest <rate%>` — the monthly interest charged **on loans**.
 
 ## Dividends
 
 - `dividend <rate>` shows a real-time calculator: the pool and each member's
   share, proportional to their lifetime savings.
-- `paydividend <rate>` distributes it — wallets are credited and it appears
-  in each member's statement.
+- `paydividend <rate>` (super admin only) distributes it — wallets are
+  credited and it appears in each member's statement.
 
 ## Withdrawals
 
 - `withdraw <amount>` lets a member take out up to **45% of their current
-  savings** at once, to their bank account.
-- The bot collects (or reuses) the member's bank account + bank, asks for the
-  **4-digit PIN**, and — like loans — verifies the account holder's name
-  against the member's registered name before any money moves. On success the
-  wallet is debited and a payout record is created.
+  savings** at once, and at most once every **6 months** (an admin can waive
+  the window with `overridewithdrawal <phone>`).
+- The bot collects (or reuses) the member's bank account + bank, then asks for
+  the **4-digit PIN**. A **request** is created — no money moves yet.
+- An admin approves with `approvewdraw <id>`; the **super admin finalizes**
+  (`finalize <id>`, or their own approval pays immediately). Only then is the
+  wallet debited atomically and the payout sent — after the account-holder
+  name check against the registered name, like loans.
+
+## Fraud hardening & KYC
+
+- **PIN lockout:** 3 wrong PIN attempts lock the PIN for 15 minutes
+  (`PIN_MAX_ATTEMPTS`, `PIN_LOCK_MINUTES`).
+- **Session expiry:** abandoned multi-turn flows expire after 30 minutes.
+- **Phone verification (Telegram):** if an onboarding phone number already
+  belongs to a WhatsApp member, a 6-digit OTP (10-minute TTL) is sent to that
+  WhatsApp number; the Telegram user must enter it. Otherwise onboarding
+  continues with the phone marked unverified.
+- **Next of kin** is captured during onboarding — death claims are settled
+  with them.
+- **Audit trail:** every contribution, repayment, top-up credit, payout,
+  withdrawal step, claim action, role change and election is written to an
+  append-only audit log (`audit` command).
+
+## Support tickets
+
+Members open tickets with `support <issue>`; customer-service agents (the
+`support` role) list them with `tickets` and close them with
+`resolve <id> <note>` — the member is notified of the resolution.
+
+## Elections
+
+Admins open ballots with `startvote unit <unitcode> <title>` (workplace
+elections) or `startvote exec <position> <title>` (cooperative-wide executive
+elections). Members add candidates (`candidate <id> <code>`) and vote
+(`vote <id> <code>`) — one ballot per member per election, unit elections
+restricted to unit members. `closevote <id>` tallies the result; the winner of
+a unit election is automatically installed as that unit's admin.
+
+## Payment provider failover
+
+Top-ups and payouts run through Flutterwave or Paystack. If the configured
+provider errors repeatedly it is circuit-broken (5-minute cooldown) and the
+other provider takes over automatically until it recovers.
 
 ## Monthly statements & birthdays
 
@@ -182,17 +264,6 @@ units are an organizational layer for communication and visibility.
   month.
 - Members who shared a birthday during onboarding get a **birthday greeting**
   on the day, once per year. Both steps are optional and skippable (`skip`).
-
-## Admin WhatsApp commands
-
-Admins (members with `role: admin`) get extra commands:
-
-| Command | What it does |
-| --- | --- |
-| `pending` | List pending loan applications |
-| `approve <loan id>` | Approve a pending loan |
-| `reject <loan id>` | Reject a pending loan |
-| `payout <amount> <phone>` | Send a payout to a member |
 
 ## Admin dashboard
 
@@ -250,6 +321,11 @@ npx tsx -e "import { prisma } from './src/lib/prisma.js'; await prisma.cooperati
 - [x] Phase 3: guarantors, auto-disbursement + name verification, units,
   dividends, interest, broadcasts, recurring plans, withdrawals, statements,
   birthday greetings
+- [x] Phase 3.5: two-tier admin governance (super admin finalizes all money
+  movement), Nigeria rules (6-month withdrawal window, guarantor exposure +
+  tenure caps, loan-to-savings cap, late fines, defaulter blocking), KYC
+  (OTP phone verification, next of kin), PIN lockout, audit trail, support
+  tickets, elections (unit admins + executives), provider failover
 - [ ] Phase 4: marketplace, state/LGA grouping, Pidgin, scale, more languages
 
 ## Tests

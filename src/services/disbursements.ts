@@ -18,6 +18,8 @@ interface SendToBankOpts {
   note: string;
   /** Overrides the success message/notification (e.g. for loan wording). */
   successMessage?: string;
+  /** Skip account-name verification (death-claim payouts to family members). */
+  skipNameCheck?: boolean;
   /** Extra error context to store on the loan (if any) when it fails */
   onFailure?: (status: string, error: string) => Promise<void>;
 }
@@ -33,6 +35,9 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
 
   const provider = resolveProvider();
   if (!provider.resolveAccount) {
+    if (opts.skipNameCheck) {
+      return payOut(opts, member, null);
+    }
     const msg = "Payment provider has no account resolver — can't verify the bank account.";
     await opts.onFailure?.("failed", "provider has no resolver");
     await notify(member, msg);
@@ -44,6 +49,11 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
     accountNumber: opts.bankAccountNumber,
     bankCode: opts.bankCode,
   });
+  if (opts.skipNameCheck) {
+    // Death claims etc. — the money goes to a family member, not the account
+    // holder. Security comes from the validations + super admin approval.
+    return payOut(opts, member, resolved.ok ? (resolved.name ?? null) : null);
+  }
   if (!resolved.ok || !resolved.name) {
     const msg = `Not paid out: could not verify the account (${resolved.error ?? "unknown error"}). Check the bank details.`;
     await opts.onFailure?.("failed", resolved.error ?? "resolution failed");
@@ -59,6 +69,15 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
   }
 
   // 2. Names match — send the money.
+  return payOut(opts, member, resolved.name);
+}
+
+async function payOut(
+  opts: SendToBankOpts,
+  member: { id: string; name: string; cooperativeId: string; phone: string },
+  verifiedName: string | null,
+): Promise<DisbursementResult> {
+  const provider = resolveProvider();
   const reference = `TFR-${opts.memberId.slice(-8)}-${Date.now()}`;
   try {
     if (provider.payout) {

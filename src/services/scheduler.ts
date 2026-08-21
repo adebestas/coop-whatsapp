@@ -70,65 +70,23 @@ export async function runAutoSaveReminders(now = new Date()): Promise<number> {
   return sent;
 }
 
-/** Accrue monthly interest on savings for cooperatives with a rate > 0. */
-export async function runMonthlyInterest(now = new Date()): Promise<number> {
-  const coops = await prisma.cooperative.findMany({ where: { interestRate: { gt: 0 } } });
-  let credited = 0;
-
-  for (const coop of coops) {
-    // Only run on the 1st of the month.
-    if (now.getDate() !== 1) continue;
-
-    const wallets = await prisma.wallet.findMany({
-      where: { member: { cooperativeId: coop.id, status: "active" } },
-      include: { member: true },
-    });
-
-    for (const w of wallets) {
-      if ((w.balance ?? 0) <= 0) continue;
-      const interest = Math.round(w.balance * (coop.interestRate / 100) * 100) / 100;
-      const reference = `INT-${coop.id.slice(-6)}-${w.memberId.slice(-6)}-${now.getFullYear()}-${now.getMonth() + 1}`;
-      const exists = await prisma.contribution.findUnique({ where: { reference } });
-      if (exists) continue;
-
-      await prisma.$transaction([
-        prisma.wallet.update({ where: { id: w.id }, data: { balance: { increment: interest } } }),
-        prisma.contribution.create({
-          data: {
-            amount: interest,
-            type: "interest",
-            note: `Monthly interest at ${coop.interestRate}%`,
-            reference,
-            status: "confirmed",
-            paidAt: now,
-            memberId: w.memberId,
-            cooperativeId: coop.id,
-          },
-        }),
-      ]);
-      credited++;
-    }
-  }
-  return credited;
-}
-
-/** Set the cooperative's monthly interest rate (admin only). */
+/** Set the cooperative's monthly loan interest rate (admin only). */
 export async function setInterestRate(
   phone: string,
   rate: number,
 ): Promise<{ ok: boolean; message: string }> {
-  const admin = await prisma.member.findFirst({ where: { phone, role: "admin" } });
+  const admin = await prisma.member.findFirst({ where: { phone, role: { in: ["admin", "superadmin"] } } });
   if (!admin) return { ok: false, message: "Only a cooperative admin can set the interest rate." };
   if (!Number.isFinite(rate) || rate < 0 || rate > 20) {
-    return { ok: false, message: "Monthly interest must be between 0 and 20%, e.g. *interest 1* for 1%." };
+    return { ok: false, message: "Monthly loan interest must be between 0 and 20%, e.g. *interest 2* for 2%." };
   }
   await prisma.cooperative.update({
     where: { id: admin.cooperativeId },
-    data: { interestRate: rate },
+    data: { loanInterestRate: rate },
   });
   return {
     ok: true,
-    message: `Monthly interest rate set to *${rate}%*. Interest accrues on savings on the 1st of each month.`,
+    message: `Loan interest rate set to *${rate}%/month*. New loan applications will use this rate.`,
   };
 }
 

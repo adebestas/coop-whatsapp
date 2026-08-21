@@ -1,9 +1,12 @@
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
+import { sendText } from "../lib/messaging.js";
 import { sendToBank } from "./disbursements.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
+/** Minimum gap between two withdrawals (6 months). */
+export const WITHDRAW_COOLDOWN_MS = 180 * 24 * 60 * 60 * 1000;
 
 export interface WithdrawResult {
   ok: boolean;
@@ -21,23 +24,41 @@ export async function withdrawLimit(phone: string): Promise<{ balance: number; m
   return { balance, max: Math.floor(balance * WITHDRAW_LIMIT_RATIO) };
 }
 
+/** Is this member allowed to withdraw under the 6-month rule? */
+export async function canWithdraw(phone: string): Promise<{ ok: boolean; message: string; member: any }> {
+  const member = await prisma.member.findFirst({ where: { phone }, include: { wallet: true } });
+  if (!member || !member.wallet) {
+    return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*.", member: null };
+  }
+  if (member.status === "deceased") {
+    return { ok: false, message: "This account is under a death claim. The family withdrawal is handled by the cooperative admin.", member };
+  }
+  if (member.lastWithdrawalAt && !member.withdrawalOverride) {
+    const elapsed = Date.now() - member.lastWithdrawalAt.getTime();
+    if (elapsed < WITHDRAW_COOLDOWN_MS) {
+      const daysLeft = Math.ceil((WITHDRAW_COOLDOWN_MS - elapsed) / (24 * 60 * 60 * 1000));
+      return {
+        ok: false,
+        message: `You can only withdraw once every 6 months. You can withdraw again in about *${daysLeft} days* — or ask an admin to *override* the rule.`,
+        member,
+      };
+    }
+  }
+  return { ok: true, message: "", member };
+}
+
 /**
- * Withdraw up to 45% of savings to the member's bank account.
- * The provider verifies the account holder's name matches the member's
- * registered name before any money moves.
+ * Request a withdrawal. The request needs an admin approval, then the super
+ * admin's final approval, before the money is sent.
  */
-export async function withdrawToBank(
+export async function requestWithdrawal(
   phone: string,
   amount: number,
   bank?: { accountNumber: string; bankCode: string; bankName?: string },
 ): Promise<WithdrawResult> {
-  const member = await prisma.member.findFirst({
-    where: { phone },
-    include: { wallet: true },
-  });
-  if (!member || !member.wallet) {
-    return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
-  }
+  const eligibility = await canWithdraw(phone);
+  if (!eligibility.ok) return { ok: false, message: eligibility.message };
+  const member = eligibility.member;
 
   const balance = member.wallet.balance ?? 0;
   const max = Math.floor(balance * WITHDRAW_LIMIT_RATIO);
@@ -61,33 +82,177 @@ export async function withdrawToBank(
     };
   }
 
-  const result = await sendToBank({
-    memberId: member.id,
-    amount,
-    bankAccountNumber: accNo,
-    bankCode,
-    bankName: bankName ?? undefined,
-    note: `Member withdrawal (45% of savings)`,
+  const request = await prisma.withdrawalRequest.create({
+    data: {
+      amount,
+      status: "pending",
+      bankAccountNumber: accNo,
+      bankCode,
+      bankName: bankName ?? null,
+      memberId: member.id,
+      cooperativeId: member.cooperativeId,
+    },
   });
-  if (!result.ok) {
-    return { ok: false, message: `Withdrawal not processed: ${result.message}` };
+
+  await prisma.member.update({
+    where: { id: member.id },
+    data: { bankAccountNumber: accNo, bankCode, bankName },
+  });
+
+  await notifySuperAdmins(
+    member.cooperativeId,
+    `💰 *Withdrawal request* ${request.id.slice(-6)}\n${member.name} wants to withdraw *${formatBalance(amount)}* to ${bankName ?? bankCode} ****${accNo.slice(-4)}.\n\nAdmin: *approvewithdraw ${request.id.slice(-6)}* or *rejectwithdraw ${request.id.slice(-6)}*. Super admin's final approval pays it out.`,
+  );
+
+  return {
+    ok: true,
+    message: `✅ Withdrawal of *${formatBalance(amount)}* requested.\n\nIt needs an *admin approval*, then the *super admin's final approval*, before the money is sent to ${bankName ?? bankCode} ****${accNo.slice(-4)}.`,
+  };
+}
+
+/** Admin/super admin approval. Super admin approval also pays out immediately. */
+export async function approveWithdrawal(
+  requestId: string,
+  actor: { id: string; role: string; phone: string },
+): Promise<WithdrawResult> {
+  const request = await prisma.withdrawalRequest.findFirst({
+    where: { OR: [{ id: requestId }, { id: { startsWith: requestId } }, { id: { endsWith: requestId } }] },
+    include: { member: true },
+  });
+  if (!request) return { ok: false, message: "Withdrawal request not found. Check the id." };
+  if (request.status !== "pending") {
+    return { ok: false, message: `This request is already ${request.status}.` };
   }
 
-  // Money moved — now deduct the wallet.
+  const isSuper = actor.role === "superadmin" || (await isSuperAdminOf(actor.phone, request.cooperativeId));
+
+  if (isSuper) {
+    return finalizeWithdrawal(requestId, actor);
+  }
+
+  await prisma.withdrawalRequest.update({
+    where: { id: request.id },
+    data: { status: "admin_approved", adminApprovedAt: new Date(), adminApprovedById: actor.id },
+  });
+  await notifySuperAdmins(
+    request.cooperativeId,
+    `✅ Withdrawal *${request.id.slice(-6)}* for ${request.member.name} approved by an admin. As super admin, reply *finalize ${request.id.slice(-6)}* to send *${formatBalance(request.amount)}* to the member's bank.`,
+  );
+  return {
+    ok: true,
+    message: `Withdrawal *${request.id.slice(-6)}* for ${request.member.name} approved. The *super admin* must reply *finalize ${request.id.slice(-6)}* before the money is sent.`,
+  };
+}
+
+/** Super admin's final approval — sends the money and debits the wallet. */
+export async function finalizeWithdrawal(
+  requestId: string,
+  actor: { id: string; role: string; phone: string },
+): Promise<WithdrawResult> {
+  const request = await prisma.withdrawalRequest.findFirst({
+    where: { OR: [{ id: requestId }, { id: { startsWith: requestId } }, { id: { endsWith: requestId } }] },
+    include: { member: true },
+  });
+  if (!request) return { ok: false, message: "Withdrawal request not found." };
+  if (request.status === "paid") return { ok: false, message: "This withdrawal was already paid." };
+  if (request.status === "rejected") return { ok: false, message: "This withdrawal was rejected." };
+
+  const isSuper = actor.role === "superadmin" || (await isSuperAdminOf(actor.phone, request.cooperativeId));
+  if (!isSuper) {
+    return { ok: false, message: "Only the cooperative's super admin can give the final approval." };
+  }
+
+  const member = request.member;
+  const wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
+  const balance = wallet?.balance ?? 0;
+  if (balance < request.amount) {
+    await prisma.withdrawalRequest.update({ where: { id: request.id }, data: { status: "rejected", rejectedAt: new Date() } });
+    return { ok: false, message: `Insufficient balance (${formatBalance(balance)}). Request rejected.` };
+  }
+
+  const result = await sendToBank({
+    memberId: member.id,
+    amount: request.amount,
+    bankAccountNumber: request.bankAccountNumber,
+    bankCode: request.bankCode,
+    bankName: request.bankName ?? undefined,
+    note: `Member withdrawal (finalized by super admin)`,
+  });
+  if (!result.ok) {
+    return { ok: false, message: `Withdrawal not paid out: ${result.message}` };
+  }
+
+  // Atomic debit — only succeeds if the balance still covers the amount.
+  const debited = await prisma.wallet.updateMany({
+    where: { id: wallet!.id, balance: { gte: request.amount } },
+    data: { balance: { decrement: request.amount } },
+  });
+  if (debited.count === 0) {
+    await prisma.withdrawalRequest.update({ where: { id: request.id }, data: { status: "rejected", rejectedAt: new Date() } });
+    return { ok: false, message: "Balance changed during payout — request rejected. Investigate immediately." };
+  }
+
   await prisma.$transaction([
-    prisma.wallet.update({
-      where: { id: member.wallet.id },
-      data: { balance: { decrement: amount } },
+    prisma.withdrawalRequest.update({
+      where: { id: request.id },
+      data: { status: "paid", finalizedAt: new Date(), finalizedById: actor.id },
     }),
     prisma.member.update({
       where: { id: member.id },
-      data: { bankAccountNumber: accNo, bankCode, bankName },
+      data: { lastWithdrawalAt: new Date(), withdrawalOverride: false },
     }),
   ]);
 
-  const newBalance = balance - amount;
   return {
     ok: true,
-    message: `✅ Withdrew ${formatBalance(amount)} to your bank (${bankName ?? bankCode} ****${accNo.slice(-4)}).\nRemaining balance: ${formatBalance(newBalance)}.`,
+    message: `✅ *${formatBalance(request.amount)}* sent to ${request.member.name} (${request.bankName ?? request.bankCode} ****${request.bankAccountNumber.slice(-4)}). Wallet debited.`,
   };
+}
+
+export async function rejectWithdrawal(requestId: string): Promise<WithdrawResult> {
+  const request = await prisma.withdrawalRequest.findFirst({
+    where: { OR: [{ id: requestId }, { id: { startsWith: requestId } }, { id: { endsWith: requestId } }] },
+    include: { member: true },
+  });
+  if (!request) return { ok: false, message: "Withdrawal request not found." };
+  if (request.status === "paid" || request.status === "rejected") {
+    return { ok: false, message: `This request is already ${request.status}.` };
+  }
+  await prisma.withdrawalRequest.update({ where: { id: request.id }, data: { status: "rejected", rejectedAt: new Date() } });
+  return { ok: true, message: `Withdrawal *${request.id.slice(-6)}* for ${request.member.name} was rejected.` };
+}
+
+/** Grant an admin override so a member can withdraw before the 6-month window. */
+export async function overrideWithdrawalRule(phone: string, memberPhone: string): Promise<WithdrawResult> {
+  const member = await prisma.member.findFirst({
+    where: { phone: memberPhone, cooperative: { members: { some: { phone } } } },
+  });
+  if (!member) return { ok: false, message: "No member found with that phone in your cooperative." };
+  await prisma.member.update({ where: { id: member.id }, data: { withdrawalOverride: true } });
+  return {
+    ok: true,
+    message: `Withdrawal override granted for *${member.name}*. They can now withdraw before the 6-month window.`,
+  };
+}
+
+/** Send a message to every super admin of a cooperative. */
+export async function notifySuperAdmins(cooperativeId: string, text: string): Promise<void> {
+  const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
+  const supers = await prisma.member.findMany({
+    where: { cooperativeId, role: "superadmin", status: "active" },
+  });
+  const targets = new Set<string>();
+  for (const s of supers) if (s.phone) targets.add(s.phone);
+  if (coop?.adminPhone) targets.add(coop.adminPhone);
+  for (const to of targets) {
+    await sendText({ to, text }).catch(() => {});
+  }
+}
+
+async function isSuperAdminOf(phone: string, cooperativeId: string): Promise<boolean> {
+  const member = await prisma.member.findFirst({ where: { phone, cooperativeId } });
+  if (!member) return false;
+  if (member.role === "superadmin") return true;
+  const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
+  return coop?.adminPhone === phone;
 }

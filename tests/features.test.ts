@@ -5,7 +5,7 @@ import { sendText } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { createUnit, joinUnit, setUnitAdmin, broadcastToScope } from "../src/services/units.js";
 import { computeDividendPreview, distributeDividend } from "../src/services/dividends.js";
-import { runAutoSaveReminders, runMonthlyInterest, runMonthlyStatements, runBirthdayGreetings, setAutoSave, setInterestRate } from "../src/services/scheduler.js";
+import { runAutoSaveReminders, runMonthlyStatements, runBirthdayGreetings, setAutoSave, setInterestRate } from "../src/services/scheduler.js";
 import { createContribution } from "../src/services/cooperative.js";
 
 vi.mock("../src/lib/messaging.js", () => ({
@@ -40,6 +40,14 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string }
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  await prisma.voteBallot.deleteMany();
+  await prisma.voteCandidate.deleteMany();
+  await prisma.vote.deleteMany();
+  await prisma.supportTicket.deleteMany();
+  await prisma.auditLog.deleteMany();
+  await prisma.deathValidation.deleteMany();
+  await prisma.deathClaim.deleteMany();
+  await prisma.withdrawalRequest.deleteMany();
   await prisma.contribution.deleteMany();
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
@@ -149,21 +157,22 @@ describe("recurring contributions + interest", () => {
     expect(member!.autoSaveEnabled).toBe(false);
   });
 
-  it("accrues monthly interest on the 1st", async () => {
+  it("sets the loan interest rate (interest is on loans, never savings)", async () => {
     const coop = await makeCoop("TEST15", "Test Coop");
     const member = await makeMember(PHONE, coop.id);
     await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 10000 } });
 
     await setInterestRate(ADMIN_PHONE, 1); // not an admin yet -> rejected
     await prisma.member.update({ where: { id: member.id }, data: { role: "admin" } });
-    const set = await setInterestRate(PHONE, 1);
+    const set = await setInterestRate(PHONE, 1.5);
     expect(set.ok).toBe(true);
 
-    const credited = await runMonthlyInterest(new Date("2026-08-01"));
-    expect(credited).toBe(1);
+    const updated = await prisma.cooperative.findUnique({ where: { id: coop.id } });
+    expect(updated!.loanInterestRate).toBe(1.5);
 
+    // Savings balances are untouched — no interest accrues on savings.
     const wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
-    expect(wallet!.balance).toBe(10100);
+    expect(wallet!.balance).toBe(10000);
   });
 });
 

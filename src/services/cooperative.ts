@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { generateMemberCode, hashPin } from "../lib/security.js";
+import { audit } from "./audit.js";
 
 export interface JoinResult {
   ok: boolean;
@@ -18,6 +19,8 @@ export async function findOrCreateMember(
   contactPhone?: string,
   email?: string,
   dateOfBirth?: Date,
+  nextOfKin?: { name: string; phone: string },
+  phoneVerified = false,
 ): Promise<JoinResult> {
   const coop = await prisma.cooperative.findUnique({ where: { code: coopCode } });
   if (!coop) {
@@ -31,6 +34,27 @@ export async function findOrCreateMember(
     return { ok: false, message: `You're already a member of *${coop.name}*. Reply *menu* to see what you can do.` };
   }
 
+  // Platform lock: one account per person per cooperative. A member who
+  // started on WhatsApp can't open a second account on Telegram (or
+  // vice-versa) — transactions must be finished where they were started.
+  const realPhone = contactPhone ?? (phone.startsWith("tg:") ? null : phone);
+  if (realPhone) {
+    const twin = await prisma.member.findFirst({
+      where: {
+        cooperativeId: coop.id,
+        contactPhone: realPhone,
+        NOT: [{ phone }],
+      },
+    });
+    if (twin) {
+      const platform = twin.phone.startsWith("tg:") ? "Telegram" : "WhatsApp";
+      return {
+        ok: false,
+        message: `You already have an account on *${platform}* with this phone number. You can only use one platform — finish your transactions there.`,
+      };
+    }
+  }
+
   let code = generateMemberCode();
   while (await prisma.member.findUnique({ where: { code } })) {
     code = generateMemberCode();
@@ -41,9 +65,12 @@ export async function findOrCreateMember(
       phone,
       // WhatsApp members are identified by their number already; only
       // Telegram users need a separately-collected real phone.
-      contactPhone: contactPhone ?? (phone.startsWith("tg:") ? null : phone),
+      contactPhone: realPhone,
       email,
       dateOfBirth,
+      nextOfKinName: nextOfKin?.name,
+      nextOfKinPhone: nextOfKin?.phone,
+      phoneVerified,
       name,
       code,
       pin: hashPin(pin),
@@ -108,6 +135,15 @@ export async function createContribution(phone: string, amount: number): Promise
   });
 
   const balance = (member.wallet.balance ?? 0) + amount;
+  await audit({
+    cooperativeId: member.cooperativeId,
+    actorPhone: phone,
+    actorId: member.id,
+    actorRole: member.role,
+    action: "contribution.create",
+    targetType: "contribution",
+    detail: formatBalance(amount),
+  });
   return {
     ok: true,
     message: `✅ Saved ${formatBalance(amount)}.\nYour new balance is *${formatBalance(balance)}*.\n\nReply *balance* anytime to check.`,

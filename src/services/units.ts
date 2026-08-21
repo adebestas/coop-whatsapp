@@ -33,7 +33,9 @@ export async function setUnitAdmin(
   unitCode: string,
   memberCode: string,
 ): Promise<{ ok: boolean; message: string }> {
-  const admin = await prisma.member.findFirst({ where: { phone: adminPhone, role: "admin" } });
+  const admin = await prisma.member.findFirst({
+    where: { phone: adminPhone, role: { in: ["admin", "superadmin"] } },
+  });
   if (!admin) return { ok: false, message: "Only a cooperative admin can assign unit admins." };
 
   const unit = await prisma.unit.findUnique({

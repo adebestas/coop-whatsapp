@@ -15,16 +15,33 @@ import { showLedger, showHistory } from "./statements.js";
 import { computeDividendPreview } from "./dividends.js";
 import { setAutoSave } from "./scheduler.js";
 import { joinUnit } from "./units.js";
-import { withdrawToBank, withdrawLimit } from "./withdrawals.js";
-import { verifyPin } from "../lib/security.js";
+import { withdrawLimit, requestWithdrawal, canWithdraw } from "./withdrawals.js";
+import { verifyMemberPin } from "./pin.js";
+import { resolveBankCode } from "../lib/banks.js";
+import { createTicket, listTickets, resolveTicket } from "./support.js";
+import { startVote, addCandidate, castVote, closeVote, showResults } from "./votes.js";
+import {
+  startDeathClaim,
+  submitCertificate,
+  validateClaim,
+  setClaimBank,
+} from "./deathclaims.js";
+
+/** A half-finished flow expires after this long. */
+const SESSION_TTL_MS = 30 * 60 * 1000;
+/** OTP codes expire after this long. */
+const OTP_TTL_MS = 10 * 60 * 1000;
 
 export type BotState =
   | "idle"
   | "awaiting_name"
   | "awaiting_coop_code"
   | "awaiting_phone"
+  | "awaiting_otp"
   | "awaiting_email"
   | "awaiting_birthday"
+  | "awaiting_nok_name"
+  | "awaiting_nok_phone"
   | "awaiting_pin"
   | "awaiting_pin_confirm"
   | "awaiting_save_amount"
@@ -37,15 +54,21 @@ export type BotState =
   | "awaiting_withdraw_amount"
   | "awaiting_withdraw_account"
   | "awaiting_withdraw_bank"
-  | "awaiting_withdraw_pin";
+  | "awaiting_withdraw_pin"
+  | "awaiting_death_cert";
 
 interface FlowData {
   joinCode?: string;
   pin?: string;
   name?: string;
   contactPhone?: string;
+  otp?: string;
+  otpExpiresAt?: number;
+  phoneVerified?: boolean;
   email?: string;
   dateOfBirth?: string; // ISO date string
+  nokName?: string;
+  nokPhone?: string;
   loanAmount?: number;
   loanMonths?: number;
   loanAccount?: string;
@@ -56,6 +79,7 @@ interface FlowData {
   withdrawAccount?: string;
   withdrawBankCode?: string;
   withdrawBankName?: string;
+  deathClaimId?: string;
 }
 
 function isAwaitingState(state: BotState): boolean {
@@ -73,6 +97,20 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
     create: { phone, state: "idle" },
     update: {},
   });
+
+  // Expire stale flows so an abandoned "enter your PIN" prompt can't be
+  // completed hours later by anyone with the phone.
+  if (
+    isAwaitingState(session.state as BotState) &&
+    Date.now() - session.updatedAt.getTime() > SESSION_TTL_MS
+  ) {
+    await prisma.session.update({ where: { phone }, data: { state: "idle", data: "{}" } });
+    await sendText({
+      to: phone,
+      text: "That request expired. Reply *menu* to start again.",
+    });
+    return;
+  }
 
   // Multi-turn flow: the bot is waiting for an answer to a question.
   if (isAwaitingState(session.state as BotState)) {
@@ -157,6 +195,87 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
       await handleWithdraw(phone, args);
       break;
 
+    case "validate":
+      await handleValidateClaim(phone, args);
+      break;
+
+    case "support":
+      await handleSupport(phone, text);
+      break;
+
+    case "tickets":
+    case "mytickets": {
+      const result = await listTickets(phone);
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "resolve": {
+      const ticketCode = args[0];
+      const note = args.slice(1).join(" ");
+      if (!ticketCode) {
+        await sendText({ to: phone, text: "Usage: *resolve <ticket id> <note>*" });
+        return;
+      }
+      const result = await resolveTicket(phone, ticketCode, note);
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "startvote": {
+      // startvote unit <unitcode> <title...> | startvote exec <position> <title...>
+      const kind = args[0]?.toLowerCase();
+      const scope = args[1];
+      const title = args.slice(2).join(" ");
+      const result = await startVote(phone, kind ?? "", scope, title);
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "candidate": {
+      const voteCode = args[0];
+      const memberCode = args[1];
+      if (!voteCode || !memberCode) {
+        await sendText({ to: phone, text: "Usage: *candidate <election id> <member code>*" });
+        return;
+      }
+      const result = await addCandidate(phone, voteCode, memberCode);
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "vote": {
+      const voteCode = args[0];
+      const memberCode = args[1];
+      if (!voteCode || !memberCode) {
+        await sendText({ to: phone, text: "Usage: *vote <election id> <member code>*" });
+        return;
+      }
+      const result = await castVote(phone, voteCode, memberCode);
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "closevote": {
+      if (!args[0]) {
+        await sendText({ to: phone, text: "Usage: *closevote <election id>*" });
+        return;
+      }
+      const result = await closeVote(phone, args[0]);
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "results": {
+      if (!args[0]) {
+        await sendText({ to: phone, text: "Usage: *results <election id>*" });
+        return;
+      }
+      const result = await showResults(phone, args[0]);
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
     default:
       await sendText({
         to: phone,
@@ -182,11 +301,12 @@ function buildMenu(member: { name: string; cooperative: { name: string }; wallet
       `Commands:\n` +
       `• *balance* — check your savings balance\n` +
       `• *save <amount>* — make a contribution (e.g. *save 2000*)\n` +
-      `• *withdraw <amount>* — withdraw up to 45% of your savings\n` +
+      `• *withdraw <amount>* — request a withdrawal (up to 45% of savings; once per 6 months)\n` +
       `• *plan <amount> <weekly|monthly>* — set a recurring contribution\n` +
       `• *fund* — get your personal top-up account number\n` +
       `• *loan <amount> <months>* — apply for a loan (e.g. *loan 50000 3*)\n` +
       `• *repay* — repay your loan monthly installment\n` +
+      `• *validate <claim id>* — validate a death claim (guarantors)\n` +
       `• *history* — your transaction statement\n` +
       `• *ledger* — cooperative ledger (transparency)\n` +
       `• *dividend <rate>* — dividend calculator (real-time)\n` +
@@ -194,8 +314,11 @@ function buildMenu(member: { name: string; cooperative: { name: string }; wallet
       `• *code* — see your member code (share it for guarantor requests)\n` +
       `• *confirm <code>* — accept a guarantor request\n` +
       `• *phone <number>* — add/update your real phone number (needed for funding)\n` +
+      `• *support <issue>* — open a support ticket with customer service\n` +
+      `• *vote <election id> <member code>* — vote in an election\n` +
       `• *menu* — show this menu\n\n` +
-      `Admins: try *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *dividend <rate>*, *interest <rate>*, *units*, *addunit <name> <code>*, *payout <amount> <phone>*`
+      `Admins: try *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *interest <rate>* (loan rate), *units*, *addunit <name> <code>*, *approvewithdraw <id>*, *overridewithdrawal <phone>*, *deathclaim <membercode>*, *claimbank <claim id> <account> <bank>*, *tickets*, *resolve <id> <note>*, *startvote unit|exec ...*, *candidate <id> <code>*, *closevote <id>*\n` +
+      `Super admin: *finalize <withdraw id>*, *approveclaim <claim id>*, *setrole <membercode> <member|admin|superadmin|support>*, *paydividend <rate>*, *payout <amount> <phone>*`
   );
 }
 
@@ -272,12 +395,59 @@ async function handleAwaitingInput(
         await sendText({ to: phone, text: "That doesn't look like a valid number. Try e.g. *08012345678* or *+2348012345678*." });
         return;
       }
+      // Verify the number belongs to them: if it's already a WhatsApp member
+      // number we can send a code to that WhatsApp. Otherwise continue
+      // unverified (flagged on the account).
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      const delivered = await deliverOtp(contactPhone, code);
+      if (delivered) {
+        await prisma.session.upsert({
+          where: { phone },
+          create: {
+            phone,
+            state: "awaiting_otp",
+            data: JSON.stringify({ ...data, contactPhone, otp: code, otpExpiresAt: Date.now() + OTP_TTL_MS }),
+          },
+          update: {
+            state: "awaiting_otp",
+            data: JSON.stringify({ ...data, contactPhone, otp: code, otpExpiresAt: Date.now() + OTP_TTL_MS }),
+          },
+        });
+        await sendText({
+          to: phone,
+          text: `We sent a 6-digit code to the WhatsApp connected to *${contactPhone}*. Reply it here to verify your number.`,
+        });
+        return;
+      }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_email", data: JSON.stringify({ ...data, contactPhone }) },
-        update: { state: "awaiting_email", data: JSON.stringify({ ...data, contactPhone }) },
+        create: { phone, state: "awaiting_email", data: JSON.stringify({ ...data, contactPhone, phoneVerified: false }) },
+        update: { state: "awaiting_email", data: JSON.stringify({ ...data, contactPhone, phoneVerified: false }) },
       });
-      await askEmail(phone, { ...data, contactPhone });
+      await askEmail(phone, { ...data, contactPhone, phoneVerified: false });
+      break;
+    }
+
+    case "awaiting_otp": {
+      const input = text.trim();
+      if (!/^\d{6}$/.test(input)) {
+        await sendText({ to: phone, text: "Enter the 6-digit code we sent to your WhatsApp, or reply *resend*." });
+        return;
+      }
+      if (!data.otpExpiresAt || data.otpExpiresAt < Date.now()) {
+        await sendText({ to: phone, text: "That code expired. Reply *resend* for a new one." });
+        return;
+      }
+      if (input !== data.otp) {
+        await sendText({ to: phone, text: "Wrong code. Check the WhatsApp message and try again." });
+        return;
+      }
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_email", data: JSON.stringify({ ...data, otp: undefined, phoneVerified: true }) },
+        update: { state: "awaiting_email", data: JSON.stringify({ ...data, otp: undefined, phoneVerified: true }) },
+      });
+      await askEmail(phone, { ...data, phoneVerified: true });
       break;
     }
 
@@ -303,7 +473,7 @@ async function handleAwaitingInput(
     case "awaiting_birthday": {
       const raw = text.trim();
       if (raw === "skip" || raw === "0" || raw === "-" || raw === "none") {
-        await askPin(phone, data);
+        await askNokName(phone, data);
         return;
       }
       const dob = parseBirthday(raw);
@@ -313,10 +483,44 @@ async function handleAwaitingInput(
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_pin", data: JSON.stringify({ ...data, dateOfBirth: dob.toISOString() }) },
-        update: { state: "awaiting_pin", data: JSON.stringify({ ...data, dateOfBirth: dob.toISOString() }) },
+        create: { phone, state: "awaiting_nok_name", data: JSON.stringify({ ...data, dateOfBirth: dob.toISOString() }) },
+        update: { state: "awaiting_nok_name", data: JSON.stringify({ ...data, dateOfBirth: dob.toISOString() }) },
       });
-      await askPin(phone, { ...data, dateOfBirth: dob.toISOString() });
+      await askNokName(phone, { ...data, dateOfBirth: dob.toISOString() });
+      break;
+    }
+
+    case "awaiting_nok_name": {
+      const nokName = text.trim().replace(/\s+/g, " ");
+      if (!nokName || nokName.length < 2) {
+        await sendText({ to: phone, text: "Please enter your next of kin's full name (e.g. *Chidi Okafor*)." });
+        return;
+      }
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_nok_phone", data: JSON.stringify({ ...data, nokName }) },
+        update: { state: "awaiting_nok_phone", data: JSON.stringify({ ...data, nokName }) },
+      });
+      await sendText({
+        to: phone,
+        text: `What's *${nokName}'s* phone number? If anything happens to you, this is who we contact about your savings.`,
+      });
+      break;
+    }
+
+    case "awaiting_nok_phone": {
+      const nokPhone = normalizePhone(text);
+      if (!nokPhone) {
+        await sendText({ to: phone, text: "That doesn't look like a valid number. Try e.g. *08012345678* or *+2348012345678*." });
+        return;
+      }
+      const nextData: FlowData = { ...data, nokPhone };
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_pin", data: JSON.stringify(nextData) },
+        update: { state: "awaiting_pin", data: JSON.stringify(nextData) },
+      });
+      await askPin(phone, nextData);
       break;
     }
 
@@ -352,6 +556,8 @@ async function handleAwaitingInput(
         data.contactPhone,
         data.email,
         data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
+        data.nokName && data.nokPhone ? { name: data.nokName, phone: data.nokPhone } : undefined,
+        data.phoneVerified ?? false,
       );
       await prisma.session.upsert({
         where: { phone },
@@ -542,16 +748,40 @@ async function handleAwaitingInput(
     }
 
     case "awaiting_withdraw_pin": {
+      const input = text.trim();
+      if (input.toLowerCase() === "menu" || input.toLowerCase() === "cancel") {
+        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
+        await sendText({ to: phone, text: "Withdrawal cancelled. Reply *menu* to start something else." });
+        return;
+      }
       const member = await getMemberByPhone(phone);
-      if (!member || !member.pin || !verifyPin(text.trim(), member.pin)) {
-        await sendText({ to: phone, text: "Incorrect PIN. Try again, or reply *menu* to cancel." });
+      if (!member) {
+        await sendText({ to: phone, text: "You need to join a cooperative first." });
+        return;
+      }
+      // Brute-force protection: 3 wrong PINs locks the account for 15 minutes.
+      const pinCheck = await verifyMemberPin(member, input);
+      if (!pinCheck.ok) {
+        await sendText({ to: phone, text: pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel." });
         return;
       }
       const bank =
         data.withdrawAccount && data.withdrawBankCode
           ? { accountNumber: data.withdrawAccount, bankCode: data.withdrawBankCode, bankName: data.withdrawBankName }
           : undefined;
-      const result = await withdrawToBank(phone, data.withdrawAmount ?? 0, bank);
+      const result = await requestWithdrawal(phone, data.withdrawAmount ?? 0, bank);
+      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "awaiting_death_cert": {
+      const cert = text.trim();
+      if (!cert) {
+        await sendText({ to: phone, text: "Please send the death certificate (photo, document or reference details)." });
+        return;
+      }
+      const result = await submitCertificate(data.deathClaimId ?? "", cert);
       await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
       await sendText({ to: phone, text: result.message });
       break;
@@ -622,6 +852,12 @@ async function handleWithdraw(phone: string, args: string[]): Promise<void> {
     await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
     return;
   }
+  // 6-month rule (admin can override).
+  const eligibility = await canWithdraw(phone);
+  if (!eligibility.ok) {
+    await sendText({ to: phone, text: eligibility.message });
+    return;
+  }
   if (amount > limit.max) {
     await sendText({
       to: phone,
@@ -687,6 +923,23 @@ async function handleLoan(phone: string, args: string[]): Promise<void> {
 
 async function handleRepay(phone: string, _args: string[]): Promise<void> {
   const result = await repayLoan(phone);
+  await sendText({ to: phone, text: result.message });
+}
+
+async function handleSupport(phone: string, text: string): Promise<void> {
+  // Everything after the word "support" is the issue description.
+  const message = text.trim().replace(/^\s*support\s*/i, "");
+  const result = await createTicket(phone, message);
+  await sendText({ to: phone, text: result.message });
+}
+
+async function handleValidateClaim(phone: string, args: string[]): Promise<void> {
+  const code = args[0];
+  if (!code) {
+    await sendText({ to: phone, text: "To validate a death claim, reply *validate <claim id>* with the id you received." });
+    return;
+  }
+  const result = await validateClaim(phone, code);
   await sendText({ to: phone, text: result.message });
 }
 
@@ -789,49 +1042,6 @@ function parseNaira(raw?: string): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// Common Nigerian bank names -> provider bank codes.
-const BANK_CODES: Record<string, string> = {
-  access: "044",
-  gtb: "058",
-  gtbank: "058",
-  guarantee: "058",
-  zenith: "057",
-  uba: "033",
-  firstbank: "011",
-  first: "011",
-  fbn: "011",
-  union: "032",
-  fidelity: "070",
-  fcmb: "214",
-  stanbic: "221",
-  ibtc: "221",
-  ecobank: "050",
-  sterling: "232",
-  wema: "035",
-  polaris: "076",
-  keystone: "082",
-  unity: "215",
-  jaiz: "301",
-  providus: "101",
-  kuda: "50211",
-  opay: "50212",
-  palmpay: "999992",
-  moniepoint: "50515",
-  fairmoney: "51318",
-};
-
-/** Resolve a bank code from a name (or accept a raw numeric code). */
-function resolveBankCode(input: string): { code: string; name: string } | null {
-  const cleaned = input.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (!cleaned) return null;
-  if (/^\d+$/.test(cleaned)) {
-    return { code: cleaned, name: input.trim() };
-  }
-  const code = BANK_CODES[cleaned];
-  if (!code) return null;
-  return { code, name: input.trim() };
-}
-
 /** Parse DD/MM (or DD-MM) into a date. Year is arbitrary — only month/day matter. */
 function parseBirthday(raw: string): Date | null {
   const m = raw.trim().match(/^(\d{1,2})[\/\-](\d{1,2})$/);
@@ -867,6 +1077,20 @@ async function askBirthday(phone: string, data: FlowData): Promise<void> {
   });
 }
 
+async function askNokName(phone: string, data: FlowData): Promise<void> {
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_nok_name", data: JSON.stringify(data) },
+    update: { state: "awaiting_nok_name", data: JSON.stringify(data) },
+  });
+  await sendText({
+    to: phone,
+    text:
+      `Last KYC step — who is your *next of kin*? (full name)\n\n` +
+      `If anything happens to you, they're who the cooperative works with on your savings.`,
+  });
+}
+
 async function askPin(phone: string, data: FlowData): Promise<void> {
   await prisma.session.upsert({
     where: { phone },
@@ -877,6 +1101,27 @@ async function askPin(phone: string, data: FlowData): Promise<void> {
     to: phone,
     text: `Now choose a 4-digit PIN. You'll use it to approve transactions.`,
   });
+}
+
+/**
+ * Deliver an OTP to prove ownership of a phone number: if that number is
+ * already connected to WhatsApp here, send the code there.
+ */
+async function deliverOtp(contactPhone: string, code: string): Promise<boolean> {
+  const existing = await prisma.member.findFirst({
+    where: { contactPhone, phone: { not: { startsWith: "tg:" } } },
+    select: { phone: true },
+  });
+  if (!existing) return false;
+  try {
+    await sendText({
+      to: existing.phone,
+      text: `Your Coop Bank verification code is *${code}*. It expires in 10 minutes.`,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function safeParse(json: string): unknown {

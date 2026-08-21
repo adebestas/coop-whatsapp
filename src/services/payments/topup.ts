@@ -1,10 +1,13 @@
 import { prisma } from "../../lib/prisma.js";
-import { resolveProvider } from "./index.js";
+import { resolveProvider, markProviderDown } from "./index.js";
 import type { PaymentNotification } from "./index.js";
+import { audit } from "../audit.js";
 
 /**
  * Create a virtual account for a member so they can receive transfers.
  * Idempotent — returns the existing account if already provisioned.
+ * Tries the preferred provider first; if it's down (network/downtime) the
+ * other provider is used automatically.
  */
 export async function provisionVirtualAccount(memberId: string): Promise<{
   ok: boolean;
@@ -19,8 +22,6 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
     };
   }
 
-  const provider = resolveProvider();
-
   // Real phone for the provider KYC. WhatsApp members have it on `phone`;
   // Telegram members must have set `contactPhone` (collected at onboarding
   // or via the `phone <number>` command).
@@ -34,34 +35,50 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
     };
   }
 
-  try {
-    const va = await provider.createVirtualAccount({
-      phone: kycPhone,
-      name: member.name,
-      reference: `MEM-${member.id}`,
-      currency: "NGN",
-    });
+  const params = {
+    phone: kycPhone,
+    name: member.name,
+    reference: `MEM-${member.id}`,
+    currency: "NGN",
+  };
 
-    await prisma.member.update({
-      where: { id: member.id },
-      data: {
-        virtualAccountNumber: va.accountNumber,
-        virtualAccountBank: va.bank,
-        virtualAccountProvider: va.provider,
-      },
-    });
+  let lastError: unknown = null;
+  let lastProviderName: string | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const provider = resolveProvider(attempt === 0 ? undefined : otherThan(lastProviderName));
+    lastProviderName = provider.name;
+    try {
+      const va = await provider.createVirtualAccount(params);
 
-    return {
-      ok: true,
-      message: `Your personal funding account is ready:\n\n*${va.accountNumber}*\nBank: *${va.bank}*\n\nTransfer to it anytime and your wallet is credited automatically.`,
-    };
-  } catch (err) {
-    console.error("[topup] virtual account provisioning failed", err);
-    return {
-      ok: false,
-      message: "We couldn't set up your funding account right now. Please try again later.",
-    };
+      await prisma.member.update({
+        where: { id: member.id },
+        data: {
+          virtualAccountNumber: va.accountNumber,
+          virtualAccountBank: va.bank,
+          virtualAccountProvider: va.provider,
+        },
+      });
+
+      return {
+        ok: true,
+        message: `Your personal funding account is ready:\n\n*${va.accountNumber}*\nBank: *${va.bank}*\n\nTransfer to it anytime and your wallet is credited automatically.`,
+      };
+    } catch (err) {
+      lastError = err;
+      console.error(`[topup] ${provider.name} failed, failing over`, err);
+      markProviderDown(provider.name);
+    }
   }
+
+  console.error("[topup] all providers failed", lastError);
+  return {
+    ok: false,
+    message: "We couldn't set up your funding account right now. Please try again later.",
+  };
+}
+
+function otherThan(name?: string): string | undefined {
+  return name === "paystack" ? "flutterwave" : name === "flutterwave" ? "paystack" : undefined;
 }
 
 /**
@@ -110,4 +127,14 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
   ]);
 
   console.log(`[topup] credited ${member.phone} with ${n.amount} ${n.currency} (${n.transactionId})`);
+
+  await audit({
+    cooperativeId: member.cooperativeId,
+    actorPhone: member.phone,
+    actorId: member.id,
+    actorRole: member.role,
+    action: "topup.credit",
+    targetType: "contribution",
+    detail: `${n.amount} ${n.currency} via ${n.provider} (${n.transactionId})`,
+  });
 }

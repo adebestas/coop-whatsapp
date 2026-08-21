@@ -9,67 +9,85 @@ datasource db {
 
 // ---- Cooperatives (multi-tenant orgs) ----
 model Cooperative {
-  id            String     @id @default(cuid())
-  name          String
-  code          String     @unique // e.g. TEST01 — used to join via WhatsApp
-  description   String?
-  state         String?    // Nigerian state (or country for global scope)
-  country       String     @default("NG")
-  currency      String     @default("NGN")
-  adminPhone    String?    // WhatsApp number of the coop admin
-  status        String     @default("active") // active | suspended
-  interestRate  Float      @default(0) // monthly % paid on member savings
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
-  members       Member[]
-  contributions Contribution[]
-  loans         Loan[]
-  payouts       Payout[]
-  units         Unit[]
-  dividends     Dividend[]
-  broadcasts    Broadcast[]
+  id                 String              @id @default(cuid())
+  name               String
+  code               String              @unique // e.g. TEST01 — used to join via WhatsApp
+  description        String?
+  state              String? // Nigerian state (or country for global scope)
+  country            String              @default("NG")
+  currency           String              @default("NGN")
+  adminPhone         String? // WhatsApp number of the coop super admin
+  status             String              @default("active") // active | suspended
+  loanInterestRate   Float               @default(2) // monthly % charged on loans
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  members            Member[]
+  contributions      Contribution[]
+  loans              Loan[]
+  payouts            Payout[]
+  units              Unit[]
+  dividends          Dividend[]
+  broadcasts         Broadcast[]
+  withdrawalRequests WithdrawalRequest[]
+  deathClaims        DeathClaim[]
+  supportTickets     SupportTicket[]
+  votes              Vote[]
 }
 
 // ---- Members (users) ----
 model Member {
-  id            String     @id @default(cuid())
-  code          String     @unique // short human-friendly code (e.g. A1B2C3) for guarantor/reference
-  phone         String // channel id: WhatsApp E.164 number, or "tg:<chatId>" for Telegram
-  contactPhone  String?   // real phone number (E.164) used for top-ups, payouts, KYC
-  email         String?   // optional — statements can be sent here
-  dateOfBirth   DateTime? // optional — used for birthday greetings (month/day only)
-  name          String
-  bvn           String?
-  role          String     @default("member") // member | admin
-  state         String?    // member's home state/LGA grouping
-  lga           String?
-  pin           String?    // 4-digit transaction PIN (hashed)
-  status        String     @default("active") // pending | active | suspended
-  bankAccountNumber String? // member's bank account for withdrawals
-  bankCode          String?
-  bankName          String?
-  lastStatementSentAt DateTime? // month marker for monthly statements
-  lastBirthdayGreetedYear Int?  // year marker so birthdays only fire once a year
-  virtualAccountNumber String? // provider-issued account number for top-ups
-  virtualAccountBank    String?
-  virtualAccountProvider String?
-  unitId        String?
-  unit          Unit?     @relation("UnitMembership", fields: [unitId], references: [id], onDelete: SetNull)
-  adminOf       Unit[]    @relation("UnitAdmin")
-  autoSaveAmount  Float?   // recurring contribution amount
-  autoSaveInterval String? // weekly | monthly
-  autoSaveNextDue  DateTime? // when the next reminder should fire
-  autoSaveEnabled  Boolean  @default(false)
-  cooperativeId String
-  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
-  wallet        Wallet?
-  contributions Contribution[]
-  loans         Loan[]
-  payouts       Payout[]
-  guarantorFor  Guarantor[]
-  dividendEntries DividendEntry[]
+  id                      String              @id @default(cuid())
+  code                    String              @unique // short human-friendly code (e.g. A1B2C3) for guarantor/reference
+  phone                   String // channel id: WhatsApp E.164 number, or "tg:<chatId>" for Telegram
+  contactPhone            String? // real phone number (E.164) used for top-ups, payouts, KYC
+  email                   String? // optional — statements can be sent here
+  dateOfBirth             DateTime? // optional — used for birthday greetings (month/day only)
+  nextOfKinName           String? // required for death claims
+  nextOfKinPhone          String?
+  phoneVerified           Boolean             @default(false) // OTP-verified real phone number
+  name                    String
+  bvn                     String?
+  role                    String              @default("member") // member | admin | superadmin
+  state                   String? // member's home state/LGA grouping
+  lga                     String?
+  pin                     String? // 4-digit transaction PIN (hashed)
+  pinFailedCount          Int                 @default(0) // consecutive wrong PIN attempts
+  pinLockedUntil          DateTime? // brute-force lockout window
+  status                  String              @default("active") // pending | active | suspended | deceased
+  bankAccountNumber       String? // member's bank account for withdrawals
+  bankCode                String?
+  bankName                String?
+  lastWithdrawalAt        DateTime? // when the member last withdrew (6-month rule)
+  withdrawalOverride      Boolean             @default(false) // admin granted an early-withdrawal override
+  lastStatementSentAt     DateTime? // month marker for monthly statements
+  lastBirthdayGreetedYear Int? // year marker so birthdays only fire once a year
+  virtualAccountNumber    String? // provider-issued account number for top-ups
+  virtualAccountBank      String?
+  virtualAccountProvider  String?
+  unitId                  String?
+  unit                    Unit?               @relation("UnitMembership", fields: [unitId], references: [id], onDelete: SetNull)
+  adminOf                 Unit[]              @relation("UnitAdmin")
+  autoSaveAmount          Float? // recurring contribution amount
+  autoSaveInterval        String? // weekly | monthly
+  autoSaveNextDue         DateTime? // when the next reminder should fire
+  autoSaveEnabled         Boolean             @default(false)
+  cooperativeId           String
+  cooperative             Cooperative         @relation(fields: [cooperativeId], references: [id])
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+  wallet                  Wallet?
+  contributions           Contribution[]
+  loans                   Loan[]
+  payouts                 Payout[]
+  guarantorFor            Guarantor[]
+  dividendEntries         DividendEntry[]
+  withdrawalRequests      WithdrawalRequest[]
+  deathClaims             DeathClaim[]
+  deathValidations        DeathValidation[]
+  ticketsOpened           SupportTicket[]     @relation("TicketMember")
+  ticketsAssigned         SupportTicket[]     @relation("TicketAssignee")
+  voteCandidates          VoteCandidate[]     @relation("VoteCandidates")
+  voteBallots             VoteBallot[]        @relation("VoteBallots")
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -80,96 +98,98 @@ model Member {
 // has its own code and an assigned admin. Cooperative rules (savings, loans,
 // guarantors, dividends) still apply across the whole cooperative.
 model Unit {
-  id            String   @id @default(cuid())
+  id            String      @id @default(cuid())
   name          String
-  code          String   // e.g. LAG01 — used to join the unit
+  code          String // e.g. LAG01 — used to join the unit
   adminMemberId String?
-  adminMember   Member?  @relation("UnitAdmin", fields: [adminMemberId], references: [id], onDelete: SetNull)
+  adminMember   Member?     @relation("UnitAdmin", fields: [adminMemberId], references: [id], onDelete: SetNull)
   cooperativeId String
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
-  members       Member[] @relation("UnitMembership")
+  members       Member[]    @relation("UnitMembership")
   broadcasts    Broadcast[]
-  createdAt     DateTime @default(now())
+  createdAt     DateTime    @default(now())
 
   @@unique([cooperativeId, code])
 }
 
 model Wallet {
-  id         String     @id @default(cuid())
-  balance    Float      @default(0) // in minor? store as float cents-safe in NGN with 2dp
-  totalSaved Float      @default(0)
-  memberId   String     @unique
-  member     Member     @relation(fields: [memberId], references: [id])
-  createdAt  DateTime   @default(now())
-  updatedAt  DateTime   @updatedAt
+  id         String   @id @default(cuid())
+  balance    Float    @default(0) // in minor? store as float cents-safe in NGN with 2dp
+  totalSaved Float    @default(0)
+  memberId   String   @unique
+  member     Member   @relation(fields: [memberId], references: [id])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 // ---- Savings / contributions ----
 model Contribution {
-  id          String       @id @default(cuid())
-  amount      Float
-  type        String       @default("savings") // savings | weekly | monthly | emergency
-  note        String?
-  reference   String       @unique // merchant ref for reconciliation
-  status      String       @default("pending") // pending | confirmed | failed
-  paidAt      DateTime?
-  memberId    String
-  member      Member       @relation(fields: [memberId], references: [id])
+  id            String      @id @default(cuid())
+  amount        Float
+  type          String      @default("savings") // savings | weekly | monthly | emergency
+  note          String?
+  reference     String      @unique // merchant ref for reconciliation
+  status        String      @default("pending") // pending | confirmed | failed
+  paidAt        DateTime?
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id])
   cooperativeId String
-  cooperative Cooperative @relation(fields: [cooperativeId], references: [id])
-  createdAt   DateTime     @default(now())
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  createdAt     DateTime    @default(now())
 }
 
 // ---- Loans ----
 model Loan {
-  id             String     @id @default(cuid())
-  amount         Float
-  interestRate   Float      @default(0) // monthly %
-  tenureMonths   Int        @default(1)
-  status         String     @default("pending") // pending | guaranteed | approved | disbursed | rejected | paid
-  balance        Float
-  monthlyPayment Float?     // installment amount after approval
-  bankAccountNumber String? // member's bank account for disbursement
-  bankCode          String? // provider bank code
-  bankName          String? // bank display name
+  id                 String          @id @default(cuid())
+  amount             Float
+  interestRate       Float           @default(0) // monthly %
+  tenureMonths       Int             @default(1)
+  status             String          @default("pending") // pending | guaranteed | approved | disbursed | rejected | paid
+  balance            Float
+  monthlyPayment     Float? // installment amount after approval
+  bankAccountNumber  String? // member's bank account for disbursement
+  bankCode           String? // provider bank code
+  bankName           String? // bank display name
   disbursementStatus String? // pending | successful | failed | name_mismatch
   disbursementError  String? // provider error or name-mismatch detail
-  disbursedAt    DateTime?
-  dueDate        DateTime?  // next installment due date
-  memberId       String
-  member         Member     @relation(fields: [memberId], references: [id])
-  cooperativeId  String
-  cooperative    Cooperative @relation(fields: [cooperativeId], references: [id])
-  createdAt      DateTime   @default(now())
-  approvedAt     DateTime?
-  guarantors     Guarantor[]
-  repayments     LoanRepayment[]
+  adminApprovedById  String? // who gave the first (admin) approval
+  finalApprovedById  String? // who gave the super admin's final approval
+  disbursedAt        DateTime?
+  dueDate            DateTime? // next installment due date
+  memberId           String
+  member             Member          @relation(fields: [memberId], references: [id])
+  cooperativeId      String
+  cooperative        Cooperative     @relation(fields: [cooperativeId], references: [id])
+  createdAt          DateTime        @default(now())
+  approvedAt         DateTime?
+  guarantors         Guarantor[]
+  repayments         LoanRepayment[]
 }
 
 // ---- Guarantors ----
 // A loan requires 2 guarantors. Each guarantor is a member, and the system
 // generates a unique confirmation code for each before the loan can be approved.
 model Guarantor {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   loanId      String
-  loan        Loan     @relation(fields: [loanId], references: [id])
+  loan        Loan      @relation(fields: [loanId], references: [id])
   memberId    String
-  member      Member   @relation(fields: [memberId], references: [id])
-  code        String   @unique // auto-generated unique confirmation code
-  status      String   @default("pending") // pending | confirmed | declined
+  member      Member    @relation(fields: [memberId], references: [id])
+  code        String    @unique // auto-generated unique confirmation code
+  status      String    @default("pending") // pending | confirmed | declined
   confirmedAt DateTime?
-  createdAt   DateTime @default(now())
+  createdAt   DateTime  @default(now())
 
   @@unique([loanId, memberId])
   @@index([code])
 }
 
 model LoanRepayment {
-  id        String   @id @default(cuid())
-  amount    Float
-  loanId    String
-  loan      Loan     @relation(fields: [loanId], references: [id])
-  paidAt    DateTime @default(now())
+  id     String   @id @default(cuid())
+  amount Float
+  loanId String
+  loan   Loan     @relation(fields: [loanId], references: [id])
+  paidAt DateTime @default(now())
 }
 
 // ---- Payouts (admin disbursements to members) ----
@@ -178,8 +198,8 @@ model Payout {
   amount        Float
   reference     String      @unique
   status        String      @default("pending") // pending | processing | successful | failed
-  provider      String?     // flutterwave | paystack
-  providerRef   String?     // provider-side reference/id
+  provider      String? // flutterwave | paystack
+  providerRef   String? // provider-side reference/id
   note          String?
   memberId      String
   member        Member      @relation(fields: [memberId], references: [id])
@@ -187,6 +207,147 @@ model Payout {
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
+}
+
+// ---- Withdrawal requests (money out of a member's wallet) ----
+// A member can withdraw at most once every 6 months (admin can override).
+// Every withdrawal needs an admin approval, then the super admin's final
+// approval, before the money is sent to the member's bank account.
+model WithdrawalRequest {
+  id                String      @id @default(cuid())
+  amount            Float
+  status            String      @default("pending") // pending | admin_approved | paid | rejected
+  bankAccountNumber String
+  bankCode          String
+  bankName          String?
+  payoutReference   String?
+  adminApprovedAt   DateTime?
+  adminApprovedById String? // who gave the first (admin) approval
+  finalizedAt       DateTime?
+  finalizedById     String? // super admin who released the money
+  rejectedAt        DateTime?
+  memberId          String
+  member            Member      @relation(fields: [memberId], references: [id])
+  cooperativeId     String
+  cooperative       Cooperative @relation(fields: [cooperativeId], references: [id])
+  createdAt         DateTime    @default(now())
+}
+
+// ---- Death claims ----
+// If the account holder dies, the family can withdraw the money. An admin
+// records the claim with a death certificate, 2 guarantors validate it, and
+// the super admin's final approval triggers the payout to the family's bank.
+model DeathClaim {
+  id                  String            @id @default(cuid())
+  memberId            String // the deceased member
+  member              Member            @relation(fields: [memberId], references: [id])
+  cooperativeId       String
+  cooperative         Cooperative       @relation(fields: [cooperativeId], references: [id])
+  status              String            @default("awaiting_certificate") // awaiting_certificate | awaiting_validation | validated | approved | paid | rejected
+  certificateRef      String? // death certificate upload reference
+  familyAccountNumber String?
+  familyBankCode      String?
+  familyBankName      String?
+  payoutReference     String?
+  createdById         String?
+  approvedAt          DateTime?
+  finalizedAt         DateTime?
+  createdAt           DateTime          @default(now())
+  validations         DeathValidation[]
+}
+
+model DeathValidation {
+  id        String     @id @default(cuid())
+  claimId   String
+  claim     DeathClaim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  memberId  String
+  member    Member     @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  createdAt DateTime   @default(now())
+
+  @@unique([claimId, memberId])
+}
+
+// ---- Audit log (who did what — every money/admin action) ----
+model AuditLog {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  actorId       String? // member who performed the action
+  actorPhone    String
+  actorRole     String? // member | admin | superadmin at the time
+  action        String // e.g. loan.approve, withdraw.finalize, claim.payout, role.set
+  targetType    String? // loan | withdrawal | deathclaim | member | ...
+  targetId      String?
+  detail        String? // human-readable summary
+  createdAt     DateTime @default(now())
+
+  @@index([cooperativeId, createdAt])
+  @@index([action])
+}
+
+// ---- Support tickets (customer service) ----
+model SupportTicket {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  memberId      String
+  message       String
+  status        String   @default("open") // open | in_progress | resolved
+  assignedToId  String? // customer-service/admin handling it
+  resolution    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  member      Member      @relation("TicketMember", fields: [memberId], references: [id])
+  assignedTo  Member?     @relation("TicketAssignee", fields: [assignedToId], references: [id])
+  cooperative Cooperative @relation(fields: [cooperativeId], references: [id])
+
+  @@index([cooperativeId, status])
+}
+
+// ---- Voting engine (unit admin + executive elections) ----
+model Vote {
+  id            String    @id @default(cuid())
+  cooperativeId String
+  unitId        String? // null = cooperative-wide election
+  kind          String // unit_admin | executive
+  position      String? // e.g. "President", "Treasurer" for executive votes
+  title         String
+  status        String    @default("open") // open | closed
+  winnerId      String? // member who won when closed
+  createdById   String
+  createdAt     DateTime  @default(now())
+  closedAt      DateTime?
+
+  cooperative Cooperative     @relation(fields: [cooperativeId], references: [id])
+  candidates  VoteCandidate[]
+  ballots     VoteBallot[]
+
+  @@index([cooperativeId, status])
+}
+
+model VoteCandidate {
+  id       String @id @default(cuid())
+  voteId   String
+  memberId String
+
+  vote    Vote         @relation(fields: [voteId], references: [id])
+  member  Member       @relation("VoteCandidates", fields: [memberId], references: [id])
+  ballots VoteBallot[]
+
+  @@unique([voteId, memberId])
+}
+
+model VoteBallot {
+  id          String   @id @default(cuid())
+  voteId      String
+  candidateId String
+  voterId     String
+  createdAt   DateTime @default(now())
+
+  vote      Vote          @relation(fields: [voteId], references: [id])
+  candidate VoteCandidate @relation(fields: [candidateId], references: [id])
+  voter     Member        @relation("VoteBallots", fields: [voterId], references: [id])
+
+  @@unique([voteId, voterId]) // one person, one vote per election
 }
 
 // ---- Dividends ----
@@ -197,7 +358,7 @@ model Dividend {
   cooperativeId String
   cooperative   Cooperative     @relation(fields: [cooperativeId], references: [id])
   reference     String          @unique
-  rate          Float           // percentage of totalSaved
+  rate          Float // percentage of totalSaved
   totalPool     Float
   status        String          @default("pending") // pending | distributed
   createdAt     DateTime        @default(now())
@@ -206,38 +367,38 @@ model Dividend {
 }
 
 model DividendEntry {
-  id        String   @id @default(cuid())
+  id         String    @id @default(cuid())
   dividendId String
-  dividend  Dividend @relation(fields: [dividendId], references: [id], onDelete: Cascade)
-  memberId  String
-  member    Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
-  amount    Float
-  status    String   @default("pending") // pending | paid
-  paidAt    DateTime?
-  createdAt DateTime @default(now())
+  dividend   Dividend  @relation(fields: [dividendId], references: [id], onDelete: Cascade)
+  memberId   String
+  member     Member    @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  amount     Float
+  status     String    @default("pending") // pending | paid
+  paidAt     DateTime?
+  createdAt  DateTime  @default(now())
 
   @@unique([dividendId, memberId])
 }
 
 // ---- Broadcasts (admin announcements) ----
 model Broadcast {
-  id            String   @id @default(cuid())
+  id            String      @id @default(cuid())
   cooperativeId String
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
   senderId      String
   senderName    String
   message       String
-  scope         String   @default("coop") // coop | unit
-  unitId        String?  // set when scope = unit
-  unit          Unit?    @relation(fields: [unitId], references: [id], onDelete: SetNull)
-  createdAt     DateTime @default(now())
+  scope         String      @default("coop") // coop | unit
+  unitId        String? // set when scope = unit
+  unit          Unit?       @relation(fields: [unitId], references: [id], onDelete: SetNull)
+  createdAt     DateTime    @default(now())
 }
 
 // ---- Chat state machine (multi-turn onboarding / flows) ----
 model Session {
-  id         String   @id @default(cuid())
-  phone      String   @unique
-  state      String   @default("idle") // idle | awaiting_name | awaiting_coop | awaiting_pin | ...
-  data       String   @default("{}") // JSON payload for the current flow
-  updatedAt  DateTime @updatedAt
+  id        String   @id @default(cuid())
+  phone     String   @unique
+  state     String   @default("idle") // idle | awaiting_name | awaiting_coop | awaiting_pin | ...
+  data      String   @default("{}") // JSON payload for the current flow
+  updatedAt DateTime @updatedAt
 }
