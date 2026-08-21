@@ -1,14 +1,15 @@
 import { createHmac } from "node:crypto";
 import type {
-  CreateVirtualAccountParams,
-  PayoutParams,
-  PayoutResult,
-  PaymentNotification,
   ProviderAdapter,
+  CreateVirtualAccountParams,
+  VirtualAccountData,
+  PaymentNotification,
   ResolveAccountParams,
   ResolveAccountResult,
-  VirtualAccountData,
+  PayoutParams,
+  PayoutResult,
 } from "./index.js";
+import { signaturesMatch } from "./index.js";
 
 const API_BASE = "https://api.paystack.co";
 
@@ -100,13 +101,18 @@ export const paystackAdapter: ProviderAdapter = {
     };
   },
 
-  verifyWebhook(body: any, headers: Record<string, string | string[] | undefined>): boolean {
+  verifyWebhook(rawBody, headers): boolean {
+    // Paystack signs the RAW request body with HMAC-SHA512 using the secret key.
     const signature = header(headers, "x-paystack-signature");
-    if (!signature) return false;
-    const hash = createHmac("sha512", getSecret())
-      .update(JSON.stringify(body))
-      .digest("hex");
-    return hash === signature;
+    if (!signature || typeof rawBody !== "string" || rawBody.length === 0) return false;
+    let secret: string;
+    try {
+      secret = getSecret();
+    } catch {
+      return false; // fail closed when unconfigured
+    }
+    const expected = createHmac("sha512", secret).update(rawBody).digest("hex");
+    return signaturesMatch(expected, signature);
   },
 
   parseNotification(body: any): PaymentNotification | null {

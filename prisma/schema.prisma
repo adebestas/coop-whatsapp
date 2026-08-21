@@ -18,7 +18,8 @@ model Cooperative {
   currency           String              @default("NGN")
   adminPhone         String? // WhatsApp number of the coop super admin
   status             String              @default("active") // active | suspended
-  loanInterestRate   Float               @default(2) // monthly % charged on loans
+  loanInterestRate   Float               @default(2) // fallback monthly % charged on loans
+  dailyPayoutLimit   Float               @default(1000000) // fraud guard: max total money-out per day
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   members            Member[]
@@ -32,6 +33,10 @@ model Cooperative {
   deathClaims        DeathClaim[]
   supportTickets     SupportTicket[]
   votes              Vote[]
+  ledgerEntries      LedgerEntry[]
+  journalEntries     JournalEntry[]
+  externalPayments   ExternalPayment[]
+  purchasePolls      PurchasePoll[]
 }
 
 // ---- Members (users) ----
@@ -88,6 +93,17 @@ model Member {
   ticketsAssigned         SupportTicket[]     @relation("TicketAssignee")
   voteCandidates          VoteCandidate[]     @relation("VoteCandidates")
   voteBallots             VoteBallot[]        @relation("VoteBallots")
+  salaryAmount            Float? // monthly salary/stipend for super admins (0 = off)
+  salaryKind              String? // salary | stipend
+  externalPaymentsInitiated ExternalPayment[] @relation("ExternalPayInitiator")
+  externalPaymentsApproved1 ExternalPayment[] @relation("ExternalPayApprover1")
+  externalPaymentsApproved2 ExternalPayment[] @relation("ExternalPayApprover2")
+  externalPaymentsApproved3 ExternalPayment[] @relation("ExternalPayApprover3")
+  loanSuperApproved2      Loan[]              @relation("LoanSuper2")
+  pollOptionsCreated      PollOption[]        @relation("PollOptionCreator")
+  purchasePollsCreated    PurchasePoll[]      @relation("PollCreator")
+  pollBallots             PollBallot[]        @relation("PollVoter")
+  guarantorDeductions     GuarantorDeduction[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -152,12 +168,16 @@ model Loan {
   bankName           String? // bank display name
   disbursementStatus String? // pending | successful | failed | name_mismatch
   disbursementError  String? // provider error or name-mismatch detail
+  adminCharge        Float   @default(2000) // flat admin charge deducted from disbursement
+  disbursementAmount Float? // amount actually sent = amount - adminCharge
   adminApprovedById  String? // who gave the first (admin) approval
-  finalApprovedById  String? // who gave the super admin's final approval
+  finalApprovedById  String? // first super admin approval
+  superApproved2ById String? // second super admin approval — triggers disbursement
   disbursedAt        DateTime?
   dueDate            DateTime? // next installment due date
   memberId           String
   member             Member          @relation(fields: [memberId], references: [id])
+  superApprover2     Member?         @relation("LoanSuper2", fields: [superApproved2ById], references: [id])
   cooperativeId      String
   cooperative        Cooperative     @relation(fields: [cooperativeId], references: [id])
   createdAt          DateTime        @default(now())
@@ -197,8 +217,11 @@ model Payout {
   id            String      @id @default(cuid())
   amount        Float
   reference     String      @unique
+  // Deterministic per-logical-operation key so provider retries never
+  // double-pay: e.g. TFR-LOAN-<loanId>. Unique => second create is rejected.
+  idempotencyKey String?    @unique
   status        String      @default("pending") // pending | processing | successful | failed
-  provider      String? // flutterwave | paystack
+  provider      String? // monnify | paystack | flutterwave
   providerRef   String? // provider-side reference/id
   note          String?
   memberId      String
@@ -207,6 +230,49 @@ model Payout {
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
+
+  @@index([status, createdAt])
+}
+
+// ---- Provider webhook events (idempotency & duplicate protection) ----
+// Every signed webhook delivery is recorded BEFORE processing. The composite
+// event id is globally unique, so replays/retries hit the primary key and are
+// acknowledged without reprocessing (permanent anti-replay window).
+model WebhookEvent {
+  id          String    @id // `${provider}:${eventTransactionId}`
+  provider    String
+  kind        String? // credit | payout_update
+  payloadHash String
+  status      String    @default("received") // received | processed | failed
+  error       String?
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+
+  @@index([provider, receivedAt])
+}
+
+// ---- Double-entry journal (accounting source of truth) ----
+model JournalEntry {
+  id            String    @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  // Idempotency key: the same business event can never post twice.
+  txRef         String    @unique
+  description   String
+  createdAt     DateTime  @default(now())
+  postings      Posting[]
+}
+
+model Posting {
+  id        String       @id @default(cuid())
+  entryId   String
+  entry     JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  account   String // assets:bank | income:<cat> | expense:<cat> | member_wallet:<walletId>
+  direction String // DEBIT | CREDIT
+  amount    Float
+  memberId  String?
+
+  @@index([account])
 }
 
 // ---- Withdrawal requests (money out of a member's wallet) ----
@@ -268,6 +334,8 @@ model DeathValidation {
 }
 
 // ---- Audit log (who did what — every money/admin action) ----
+// Entries are hash-chained: each entry stores the hash of the previous one,
+// so tampering with history is detectable.
 model AuditLog {
   id            String   @id @default(cuid())
   cooperativeId String
@@ -278,10 +346,126 @@ model AuditLog {
   targetType    String? // loan | withdrawal | deathclaim | member | ...
   targetId      String?
   detail        String? // human-readable summary
+  prevHash      String? // hash of the previous entry (tamper-evident chain)
+  hash          String? // sha256 of this entry's content + prevHash
   createdAt     DateTime @default(now())
 
   @@index([cooperativeId, createdAt])
   @@index([action])
+}
+
+// ---- Ledger (profit & loss) ----
+// Every income and expense the cooperative makes, so P&L is computable from
+// transaction records. type: income | expense | appropriation (dividends).
+model LedgerEntry {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  type          String // income | expense | appropriation
+  category      String // interest | fine | admin_charge | salary | stipend | purchase | external_payment | dividend
+  amount        Float
+  note          String?
+  reference     String? // link to the source record (loan id, payout ref, ...)
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId, createdAt])
+}
+
+// ---- Pay anyone (external disbursement, 3-super-admin rule) ----
+model ExternalPayment {
+  id                String      @id @default(cuid())
+  cooperativeId     String
+  cooperative       Cooperative @relation(fields: [cooperativeId], references: [id])
+  beneficiaryName   String
+  bankAccountNumber String
+  bankCode          String
+  bankName          String?
+  amount            Float
+  purpose           String?
+  status            String      @default("pending") // pending | approved1 | approved2 | paid | rejected | failed
+  initiatedById     String
+  initiator         Member      @relation("ExternalPayInitiator", fields: [initiatedById], references: [id])
+  approved1ById     String?
+  approver1         Member?     @relation("ExternalPayApprover1", fields: [approved1ById], references: [id])
+  approved2ById     String?
+  approver2         Member?     @relation("ExternalPayApprover2", fields: [approved2ById], references: [id])
+  approved3ById     String?
+  approver3         Member?     @relation("ExternalPayApprover3", fields: [approved3ById], references: [id])
+  lastApprovedAt    DateTime? // cool-off clock between approvals
+  payoutReference   String?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  @@index([cooperativeId, status])
+}
+
+// ---- Buy votes (what should the coop buy for members?) ----
+model PurchasePoll {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  title         String
+  status        String      @default("open") // open | closed
+  winnerOptionId String?
+  createdById   String
+  creator       Member      @relation("PollCreator", fields: [createdById], references: [id])
+  options       PollOption[]
+  ballots       PollBallot[]
+  createdAt     DateTime    @default(now())
+  closedAt      DateTime?
+
+  @@index([cooperativeId, status])
+}
+
+model PollOption {
+  id                String       @id @default(cuid())
+  pollId            String
+  poll              PurchasePoll @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  name              String // e.g. "Industrial generator"
+  estimatedCost     Float
+  bankAccountNumber String? // vendor account for the auto pay-anyone request
+  bankCode          String?
+  bankName          String?
+  createdById       String
+  creator           Member       @relation("PollOptionCreator", fields: [createdById], references: [id])
+  createdAt         DateTime     @default(now())
+
+  ballots PollBallot[]
+}
+
+model PollBallot {
+  id       String     @id @default(cuid())
+  pollId   String
+  poll     PurchasePoll @relation(fields: [pollId], references: [id])
+  optionId String
+  option   PollOption   @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  voterId  String
+  voter    Member       @relation("PollVoter", fields: [voterId], references: [id])
+  createdAt DateTime   @default(now())
+
+  @@unique([pollId, voterId]) // one person, one vote per poll
+}
+
+// ---- Guarantor default deductions ----
+// When a borrower defaults for 2 straight months, each guarantor is notified
+// that 50% of the loan's flat interest will be deducted from their savings
+// in 10 days — unless the loan is brought current first.
+model GuarantorDeduction {
+  id            String    @id @default(cuid())
+  cooperativeId String
+  loanId        String
+  guarantorId   String
+  guarantor     Member    @relation(fields: [guarantorId], references: [id])
+  amount        Float // 50% of the loan's flat interest
+  status        String    @default("notified") // notified | deducted | cancelled
+  noticeSentAt  DateTime
+  deductAt      DateTime // notice date + 10 days
+  deductedAt    DateTime?
+  note          String?
+  createdAt     DateTime  @default(now())
+
+  @@unique([loanId, guarantorId])
+  @@index([status, deductAt])
 }
 
 // ---- Support tickets (customer service) ----

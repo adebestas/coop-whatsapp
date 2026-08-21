@@ -43,6 +43,8 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
 beforeEach(async () => {
   vi.clearAllMocks();
   for (const m of [
+    "posting", "journalEntry", "webhookEvent", "pollBallot", "pollOption", "purchasePoll", "externalPayment",
+    "guarantorDeduction", "ledgerEntry",
     "voteBallot", "voteCandidate", "vote", "supportTicket", "auditLog",
     "deathValidation", "deathClaim", "withdrawalRequest", "contribution",
     "loanRepayment", "guarantor", "loan", "payout", "dividendEntry",
@@ -315,12 +317,15 @@ describe("voting engine", () => {
 
 describe("provider failover", () => {
   it("routes to the healthy provider when one is marked down", () => {
-    expect(resolveProvider().name).toBe("flutterwave"); // env default
-    markProviderDown("flutterwave");
-    expect(isProviderAvailable("flutterwave")).toBe(false);
+    expect(resolveProvider().name).toBe("monnify"); // env default
+    markProviderDown("monnify");
+    expect(isProviderAvailable("monnify")).toBe(false);
     expect(resolveProvider().name).toBe("paystack");
     markProviderDown("paystack");
     // Everything down -> falls back to the configured provider.
-    expect(resolveProvider().name).toBe("flutterwave");
+    expect(resolveProvider().name).toBe("monnify");
   });
 });
+
+
+

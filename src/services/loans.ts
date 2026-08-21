@@ -3,6 +3,7 @@ import { formatBalance } from "./cooperative.js";
 import { disburseLoan } from "./disbursements.js";
 import { requiredGuarantors } from "./guarantors.js";
 import { audit } from "./audit.js";
+import { recordLedger } from "./ledger.js";
 
 export interface ApplyLoanResult {
   ok: boolean;
@@ -14,6 +15,24 @@ export interface ApplyLoanResult {
 export const LOAN_TO_SAVINGS_RATIO = 2;
 /** Flat fine (% of the late installment) charged per month overdue. */
 export const LATE_FINE_RATE = 2;
+/** Flat admin charge deducted from every loan at disbursement. */
+export const LOAN_ADMIN_CHARGE = 2000;
+
+/**
+ * Tiered flat interest on the principal (not per month):
+ * up to 3 months → 5%, up to 6 → 8%, up to 9 → 9%, longer → 10%.
+ */
+export function interestRateFor(tenureMonths: number): number {
+  if (tenureMonths <= 3) return 5;
+  if (tenureMonths <= 6) return 8;
+  if (tenureMonths <= 9) return 9;
+  return 10;
+}
+
+/** Total repayable for a flat-rate loan: principal + flat interest. */
+export function totalRepayable(amount: number, ratePercent: number): number {
+  return Math.round(amount * (1 + ratePercent / 100) * 100) / 100;
+}
 
 /**
  * Apply for a loan. Amount + tenure months come from the chat.
@@ -72,8 +91,10 @@ export async function applyForLoan(
     };
   }
 
-  // Interest is charged on loans (never on savings) at the cooperative's rate.
-  const interestRate = member.cooperative.loanInterestRate;
+  // Interest is tiered by tenure and charged flat on the principal.
+  const interestRate = interestRateFor(tenureMonths);
+  const total = totalRepayable(amount, interestRate);
+  const monthly = total / tenureMonths;
 
   const loan = await prisma.loan.create({
     data: {
@@ -90,8 +111,6 @@ export async function applyForLoan(
     },
   });
 
-  const total = amount * (1 + (interestRate / 100) * tenureMonths);
-  const monthly = total / tenureMonths;
   const needed = requiredGuarantors(member.role);
 
   return {
@@ -99,18 +118,21 @@ export async function applyForLoan(
     loanId: loan.id,
     message:
       `Loan application received ✅\n\n` +
-      `Amount: *${formatBalance(amount)}*\n` +
+      `Amount requested: *${formatBalance(amount)}*\n` +
       `Tenure: *${tenureMonths} months*\n` +
-      `Interest: *${interestRate}%/month*\n` +
-      `Estimated total: *${formatBalance(Math.round(total))}*\n` +
-      `Estimated monthly: *${formatBalance(Math.round(monthly))}*\n\n` +
+      `Interest: *${interestRate}% flat* → repay *${formatBalance(Math.round(total))}*\n` +
+      `Monthly installment: *${formatBalance(Math.round(monthly))}*\n` +
+      `Admin charge: *${formatBalance(LOAN_ADMIN_CHARGE)}* (you'll receive ${formatBalance(amount - LOAN_ADMIN_CHARGE)})\n\n` +
       `You still need to add *${needed} guarantor${needed > 1 ? "s" : ""}* before the loan can be approved.`,
   };
 }
 
 export async function listPendingLoans(cooperativeId: string, limit = 20) {
   return prisma.loan.findMany({
-    where: { cooperativeId, status: { in: ["pending", "guaranteed", "admin_approved"] } },
+    where: {
+      cooperativeId,
+      status: { in: ["pending", "guaranteed", "admin_approved", "super_approved_1"] },
+    },
     include: {
       member: { select: { name: true, phone: true, unitId: true } },
       guarantors: { include: { member: { select: { name: true, phone: true } } } },
@@ -135,9 +157,10 @@ async function findLoan(shortId: string) {
 }
 
 /**
- * Two-step approval. An admin's approval moves the loan to `admin_approved`;
- * only the super admin's final approval marks it `approved` and disburses the
- * money. A super admin can do both steps in one go.
+ * Three-step approval:
+ *   1. admin (or super) → `admin_approved`
+ *   2. first super admin → `super_approved_1`
+ *   3. a *different* super admin → `approved` → auto-disbursement
  */
 export async function approveLoan(
   loanId: string,
@@ -145,73 +168,135 @@ export async function approveLoan(
 ): Promise<{ ok: boolean; message: string }> {
   const loan = await findLoan(loanId);
   if (!loan) return { ok: false, message: "Loan not found. Check the id and try again." };
+  const shortId = loan.id.slice(-6);
+
+  // Dual-control: nobody approves their own borrowing.
+  if (opts.actorId && loan.memberId === opts.actorId) {
+    return {
+      ok: false,
+      message: `⛔ You can't approve your own loan. Another admin/super admin must do that.`,
+    };
+  }
+
+  if (loan.status === "super_approved_1") {
+    if (!opts.superAdmin) {
+      return {
+        ok: false,
+        message: `Loan *${shortId}* needs a *second super admin* to approve before disbursement.`,
+      };
+    }
+    if (opts.actorId && loan.finalApprovedById === opts.actorId) {
+      return {
+        ok: false,
+        message: `⛔ You already approved this loan. A *different* super admin must give the second approval.`,
+      };
+    }
+    return finalizeLoanApproval(loan.id, opts.actorId);
+  }
 
   if (loan.status === "admin_approved") {
     if (!opts.superAdmin) {
       return {
         ok: false,
-        message: `Loan *${loan.id.slice(-6)}* is waiting for the *super admin's* final approval.`,
+        message: `Loan *${shortId}* is waiting for the *first super admin's* approval.`,
       };
     }
-    return finalizeLoanApproval(loan.id, opts.actorId);
+    // Atomic transition — two supers approving simultaneously: only ONE wins
+    // this step (the row no longer matches WHERE status='admin_approved').
+    const moved = await prisma.loan.updateMany({
+      where: { id: loan.id, status: "admin_approved" },
+      data: { status: "super_approved_1", finalApprovedById: opts.actorId, approvedAt: new Date() },
+    });
+    if (moved.count === 0) {
+      return { ok: false, message: `Loan *${shortId}* was just updated by another approval. Check *pending*.` };
+    }
+    return {
+      ok: true,
+      message:
+        `First super approval recorded for loan *${shortId}* (${loan.member.name}). ` +
+        `One *more* super admin must reply *approve ${shortId}* to release the money.`,
+    };
   }
 
   if (loan.status !== "guaranteed") {
     const needed = requiredGuarantors(loan.member.role);
     return {
       ok: false,
-      message: `Loan *${loan.id.slice(-6)}* can't be approved yet. It must have ${needed} confirmed guarantor(s) (current status: ${loan.status}).`,
+      message: `Loan *${shortId}* can't be approved yet. It must have ${needed} confirmed guarantor(s) (current status: ${loan.status}).`,
     };
   }
 
-  if (!opts.superAdmin) {
-    await prisma.loan.update({
-      where: { id: loan.id },
-      data: { status: "admin_approved", adminApprovedById: opts.actorId },
+  // Step 1 — admin approval. A super admin's first signature already counts
+  // as the first *super* approval (they outrank the admin step).
+  if (opts.superAdmin) {
+    const moved = await prisma.loan.updateMany({
+      where: { id: loan.id, status: "guaranteed" },
+      data: { status: "super_approved_1", finalApprovedById: opts.actorId },
     });
+    if (moved.count === 0) {
+      return { ok: false, message: `Loan *${shortId}* was just updated by another approval. Check *pending*.` };
+    }
     return {
       ok: true,
-      message: `Loan *${loan.id.slice(-6)}* for ${loan.member.name} approved by admin. The *super admin* must reply *approve ${loan.id.slice(-6)}* to give the final approval before disbursement.`,
+      message:
+        `First super approval recorded for loan *${shortId}* (${loan.member.name}). ` +
+        `One *more* super admin must reply *approve ${shortId}* to release the money.`,
     };
   }
-
-  await prisma.loan.update({
-    where: { id: loan.id },
-    data: { status: "admin_approved", adminApprovedById: opts.actorId, approvedAt: new Date() },
+  const movedAdmin = await prisma.loan.updateMany({
+    where: { id: loan.id, status: "guaranteed" },
+    data: { status: "admin_approved", adminApprovedById: opts.actorId },
   });
-  return finalizeLoanApproval(loan.id, opts.actorId);
+  if (movedAdmin.count === 0) {
+    return { ok: false, message: `Loan *${shortId}* was just updated by another approval. Check *pending*.` };
+  }
+  return {
+    ok: true,
+    message: `Loan *${shortId}* for ${loan.member.name} approved by admin. A *super admin* must reply *approve ${shortId}* next (two super approvals release the money).`,
+  };
 }
 
-/** Super admin's final approval — sets terms, marks approved, disburses. */
+/**
+ * Second (final) super approval — sets terms, marks approved, disburses.
+ * The status flip happens as an atomic CLAIM: exactly one concurrent caller
+ * can move super_approved_1 -> approved, so the loan can never be disbursed
+ * twice even under racing approvals.
+ */
 async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{ ok: boolean; message: string }> {
   const loan = await prisma.loan.findUnique({
     where: { id: loanId },
     include: { member: true },
   });
-  if (!loan || loan.status !== "admin_approved") {
+  if (!loan || loan.status !== "super_approved_1") {
     return { ok: false, message: "Loan isn't ready for final approval." };
   }
 
-  const rate = loan.interestRate;
-  const total = loan.amount * (1 + (rate / 100) * loan.tenureMonths);
+  const total = totalRepayable(loan.amount, loan.interestRate);
   const monthly = total / loan.tenureMonths;
   const due = new Date();
   due.setMonth(due.getMonth() + 1);
 
-  await prisma.loan.update({
-    where: { id: loan.id },
+  // ATOMIC CLAIM — the second concurrent finalizer gets count=0 and stops.
+  const claimed = await prisma.loan.updateMany({
+    where: { id: loan.id, status: "super_approved_1" },
     data: {
       status: "approved",
       monthlyPayment: Math.round(monthly * 100) / 100,
-      balance: Math.round(total * 100) / 100,
-      finalApprovedById: actorId,
+      balance: total,
+      superApproved2ById: actorId,
       approvedAt: new Date(),
       dueDate: due,
     },
   });
+  if (claimed.count === 0) {
+    return {
+      ok: false,
+      message: `Loan *${loan.id.slice(-6)}* was already finalized by another super admin moments ago.`,
+    };
+  }
 
   const approvedMsg =
-    `Loan *${loan.id.slice(-6)}* got its final approval for ${loan.member.name}. ${formatBalance(loan.amount)} @ ${rate}%/mo for ${loan.tenureMonths} months. Monthly: ${formatBalance(Math.round(monthly))}.`;
+    `Loan *${loan.id.slice(-6)}* fully approved for ${loan.member.name}: ${formatBalance(loan.amount)} @ ${loan.interestRate}% flat for ${loan.tenureMonths} months. Monthly: ${formatBalance(Math.round(monthly))}.`;
 
   // Auto-disburse to the member's bank account (name-verified by the provider).
   const disbursement = await disburseLoan(loan.id);
@@ -221,7 +306,7 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
 export async function rejectLoan(loanId: string): Promise<{ ok: boolean; message: string }> {
   const loan = await findLoan(loanId);
   if (!loan) return { ok: false, message: "Loan not found. Check the id and try again." };
-  if (!["pending", "guaranteed", "admin_approved"].includes(loan.status)) {
+  if (!["pending", "guaranteed", "admin_approved", "super_approved_1"].includes(loan.status)) {
     return { ok: false, message: `Loan is already ${loan.status}.` };
   }
 
@@ -309,6 +394,28 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
         ]
       : []),
   ]);
+
+  // P&L: the interest slice of this installment is cooperative income; fines too.
+  const totalInterest = totalRepayable(loan.amount, loan.interestRate) - loan.amount;
+  const interestPortion = Math.round((totalInterest / loan.tenureMonths) * 100) / 100;
+  await recordLedger({
+    cooperativeId: member.cooperativeId,
+    type: "income",
+    category: "interest",
+    amount: interestPortion,
+    note: `Installment interest on loan ${loan.id.slice(-6)}`,
+    reference: loan.id,
+  });
+  if (fine > 0) {
+    await recordLedger({
+      cooperativeId: member.cooperativeId,
+      type: "income",
+      category: "fine",
+      amount: fine,
+      note: `Late fine on loan ${loan.id.slice(-6)}`,
+      reference: loan.id,
+    });
+  }
 
   const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
   const isPaid = (updated?.balance ?? 0) <= 0;

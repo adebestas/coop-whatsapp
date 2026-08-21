@@ -5,7 +5,6 @@ import { formatBalance } from "./cooperative.js";
 import { sendToBank } from "./disbursements.js";
 import { broadcastToScope, createUnit, listUnits, setUnitAdmin, unitAdminOf } from "./units.js";
 import { distributeDividend } from "./dividends.js";
-import { setInterestRate } from "./scheduler.js";
 import {
   approveWithdrawal,
   finalizeWithdrawal,
@@ -19,6 +18,25 @@ import {
   rejectClaim,
 } from "./deathclaims.js";
 import { audit, recentAudit } from "./audit.js";
+import { computePnl } from "./ledger.js";
+import {
+  requestExternalPayment,
+  approveExternalPayment,
+  rejectExternalPayment,
+  listPendingExternal,
+} from "./payanyone.js";
+import {
+  startBuyPoll,
+  addPollOption,
+  closeBuyPoll,
+  listBuyPolls,
+} from "./buypoll.js";
+import { payrollOverview, runPayroll, setSalary } from "./payroll.js";
+import { runExport, type ExportKind } from "./exports.js";
+import { checkDailyPayoutLimit } from "./fraud.js";
+import { runBackup } from "./backup.js";
+import { runReconciliation } from "./reconcile.js";
+import { resolveProvider } from "./payments/index.js";
 
 /** Is this phone an admin or super admin of some cooperative? */
 export async function isAdmin(phone: string): Promise<boolean> {
@@ -41,7 +59,7 @@ export async function isSuperAdmin(phone: string, cooperativeId?: string): Promi
 }
 
 interface AdminContext {
-  admin: { id: string; phone: string; name: string; role: string; cooperativeId: string };
+  admin: { id: string; phone: string; name: string; email: string | null; role: string; cooperativeId: string };
   coop: { id: string; name: string; adminPhone: string | null };
   unitAdmin: Awaited<ReturnType<typeof unitAdminOf>>;
   isSuper: boolean;
@@ -137,18 +155,22 @@ export async function handleAdminCommand(
 
     case "payout": {
       // Money out of a member's wallet — super admin only, real bank details,
-      // wallet debited, everything audited.
+      // wallet debited, narration required, everything audited.
       if (!isSuper) {
         await sendText({ to: phone, text: "Only the *super admin* can make payouts." });
         return true;
       }
       const amount = Number(args[0]);
       const targetPhone = args[1]?.replace(/[^0-9]/g, "");
-      if (!Number.isFinite(amount) || amount <= 0 || !targetPhone) {
-        await sendText({ to: phone, text: "Usage: *payout <amount> <member phone>*, e.g. *payout 5000 2348012345678*" });
+      const narration = args.slice(2).join(" ").trim();
+      if (!Number.isFinite(amount) || amount <= 0 || !targetPhone || narration.length < 3) {
+        await sendText({
+          to: phone,
+          text: "Usage: *payout <amount> <member phone> <narration>* — e.g. *payout 5000 2348012345678 October savings refund*. A narration is required on every payment.",
+        });
         return true;
       }
-      await handlePayout(ctx, amount, targetPhone);
+      await handlePayout(ctx, amount, targetPhone, narration);
       return true;
     }
 
@@ -503,13 +525,359 @@ export async function handleAdminCommand(
     }
 
     case "interest": {
-      const rate = Number(args[0]);
-      if (!Number.isFinite(rate) || rate < 0 || rate > 20) {
-        await sendText({ to: phone, text: "Usage: *interest <rate%>*, e.g. *interest 2* for 2%/month on loans." });
+      // Interest is now tiered automatically by tenure.
+      await sendText({
+        to: phone,
+        text:
+          "*Loan interest (automatic tiers)*\n\n" +
+          "• Up to 3 months: *5% flat*\n" +
+          "• 4–6 months: *8% flat*\n" +
+          "• 7–9 months: *9% flat*\n" +
+          "• 10–12 months: *10% flat*\n\n" +
+          `Admin charge per loan: ${formatBalance(2000)} (deducted at disbursement).`,
+      });
+      return true;
+    }
+
+    case "pnl": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can view profit & loss." });
         return true;
       }
-      const result = await setInterestRate(phone, rate);
+      const pnl = await computePnl(coopId);
+      const inc = Object.entries(pnl.incomeByCategory).map(([c, a]) => `• ${c}: +${formatBalance(a)}`);
+      const exp = Object.entries(pnl.expenseByCategory).map(([c, a]) => `• ${c}: −${formatBalance(a)}`);
+      const body = [
+        "*📊 Profit & Loss*",
+        "",
+        "*Income*",
+        ...(inc.length > 0 ? inc : ["• (none yet)"]),
+        "",
+        "*Expenses*",
+        ...(exp.length > 0 ? exp : ["• (none yet)"]),
+        "",
+        `Total income: *${formatBalance(pnl.totalIncome)}*`,
+        `Total expenses: *${formatBalance(pnl.totalExpense)}*`,
+        `NET ${pnl.netProfit >= 0 ? "PROFIT" : "LOSS"}: *${formatBalance(Math.abs(pnl.netProfit))}*`,
+        "",
+        "_Dividends are paid from this profit: *paydividend <rate%>*_",
+      ];
+      await sendText({ to: phone, text: body.join("\n") });
+      return true;
+    }
+
+    case "payanyone": {
+      if (unitAdmin) {
+        await sendText({ to: phone, text: "Unit admins can't initiate organization payments." });
+        return true;
+      }
+      const amount = Number(args[0]);
+      const accountNumber = args[1] ?? "";
+      const bankCode = args[2]?.toUpperCase() ?? "";
+      const narration = args.slice(3).join(" ").trim();
+      if (
+        !Number.isFinite(amount) || amount <= 0 ||
+        !/^\d{10}$/.test(accountNumber) || !bankCode || narration.length < 3
+      ) {
+        await sendText({
+          to: phone,
+          text:
+            "Usage: *payanyone <amount> <account number> <bank code> <narration>*\n" +
+            "e.g. *payanyone 150000 0123456789 GTB Generator purchase*\n\n" +
+            "The beneficiary's name is verified from their bank account, and payment needs *3 super admin approvals*. A narration is required.",
+        });
+        return true;
+      }
+
+      // Resolve + verify the beneficiary's name from their bank account.
+      const provider = resolveProvider();
+      let beneficiaryName = "";
+      if (provider.resolveAccount) {
+        const resolved = await provider.resolveAccount({ accountNumber, bankCode });
+        if (!resolved.ok || !resolved.name) {
+          await sendText({
+            to: phone,
+            text: `Could not verify that account (${resolved.error ?? "unknown error"}). Check the number and bank code — no request was created.`,
+          });
+          return true;
+        }
+        beneficiaryName = resolved.name;
+      } else {
+        await sendText({ to: phone, text: "Payment provider can't resolve accounts right now — try again later." });
+        return true;
+      }
+
+      const result = await requestExternalPayment(
+        { id: admin.id, name: admin.name, phone, role: admin.role, cooperativeId: coopId },
+        { beneficiaryName, accountNumber, bankCode, amount, purpose: narration },
+      );
       await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "approvepay": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only *super admins* approve pay-anyone requests." });
+        return true;
+      }
+      const id = args[0];
+      if (!id) {
+        await sendText({ to: phone, text: "Usage: *approvepay <request id>*" });
+        return true;
+      }
+      const result = await approveExternalPayment(
+        { id: admin.id, name: admin.name, phone, role: admin.role, cooperativeId: coopId },
+        id,
+      );
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "rejectpay": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only *super admins* reject pay-anyone requests." });
+        return true;
+      }
+      const id = args[0];
+      if (!id) {
+        await sendText({ to: phone, text: "Usage: *rejectpay <request id>*" });
+        return true;
+      }
+      const result = await rejectExternalPayment(
+        { id: admin.id, phone, role: admin.role, cooperativeId: coopId },
+        id,
+      );
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "pendingpay": {
+      const requests = await listPendingExternal(coopId);
+      if (requests.length === 0) {
+        await sendText({ to: phone, text: "No pay-anyone requests waiting. ✅" });
+        return true;
+      }
+      const body = requests
+        .map((r) => {
+          const approvals =
+            (r.approved1ById ? 1 : 0) + (r.approved2ById ? 1 : 0) + (r.approved3ById ? 1 : 0);
+          return `• *${r.id.slice(-6)}* — ${formatBalance(r.amount)} → ${r.beneficiaryName}\n   by ${r.initiator.name} · "${r.purpose ?? ""}" · ${approvals}/3 approved`;
+        })
+        .join("\n");
+      await sendText({
+        to: phone,
+        text: `*Pay-anyone requests*\n\n${body}\n\nSupers approve with *approvepay <id>*, reject with *rejectpay <id>*.`,
+      });
+      return true;
+    }
+
+    case "startbuyvote": {
+      if (unitAdmin) {
+        await sendText({ to: phone, text: "Only cooperative admins open buy-votes." });
+        return true;
+      }
+      const title = args.join(" ").trim();
+      const result = await startBuyPoll(
+        { id: admin.id, phone, role: admin.role, cooperativeId: coopId },
+        title,
+      );
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "addoption": {
+      if (unitAdmin) {
+        await sendText({ to: phone, text: "Only cooperative admins add options." });
+        return true;
+      }
+      const pollId = args[0];
+      const costIdx = args.findIndex((a, i) => i > 0 && /^\d+(\.\d+)?$/.test(a));
+      if (!pollId || costIdx === -1) {
+        await sendText({ to: phone, text: "Usage: *addoption <poll id> <item name> <cost> <vendor account> <bank>*" });
+        return true;
+      }
+      const name = args.slice(1, costIdx).join(" ");
+      const cost = Number(args[costIdx]);
+      const account = args[costIdx + 1];
+      const bank = args[costIdx + 2]?.toUpperCase();
+      const result = await addPollOption(
+        { id: admin.id, phone, role: admin.role, cooperativeId: coopId },
+        pollId,
+        name,
+        cost,
+        account,
+        bank,
+      );
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "closebuyvote": {
+      if (unitAdmin) {
+        await sendText({ to: phone, text: "Only cooperative admins close buy-votes." });
+        return true;
+      }
+      const pollId = args[0];
+      if (!pollId) {
+        await sendText({ to: phone, text: "Usage: *closebuyvote <poll id>*" });
+        return true;
+      }
+      const result = await closeBuyPoll(
+        { id: admin.id, phone, role: admin.role, cooperativeId: coopId },
+        pollId,
+      );
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "buypolls": {
+      const polls = await listBuyPolls(coopId);
+      if (polls.length === 0) {
+        await sendText({ to: phone, text: "No buy-votes yet. Admins open one with *startbuyvote <title>*." });
+        return true;
+      }
+      const parts: string[] = [];
+      for (const p of polls) {
+        parts.push(
+          `🛒 *${p.title}* (${p.status}) — id *${p.id.slice(-6)}*`,
+          ...p.options.map((o, i) => `   ${i + 1}. ${o.name} — ~${formatBalance(o.estimatedCost)} — ${o._count.ballots} vote(s)`),
+          "",
+        );
+      }
+      await sendText({ to: phone, text: parts.join("\n").trim() });
+      return true;
+    }
+
+    case "setsalary": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* manages salaries." });
+        return true;
+      }
+      const targetPhone = args[0]?.replace(/[^0-9]/g, "");
+      const amountArg = args[1];
+      if (!targetPhone || !amountArg) {
+        await sendText({ to: phone, text: "Usage: *setsalary <phone> <amount>* or *setsalary <phone> off*" });
+        return true;
+      }
+      const off = amountArg.toLowerCase() === "off";
+      const amount = Number(amountArg);
+      if (!off && (!Number.isFinite(amount) || amount <= 0)) {
+        await sendText({ to: phone, text: "Amount must be a positive number, or reply *setsalary <phone> off* to stop." });
+        return true;
+      }
+      const result = await setSalary(
+        { id: admin.id, phone, role: admin.role, cooperativeId: coopId },
+        targetPhone,
+        off ? "off" : amount,
+      );
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "salarylist":
+    case "runpayrollprep": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* views payroll." });
+        return true;
+      }
+      const rows = await payrollOverview(coopId);
+      if (rows.length === 0) {
+        await sendText({ to: phone, text: "No super admins yet." });
+        return true;
+      }
+      const body = rows
+        .map((r) =>
+          `• ${r.name} — ${r.salaryAmount ? formatBalance(r.salaryAmount) : "not set"}${r.bankAccountNumber ? "" : " ⚠️ no bank on file"}`,
+        )
+        .join("\n");
+      await sendText({
+        to: phone,
+        text: `*Payroll setup*\n\n${body}\n\nSet: *setsalary <phone> <amount>* · Pay: *runpayroll <narration>*`,
+      });
+      return true;
+    }
+
+    case "runpayroll": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* runs payroll." });
+        return true;
+      }
+      const narration = args.join(" ").trim();
+      const result = await runPayroll(coopId, { id: admin.id, phone, role: admin.role }, narration);
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "export": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can export data." });
+        return true;
+      }
+      const kind = args[0]?.toLowerCase() as ExportKind | undefined;
+      if (!kind || !["members", "transactions", "pnl"].includes(kind)) {
+        await sendText({
+          to: phone,
+          text: "Usage: *export members* | *export transactions* | *export pnl* — you get Excel + PDF links, emailed to you when your email is on file.",
+        });
+        return true;
+      }
+      const baseUrl = process.env.APP_URL ?? `http://localhost:${process.env.PORT ?? "3000"}`;
+      await sendText({ to: phone, text: "⏳ Generating your export…" });
+      const result = await runExport(
+        { id: admin.id, name: admin.name, email: admin.email ?? null, cooperativeId: coopId },
+        kind,
+        baseUrl,
+      );
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "setlimit": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* changes payout limits." });
+        return true;
+      }
+      const amount = Number(args[0]);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        await sendText({ to: phone, text: "Usage: *setlimit <amount>* — daily ceiling on total money-out, e.g. *setlimit 500000*." });
+        return true;
+      }
+      await prisma.cooperative.update({
+        where: { id: coopId },
+        data: { dailyPayoutLimit: amount },
+      });
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorId: admin.id,
+        actorRole: "superadmin",
+        action: "fraud.set_limit",
+        detail: `daily payout limit -> ${formatBalance(amount)}`,
+      });
+      await sendText({ to: phone, text: `✅ Daily payout ceiling set to *${formatBalance(amount)}*.` });
+      return true;
+    }
+
+    case "backup": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* triggers backups." });
+        return true;
+      }
+      const result = await runBackup();
+      await sendText({ to: phone, text: result.ok ? `🗄️ ${result.message}` : `⚠️ ${result.message}` });
+      return true;
+    }
+
+    case "reconcile": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* runs reconciliation." });
+        return true;
+      }
+      const alerts = await runReconciliation();
+      await sendText({
+        to: phone,
+        text: alerts.length === 0 ? "🌙 Reconciliation clean — no anomalies found. ✅" : `🌙 Reconciliation found:\n\n${alerts.join("\n")}`,
+      });
       return true;
     }
 
@@ -573,7 +941,7 @@ async function sendPendingLoans(phone: string, loans: Awaited<ReturnType<typeof 
  * Super-admin payout: pays from the member's WALLET to their bank on file,
  * name-verified by the provider, wallet debited atomically.
  */
-async function handlePayout(ctx: AdminContext, amount: number, targetPhone: string): Promise<void> {
+async function handlePayout(ctx: AdminContext, amount: number, targetPhone: string, narration: string): Promise<void> {
   const { admin, coop } = ctx;
   const target = await prisma.member.findFirst({
     where: { cooperativeId: coop.id, phone: targetPhone },
@@ -593,13 +961,21 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
     return;
   }
 
+  // Fraud guard: daily ceiling on total money-out.
+  const limit = await checkDailyPayoutLimit(coop.id, amount);
+  if (!limit.ok) {
+    await sendText({ to: admin.phone, text: limit.message! });
+    return;
+  }
+
   const result = await sendToBank({
     memberId: target.id,
     amount,
     bankAccountNumber: target.bankAccountNumber,
     bankCode: target.bankCode,
     bankName: target.bankName ?? undefined,
-    note: `Super admin payout to ${target.name}`,
+    note: `Super admin payout to ${target.name} — ${narration}`,
+    successMessage: `✅ ${formatBalance(amount)} sent to your bank account. Narration: "${narration}".`,
   });
   if (!result.ok) {
     await sendText({ to: admin.phone, text: `Payout failed: ${result.message}` });
@@ -624,8 +1000,12 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
     action: "payout.send",
     targetType: "member",
     targetId: target.id,
-    detail: `${formatBalance(amount)} to ${target.name}`,
+    detail: `${formatBalance(amount)} to ${target.name} — ${narration}`,
   });
+
+  if (limit.warning) {
+    await sendText({ to: admin.phone, text: limit.warning });
+  }
 
   await sendText({
     to: admin.phone,

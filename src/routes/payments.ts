@@ -1,41 +1,23 @@
 import type { FastifyInstance } from "fastify";
-import { flutterwaveAdapter } from "../services/payments/flutterwave.js";
-import { paystackAdapter } from "../services/payments/paystack.js";
-import type { ProviderAdapter } from "../services/payments/index.js";
-import { handlePaymentNotification } from "../services/payments/topup.js";
-
-const adapters: Record<string, ProviderAdapter> = {
-  flutterwave: flutterwaveAdapter,
-  paystack: paystackAdapter,
-};
+import { processPaymentWebhook } from "../services/webhooks.js";
 
 /**
- * Provider payment webhooks. Both Flutterwave and Paystack post here;
- * the path selects which adapter parses the payload.
+ * Combined provider payment webhook (Monnify + Paystack + Flutterwave).
+ * The provider is detected by its signature header and verified against the
+ * RAW request body; deliveries are deduplicated in WebhookEvent before any
+ * processing. Legacy per-provider paths are aliased onto the same handler.
  */
 export async function paymentWebhookRoutes(app: FastifyInstance) {
-  app.post("/webhooks/payments/:provider", async (req, reply) => {
-    const { provider } = req.params as { provider: string };
-    const adapter = adapters[provider.toLowerCase()];
-    if (!adapter) {
-      return reply.code(404).send({ error: "unknown provider" });
+  async function handle(req: any, reply: any) {
+    const rawBody = (req as any).rawBody;
+    if (typeof rawBody !== "string") {
+      return reply.code(400).send({ error: "raw body unavailable" });
     }
+    const outcome = await processPaymentWebhook(rawBody, req.headers as Record<string, string>);
+    return reply.code(outcome.httpStatus).send(outcome.body);
+  }
 
-    const body = req.body;
-    const headers = req.headers as Record<string, string | string[] | undefined>;
-
-    if (!adapter.verifyWebhook(body, headers)) {
-      return reply.code(403).send({ error: "invalid signature" });
-    }
-
-    const notification = adapter.parseNotification(body);
-    if (notification) {
-      // Don't block the response on processing; log errors instead.
-      void handlePaymentNotification(notification).catch((err) => {
-        app.log.error({ err, provider }, "payment notification handling failed");
-      });
-    }
-
-    return reply.code(200).send({ status: "ok" });
-  });
+  app.post("/webhooks/payments", handle);
+  // Backward-compatible aliases for providers already configured per-path.
+  app.post("/webhooks/payments/:provider", handle);
 }

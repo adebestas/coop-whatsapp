@@ -81,14 +81,27 @@ export interface ProviderAdapter {
   payout?(params: PayoutParams): Promise<PayoutResult>;
   /** Resolve an account and return the registered account name */
   resolveAccount?(params: ResolveAccountParams): Promise<ResolveAccountResult>;
-  /** Validate an incoming webhook request (signature/headers) */
-  verifyWebhook(body: unknown, headers: Record<string, string | string[] | undefined>): boolean;
+  /**
+   * Validate an incoming webhook request. `rawBody` is the EXACT bytes the
+   * provider sent (captured before JSON parsing) — signatures must be
+   * computed over the raw payload, never a re-serialization.
+   */
+  verifyWebhook(rawBody: string, headers: Record<string, string | string[] | undefined>): boolean;
   /** Parse a raw webhook body into a PaymentNotification, or null if irrelevant */
   parseNotification(body: unknown): PaymentNotification | null;
 }
 
-import { flutterwaveAdapter } from "./flutterwave.js";
+import { timingSafeEqual } from "node:crypto";
+import { monnifyAdapter } from "./monnify.js";
 import { paystackAdapter } from "./paystack.js";
+
+/** Constant-time string comparison for signature checks (anti-timing-attack). */
+export function signaturesMatch(expected: string, received: string): boolean {
+  const a = Buffer.from(String(expected), "utf8");
+  const b = Buffer.from(String(received ?? ""), "utf8");
+  if (a.length !== b.length || a.length === 0) return false;
+  return timingSafeEqual(a, b);
+}
 
 /**
  * Provider availability (circuit breaker). When a provider fails — network
@@ -111,18 +124,18 @@ function adapterFor(name: string): ProviderAdapter | null {
   switch (name.toLowerCase()) {
     case "paystack":
       return paystackAdapter;
-    case "flutterwave":
-      return flutterwaveAdapter;
+    case "monnify":
+      return monnifyAdapter;
     default:
       return null;
   }
 }
 
-const ALL_PROVIDERS = ["flutterwave", "paystack"];
+const ALL_PROVIDERS = ["monnify", "paystack"];
 
 /** Preferred provider first (env or explicit), then any healthy fallback. */
 export function resolveProvider(preferred?: string): ProviderAdapter {
-  const configured = (preferred ?? process.env.PAYMENT_PROVIDER ?? "flutterwave").toLowerCase();
+  const configured = (preferred ?? process.env.PAYMENT_PROVIDER ?? "monnify").toLowerCase();
   const order = [configured, ...ALL_PROVIDERS.filter((p) => p !== configured)];
   for (const name of order) {
     const adapter = adapterFor(name);
@@ -130,5 +143,5 @@ export function resolveProvider(preferred?: string): ProviderAdapter {
   }
   // Everything is marked down — fall back to the configured one and let the
   // caller surface the error.
-  return adapterFor(configured) ?? flutterwaveAdapter;
+  return adapterFor(configured) ?? monnifyAdapter;
 }

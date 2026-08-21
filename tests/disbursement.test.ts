@@ -61,13 +61,15 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
   });
 }
 
-/** Run the full loan flow up to approval. Returns the borrower's loan. */
+/** Run the full loan flow up to approval. Returns the loan + two super admin ids. */
 async function getGuaranteedLoan(borrowerName?: string) {
   const coop = await makeCoop("TEST21");
   const borrower = await makeMember(PHONE, coop.id, { name: borrowerName });
   await makeMember(G1, coop.id);
   await makeMember(G2, coop.id);
   await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+  const super1 = await makeMember("2348070000001", coop.id, { role: "superadmin" });
+  const super2 = await makeMember("2348070000002", coop.id, { role: "superadmin" });
 
   // Loans are capped at 2x savings — give the borrower history first.
   await prisma.wallet.update({
@@ -95,7 +97,7 @@ async function getGuaranteedLoan(borrowerName?: string) {
 
   loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
   expect(loan!.status).toBe("guaranteed");
-  return loan!;
+  return { loan: loan!, super1Id: super1.id, super2Id: super2.id };
 }
 
 beforeEach(async () => {
@@ -103,6 +105,15 @@ beforeEach(async () => {
   state.resolveName = "ADA OBI";
   state.resolveFails = false;
   state.payoutFails = false;
+    await prisma.posting.deleteMany();
+  await prisma.journalEntry.deleteMany();
+  await prisma.webhookEvent.deleteMany();
+  await prisma.pollBallot.deleteMany();
+  await prisma.pollOption.deleteMany();
+  await prisma.purchasePoll.deleteMany();
+  await prisma.externalPayment.deleteMany();
+  await prisma.guarantorDeduction.deleteMany();
+  await prisma.ledgerEntry.deleteMany();
   await prisma.voteBallot.deleteMany();
   await prisma.voteCandidate.deleteMany();
   await prisma.vote.deleteMany();
@@ -128,10 +139,12 @@ beforeEach(async () => {
 
 describe("loan disbursement", () => {
   it("disburses to the member's bank account when the name matches", async () => {
-    const loan = await getGuaranteedLoan("Ada Obi");
+    const { loan, super1Id, super2Id } = await getGuaranteedLoan("Ada Obi");
 
-    // Super admin gives the final approval (auto-disburses).
-    const result = await approveLoan(loan.id.slice(-6), { superAdmin: true });
+    // Two distinct super admins must approve; the second auto-disburses.
+    const one = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super1Id });
+    expect(one.ok).toBe(true);
+    const result = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super2Id });
     expect(result.ok).toBe(true);
 
     const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
@@ -150,10 +163,11 @@ describe("loan disbursement", () => {
   });
 
   it("blocks disbursement when the account name does not match the registered name", async () => {
-    const loan = await getGuaranteedLoan("Chinedu Eze"); // registered under a different name
+    const { loan, super1Id, super2Id } = await getGuaranteedLoan("Chinedu Eze"); // registered under a different name
     state.resolveName = "SADE BALOGUN"; // account belongs to someone else
 
-    const result = await approveLoan(loan.id.slice(-6), { superAdmin: true });
+    await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super1Id });
+    const result = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super2Id });
     expect(result.ok).toBe(true); // approved, but NOT paid out
 
     const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
@@ -166,10 +180,11 @@ describe("loan disbursement", () => {
   });
 
   it("marks a failed disbursement without paying when the provider can't resolve", async () => {
-    const loan = await getGuaranteedLoan();
+    const { loan, super1Id, super2Id } = await getGuaranteedLoan();
     state.resolveFails = true;
 
-    await approveLoan(loan.id.slice(-6), { superAdmin: true });
+    await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super1Id });
+    await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super2Id });
 
     const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(updated!.status).toBe("approved");
@@ -178,7 +193,7 @@ describe("loan disbursement", () => {
   });
 
   it("requires the super admin's approval before an admin-approved loan pays out", async () => {
-    const loan = await getGuaranteedLoan("Ada Obi");
+    const { loan, super1Id, super2Id } = await getGuaranteedLoan("Ada Obi");
 
     // Plain admin approval stops at admin_approved — no money moves.
     const first = await approveLoan(loan.id.slice(-6));
@@ -187,12 +202,18 @@ describe("loan disbursement", () => {
     expect(updated!.status).toBe("admin_approved");
     expect(await prisma.payout.count()).toBe(0);
 
-    // Super admin's final approval releases the money.
-    const second = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: "super-admin-1" });
+    // Two distinct super admins must sign off; the second releases the money.
+    const second = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super1Id });
     expect(second.ok).toBe(true);
     updated = await prisma.loan.findUnique({ where: { id: loan.id } });
-    expect(updated!.status).toBe("disbursed");
+    expect(updated!.status).toBe("super_approved_1");
     expect(updated!.finalApprovedById).not.toBeNull();
+    expect(await prisma.payout.count()).toBe(0);
+
+    const third = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super2Id });
+    expect(third.ok).toBe(true);
+    updated = await prisma.loan.findUnique({ where: { id: loan.id } });
+    expect(updated!.status).toBe("disbursed");
   });
 });
 
@@ -368,3 +389,4 @@ describe("withdrawals", () => {
     expect(after!.status).not.toBe("paid");
   });
 });
+

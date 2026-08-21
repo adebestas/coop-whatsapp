@@ -120,20 +120,32 @@ export async function approveWithdrawal(
     include: { member: true },
   });
   if (!request) return { ok: false, message: "Withdrawal request not found. Check the id." };
-  if (request.status !== "pending") {
+  if (["paid", "rejected", "processing"].includes(request.status)) {
     return { ok: false, message: `This request is already ${request.status}.` };
+  }
+
+  // Dual-control: nobody approves their own money leaving the cooperative.
+  if (actor.id === request.memberId) {
+    return {
+      ok: false,
+      message: `⛔ You can't approve your own withdrawal. Another admin must do that.`,
+    };
   }
 
   const isSuper = actor.role === "superadmin" || (await isSuperAdminOf(actor.phone, request.cooperativeId));
 
-  if (isSuper) {
+  if (isSuper && ["pending", "admin_approved"].includes(request.status)) {
     return finalizeWithdrawal(requestId, actor);
   }
 
-  await prisma.withdrawalRequest.update({
-    where: { id: request.id },
+  // Atomic transition — two admins approving at once: only ONE flips it.
+  const moved = await prisma.withdrawalRequest.updateMany({
+    where: { id: request.id, status: "pending" },
     data: { status: "admin_approved", adminApprovedAt: new Date(), adminApprovedById: actor.id },
   });
+  if (moved.count === 0) {
+    return { ok: false, message: `This request is no longer pending — check its current state.` };
+  }
   await notifySuperAdmins(
     request.cooperativeId,
     `✅ Withdrawal *${request.id.slice(-6)}* for ${request.member.name} approved by an admin. As super admin, reply *finalize ${request.id.slice(-6)}* to send *${formatBalance(request.amount)}* to the member's bank.`,
@@ -144,7 +156,18 @@ export async function approveWithdrawal(
   };
 }
 
-/** Super admin's final approval — sends the money and debits the wallet. */
+/**
+ * Super admin's final approval — sends the money and debits the wallet.
+ *
+ * Saga ordering (crash-safe):
+ *   1. ATOMIC CLAIM: pending/admin_approved -> processing. Exactly one
+ *      concurrent finalizer proceeds; everyone else gets "already handled".
+ *   2. DEBIT the wallet atomically (balance-guarded decrement).
+ *   3. PAY via provider using a deterministic idempotency key
+ *      (TFR-WDR-<requestId>) — retries can never pay twice.
+ *   4a. Success  -> mark paid (+ cooldown reset).
+ *   4b. Failure  -> REFUND the wallet and hand the request back for retry.
+ */
 export async function finalizeWithdrawal(
   requestId: string,
   actor: { id: string; role: string; phone: string },
@@ -156,57 +179,116 @@ export async function finalizeWithdrawal(
   if (!request) return { ok: false, message: "Withdrawal request not found." };
   if (request.status === "paid") return { ok: false, message: "This withdrawal was already paid." };
   if (request.status === "rejected") return { ok: false, message: "This withdrawal was rejected." };
+  if (request.status === "processing") {
+    return { ok: false, message: "This withdrawal is being processed right now — wait for it to settle." };
+  }
 
   const isSuper = actor.role === "superadmin" || (await isSuperAdminOf(actor.phone, request.cooperativeId));
   if (!isSuper) {
     return { ok: false, message: "Only the cooperative's super admin can give the final approval." };
   }
 
+  // Dual-control: nobody finalizes their own withdrawal.
+  if (actor.id === request.memberId) {
+    return {
+      ok: false,
+      message: `⛔ You can't finalize your own withdrawal. Another super admin must do that.`,
+    };
+  }
+
+  // STEP 1 — atomic claim.
+  const claimed = await prisma.withdrawalRequest.updateMany({
+    where: { id: request.id, status: { in: ["pending", "admin_approved"] } },
+    data: { status: "processing", finalizedById: actor.id },
+  });
+  if (claimed.count === 0) {
+    return { ok: false, message: "This withdrawal was just taken by another approval — check *pending*." };
+  }
+
   const member = request.member;
   const wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
-  const balance = wallet?.balance ?? 0;
-  if (balance < request.amount) {
-    await prisma.withdrawalRequest.update({ where: { id: request.id }, data: { status: "rejected", rejectedAt: new Date() } });
-    return { ok: false, message: `Insufficient balance (${formatBalance(balance)}). Request rejected.` };
+
+  try {
+    // STEP 2 — debit BEFORE paying. If the balance can't cover it the whole
+    // thing stops here; no money ever leaves the cooperative's bank.
+    if (!wallet || wallet.balance < request.amount) {
+      await prisma.withdrawalRequest.updateMany({
+        where: { id: request.id, status: "processing" },
+        data: { status: "rejected", rejectedAt: new Date() },
+      });
+      return { ok: false, message: `Insufficient balance (${formatBalance(wallet?.balance ?? 0)}). Request rejected.` };
+    }
+    const debited = await prisma.wallet.updateMany({
+      where: { id: wallet.id, balance: { gte: request.amount } },
+      data: { balance: { decrement: request.amount } },
+    });
+    if (debited.count === 0) {
+      await prisma.withdrawalRequest.updateMany({
+        where: { id: request.id, status: "processing" },
+        data: { status: "rejected", rejectedAt: new Date() },
+      });
+      return { ok: false, message: "Balance changed during payout — request rejected. Investigate immediately." };
+    }
+
+    // STEP 3 — pay out (deterministic key => provider retries are safe).
+    const result = await sendToBank({
+      memberId: member.id,
+      amount: request.amount,
+      bankAccountNumber: request.bankAccountNumber,
+      bankCode: request.bankCode,
+      bankName: request.bankName ?? undefined,
+      note: `Member withdrawal (finalized by super admin)`,
+      idempotencyKey: `TFR-WDR-${request.id}`,
+    });
+
+    if (!result.ok) {
+      // STEP 4b — refund and hand back for retry/rejection by humans.
+      await prisma.$transaction([
+        prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: request.amount } } }),
+        prisma.withdrawalRequest.updateMany({
+          where: { id: request.id, status: "processing" },
+          data: { status: "admin_approved" },
+        }),
+      ]);
+      console.error(`[withdrawal] payout failed, refunded: ${request.id} — ${result.message}`);
+      return { ok: false, message: `Withdrawal not paid out (wallet refunded): ${result.message}` };
+    }
+
+    // STEP 4a — success.
+    await prisma.$transaction([
+      prisma.withdrawalRequest.updateMany({
+        where: { id: request.id, status: "processing" },
+        data: { status: "paid", finalizedAt: new Date(), finalizedById: actor.id },
+      }),
+      prisma.member.update({
+        where: { id: member.id },
+        data: { lastWithdrawalAt: new Date(), withdrawalOverride: false },
+      }),
+    ]);
+
+    return {
+      ok: true,
+      message: `✅ *${formatBalance(request.amount)}* sent to ${request.member.name} (${request.bankName ?? request.bankCode} ****${request.bankAccountNumber.slice(-4)}). Wallet debited.`,
+    };
+  } catch (err: any) {
+    // Crash safety — anything thrown after the debit must restore funds.
+    if (wallet) {
+      await prisma.wallet
+        .updateMany({
+          where: { id: wallet.id },
+          data: { balance: { increment: request.amount } },
+        })
+        .catch(() => {});
+    }
+    await prisma.withdrawalRequest
+      .updateMany({
+        where: { id: request.id, status: "processing" },
+        data: { status: "admin_approved" },
+      })
+      .catch(() => {});
+    console.error(`[withdrawal] finalized threw, refunded: ${request.id}`, err);
+    return { ok: false, message: `Withdrawal failed and the wallet was refunded (${String(err?.message ?? err).slice(0, 120)}).` };
   }
-
-  const result = await sendToBank({
-    memberId: member.id,
-    amount: request.amount,
-    bankAccountNumber: request.bankAccountNumber,
-    bankCode: request.bankCode,
-    bankName: request.bankName ?? undefined,
-    note: `Member withdrawal (finalized by super admin)`,
-  });
-  if (!result.ok) {
-    return { ok: false, message: `Withdrawal not paid out: ${result.message}` };
-  }
-
-  // Atomic debit — only succeeds if the balance still covers the amount.
-  const debited = await prisma.wallet.updateMany({
-    where: { id: wallet!.id, balance: { gte: request.amount } },
-    data: { balance: { decrement: request.amount } },
-  });
-  if (debited.count === 0) {
-    await prisma.withdrawalRequest.update({ where: { id: request.id }, data: { status: "rejected", rejectedAt: new Date() } });
-    return { ok: false, message: "Balance changed during payout — request rejected. Investigate immediately." };
-  }
-
-  await prisma.$transaction([
-    prisma.withdrawalRequest.update({
-      where: { id: request.id },
-      data: { status: "paid", finalizedAt: new Date(), finalizedById: actor.id },
-    }),
-    prisma.member.update({
-      where: { id: member.id },
-      data: { lastWithdrawalAt: new Date(), withdrawalOverride: false },
-    }),
-  ]);
-
-  return {
-    ok: true,
-    message: `✅ *${formatBalance(request.amount)}* sent to ${request.member.name} (${request.bankName ?? request.bankCode} ****${request.bankAccountNumber.slice(-4)}). Wallet debited.`,
-  };
 }
 
 export async function rejectWithdrawal(requestId: string): Promise<WithdrawResult> {
@@ -218,7 +300,14 @@ export async function rejectWithdrawal(requestId: string): Promise<WithdrawResul
   if (request.status === "paid" || request.status === "rejected") {
     return { ok: false, message: `This request is already ${request.status}.` };
   }
-  await prisma.withdrawalRequest.update({ where: { id: request.id }, data: { status: "rejected", rejectedAt: new Date() } });
+  // Atomic — can't reject something that just flipped to paid/processing.
+  const moved = await prisma.withdrawalRequest.updateMany({
+    where: { id: request.id, status: { in: ["pending", "admin_approved"] } },
+    data: { status: "rejected", rejectedAt: new Date() },
+  });
+  if (moved.count === 0) {
+    return { ok: false, message: `This request just changed state (now ${request.status}) — it wasn't rejected.` };
+  }
   return { ok: true, message: `Withdrawal *${request.id.slice(-6)}* for ${request.member.name} was rejected.` };
 }
 

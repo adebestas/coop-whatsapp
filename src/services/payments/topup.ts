@@ -2,6 +2,8 @@ import { prisma } from "../../lib/prisma.js";
 import { resolveProvider, markProviderDown } from "./index.js";
 import type { PaymentNotification } from "./index.js";
 import { audit } from "../audit.js";
+import { postJournal } from "../journal.js";
+import { roundMoney } from "../money.js";
 
 /**
  * Create a virtual account for a member so they can receive transfers.
@@ -83,50 +85,76 @@ function otherThan(name?: string): string | undefined {
 
 /**
  * Handle an incoming provider webhook notification and credit the member wallet.
- * Idempotent: the same provider transaction id never credits twice.
+ * Idempotent on TWO layers:
+ *  1. The deterministic journal txRef (TOPUP-<provider>-<txid>) is inserted
+ *     FIRST inside the transaction — a replayed delivery aborts the whole
+ *     transaction on the unique constraint before any wallet moves.
+ *  2. Contribution.reference (`<provider>-<txid>`) is also unique.
  */
 export async function handlePaymentNotification(n: PaymentNotification): Promise<void> {
   if (n.status !== "successful") return;
-
-  // Deduplicate on provider transaction id.
-  const existing = await prisma.contribution.findFirst({
-    where: { reference: `${n.provider}-${n.transactionId}` },
-  });
-  if (existing) return;
 
   // Find the member by their virtual account number.
   const member = await prisma.member.findFirst({
     where: { virtualAccountNumber: n.accountNumber },
     include: { wallet: true },
   });
-  if (!member) {
+  if (!member || !member.wallet) {
     console.warn(`[topup] credit for unknown account ${n.accountNumber}, ignoring`);
     return;
   }
 
-  await prisma.$transaction([
-    prisma.contribution.create({
+  const amount = roundMoney(n.amount);
+  if (amount <= 0) return;
+  const reference = `${n.provider}-${n.transactionId}`;
+
+  await prisma.$transaction(async (tx) => {
+    // Idempotency gate FIRST: duplicate delivery throws P2002 here, which
+    // rolls back everything — the wallet is never credited twice.
+    try {
+      await postJournal(
+        {
+          cooperativeId: member.cooperativeId,
+          txRef: `TOPUP-${reference}`,
+          description: `Wallet top-up via ${n.provider} (${n.transactionId})`,
+          postings: [
+            { account: "assets:bank", direction: "DEBIT" as const, amount },
+            { account: `member_wallet:${member.wallet!.id}`, direction: "CREDIT" as const, amount, memberId: member.id },
+          ],
+          throwOnDuplicate: true,
+        },
+        tx as any,
+      );
+    } catch (err: any) {
+      if (err?.code === "P2002") {
+        console.log(`[topup] duplicate credit blocked: ${reference}`);
+        return; // treat like a no-op success
+      }
+      throw err;
+    }
+
+    await tx.contribution.create({
       data: {
-        amount: n.amount,
+        amount,
         type: "topup",
         note: `Incoming transfer via ${n.provider}`,
-        reference: `${n.provider}-${n.transactionId}`,
+        reference,
         status: "confirmed",
         paidAt: new Date(),
         memberId: member.id,
         cooperativeId: member.cooperativeId,
       },
-    }),
-    prisma.wallet.update({
+    });
+    await tx.wallet.update({
       where: { id: member.wallet!.id },
       data: {
-        balance: { increment: n.amount },
-        totalSaved: { increment: n.amount },
+        balance: { increment: amount },
+        totalSaved: { increment: amount },
       },
-    }),
-  ]);
+    });
+  });
 
-  console.log(`[topup] credited ${member.phone} with ${n.amount} ${n.currency} (${n.transactionId})`);
+  console.log(`[topup] credited ${member.phone} with ${amount} ${n.currency} (${n.transactionId})`);
 
   await audit({
     cooperativeId: member.cooperativeId,
@@ -135,6 +163,6 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
     actorRole: member.role,
     action: "topup.credit",
     targetType: "contribution",
-    detail: `${n.amount} ${n.currency} via ${n.provider} (${n.transactionId})`,
+    detail: `${amount} ${n.currency} via ${n.provider} (${n.transactionId})`,
   });
 }

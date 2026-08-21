@@ -8,6 +8,7 @@ import type {
   ResolveAccountResult,
   VirtualAccountData,
 } from "./index.js";
+import { signaturesMatch } from "./index.js";
 
 const API_BASE = "https://api.flutterwave.com/v3";
 
@@ -96,11 +97,15 @@ export const flutterwaveAdapter: ProviderAdapter = {
     };
   },
 
-  verifyWebhook(): boolean {
-    // Flutterwave webhooks are verified with a secret hash header set in the
-    // Flutterwave dashboard. Production setups should compare
-    // `req.headers['verif-hash']` with FLUTTERWAVE_WEBHOOK_HASH.
-    return true;
+  verifyWebhook(rawBody, headers): boolean {
+    // Flutterwave webhooks carry a static secret hash in the `verif-hash`
+    // header (set in the dashboard). FAIL CLOSED: if FLUTTERWAVE_WEBHOOK_HASH
+    // is not configured, every webhook is rejected — an unauthenticated
+    // "verify everything" adapter once let forged credits mint wallet money.
+    const expected = process.env.FLUTTERWAVE_WEBHOOK_HASH ?? "";
+    const received = String(headers["verif-hash"] ?? "");
+    if (!expected || !received) return false;
+    return signaturesMatch(expected, received);
   },
 
   parseNotification(body: any): PaymentNotification | null {

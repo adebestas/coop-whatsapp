@@ -210,8 +210,15 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     return { ok: false, message: "Only the cooperative's super admin can give the final approval on a death claim." };
   }
   if (claim.status === "paid") return { ok: false, message: "This claim was already paid." };
+  if (claim.status === "processing") {
+    return { ok: false, message: "This claim payout is already in progress — wait for it to settle." };
+  }
   if (claim.status !== "validated") {
     return { ok: false, message: `The claim must be validated by ${REQUIRED_DEATH_VALIDATIONS} guarantors first (current: ${claim.status}).` };
+  }
+  // Dual-control: nobody approves a payout on their own wallet.
+  if (actor.id === claim.memberId) {
+    return { ok: false, message: "⛔ You can't approve a death claim on your own account." };
   }
   if (!claim.familyAccountNumber || !claim.familyBankCode) {
     return { ok: false, message: `Set the family's bank first: *claimbank ${claim.id.slice(-6)} <account> <bank>*.` };
@@ -224,48 +231,87 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     return { ok: true, message: `No balance left in ${claim.member.name}'s wallet. Claim *${claim.id.slice(-6)}* closed as paid.` };
   }
 
-  const result = await sendToBank({
-    memberId: claim.memberId,
-    amount: balance,
-    bankAccountNumber: claim.familyAccountNumber,
-    bankCode: claim.familyBankCode,
-    bankName: claim.familyBankName ?? undefined,
-    note: `Death claim payout to family of ${claim.member.name}`,
-    skipNameCheck: true, // the money goes to the family, not the account holder
+  // ATOMIC CLAIM — exactly one super drives the payout; concurrent calls stop here.
+  const claimed = await prisma.deathClaim.updateMany({
+    where: { id: claim.id, status: "validated" },
+    data: { status: "processing" },
   });
-  if (!result.ok) {
-    return { ok: false, message: `Payout failed: ${result.message}` };
+  if (claimed.count === 0) {
+    return { ok: false, message: "This claim was just picked up by another approval — check its state." };
   }
 
-  // Atomic debit — only succeeds if the balance still covers the payout.
-  const debited = await prisma.wallet.updateMany({
-    where: { id: wallet!.id, balance: { gte: balance } },
-    data: { balance: { decrement: balance } },
-  });
-  if (debited.count === 0) {
-    return { ok: false, message: "Balance changed during payout — claim NOT closed. Investigate immediately." };
+  try {
+    // Debit BEFORE paying — no balance, no transfer.
+    const debited = await prisma.wallet.updateMany({
+      where: { id: wallet!.id, balance: { gte: balance } },
+      data: { balance: { decrement: balance } },
+    });
+    if (debited.count === 0) {
+      await prisma.deathClaim.updateMany({
+        where: { id: claim.id, status: "processing" },
+        data: { status: "validated" },
+      });
+      return { ok: false, message: "Balance changed during payout — claim NOT closed. Investigate immediately." };
+    }
+
+    const result = await sendToBank({
+      memberId: claim.memberId,
+      amount: balance,
+      bankAccountNumber: claim.familyAccountNumber,
+      bankCode: claim.familyBankCode,
+      bankName: claim.familyBankName ?? undefined,
+      note: `Death claim payout to family of ${claim.member.name}`,
+      skipNameCheck: true, // the money goes to the family, not the account holder
+      idempotencyKey: `TFR-CLAIM-${claim.id}`,
+    });
+    if (!result.ok) {
+      // Refund and hand back for retry.
+      await prisma.$transaction([
+        prisma.wallet.update({ where: { id: wallet!.id }, data: { balance: { increment: balance } } }),
+        prisma.deathClaim.updateMany({
+          where: { id: claim.id, status: "processing" },
+          data: { status: "validated" },
+        }),
+      ]);
+      return { ok: false, message: `Payout failed (wallet refunded): ${result.message}` };
+    }
+
+    await prisma.deathClaim.updateMany({
+      where: { id: claim.id, status: "processing" },
+      data: { status: "paid", approvedAt: new Date(), finalizedAt: new Date() },
+    });
+
+    await audit({
+      cooperativeId: claim.cooperativeId,
+      actorPhone,
+      actorId: actor.id,
+      actorRole: "superadmin",
+      action: "claim.payout",
+      targetType: "deathclaim",
+      targetId: claim.id,
+      detail: `${formatBalance(balance)} to family of ${claim.member.name}`,
+    });
+
+    return {
+      ok: true,
+      message: `🕊️ *${formatBalance(balance)}* paid to the family of ${claim.member.name} (${claim.familyBankName ?? claim.familyBankCode} ****${claim.familyAccountNumber.slice(-4)}). Claim *${claim.id.slice(-6)}* closed.`,
+    };
+  } catch (err: any) {
+    // Crash safety — restore funds and hand the claim back for retry.
+    if (wallet) {
+      await prisma.wallet
+        .updateMany({ where: { id: wallet.id }, data: { balance: { increment: balance } } })
+        .catch(() => {});
+    }
+    await prisma.deathClaim
+      .updateMany({
+        where: { id: claim.id, status: "processing" },
+        data: { status: "validated" },
+      })
+      .catch(() => {});
+    console.error(`[claim] payout threw, refunded: ${claim.id}`, err);
+    return { ok: false, message: `Claim payout failed and the wallet was refunded (${String(err?.message ?? err).slice(0, 120)}).` };
   }
-
-  await prisma.deathClaim.update({
-    where: { id: claim.id },
-    data: { status: "paid", approvedAt: new Date(), finalizedAt: new Date() },
-  });
-
-  await audit({
-    cooperativeId: claim.cooperativeId,
-    actorPhone,
-    actorId: actor.id,
-    actorRole: "superadmin",
-    action: "claim.payout",
-    targetType: "deathclaim",
-    targetId: claim.id,
-    detail: `${formatBalance(balance)} to family of ${claim.member.name}`,
-  });
-
-  return {
-    ok: true,
-    message: `🕊️ *${formatBalance(balance)}* paid to the family of ${claim.member.name} (${claim.familyBankName ?? claim.familyBankCode} ****${claim.familyAccountNumber.slice(-4)}). Claim *${claim.id.slice(-6)}* closed.`,
-  };
 }
 
 export async function rejectClaim(actorPhone: string, claimCode: string): Promise<ClaimResult> {

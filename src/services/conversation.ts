@@ -20,6 +20,7 @@ import { verifyMemberPin } from "./pin.js";
 import { resolveBankCode } from "../lib/banks.js";
 import { createTicket, listTickets, resolveTicket } from "./support.js";
 import { startVote, addCandidate, castVote, closeVote, showResults } from "./votes.js";
+import { castBuyVote, listBuyPolls } from "./buypoll.js";
 import {
   startDeathClaim,
   submitCertificate,
@@ -276,6 +277,53 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
       break;
     }
 
+    case "buypolls": {
+      if (!member) {
+        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        return;
+      }
+      const polls = await listBuyPolls(member.cooperativeId);
+      if (polls.length === 0) {
+        await sendText({ to: phone, text: "No buy-votes yet. Admins open one with *startbuyvote <title>*." });
+        return;
+      }
+      const parts: string[] = [];
+      for (const p of polls) {
+        parts.push(
+          `🛒 *${p.title}* (${p.status}) — id *${p.id.slice(-6)}*`,
+          ...p.options.map((o, i) => `   ${i + 1}. ${o.name} — ~${formatBalance(o.estimatedCost)} — ${o._count.ballots} vote(s)`),
+          "",
+        );
+      }
+      await sendText({
+        to: phone,
+        text:
+          parts.join("\n").trim() +
+          `\n\nVote with *votebuy <poll id> <option number>*.`,
+      });
+      return;
+    }
+
+    case "votebuy": {
+      if (!member) {
+        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        return;
+      }
+      const pollCode = args[0];
+      const optionNumber = Number(args[1]);
+      if (!pollCode || !Number.isInteger(optionNumber) || optionNumber < 1) {
+        await sendText({ to: phone, text: "Usage: *votebuy <poll id> <option number>* — see options with *buypolls*." });
+        return;
+      }
+      const result = await castBuyVote(
+        { id: member.id, cooperativeId: member.cooperativeId },
+        pollCode,
+        optionNumber,
+      );
+      await sendText({ to: phone, text: result.message });
+      return;
+    }
+
     default:
       await sendText({
         to: phone,
@@ -316,9 +364,11 @@ function buildMenu(member: { name: string; cooperative: { name: string }; wallet
       `• *phone <number>* — add/update your real phone number (needed for funding)\n` +
       `• *support <issue>* — open a support ticket with customer service\n` +
       `• *vote <election id> <member code>* — vote in an election\n` +
+      `• *buypolls* — see what the coop is voting to buy\n` +
+      `• *votebuy <poll id> <option #>* — vote for what the coop should buy\n` +
       `• *menu* — show this menu\n\n` +
-      `Admins: try *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *interest <rate>* (loan rate), *units*, *addunit <name> <code>*, *approvewithdraw <id>*, *overridewithdrawal <phone>*, *deathclaim <membercode>*, *claimbank <claim id> <account> <bank>*, *tickets*, *resolve <id> <note>*, *startvote unit|exec ...*, *candidate <id> <code>*, *closevote <id>*\n` +
-      `Super admin: *finalize <withdraw id>*, *approveclaim <claim id>*, *setrole <membercode> <member|admin|superadmin|support>*, *paydividend <rate>*, *payout <amount> <phone>*`
+      `Admins: try *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *units*, *addunit*, *approvewdraw <id>*, *overridewithdrawal <phone>*, *deathclaim*, *claimbank*, *tickets*, *resolve*, *startvote unit|exec ...*, *candidate*, *closevote*, *startbuyvote <title>*, *addoption <id> <item> <cost> <acct> <bank>*, *closebuyvote <id>*\n` +
+      `Super admin: *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *paydividend <rate% of profit>*, *pnl*, *payout <amt> <phone> <narration>*, *payanyone <amt> <account> <bank> <narration>* (3 supers), *approvepay <id>*, *setsalary*, *runpayroll <narration>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
 }
 

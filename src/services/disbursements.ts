@@ -2,6 +2,8 @@ import { prisma } from "../lib/prisma.js";
 import { sendText } from "../lib/messaging.js";
 import { resolveProvider } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
+import { recordLedger } from "./ledger.js";
+import { postJournal } from "./journal.js";
 
 export interface DisbursementResult {
   ok: boolean;
@@ -16,6 +18,12 @@ interface SendToBankOpts {
   bankCode: string;
   bankName?: string;
   note: string;
+  /**
+   * Deterministic idempotency key (e.g. TFR-LOAN-<loanId>). The same key can
+   * never pay out twice — provider retries and double-invocations are blocked
+   * by the unique constraint on Payout.idempotencyKey.
+   */
+  idempotencyKey?: string;
   /** Overrides the success message/notification (e.g. for loan wording). */
   successMessage?: string;
   /** Skip account-name verification (death-claim payouts to family members). */
@@ -78,8 +86,22 @@ async function payOut(
   verifiedName: string | null,
 ): Promise<DisbursementResult> {
   const provider = resolveProvider();
-  const reference = `TFR-${opts.memberId.slice(-8)}-${Date.now()}`;
+  // Deterministic reference: retries reuse the SAME key, so the provider and
+  // our own unique constraint both reject a second execution.
+  const reference = opts.idempotencyKey ?? `TFR-${opts.memberId.slice(-8)}-${Date.now()}`;
+
+  // Idempotency gate — if this logical operation already paid, stop here.
+  const existing = await prisma.payout.findUnique({ where: { idempotencyKey: reference } });
+  if (existing) {
+    return {
+      ok: false,
+      status: "failed",
+      message: `Duplicate payout blocked: reference ${reference.slice(-10)} was already processed (${existing.status}).`,
+    };
+  }
+
   try {
+    let providerRef: string | undefined;
     if (provider.payout) {
       const result = await provider.payout({
         amount: opts.amount,
@@ -94,20 +116,46 @@ async function payOut(
         await notify(member, msg);
         return { ok: false, status: "failed", message: msg };
       }
+      providerRef = result.providerRef;
+    }
 
+    try {
       await prisma.payout.create({
         data: {
           amount: opts.amount,
           reference,
+          idempotencyKey: reference,
           status: "successful",
           provider: provider.name,
-          providerRef: result.providerRef,
+          providerRef,
           note: opts.note,
           memberId: member.id,
           cooperativeId: member.cooperativeId,
         },
       });
+    } catch (err: any) {
+      if (err?.code === "P2002") {
+        // Lost the race with a concurrent identical payout — treat as duplicate.
+        console.error(`[payout] duplicate blocked for ${reference}`);
+        return {
+          ok: false,
+          status: "failed",
+          message: "Duplicate payout blocked (already processed). No second payment was made.",
+        };
+      }
+      throw err;
     }
+
+    // Double-entry: expense leaves the cooperative bank account.
+    await postJournal({
+      cooperativeId: member.cooperativeId,
+      txRef: `PAYOUT-${reference}`,
+      description: opts.note,
+      postings: [
+        { account: "expense:payout", direction: "DEBIT", amount: opts.amount },
+        { account: "assets:bank", direction: "CREDIT", amount: opts.amount },
+      ],
+    }).catch((err) => console.error("[payout] journal failed", err));
 
     const msg = opts.successMessage ?? `✅ ${formatBalance(opts.amount)} sent to your bank account (${opts.bankName ?? opts.bankCode} ****${opts.bankAccountNumber.slice(-4)}). Ref: ${reference.slice(-6)}.`;
     await notify(member, msg);
@@ -137,6 +185,29 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
     return { ok: false, status: "failed", message: `Loan must be approved before disbursement (current: ${loan.status}).` };
   }
 
+  // ATOMIC CLAIM — flips disbursementStatus to "processing" only if no other
+  // caller is mid-flight and it hasn't already succeeded. Two racing retries
+  // can never both reach the provider. (NULL disbursementStatus must match
+  // explicitly — SQL NOT IN never matches NULL.)
+  const claimed = await prisma.loan.updateMany({
+    where: {
+      id: loan.id,
+      status: "approved",
+      OR: [
+        { disbursementStatus: null },
+        { disbursementStatus: { notIn: ["successful", "processing"] } },
+      ],
+    },
+    data: { disbursementStatus: "processing" },
+  });
+  if (claimed.count === 0) {
+    return {
+      ok: false,
+      status: "failed",
+      message: `Loan *${loan.id.slice(-6)}* is already disbursing or was paid out — check *loans* before retrying.`,
+    };
+  }
+
   const { member } = loan;
 
   if (!loan.bankAccountNumber || !loan.bankCode) {
@@ -149,15 +220,23 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
     return { ok: false, status: "failed", message: msg };
   }
 
+  // The member receives the loan minus the flat admin charge.
+  const adminCharge = loan.adminCharge ?? 0;
+  const disbursable = Math.max(0, loan.amount - adminCharge);
+
   const result = await sendToBank({
     memberId: member.id,
-    amount: loan.amount,
+    amount: disbursable,
     bankAccountNumber: loan.bankAccountNumber,
     bankCode: loan.bankCode,
     bankName: loan.bankName ?? undefined,
     note: `Loan disbursement to ${member.name}`,
-    successMessage: `🎉 Your loan of *${formatBalance(loan.amount)}* was approved and *disbursed* to your bank account (${loan.bankName ?? loan.bankCode} ****${loan.bankAccountNumber.slice(-4)}).`,
+    // Deterministic per-loan key: a retried disbursement of THIS loan can
+    // never pay out twice, even across app restarts.
+    idempotencyKey: `TFR-LOAN-${loan.id}`,
+    successMessage: `🎉 Loan *disbursed!* ${formatBalance(loan.amount)} approved — *${formatBalance(disbursable)}* (after the ${formatBalance(adminCharge)} admin charge) is on its way to your ${loan.bankName ?? loan.bankCode} account ****${loan.bankAccountNumber.slice(-4)}.`,
     onFailure: async (status, error) => {
+      // "failed" is retryable; the next attempt re-claims via the gate above.
       await prisma.loan.update({
         where: { id: loan.id },
         data: { disbursementStatus: status, disbursementError: error },
@@ -166,19 +245,35 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
   });
 
   if (result.ok) {
-    await prisma.loan.update({
-      where: { id: loan.id },
+    // Defensive final claim — even if two paths somehow reached here, only
+    // the one that flips the status books the ledger entry.
+    const finalized = await prisma.loan.updateMany({
+      where: { id: loan.id, status: "approved" },
       data: {
         status: "disbursed",
         disbursedAt: new Date(),
         disbursementStatus: "successful",
+        disbursementAmount: disbursable,
         disbursementError: null,
       },
+    });
+    if (finalized.count === 0) {
+      console.error(`[loan] disbursement succeeded but loan ${loan.id} was already finalized`);
+      return result;
+    }
+    // P&L: the admin charge is cooperative income.
+    await recordLedger({
+      cooperativeId: loan.cooperativeId,
+      type: "income",
+      category: "admin_charge",
+      amount: adminCharge,
+      note: `Admin charge on loan ${loan.id.slice(-6)}`,
+      reference: loan.id,
     });
     return {
       ok: true,
       status: "successful",
-      message: `🎉 Your loan of *${formatBalance(loan.amount)}* was approved and *disbursed* to your bank account (${loan.bankName ?? loan.bankCode} ****${loan.bankAccountNumber.slice(-4)}).`,
+      message: `🎉 Loan *disbursed!* ${formatBalance(loan.amount)} approved — *${formatBalance(disbursable)}* (after the ${formatBalance(adminCharge)} admin charge) is on its way to your ${loan.bankName ?? loan.bankCode} account ****${loan.bankAccountNumber.slice(-4)}.`,
     };
   }
   return result;

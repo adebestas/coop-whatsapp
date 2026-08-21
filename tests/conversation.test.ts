@@ -14,6 +14,7 @@ const ADMIN_PHONE = "2348099999999";
 const G1_PHONE = "2348071111111";
 const G2_PHONE = "2348072222222";
 const SUPER_PHONE = "2348073333333";
+const SUPER2_PHONE = "2348073444444";
 
 async function makeCoop(code: string, name: string, adminPhone?: string) {
   return prisma.cooperative.create({
@@ -46,6 +47,15 @@ async function makeMember(
 
 beforeEach(async () => {
   vi.clearAllMocks();
+    await prisma.posting.deleteMany();
+  await prisma.journalEntry.deleteMany();
+  await prisma.webhookEvent.deleteMany();
+  await prisma.pollBallot.deleteMany();
+  await prisma.pollOption.deleteMany();
+  await prisma.purchasePoll.deleteMany();
+  await prisma.externalPayment.deleteMany();
+  await prisma.guarantorDeduction.deleteMany();
+  await prisma.ledgerEntry.deleteMany();
   await prisma.voteBallot.deleteMany();
   await prisma.voteCandidate.deleteMany();
   await prisma.vote.deleteMany();
@@ -210,6 +220,7 @@ it("requires guarantor confirmation and two-step admin approval for loans", asyn
     await makeMember(G2_PHONE, coop.id, { pin: "2222" });
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin", pin: "9999" });
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin", pin: "8888" });
+    await makeMember(SUPER2_PHONE, coop.id, { role: "superadmin", pin: "7777" });
 
     // Loans are capped at 2x savings — give the borrower some history first.
     await handleMessage(PHONE, "save 30000");
@@ -268,13 +279,18 @@ it("requires guarantor confirmation and two-step admin approval for loans", asyn
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("admin_approved");
 
-    // Step 2: super admin gives the final approval (disbursement fails
-    // gracefully in tests — no provider keys — so the loan stays approved).
+    // Step 2: first super admin signs off — one more to go (disbursement
+    // fails gracefully in tests — no provider keys).
     await handleMessage(SUPER_PHONE, `approve ${shortId}`);
+    loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
+    expect(loan!.status).toBe("super_approved_1");
+    expect(loan!.finalApprovedById).not.toBeNull();
+
+    // Step 3: a second distinct super admin finalizes.
+    await handleMessage(SUPER2_PHONE, `approve ${shortId}`);
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("approved");
     expect(loan!.monthlyPayment).toBeGreaterThan(0);
-    expect(loan!.finalApprovedById).not.toBeNull();
 
     // Fund the wallet then repay.
     await prisma.wallet.updateMany({ data: { balance: { increment: 100000 } } });
@@ -288,6 +304,7 @@ it("requires guarantor confirmation and two-step admin approval for loans", asyn
     await makeMember(G1_PHONE, coop.id, { pin: "1111" });
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin", pin: "9999" });
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin", pin: "8888" });
+    await makeMember(SUPER2_PHONE, coop.id, { role: "superadmin", pin: "7777" });
 
     // Admins need savings too (2x cap) — and only 1 guarantor.
     await handleMessage(ADMIN_PHONE, "save 10000");
@@ -309,8 +326,10 @@ it("requires guarantor confirmation and two-step admin approval for loans", asyn
 
     const shortId = loan!.id.slice(-6);
     await handleMessage(ADMIN_PHONE, `approve ${shortId}`);
-    await handleMessage(SUPER_PHONE, `approve ${shortId}`);
+    await handleMessage(SUPER_PHONE, `approve ${shortId}`); // first super
+    await handleMessage(SUPER2_PHONE, `approve ${shortId}`); // second super finalizes
     const done = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(done!.status).toBe("approved");
   });
 });
+

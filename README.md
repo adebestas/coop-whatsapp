@@ -59,7 +59,9 @@ tests/                   # vitest smoke tests
 | `repay` | Pay the monthly installment on your active loan |
 | `history` | Your personal transaction statement |
 | `ledger` | Cooperative ledger — transparency for all members |
-| `dividend <rate>` | Real-time dividend calculator |
+| `dividend <rate>` | Real-time dividend calculator (% of net profit) |
+| `buypolls` | See open buy-votes (what should the coop purchase?) |
+| `votebuy <poll id> <option>` | Vote in a buy-vote |
 | `joinunit <code>` | Join your workplace/unit |
 | `code` | See your member code (share it for guarantor requests) |
 | `confirm <code>` | Accept a guarantor request |
@@ -78,10 +80,10 @@ of kin is required — death claims are settled with them.
 
 | Role | Powers |
 | --- | --- |
-| `member` | Save, withdraw, loans, vote |
+| `member` | Save, withdraw, loans, vote, buy-votes |
 | `support` | Customer service: view & resolve tickets |
-| `admin` | Unit or coop-wide admin: approve loans (step 1), withdrawals, claims intake, broadcasts, elections |
-| `superadmin` | Final approval on **all** money movement, payouts, dividends, roles (`setrole`), audit trail |
+| `admin` | Coop-wide or unit admin: first loan approval, withdrawals intake, claims intake, broadcasts, elections, **initiates pay-anyone requests** |
+| `superadmin` | Two super admins must co-sign loan disbursements; final say on all money movement, payroll, dividends, exports, roles (`setrole`), audit trail |
 
 The super admin is any member with the `superadmin` role **or** the
 cooperative's registered `adminPhone`. Every money/admin action is written to
@@ -92,7 +94,15 @@ an append-only **audit log** (`audit` command shows the latest entries).
 | Command | Who | What it does |
 | --- | --- | --- |
 | `pending` | all admins | List loan applications (workplace admins see their unit only) |
-| `approve <id>` / `reject <id>` | admin + super | Two-step loan approval: admin approves, **super admin finalizes & disburses** |
+| `approve <id>` / `reject <id>` | admin + super | Loan approval needs **3 signatures**: admin → super #1 → a *different* super #2. The second super approval auto-disburses |
+| `payanyone <amount> <account> <bank> <name>` | admin + super | Queue an external payment (needs narration/purpose). Paid only after **3 distinct super approvals** |
+| `pendingpay` / `rejectpay <id>` | admin + super | List / reject pay-anyone requests |
+| `startbuyvote <title>`, `addoption <poll id> <name> <cost> [account] [bank]`, `closebuyvote <poll id>` | all admins | Buy-votes: members vote on what the coop should buy; closing the winning option auto-creates the 3-super payment request |
+| `export members\|ledger` | super only | Generate Excel + PDF exports and get download links by email |
+| `setpay <phone> <amount>` | super only | Configure a super admin's salary/stipend amount |
+| `runpayroll <narration>` | super only | Pay all configured salaries — straight to **bank accounts** (never wallets); narration is mandatory |
+| `payroll` | super only | See configured salaries and last payroll run |
+| `pnl` | admin + super | Profit & loss: income vs expense categories and net profit from the ledger |
 | `approvewdraw <id>` | admin + super | Approve a withdrawal request (super approval pays immediately) |
 | `finalize <id>` | super only | Final approval that sends a withdrawal |
 | `rejectwithdraw <id>` | admin + super | Reject a withdrawal request |
@@ -112,8 +122,8 @@ an append-only **audit log** (`audit` command shows the latest entries).
 | `results <election id>` | everyone | Live tallies |
 | `broadcast <msg>` | all admins | Message all members (`broadcast unit <msg>` for your workplace) |
 | `addunit <name> <code>` / `unitadmin <unit> <member>` / `units` | all admins | Manage workplaces |
-| `interest <rate%>` | all admins | Set monthly interest on **loans** |
-| `paydividend <rate%>` | super only | Distribute a dividend to all members |
+| `interest` | everyone | Shows the fixed tiered flat rates: 5% (≤3 months), 8% (≤6), 9% (≤9), 10% (10–12) |
+| `paydividend <rate%>` | super only | Distribute a percentage of **net profit** to members by savings share |
 | `audit` | admin + super | Recent audit-trail entries |
 
 ## Channels: WhatsApp + Telegram
@@ -168,21 +178,25 @@ Rules enforced:
 
 ## Loan disbursement
 
-Approval is **two-step**: an admin's `approve <id>` marks the loan
-`admin_approved`; only the super admin's approval finalizes it. On finalize
-the system auto-disburses to the account on file:
+Approval requires **three signatures**: an admin's `approve <id>` marks the
+loan `admin_approved`, the first super admin's approval records super sign-off
+#1, and a **second, different** super admin's approval finalizes it. On the
+final signature the system auto-disburses to the account on file:
 
-1. The payment provider resolves the account holder's name.
-2. The name is compared against the member's **registered name** (case and
-   punctuation-insensitive; extra titles like "Chief" are ignored).
-3. If it **matches** → the loan is `disbursed`, the wallet is debited
-   atomically, and the money is sent to the bank account. A payout record is
-   created and the member is notified.
-4. If it **doesn't match** (or the account can't be resolved) → the money is
+1. The member receives the loan minus a flat **₦2,000 admin charge**
+   (`LOAN_ADMIN_CHARGE`) — e.g. a ₦50,000 loan pays out ₦48,000.
+2. Interest is **flat by tenure tier**: 5% for ≤3 months, 8% for ≤6,
+   9% for ≤9 and 10% for 10–12 months — shown up-front before applying.
+3. The payment provider resolves the account holder's name; it is compared
+   against the member's **registered name** (case/punctuation-insensitive).
+4. If it **matches** → the loan is `disbursed`, money is sent to the bank
+   account, a payout record is created, the charge is booked as ledger income,
+   and the member is notified.
+5. If it **doesn't match** (or the account can't be resolved) → the money is
    **not sent**. The loan stays approved with a `name_mismatch` / `failed`
-   disbursement status so an admin can investigate.
+   status so an admin can investigate.
 
-The admin's approve reply includes the disbursement result.
+The same super admin can't give both super signatures.
 
 ## Workplaces (units)
 
@@ -200,14 +214,18 @@ units are an organizational layer for communication and visibility.
 - `plan <amount> weekly|monthly` sets a recurring contribution. A background
   scheduler nudges members when each instalment is due (they reply `save X`
   to pay). `plan off` cancels.
-- Admin sets `interest <rate%>` — the monthly interest charged **on loans**.
+- Loan interest is **tiered and flat** — see `interest`. It applies to loans
+  only, never to savings.
 
 ## Dividends
 
-- `dividend <rate>` shows a real-time calculator: the pool and each member's
-  share, proportional to their lifetime savings.
+Profit comes from the **ledger**: loan interest, fines and admin charges in;
+salaries/stipends, pay-anyone and other expenses out.
+
+- `dividend <rate>` shows a real-time calculator: net profit, the pool
+  (`rate`% of profit) and each member's share by savings proportion.
 - `paydividend <rate>` (super admin only) distributes it — wallets are
-  credited and it appears in each member's statement.
+  credited and the appropriation is recorded in the ledger.
 
 ## Withdrawals
 
@@ -235,6 +253,60 @@ units are an organizational layer for communication and visibility.
 - **Audit trail:** every contribution, repayment, top-up credit, payout,
   withdrawal step, claim action, role change and election is written to an
   append-only audit log (`audit` command).
+- **Hash-chained audit log:** each audit entry carries the SHA-256 hash of the
+  previous one — editing history breaks the chain, which the nightly
+  reconciliation job detects.
+- **Daily payout limit:** total money-out per cooperative per day (Payouts +
+  withdrawals + pay-anyone) is capped (`Cooperative.dailyPayoutLimit`, default
+  ₦1m); approvers are warned at 80% and blocked past the cap.
+- **Approval cool-offs:** a pay-anyone request can't collect two approvals
+  within `PAYMENT_COOLDOWN_MINUTES` (default 5) — no rubber-stamping chains.
+- **Money-command rate limit:** at most 6 money commands per member per hour.
+
+## Pay anyone (3-super approval)
+
+An admin can queue a payment to **any bank account** with
+`payanyone <amount> <account> <bank> <name>`. The money only moves after
+**three distinct super admins** approve (`approve <id>` on the `pendingpay`
+list). Every step is audited; the payout is name-checked and booked as a
+ledger expense. Self-approval is blocked and repeat approvals are rejected.
+
+## Buy-votes (what should the coop buy?)
+
+Admins open a purchase poll with `startbuyvote <title>`, add options with
+`addoption <poll id> <name> <cost> [account] [bank]`, members vote with
+`votebuy <poll id> <option>` and see results with `buypolls`. Closing the poll
+(`closebuyvote <id>`) tallies votes and **auto-creates the pay-anyone request**
+for the winning option's vendor account — so purchases follow the same
+3-super control as every other outgoing payment.
+
+## Payroll
+
+Super admins configure their own salary/stipend with
+`setpay <phone> <amount>`. `runpayroll <narration>` pays everyone configured —
+**to their registered bank accounts, never wallets** — with a mandatory
+narration recorded in the ledger and audit log. Members without bank details
+are skipped and reported.
+
+## Exports
+
+`export members` / `export ledger` generates **Excel (.xlsx) and PDF** files,
+saves them under `exports/`, emails download links to the requesting super
+admin (SMTP config), and returns dashboard links. Exports are audited.
+
+## Guarantor default deductions
+
+When a loan is **2+ months overdue**, each confirmed guarantor gets a
+**10-day notice**: 50% of the loan's flat interest will be deducted from
+their savings unless the borrower clears the arrears first. If day 10 arrives
+and the loan still isn't repaid, the deduction executes automatically
+(savings balance + lifetime savings reduced, ledger entry recorded, everyone
+notified). Clearing the arrears during the window cancels it.
+
+## Backups
+
+A daily scheduler job snapshots the SQLite database file into
+`backups/backup-YYYY-MM-DD.db.gz`, keeping the newest 30.
 
 ## Support tickets
 
@@ -253,9 +325,11 @@ a unit election is automatically installed as that unit's admin.
 
 ## Payment provider failover
 
-Top-ups and payouts run through Flutterwave or Paystack. If the configured
-provider errors repeatedly it is circuit-broken (5-minute cooldown) and the
-other provider takes over automatically until it recovers.
+Top-ups and payouts run through **Monnify** (primary) with **Paystack** as the
+automatic fallback (Flutterwave support remains in the adapter layer). If the
+active provider errors repeatedly it is circuit-broken (5-minute cooldown) and
+the next provider takes over until it recovers. Set credentials via
+`MONNIFY_*` / `PAYSTACK_*` / `FLUTTERWAVE_*` env vars.
 
 ## Monthly statements & birthdays
 
@@ -290,6 +364,13 @@ npx tsx src/seed.ts \
   --admin-pin 1234
 ```
 
+Or, for a quick test coop with no admin, insert one directly so members can
+join:
+
+```bash
+npx tsx -e "import { prisma } from './src/lib/prisma.js'; await prisma.cooperative.create({ data: { name: 'Test Farmers Coop', code: 'TEST01', state: 'Oyo' } }); console.log('created'); process.exit(0);"
+```
+
 ## Webhook setup (Meta Cloud API)
 
 1. In the Meta developer app, add the **WhatsApp** product and link a test
@@ -305,14 +386,6 @@ npx tsx src/seed.ts \
 For local testing without a public host, use a tunnel like `cloudflared
 tunnel --url http://localhost:3000`.
 
-## Seeding a cooperative
-
-With no CLI admin yet, insert a cooperative directly so members can join:
-
-```bash
-npx tsx -e "import { prisma } from './src/lib/prisma.js'; await prisma.cooperative.create({ data: { name: 'Test Farmers Coop', code: 'TEST01', state: 'Oyo' } }); console.log('created'); process.exit(0);"
-```
-
 ## Roadmap
 
 - [x] Phase 1: onboarding, balance, savings (this repo)
@@ -326,6 +399,12 @@ npx tsx -e "import { prisma } from './src/lib/prisma.js'; await prisma.cooperati
   tenure caps, loan-to-savings cap, late fines, defaulter blocking), KYC
   (OTP phone verification, next of kin), PIN lockout, audit trail, support
   tickets, elections (unit admins + executives), provider failover
+- [x] Phase 3.6: ledger P&L + profit-based dividends, tiered loan interest,
+  ₦2,000 loan admin charge, **two-super loan sign-off**, pay-anyone with
+  3-super approval, buy-votes with auto payment requests, payroll to bank
+  accounts with narrations, Excel/PDF exports by email, hash-chained audit,
+  daily payout limits + approval cool-offs, guarantor default deductions,
+  daily backups, Monnify primary provider
 - [ ] Phase 4: marketplace, state/LGA grouping, Pidgin, scale, more languages
 
 ## Tests

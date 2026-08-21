@@ -5,6 +5,7 @@ import { sendText } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { createUnit, joinUnit, setUnitAdmin, broadcastToScope } from "../src/services/units.js";
 import { computeDividendPreview, distributeDividend } from "../src/services/dividends.js";
+import { recordLedger } from "../src/services/ledger.js";
 import { runAutoSaveReminders, runMonthlyStatements, runBirthdayGreetings, setAutoSave, setInterestRate } from "../src/services/scheduler.js";
 import { createContribution } from "../src/services/cooperative.js";
 
@@ -40,6 +41,15 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string }
 
 beforeEach(async () => {
   vi.clearAllMocks();
+    await prisma.posting.deleteMany();
+  await prisma.journalEntry.deleteMany();
+  await prisma.webhookEvent.deleteMany();
+  await prisma.pollBallot.deleteMany();
+  await prisma.pollOption.deleteMany();
+  await prisma.purchasePoll.deleteMany();
+  await prisma.externalPayment.deleteMany();
+  await prisma.guarantorDeduction.deleteMany();
+  await prisma.ledgerEntry.deleteMany();
   await prisma.voteBallot.deleteMany();
   await prisma.voteCandidate.deleteMany();
   await prisma.vote.deleteMany();
@@ -177,7 +187,7 @@ describe("recurring contributions + interest", () => {
 });
 
 describe("dividends", () => {
-  it("computes a real-time dividend preview and distributes to wallets", async () => {
+  it("computes a real-time dividend preview from net profit and distributes to wallets", async () => {
     const coop = await makeCoop("TEST16", "Test Coop", ADMIN_PHONE);
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     await makeMember(PHONE, coop.id);
@@ -186,13 +196,19 @@ describe("dividends", () => {
     await createContribution(PHONE, 40000);
     await createContribution(OTHER_PHONE, 60000);
 
+    // Profit comes from the books now: 120k income - 20k expenses = 100k.
+    await recordLedger({ cooperativeId: coop.id, type: "income", category: "interest", amount: 120000, note: "loan interest" });
+    await recordLedger({ cooperativeId: coop.id, type: "expense", category: "operating_cost", amount: 20000, note: "stationery + logistics" });
+    const superAdmin = await makeMember("2348075555555", coop.id, { role: "superadmin" });
+
     const preview = await computeDividendPreview(PHONE, 5);
     expect(preview.ok).toBe(true);
     expect(preview.message).toContain("Dividend pool");
-    expect(preview.message).toContain("NGN 5,000.00"); // 5% of 100,000
+    expect(preview.message).toContain("NGN 100,000.00"); // net profit
+    expect(preview.message).toContain("NGN 5,000.00"); // 5% of profit
     expect(preview.message).toContain("NGN 2,000.00"); // PHONE's share = 5% of 40,000
 
-    const result = await distributeDividend(ADMIN_PHONE, 5);
+    const result = await distributeDividend(superAdmin.phone, 5);
     expect(result.ok).toBe(true);
 
     const phoneMember = await prisma.member.findFirst({ where: { phone: PHONE }, include: { wallet: true } });
@@ -272,3 +288,4 @@ describe("monthly statements + birthday greetings", () => {
     expect(sent).toBe(0);
   });
 });
+
