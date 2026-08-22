@@ -89,6 +89,18 @@ export interface ProviderAdapter {
   verifyWebhook(rawBody: string, headers: Record<string, string | string[] | undefined>): boolean;
   /** Parse a raw webhook body into a PaymentNotification, or null if irrelevant */
   parseNotification(body: unknown): PaymentNotification | null;
+  /**
+   * Ask the provider about a transfer we initiated (payout status polling).
+   * Lets us settle or refund rows stuck in "processing" without waiting for
+   * a webhook that may never arrive.
+   */
+  getTransferStatus?(reference: string): Promise<TransferStatus>;
+}
+
+export interface TransferStatus {
+  status: "successful" | "failed" | "pending" | "unknown";
+  providerRef?: string;
+  error?: string;
 }
 
 import { timingSafeEqual } from "node:crypto";

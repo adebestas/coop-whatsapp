@@ -10,7 +10,10 @@ export function approvalCooldownMs(): number {
 
 /**
  * Fraud guard: total money-out per cooperative per day may not exceed the
- * configured ceiling. Returns a warning string when close to the limit.
+ * configured ceiling. Also enforces an optional PILOT_FLOAT_CAP — a hard
+ * ceiling on total money-out this calendar month, meant for the pilot period
+ * (set PILOT_FLOAT_CAP=500000 in .env; unset/0 disables). Returns a warning
+ * string when close to the limit.
  */
 export async function checkDailyPayoutLimit(
   cooperativeId: string,
@@ -21,8 +24,9 @@ export async function checkDailyPayoutLimit(
 
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
+  const startOfMonth = new Date(startOfDay.getFullYear(), startOfDay.getMonth(), 1);
 
-  const [payouts, withdrawals, externals] = await Promise.all([
+  const [payouts, withdrawals, externals, monthPayouts] = await Promise.all([
     prisma.payout.aggregate({
       where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
       _sum: { amount: true },
@@ -35,6 +39,10 @@ export async function checkDailyPayoutLimit(
       where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
       _sum: { amount: true },
     }),
+    prisma.payout.aggregate({
+      where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
+      _sum: { amount: true },
+    }),
   ]);
 
   const spentToday =
@@ -44,8 +52,19 @@ export async function checkDailyPayoutLimit(
     return {
       ok: false,
       message:
-        `⛔ Daily payout ceiling reached: ${formatBalance(spentToday)} of ${formatBalance(limit)} already sent today. ` +
+        `🛑 Daily payout ceiling reached: ${formatBalance(spentToday)} of ${formatBalance(limit)} already sent today. ` +
         `This payment would exceed it. A super admin can raise the ceiling.`,
+    };
+  }
+
+  // Pilot float cap — total out this month.
+  const floatCap = Number(process.env.PILOT_FLOAT_CAP ?? 0);
+  if (floatCap > 0 && (monthPayouts._sum.amount ?? 0) + amount > floatCap) {
+    return {
+      ok: false,
+      message:
+        `🧪 Pilot safety cap reached: ${formatBalance(monthPayouts._sum.amount ?? 0)} has gone out this month and the pilot ceiling is ${formatBalance(floatCap)}. ` +
+        `Raise or remove PILOT_FLOAT_CAP once you're confident in live operations.`,
     };
   }
 
@@ -71,4 +90,9 @@ export function checkMoneyRateLimit(phone: string): boolean {
   stamps.push(now);
   moneyCommandLog.set(phone, stamps);
   return true;
+}
+
+/** Test hook: clear the in-memory money-command log. */
+export function resetMoneyRateLimit(): void {
+  moneyCommandLog.clear();
 }

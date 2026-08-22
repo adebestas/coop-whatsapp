@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
+import rateLimit from "@fastify/rate-limit";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { webhookRoutes } from "./routes/webhook.js";
@@ -15,7 +16,11 @@ declare module "fastify" {
 }
 
 export function buildApp() {
-  const app = Fastify({ logger: true });
+  const app = Fastify({
+    logger: true,
+    // Trust the reverse proxy (nginx/caddy) for correct client IPs in rate limits.
+    trustProxy: true,
+  });
 
   // Capture the RAW request body before JSON parsing — provider webhook
   // signatures are computed over the exact bytes sent, so we keep them.
@@ -39,6 +44,16 @@ export function buildApp() {
   );
 
   void app.register(cors, { origin: true });
+
+  // Rate limiting — blunt-force protection on every public route.
+  // Providers retry aggressively, so webhooks get a generous but bounded
+  // budget; everything else is tight.
+  const isTest = process.env.NODE_ENV === "test";
+  void app.register(rateLimit, {
+    global: true,
+    max: isTest ? 10_000 : 120,
+    timeWindow: "1 minute",
+  });
 
   app.get("/health", async () => ({ status: "ok", ts: new Date().toISOString() }));
 

@@ -37,6 +37,28 @@ import { checkDailyPayoutLimit } from "./fraud.js";
 import { runBackup } from "./backup.js";
 import { runReconciliation } from "./reconcile.js";
 import { resolveProvider } from "./payments/index.js";
+import { assertMoneyAuthorized, assertFreshPin, disable2fa, enable2fa, refreshPin } from "./auth2fa.js";
+
+/**
+ * Commands that move (or can move) money out. Each must pass the 2FA gate
+ * (live authenticator code when enrolled) before its handler runs.
+ */
+const MONEY_OUT_COMMANDS = new Set([
+  "approve",
+  "approvewithdraw",
+  "approvewdraw",
+  "finalize",
+  "payout",
+  "approveclaim",
+  "approvepay",
+  "runpayroll",
+]);
+
+/** Send the guard failure text and return true (command handled). */
+async function guardFailed(phone: string, message?: string): Promise<boolean> {
+  await sendText({ to: phone, text: message ?? "⛔ Not allowed." });
+  return true;
+}
 
 /** Is this phone an admin or super admin of some cooperative? */
 export async function isAdmin(phone: string): Promise<boolean> {
@@ -94,6 +116,34 @@ export async function handleAdminCommand(
   if (!ctx) return false;
   const { admin, coop, unitAdmin, isSuper } = ctx;
   const coopId = admin.cooperativeId;
+
+  // Security gates for account management.
+  if (cmd === "enable2fa") {
+    const r = await enable2fa(phone);
+    await sendText({ to: phone, text: r.message });
+    return true;
+  }
+  if (cmd === "disable2fa") {
+    const r = await disable2fa(phone);
+    await sendText({ to: phone, text: r.message });
+    return true;
+  }
+  if (cmd === "verifypin") {
+    if (!args[0]) {
+      await sendText({ to: phone, text: "Usage: *verifypin <your PIN>* — unlocks large payouts for 10 minutes." });
+      return true;
+    }
+    const r = await refreshPin(phone, args[0]);
+    await sendText({ to: phone, text: r.message });
+    return true;
+  }
+
+  // 2FA gate on every money-out command (consumes a trailing TOTP code).
+  if (MONEY_OUT_COMMANDS.has(cmd)) {
+    const guard = await assertMoneyAuthorized(admin.id, args);
+    if (!guard.ok) return guardFailed(phone, guard.message);
+    args = guard.args;
+  }
 
   switch (cmd) {
     case "pending": {
@@ -170,6 +220,9 @@ export async function handleAdminCommand(
         });
         return true;
       }
+      // Large single payouts need a recently verified PIN.
+      const pinCheck = await assertFreshPin(phone, amount);
+      if (!pinCheck.ok) return guardFailed(phone, pinCheck.message);
       await handlePayout(ctx, amount, targetPhone, narration);
       return true;
     }
@@ -209,6 +262,14 @@ export async function handleAdminCommand(
       if (!id) {
         await sendText({ to: phone, text: "Usage: *finalize <request id>*" });
         return true;
+      }
+      // Look up the amount so large payouts require a fresh PIN too.
+      const req = await prisma.withdrawalRequest.findFirst({
+        where: { OR: [{ id }, { id: { startsWith: id } }, { id: { endsWith: id } }] },
+      });
+      if (req) {
+        const pinCheck = await assertFreshPin(phone, req.amount);
+        if (!pinCheck.ok) return guardFailed(phone, pinCheck.message);
       }
       const result = await finalizeWithdrawal(id, { id: admin.id, role: admin.role, phone });
       await sendText({ to: phone, text: result.message });

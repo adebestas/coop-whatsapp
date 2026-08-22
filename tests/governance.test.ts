@@ -43,7 +43,8 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
 beforeEach(async () => {
   vi.clearAllMocks();
   for (const m of [
-    "posting", "journalEntry", "webhookEvent", "pollBallot", "pollOption", "purchasePoll", "externalPayment",
+    "posting", "journalEntry", "webhookEvent",
+    "beneficiary", "pollBallot", "pollOption", "purchasePoll", "externalPayment",
     "guarantorDeduction", "ledgerEntry",
     "voteBallot", "voteCandidate", "vote", "supportTicket", "auditLog",
     "deathValidation", "deathClaim", "withdrawalRequest", "contribution",
@@ -326,6 +327,8 @@ describe("provider failover", () => {
     expect(resolveProvider().name).toBe("monnify");
   });
 });
+
+
 
 
 

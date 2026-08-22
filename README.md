@@ -412,3 +412,20 @@ tunnel --url http://localhost:3000`.
 ```bash
 npm test
 ```
+## Security & go-live (batch 4)
+
+Money-out commands can require a one-time 6-digit code from an authenticator
+app: admins run *enable2fa* once (scan the QR / paste the key into Google
+Authenticator or Authy), after which every payout-style command must end with
+the current code, e.g. `payout 5000 234801... vendor refund 482913`. Set
+`TWO_FA_REQUIRED=1` to force enrolment. Large payouts additionally need a
+recently verified PIN (`verifypin <pin>` unlocks big payouts for 10 minutes).
+
+First-time bank accounts are held for `NEW_BENEFICIARY_HOLD_HOURS` (24h
+default) before they can receive money — this kills account-takeover fraud. A
+status poller auto-confirms or refunds transfers stuck in "processing" using
+the provider API, and every super admin receives a *Daily summary* of all
+money movement (`DIGEST_HOUR`). During the pilot, `PILOT_FLOAT_CAP` caps total
+monthly money-out per cooperative as a hard brake.
+
+See `.env.example` and AUDIT.md ("Deployment checklist") before going live.

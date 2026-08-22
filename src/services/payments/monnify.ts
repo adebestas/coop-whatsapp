@@ -8,6 +8,7 @@ import type {
   ResolveAccountResult,
   PayoutParams,
   PayoutResult,
+  TransferStatus,
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
 
@@ -91,6 +92,29 @@ export const monnifyAdapter: ProviderAdapter = {
       provider: "monnify",
       raw: body,
     };
+  },
+
+  async getTransferStatus(reference) {
+    if (!configured()) return { status: "unknown", error: "Monnify is not configured" };
+    try {
+      const res = await api<MonnifyResponse<{
+        reference?: string;
+        status?: string;
+        providerReference?: string;
+      }>>("GET", `/api/v2/disbursements/single/summary?reference=${encodeURIComponent(reference)}`);
+      const s = String(res.responseBody?.status ?? "").toUpperCase();
+      const status: TransferStatus["status"] =
+        s === "SUCCESSFUL" || s === "PAID"
+          ? "successful"
+          : s === "FAILED" || s === "REVERSED"
+            ? "failed"
+            : s === "PENDING" || s === "ONGOING" || s === "PROCESSING"
+              ? "pending"
+              : "unknown";
+      return { status, providerRef: res.responseBody?.providerReference };
+    } catch (err: any) {
+      return { status: "unknown", error: String(err?.message ?? err) };
+    }
   },
 
   async createVirtualAccount(params: CreateVirtualAccountParams): Promise<VirtualAccountData> {

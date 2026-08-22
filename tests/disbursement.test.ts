@@ -5,6 +5,7 @@ import { sendText } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { approveLoan } from "../src/services/loans.js";
 import { namesMatch } from "../src/services/disbursements.js";
+import { resetMoneyRateLimit } from "../src/services/fraud.js";
 
 // Mock the payment provider so we control account-name resolution + payouts.
 vi.mock("../src/lib/messaging.js", () => ({
@@ -102,12 +103,14 @@ async function getGuaranteedLoan(borrowerName?: string) {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  resetMoneyRateLimit();
   state.resolveName = "ADA OBI";
   state.resolveFails = false;
   state.payoutFails = false;
     await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
   await prisma.webhookEvent.deleteMany();
+  await prisma.beneficiary.deleteMany();
   await prisma.pollBallot.deleteMany();
   await prisma.pollOption.deleteMany();
   await prisma.purchasePoll.deleteMany();
@@ -389,4 +392,5 @@ describe("withdrawals", () => {
     expect(after!.status).not.toBe("paid");
   });
 });
+
 

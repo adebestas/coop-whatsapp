@@ -7,6 +7,7 @@ import type {
   ResolveAccountParams,
   ResolveAccountResult,
   VirtualAccountData,
+  TransferStatus,
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
 
@@ -131,5 +132,25 @@ export const flutterwaveAdapter: ProviderAdapter = {
       provider: "flutterwave",
       raw: body,
     };
+  },
+
+  async getTransferStatus(reference) {
+    try {
+      // Flutterwave v3 supports lookup by our own transfer reference.
+      const res = await api<{ data?: any }>("GET", `/transfers?reference=${encodeURIComponent(reference)}`);
+      const d = Array.isArray(res.data) ? res.data[0] : res.data;
+      const s = String(d?.status ?? "").toLowerCase();
+      const status: TransferStatus["status"] =
+        s === "successful"
+          ? "successful"
+          : s === "failed" || s === "reversed" || s === "cancelled"
+            ? "failed"
+            : s === "processing" || s === "pending" || s === "new" || s === "ongoing"
+              ? "pending"
+              : "unknown";
+      return { status, providerRef: d?.id != null ? String(d.id) : undefined };
+    } catch (err: any) {
+      return { status: "unknown", error: String(err?.message ?? err) };
+    }
   },
 };

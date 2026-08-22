@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { sendText } from "../lib/messaging.js";
 import { sendToBank } from "./disbursements.js";
+import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
@@ -80,6 +81,19 @@ export async function requestWithdrawal(
       ok: false,
       message: "No bank account on file. Reply *withdraw <amount> <account number> <bank>* to set one, e.g. *withdraw 5000 0123456789 Access*.",
     };
+  }
+
+  // New-payee cooling period — a hijacked account changing bank details then
+  // withdrawing same-day is the classic takeover pattern; slow it down.
+  const beneficiaryCheck = await ensureBeneficiaryAllowed({
+    cooperativeId: member.cooperativeId,
+    memberId: member.id,
+    accountNumber: accNo,
+    bankCode,
+    bankName,
+  });
+  if (!beneficiaryCheck.ok) {
+    return { ok: false, message: beneficiaryCheck.message! };
   }
 
   const request = await prisma.withdrawalRequest.create({

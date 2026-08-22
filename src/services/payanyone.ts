@@ -5,6 +5,7 @@ import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
 import { approvalCooldownMs, checkDailyPayoutLimit } from "./fraud.js";
+import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
 
 export interface PayAnyoneResult {
   ok: boolean;
@@ -28,6 +29,18 @@ export async function requestExternalPayment(
 
   const limit = await checkDailyPayoutLimit(actor.cooperativeId, input.amount);
   if (!limit.ok) return { ok: false, message: limit.message! };
+
+  // New-payee cooling period applies to external beneficiaries too.
+  const beneficiaryCheck = await ensureBeneficiaryAllowed({
+    cooperativeId: actor.cooperativeId,
+    memberId: null,
+    accountNumber: input.accountNumber,
+    bankCode: input.bankCode,
+    bankName: input.bankName ?? null,
+  });
+  if (!beneficiaryCheck.ok) {
+    return { ok: false, message: beneficiaryCheck.message! };
+  }
 
   const payment = await prisma.externalPayment.create({
     data: {

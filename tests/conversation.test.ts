@@ -50,6 +50,7 @@ beforeEach(async () => {
     await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
   await prisma.webhookEvent.deleteMany();
+  await prisma.beneficiary.deleteMany();
   await prisma.pollBallot.deleteMany();
   await prisma.pollOption.deleteMany();
   await prisma.purchasePoll.deleteMany();
@@ -332,4 +333,5 @@ it("requires guarantor confirmation and two-step admin approval for loans", asyn
     expect(done!.status).toBe("approved");
   });
 });
+
 

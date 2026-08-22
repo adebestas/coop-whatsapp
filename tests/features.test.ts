@@ -44,6 +44,7 @@ beforeEach(async () => {
     await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
   await prisma.webhookEvent.deleteMany();
+  await prisma.beneficiary.deleteMany();
   await prisma.pollBallot.deleteMany();
   await prisma.pollOption.deleteMany();
   await prisma.purchasePoll.deleteMany();
@@ -288,4 +289,5 @@ describe("monthly statements + birthday greetings", () => {
     expect(sent).toBe(0);
   });
 });
+
 

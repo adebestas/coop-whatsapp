@@ -100,3 +100,28 @@ and all dual-control blocks. Full suite: **57/57**, `tsc --noEmit` clean.
 5. **Provider credentials** (`MONNIFY_*`, `PAYSTACK_SECRET_KEY`,
    `FLUTTERWAVE_WEBHOOK_HASH`) must be set in `.env` before go-live; adapters
    refuse to operate without them.
+
+## Pre-launch hardening (batch 4)
+
+Real-risk fixes identified before live testing. All default OFF under
+`NODE_ENV=test` so the existing suite stays deterministic.
+
+| Risk | Control | Where |
+|---|---|---|
+| Phone/account takeover | TOTP 2FA on every money-out admin command (`enable2fa`, trailing 6-digit code consumed from command); `TWO_FA_REQUIRED=1` makes enrolment compulsory for admins | `src/lib/totp.ts`, `src/services/auth2fa.ts`, `admin.ts` |
+| Large single payout after session hijack | Fresh-PIN threshold: payouts above `REPIN_THRESHOLD_NGN` require `verifypin` within `FRESH_PIN_MINUTES` (default 10 min) — applies to `payout` and `finalize` | `auth2fa.assertFreshPin`, `admin.ts` |
+| Insider redirects payees | 24h new-beneficiary hold: first-time bank accounts cannot receive money for `NEW_BENEFICIARY_HOLD_HOURS`; records kept even when disabled | `src/services/beneficiaries.ts`, wired into withdrawals + pay-anyone |
+| Stuck transfers / silent provider failures | Status poller queries each provider (`getTransferStatus`) for rows in `processing` >10 min: confirms success, refunds failures, notifies supers | `src/services/statuspoller.ts`, adapters |
+| Silent insider theft | Daily movement digest to ALL super admins at `DIGEST_HOUR`: every debit yesterday, per cooperative, once/day deduped | `scheduler.runDailyDigest` |
+| Runaway losses during pilot | Monthly float cap `PILOT_FLOAT_CAP` enforced inside the daily-limit fraud guard | `fraud.checkDailyPayoutLimit` |
+| Misconfigured deployment | Startup env validation refuses boot without WhatsApp credentials; warns on missing providers/weak secrets | `src/lib/envcheck.ts`, wired into `index.ts` |
+| Brute force / webhook floods | `@fastify/rate-limit` global 120 req/min (10k in tests), `trustProxy` behind reverse proxy | `app.ts` |
+
+### Deployment checklist (go-live)
+
+1. Set `NODE_ENV=production`, strong `ADMIN_JWT_SECRET`/`SESSION_SECRET` (`openssl rand -hex 32`).
+2. Terminate TLS at nginx/caddy; forward to PORT; keep provider webhooks on HTTPS only.
+3. In Monnify/Paystack/Flutterwave dashboards, IP-allowlist the server egress IP.
+4. Start with `PILOT_FLOAT_CAP` at an amount you can afford to lose; raise it gradually.
+5. Enrol every admin/super with *enable2fa* before go-live (or set `TWO_FA_REQUIRED=1`).
+6. Confirm poller + digest logs appear in production within the first day.

@@ -16,6 +16,7 @@ import { computeDividendPreview } from "./dividends.js";
 import { setAutoSave } from "./scheduler.js";
 import { joinUnit } from "./units.js";
 import { withdrawLimit, requestWithdrawal, canWithdraw } from "./withdrawals.js";
+import { checkMoneyRateLimit } from "./fraud.js";
 import { verifyMemberPin } from "./pin.js";
 import { resolveBankCode } from "../lib/banks.js";
 import { createTicket, listTickets, resolveTicket } from "./support.js";
@@ -144,19 +145,26 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
       break;
 
     case "save":
-      await handleSave(phone, args);
+    case "loan":
+    case "repay":
+    case "withdraw": {
+      // Fraud brake: cap rapid-fire money commands per phone (6/hour).
+      if (!checkMoneyRateLimit(phone)) {
+        await sendText({
+          to: phone,
+          text: "⏳ You've made several money requests in the last hour. For your safety, please wait a little before trying again.",
+        });
+        break;
+      }
+      if (cmd === "save") await handleSave(phone, args);
+      else if (cmd === "loan") await handleLoan(phone, args);
+      else if (cmd === "repay") await handleRepay(phone, args);
+      else await handleWithdraw(phone, args);
       break;
+    }
 
     case "fund":
       await handleFund(phone);
-      break;
-
-    case "loan":
-      await handleLoan(phone, args);
-      break;
-
-    case "repay":
-      await handleRepay(phone, args);
       break;
 
     case "confirm":
@@ -190,10 +198,6 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
 
     case "joinunit":
       await handleJoinUnit(phone, args);
-      break;
-
-    case "withdraw":
-      await handleWithdraw(phone, args);
       break;
 
     case "validate":
@@ -367,7 +371,7 @@ function buildMenu(member: { name: string; cooperative: { name: string }; wallet
       `• *buypolls* — see what the coop is voting to buy\n` +
       `• *votebuy <poll id> <option #>* — vote for what the coop should buy\n` +
       `• *menu* — show this menu\n\n` +
-      `Admins: try *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *units*, *addunit*, *approvewdraw <id>*, *overridewithdrawal <phone>*, *deathclaim*, *claimbank*, *tickets*, *resolve*, *startvote unit|exec ...*, *candidate*, *closevote*, *startbuyvote <title>*, *addoption <id> <item> <cost> <acct> <bank>*, *closebuyvote <id>*\n` +
+      `Admins: try *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *units*, *addunit*, *approvewdraw <id>*, *overridewithdrawal <phone>*, *deathclaim*, *claimbank*, *tickets*, *resolve*, *startvote unit|exec ...*, *candidate*, *closevote*, *startbuyvote <title>*, *addoption <id> <item> <cost> <acct> <bank>*, *closebuyvote <id>*, *enable2fa* (protect your account), *verifypin <pin>* (unlock big payouts for 10 min)\n` +
       `Super admin: *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *paydividend <rate% of profit>*, *pnl*, *payout <amt> <phone> <narration>*, *payanyone <amt> <account> <bank> <narration>* (3 supers), *approvepay <id>*, *setsalary*, *runpayroll <narration>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
 }

@@ -96,6 +96,7 @@ beforeEach(async () => {
     "posting",
     "journalEntry",
     "webhookEvent",
+    "beneficiary",
     "pollBallot",
     "pollOption",
     "purchasePoll",
@@ -373,3 +374,5 @@ describe("dual-control blocks", () => {
     expect(after!.status).toBe("validated");
   });
 });
+
+

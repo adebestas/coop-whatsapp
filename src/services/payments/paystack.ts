@@ -8,6 +8,7 @@ import type {
   ResolveAccountResult,
   PayoutParams,
   PayoutResult,
+  TransferStatus,
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
 
@@ -134,6 +135,31 @@ export const paystackAdapter: ProviderAdapter = {
       provider: "paystack",
       raw: body,
     };
+  },
+
+  async getTransferStatus(reference) {
+    try {
+      const res = await api<{ data?: { status?: string; id?: number | string; transfer_code?: string } }>(
+        "GET",
+        `/transfer/verify/${encodeURIComponent(reference)}`,
+      );
+      const s = String(res.data?.status ?? "").toLowerCase();
+      const status: TransferStatus["status"] =
+        s === "success"
+          ? "successful"
+          : s === "failed" || s === "reversed"
+            ? "failed"
+            : s === "processing" || s === "pending" || s === "otp"
+              ? "pending"
+              : "unknown";
+      return {
+        status,
+        providerRef: res.data?.transfer_code ?? (res.data?.id != null ? String(res.data.id) : undefined),
+      };
+    } catch (err: any) {
+      // Unconfigured or HTTP error — treat as unknown, never guess.
+      return { status: "unknown", error: String(err?.message ?? err) };
+    }
   },
 };
 

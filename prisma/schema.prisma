@@ -35,6 +35,7 @@ model Cooperative {
   votes              Vote[]
   ledgerEntries      LedgerEntry[]
   journalEntries     JournalEntry[]
+  beneficiaries      Beneficiary[]
   externalPayments   ExternalPayment[]
   purchasePolls      PurchasePoll[]
 }
@@ -56,8 +57,9 @@ model Member {
   state                   String? // member's home state/LGA grouping
   lga                     String?
   pin                     String? // 4-digit transaction PIN (hashed)
-  pinFailedCount          Int                 @default(0) // consecutive wrong PIN attempts
+  pinFailedCount          Int             @default(0) // consecutive wrong PIN attempts
   pinLockedUntil          DateTime? // brute-force lockout window
+  totpSecret              String? // base32 TOTP secret — when set, money-out commands need a live 6-digit code
   status                  String              @default("active") // pending | active | suspended | deceased
   bankAccountNumber       String? // member's bank account for withdrawals
   bankCode                String?
@@ -104,6 +106,7 @@ model Member {
   purchasePollsCreated    PurchasePoll[]      @relation("PollCreator")
   pollBallots             PollBallot[]        @relation("PollVoter")
   guarantorDeductions     GuarantorDeduction[]
+  beneficiaries           Beneficiary[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -303,6 +306,23 @@ model WithdrawalRequest {
 // If the account holder dies, the family can withdraw the money. An admin
 // records the claim with a death certificate, 2 guarantors validate it, and
 // the super admin's final approval triggers the payout to the family's bank.
+// ---- Beneficiaries (new-payee 24h cooling period) ----
+// First time a bank account is paid by a cooperative it enters a holding
+// window — account-takeover fraud usually wants SAME-DAY money movement.
+model Beneficiary {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  memberId      String? // null = external pay-anyone beneficiary
+  member        Member?  @relation(fields: [memberId], references: [id])
+  accountNumber String
+  bankCode      String
+  bankName      String?
+  createdAt     DateTime @default(now()) // hold window starts here
+
+  @@unique([cooperativeId, accountNumber, bankCode])
+}
+
 model DeathClaim {
   id                  String            @id @default(cuid())
   memberId            String // the deceased member

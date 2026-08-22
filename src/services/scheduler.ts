@@ -145,3 +145,78 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
   }
   return sent;
 }
+
+// ---- Daily movement digest to super admins ----
+// Every super sees EVERY debit that left the cooperative yesterday. Silent
+// insider theft becomes impossible when all eyes see the same daily summary.
+
+const digestLastSentDate = new Map<string, string>();
+
+export async function runDailyDigest(now = new Date()): Promise<number> {
+  const hour = now.getHours();
+  const targetHour = Number(process.env.DIGEST_HOUR ?? 20); // 8pm default
+  if (hour !== targetHour) return 0;
+
+  const coops = await prisma.cooperative.findMany({ select: { id: true, name: true } });
+  let sent = 0;
+  for (const coop of coops) {
+    const key = `${coop.id}:${now.toDateString()}`;
+    if (digestLastSentDate.get(coop.id) === key) continue;
+
+    const start = new Date(now);
+    start.setDate(start.getDate() - 1);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+
+    const [payouts, externals, topups] = await Promise.all([
+      prisma.payout.findMany({
+        where: { cooperativeId: coop.id, status: "successful", createdAt: { gte: start, lt: end } },
+        include: { member: { select: { name: true } } },
+      }),
+      prisma.externalPayment.findMany({
+        where: { cooperativeId: coop.id, status: "paid", updatedAt: { gte: start, lt: end } },
+      }),
+      prisma.contribution.aggregate({
+        where: { cooperativeId: coop.id, type: "topup", status: "confirmed", paidAt: { gte: start, lt: end } },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    // Withdrawals appear inside `payouts` too (TFR-WDR refs) — list them by note.
+    const lines: string[] = [];
+    let outTotal = 0;
+    for (const p of payouts) {
+      lines.push(`• ${formatBalance(p.amount)} → ${p.member.name} (${p.note?.slice(0, 60) ?? "payout"})`);
+      outTotal += p.amount;
+    }
+    for (const e of externals) {
+      lines.push(`• ${formatBalance(e.amount)} → external: ${e.beneficiaryName}`);
+      outTotal += e.amount;
+    }
+
+    const text =
+      `📋 *Daily summary for ${coop.name}* (${start.toLocaleDateString("en-GB")})\n\n` +
+      (lines.length
+        ? `Money out (${formatBalance(outTotal)}):\n${lines.join("\n")}\n\n`
+        : `No money went out yesterday. ✅\n\n`) +
+      `Money in: *${formatBalance(topups._sum.amount ?? 0)}* via bank transfers.\n\n` +
+      `_If ANY line looks wrong, raise it with the other supers NOW — reply *tickets* to open one._`;
+
+    await notifySuperAdminsDigest(coop.id, text);
+    digestLastSentDate.set(coop.id, key);
+    sent++;
+  }
+  return sent;
+}
+
+/** Digests go to every super admin directly (not the adminPhone alias). */
+async function notifySuperAdminsDigest(cooperativeId: string, text: string): Promise<void> {
+  const supers = await prisma.member.findMany({
+    where: { cooperativeId, role: "superadmin", status: "active" },
+    select: { phone: true },
+  });
+  for (const s of supers) {
+    await sendText({ to: s.phone, text }).catch(() => {});
+  }
+}
