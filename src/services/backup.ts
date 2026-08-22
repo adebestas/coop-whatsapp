@@ -19,6 +19,7 @@ export async function runBackup(): Promise<{ ok: boolean; message: string; file?
       auditLogs, supportTickets, votes, voteCandidates, voteBallots, dividends,
       dividendEntries, broadcasts, sessions, ledgerEntries, externalPayments,
       purchasePolls, pollOptions, pollBallots, guarantorDeductions,
+      journalEntries, postings, beneficiaries,
     ] = await Promise.all([
       prisma.cooperative.findMany(),
       prisma.unit.findMany(),
@@ -47,17 +48,21 @@ export async function runBackup(): Promise<{ ok: boolean; message: string; file?
       prisma.pollOption.findMany(),
       prisma.pollBallot.findMany(),
       prisma.guarantorDeduction.findMany(),
+      prisma.journalEntry.findMany(),
+      prisma.posting.findMany(),
+      prisma.beneficiary.findMany(),
     ]);
 
     const dump = {
       exportedAt: new Date().toISOString(),
-      version: 1,
+      version: 2,
       tables: {
         cooperatives, units, members, wallets, contributions, loans, guarantors,
         loanRepayments, payouts, withdrawalRequests, deathClaims, deathValidations,
         auditLogs, supportTickets, votes, voteCandidates, voteBallots, dividends,
         dividendEntries, broadcasts, sessions, ledgerEntries, externalPayments,
         purchasePolls, pollOptions, pollBallots, guarantorDeductions,
+        journalEntries, postings, beneficiaries,
       },
     };
 
