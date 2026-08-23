@@ -1,0 +1,38 @@
+{
+  "version": "3.0",
+  "screens": [
+    {
+      "id": "SECURE_INPUT",
+      "title": "Secure entry",
+      "terminal": true,
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "TextBody",
+            "text": "Type your secret code below. It is hidden on screen and never appears in this chat."
+          },
+          {
+            "type": "TextInput",
+            "name": "code",
+            "label": "Secret code",
+            "input-type": "passcode",
+            "required": true,
+            "pattern": "[0-9]{4,6}",
+            "error-message": "Enter 4 to 6 digits"
+          },
+          {
+            "type": "Footer",
+            "label": "Submit",
+            "on-click-action": {
+              "name": "complete",
+              "payload": {
+                "code": "${form.code}"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

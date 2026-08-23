@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../src/lib/prisma.js";
 import { handleMessage } from "../src/services/conversation.js";
-import { sendText } from "../src/lib/messaging.js";
+import { sendText, notifyMember } from "../src/lib/messaging.js";
+
+/** Union of chat texts from both channels-aware senders. */
+function allTexts(): string[] {
+  return [
+    ...vi.mocked(sendText).mock.calls.map((c) => c[0].text),
+    ...vi.mocked(notifyMember).mock.calls.map((c) => String(c[1])),
+  ];
+}
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { approveLoan } from "../src/services/loans.js";
 import { namesMatch } from "../src/services/disbursements.js";
@@ -10,6 +18,10 @@ import { resetMoneyRateLimit } from "../src/services/fraud.js";
 // Mock the payment provider so we control account-name resolution + payouts.
 vi.mock("../src/lib/messaging.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
+  notifyMember: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
+  sendSecurePrompt: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
 }));
 
 const state = {
@@ -109,6 +121,10 @@ beforeEach(async () => {
   state.payoutFails = false;
     await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
+  await prisma.coopPost.deleteMany();
+  await prisma.deductionItem.deleteMany();
+  await prisma.deductionWaiver.deleteMany();
+  await prisma.deductionBatch.deleteMany();
   await prisma.webhookEvent.deleteMany();
   await prisma.beneficiary.deleteMany();
   await prisma.pollBallot.deleteMany();
@@ -161,7 +177,7 @@ describe("loan disbursement", () => {
     expect(payout!.providerRef).toBe("trx-1");
 
     // The member was notified.
-    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const texts = allTexts().join("\n");
     expect(texts).toContain("disbursed");
   });
 

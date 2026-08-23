@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { notifyMember } from "../lib/messaging.js";
 
 /** Coop admin creates a workplace/unit. */
 export async function createUnit(
@@ -149,6 +149,6 @@ export async function broadcastToScope(opts: {
     },
   });
 
-  await Promise.all(members.map((m) => sendText({ to: m.phone, text })));
+  await Promise.all(members.map((m) => notifyMember(m, text)));
   return { ok: true, message: `Message sent to ${members.length} member(s) ✅` };
 }

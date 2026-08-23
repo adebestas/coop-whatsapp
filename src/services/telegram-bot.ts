@@ -28,7 +28,7 @@ export async function startTelegramBot(): Promise<void> {
         const userId = `tg:${chatId}`;
         const text = message.text.trim();
 
-        void handleMessage(userId, text).catch((err) => {
+        void handleMessage(userId, text, { telegramMessageId: message.message_id }).catch((err) => {
           console.error(`[telegram] handleMessage failed for ${userId}`, err);
         });
       }

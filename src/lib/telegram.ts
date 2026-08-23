@@ -48,3 +48,23 @@ export async function getTelegramUpdates(offset: number, timeout = 30): Promise<
   const json = (await res.json()) as { ok: boolean; result: TelegramUpdate[] };
   return json.ok ? json.result : [];
 }
+
+/**
+ * Delete a message from a private chat — bots may delete any message,
+ * including ones sent by the user. Used to make typed PINs/OTPs vanish
+ * from chat history right after they are read.
+ */
+export async function deleteTelegramMessage(chatId: string | number, messageId: number): Promise<boolean> {
+  if (!config.telegram.token) return false;
+  const res = await fetch(`${API_BASE}/bot${config.telegram.token}/deleteMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    console.error(`[telegram] deleteMessage failed (${res.status}): ${body}`);
+    return false;
+  }
+  return true;
+}

@@ -1,12 +1,12 @@
-// PROD SCHEMA (PostgreSQL — Render). KEEP IN SYNC with schema.local.prisma:
-// any model change must be made in BOTH files until local Postgres is installed.
-
+// LOCAL DEV/TEST SCHEMA (SQLite mirror of schema.prisma).
+// KEEP IN SYNC: any model change must be made in BOTH files.
+// Postgres install pending locally; Render deploys use schema.prisma.
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -39,87 +39,87 @@ model Cooperative {
   ledgerEntries      LedgerEntry[]
   journalEntries     JournalEntry[]
   beneficiaries      Beneficiary[]
-  coopPosts         CoopPost[]
-  deductionBatches  DeductionBatch[]
+  coopPosts          CoopPost[]
+  deductionBatches   DeductionBatch[]
   externalPayments   ExternalPayment[]
   purchasePolls      PurchasePoll[]
 }
 
 // ---- Members (users) ----
 model Member {
-  id                      String              @id @default(cuid())
-  code                    String              @unique // short human-friendly code (e.g. A1B2C3) for guarantor/reference
-  phone                   String // channel id: WhatsApp E.164 number, or "tg:<chatId>" for Telegram
-  contactPhone            String? // real phone number (E.164) used for top-ups, payouts, KYC
-  email                   String? // optional — statements can be sent here
-  dateOfBirth             DateTime? // optional — used for birthday greetings (month/day only)
-  nextOfKinName           String? // required for death claims
-  nextOfKinPhone          String?
-  phoneVerified           Boolean             @default(false) // OTP-verified real phone number
-  name                    String
-  bvn                     String?
-  role                    String              @default("member") // member | admin | superadmin
-  state                   String? // member's home state/LGA grouping
-  lga                     String?
-  pin                     String? // 4-digit transaction PIN (hashed)
-  pinFailedCount          Int             @default(0) // consecutive wrong PIN attempts
-  pinLockedUntil          DateTime? // brute-force lockout window
-  totpSecret              String? // base32 TOTP secret — when set, money-out commands need a live 6-digit code
-  status                  String              @default("active") // pending | active | suspended | deceased
-  bankAccountNumber       String? // member's bank account for withdrawals
-  bankCode                String?
-  bankName                String?
-  lastWithdrawalAt        DateTime? // when the member last withdrew (6-month rule)
-  withdrawalOverride      Boolean @default(false) // admin granted an early-withdrawal override
-  altChannelId            String? // linked second chat identity (other platform) — alerts only
-  preferredChannel        String? // whatsapp | telegram — most-used platform, auto-learned
-  lastStatementSentAt     DateTime? // month marker for monthly statements
-  lastBirthdayGreetedYear Int? // year marker so birthdays only fire once a year
-  virtualAccountNumber    String? // provider-issued account number for top-ups
-  virtualAccountBank      String?
-  virtualAccountProvider  String?
-  unitId                  String?
-  unit                    Unit?               @relation("UnitMembership", fields: [unitId], references: [id], onDelete: SetNull)
-  adminOf                 Unit[]              @relation("UnitAdmin")
-  autoSaveAmount          Float? // recurring contribution amount
-  autoSaveInterval        String? // weekly | monthly
-  autoSaveNextDue         DateTime? // when the next reminder should fire
-  autoSaveEnabled         Boolean             @default(false)
-  cooperativeId           String
-  cooperative             Cooperative         @relation(fields: [cooperativeId], references: [id])
-  createdAt               DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
-  wallet                  Wallet?
-  contributions           Contribution[]
-  loans                   Loan[]
-  payouts                 Payout[]
-  guarantorFor            Guarantor[]
-  dividendEntries         DividendEntry[]
-  withdrawalRequests      WithdrawalRequest[]
-  deathClaims             DeathClaim[]
-  deathValidations        DeathValidation[]
-  ticketsOpened           SupportTicket[]     @relation("TicketMember")
-  ticketsAssigned         SupportTicket[]     @relation("TicketAssignee")
-  voteCandidates          VoteCandidate[]     @relation("VoteCandidates")
-  voteBallots             VoteBallot[]        @relation("VoteBallots")
-  salaryAmount            Float? // monthly salary/stipend for super admins (0 = off)
-  salaryKind              String? // salary | stipend
-  externalPaymentsInitiated ExternalPayment[] @relation("ExternalPayInitiator")
-  externalPaymentsApproved1 ExternalPayment[] @relation("ExternalPayApprover1")
-  externalPaymentsApproved2 ExternalPayment[] @relation("ExternalPayApprover2")
-  externalPaymentsApproved3 ExternalPayment[] @relation("ExternalPayApprover3")
-  loanSuperApproved2      Loan[]              @relation("LoanSuper2")
-  pollOptionsCreated      PollOption[]        @relation("PollOptionCreator")
-  purchasePollsCreated    PurchasePoll[]      @relation("PollCreator")
-  pollBallots             PollBallot[]        @relation("PollVoter")
-  guarantorDeductions     GuarantorDeduction[]
-  beneficiaries           Beneficiary[]
-  postsHeld               CoopPost[]          @relation("PostIncumbent")
-  monthlyDeduction        Float? // agreed salary deduction remitted by employer
-  deductionItems          DeductionItem[]
-  deductionWaivers        DeductionWaiver[]
-  batchesCreated          DeductionBatch[]    @relation("DeductionBatchCreator")
-  batchesApproved         DeductionBatch[]    @relation("DeductionBatchApprover")
+  id                        String               @id @default(cuid())
+  code                      String               @unique // short human-friendly code (e.g. A1B2C3) for guarantor/reference
+  phone                     String // channel id: WhatsApp E.164 number, or "tg:<chatId>" for Telegram
+  contactPhone              String? // real phone number (E.164) used for top-ups, payouts, KYC
+  email                     String? // optional — statements can be sent here
+  dateOfBirth               DateTime? // optional — used for birthday greetings (month/day only)
+  nextOfKinName             String? // required for death claims
+  nextOfKinPhone            String?
+  phoneVerified             Boolean              @default(false) // OTP-verified real phone number
+  name                      String
+  bvn                       String?
+  role                      String               @default("member") // member | admin | superadmin
+  state                     String? // member's home state/LGA grouping
+  lga                       String?
+  pin                       String? // 4-digit transaction PIN (hashed)
+  pinFailedCount            Int                  @default(0) // consecutive wrong PIN attempts
+  pinLockedUntil            DateTime? // brute-force lockout window
+  totpSecret                String? // base32 TOTP secret — when set, money-out commands need a live 6-digit code
+  status                    String               @default("active") // pending | active | suspended | deceased
+  bankAccountNumber         String? // member's bank account for withdrawals
+  bankCode                  String?
+  bankName                  String?
+  lastWithdrawalAt          DateTime? // when the member last withdrew (6-month rule)
+  withdrawalOverride        Boolean              @default(false) // admin granted an early-withdrawal override
+  altChannelId              String? // linked second chat identity (other platform) — alerts only
+  preferredChannel          String? // whatsapp | telegram — most-used platform, auto-learned
+  lastStatementSentAt       DateTime? // month marker for monthly statements
+  lastBirthdayGreetedYear   Int? // year marker so birthdays only fire once a year
+  virtualAccountNumber      String? // provider-issued account number for top-ups
+  virtualAccountBank        String?
+  virtualAccountProvider    String?
+  unitId                    String?
+  unit                      Unit?                @relation("UnitMembership", fields: [unitId], references: [id], onDelete: SetNull)
+  adminOf                   Unit[]               @relation("UnitAdmin")
+  autoSaveAmount            Float? // recurring contribution amount
+  autoSaveInterval          String? // weekly | monthly
+  autoSaveNextDue           DateTime? // when the next reminder should fire
+  autoSaveEnabled           Boolean              @default(false)
+  cooperativeId             String
+  cooperative               Cooperative          @relation(fields: [cooperativeId], references: [id])
+  createdAt                 DateTime             @default(now())
+  updatedAt                 DateTime             @updatedAt
+  wallet                    Wallet?
+  contributions             Contribution[]
+  loans                     Loan[]
+  payouts                   Payout[]
+  guarantorFor              Guarantor[]
+  dividendEntries           DividendEntry[]
+  withdrawalRequests        WithdrawalRequest[]
+  deathClaims               DeathClaim[]
+  deathValidations          DeathValidation[]
+  ticketsOpened             SupportTicket[]      @relation("TicketMember")
+  ticketsAssigned           SupportTicket[]      @relation("TicketAssignee")
+  voteCandidates            VoteCandidate[]      @relation("VoteCandidates")
+  voteBallots               VoteBallot[]         @relation("VoteBallots")
+  salaryAmount              Float? // monthly salary/stipend for super admins (0 = off)
+  salaryKind                String? // salary | stipend
+  externalPaymentsInitiated ExternalPayment[]    @relation("ExternalPayInitiator")
+  externalPaymentsApproved1 ExternalPayment[]    @relation("ExternalPayApprover1")
+  externalPaymentsApproved2 ExternalPayment[]    @relation("ExternalPayApprover2")
+  externalPaymentsApproved3 ExternalPayment[]    @relation("ExternalPayApprover3")
+  loanSuperApproved2        Loan[]               @relation("LoanSuper2")
+  pollOptionsCreated        PollOption[]         @relation("PollOptionCreator")
+  purchasePollsCreated      PurchasePoll[]       @relation("PollCreator")
+  pollBallots               PollBallot[]         @relation("PollVoter")
+  guarantorDeductions       GuarantorDeduction[]
+  beneficiaries             Beneficiary[]
+  postsHeld                 CoopPost[]           @relation("PostIncumbent")
+  monthlyDeduction          Float? // agreed salary deduction remitted by employer
+  deductionItems            DeductionItem[]
+  deductionWaivers          DeductionWaiver[]
+  batchesCreated            DeductionBatch[]     @relation("DeductionBatchCreator")
+  batchesApproved           DeductionBatch[]     @relation("DeductionBatchApprover")
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -184,7 +184,7 @@ model Loan {
   bankName           String? // bank display name
   disbursementStatus String? // pending | successful | failed | name_mismatch
   disbursementError  String? // provider error or name-mismatch detail
-  adminCharge        Float   @default(2000) // flat admin charge deducted from disbursement
+  adminCharge        Float           @default(2000) // flat admin charge deducted from disbursement
   disbursementAmount Float? // amount actually sent = amount - adminCharge
   adminApprovedById  String? // who gave the first (admin) approval
   finalApprovedById  String? // first super admin approval
@@ -230,22 +230,22 @@ model LoanRepayment {
 
 // ---- Payouts (admin disbursements to members) ----
 model Payout {
-  id            String      @id @default(cuid())
-  amount        Float
-  reference     String      @unique
+  id             String      @id @default(cuid())
+  amount         Float
+  reference      String      @unique
   // Deterministic per-logical-operation key so provider retries never
   // double-pay: e.g. TFR-LOAN-<loanId>. Unique => second create is rejected.
-  idempotencyKey String?    @unique
-  status        String      @default("pending") // pending | processing | successful | failed
-  provider      String? // monnify | paystack | flutterwave
-  providerRef   String? // provider-side reference/id
-  note          String?
-  memberId      String
-  member        Member      @relation(fields: [memberId], references: [id])
-  cooperativeId String
-  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  idempotencyKey String?     @unique
+  status         String      @default("pending") // pending | processing | successful | failed
+  provider       String? // monnify | paystack | flutterwave
+  providerRef    String? // provider-side reference/id
+  note           String?
+  memberId       String
+  member         Member      @relation(fields: [memberId], references: [id])
+  cooperativeId  String
+  cooperative    Cooperative @relation(fields: [cooperativeId], references: [id])
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
 
   @@index([status, createdAt])
 }
@@ -269,13 +269,13 @@ model WebhookEvent {
 
 // ---- Double-entry journal (accounting source of truth) ----
 model JournalEntry {
-  id            String    @id @default(cuid())
+  id            String      @id @default(cuid())
   cooperativeId String
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
   // Idempotency key: the same business event can never post twice.
-  txRef         String    @unique
+  txRef         String      @unique
   description   String
-  createdAt     DateTime  @default(now())
+  createdAt     DateTime    @default(now())
   postings      Posting[]
 }
 
@@ -323,15 +323,15 @@ model WithdrawalRequest {
 // First time a bank account is paid by a cooperative it enters a holding
 // window — account-takeover fraud usually wants SAME-DAY money movement.
 model Beneficiary {
-  id            String   @id @default(cuid())
+  id            String      @id @default(cuid())
   cooperativeId String
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
   memberId      String? // null = external pay-anyone beneficiary
-  member        Member?  @relation(fields: [memberId], references: [id])
+  member        Member?     @relation(fields: [memberId], references: [id])
   accountNumber String
   bankCode      String
   bankName      String?
-  createdAt     DateTime @default(now()) // hold window starts here
+  createdAt     DateTime    @default(now()) // hold window starts here
 
   @@unique([cooperativeId, accountNumber, bankCode])
 }
@@ -434,18 +434,18 @@ model ExternalPayment {
 
 // ---- Buy votes (what should the coop buy for members?) ----
 model PurchasePoll {
-  id            String      @id @default(cuid())
-  cooperativeId String
-  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
-  title         String
-  status        String      @default("open") // open | closed
+  id             String       @id @default(cuid())
+  cooperativeId  String
+  cooperative    Cooperative  @relation(fields: [cooperativeId], references: [id])
+  title          String
+  status         String       @default("open") // open | closed
   winnerOptionId String?
-  createdById   String
-  creator       Member      @relation("PollCreator", fields: [createdById], references: [id])
-  options       PollOption[]
-  ballots       PollBallot[]
-  createdAt     DateTime    @default(now())
-  closedAt      DateTime?
+  createdById    String
+  creator        Member       @relation("PollCreator", fields: [createdById], references: [id])
+  options        PollOption[]
+  ballots        PollBallot[]
+  createdAt      DateTime     @default(now())
+  closedAt       DateTime?
 
   @@index([cooperativeId, status])
 }
@@ -467,14 +467,14 @@ model PollOption {
 }
 
 model PollBallot {
-  id       String     @id @default(cuid())
-  pollId   String
-  poll     PurchasePoll @relation(fields: [pollId], references: [id])
-  optionId String
-  option   PollOption   @relation(fields: [optionId], references: [id], onDelete: Cascade)
-  voterId  String
-  voter    Member       @relation("PollVoter", fields: [voterId], references: [id])
-  createdAt DateTime   @default(now())
+  id        String       @id @default(cuid())
+  pollId    String
+  poll      PurchasePoll @relation(fields: [pollId], references: [id])
+  optionId  String
+  option    PollOption   @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  voterId   String
+  voter     Member       @relation("PollVoter", fields: [voterId], references: [id])
+  createdAt DateTime     @default(now())
 
   @@unique([pollId, voterId]) // one person, one vote per poll
 }
@@ -638,20 +638,20 @@ model CoopPost {
 
 // ---- Employer salary-deduction remittance ----
 model DeductionBatch {
-  id            String      @id @default(cuid())
+  id            String          @id @default(cuid())
   cooperativeId String
-  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
-  ref           String      @unique
-  status        String      @default("draft") // draft | submitted | approved | rejected
-  totalAmount   Float       @default(0)
+  cooperative   Cooperative     @relation(fields: [cooperativeId], references: [id])
+  ref           String          @unique
+  status        String          @default("draft") // draft | submitted | approved | rejected
+  totalAmount   Float           @default(0)
   note          String?
   createdById   String
-  createdBy     Member      @relation("DeductionBatchCreator", fields: [createdById], references: [id])
+  createdBy     Member          @relation("DeductionBatchCreator", fields: [createdById], references: [id])
   approvedById  String?
-  approvedBy    Member?     @relation("DeductionBatchApprover", fields: [approvedById], references: [id])
+  approvedBy    Member?         @relation("DeductionBatchApprover", fields: [approvedById], references: [id])
   approvedAt    DateTime?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
   items         DeductionItem[]
 }
 

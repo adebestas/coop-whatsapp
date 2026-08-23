@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../src/lib/prisma.js";
 import { handleMessage } from "../src/services/conversation.js";
-import { sendText } from "../src/lib/messaging.js";
+import { sendText, notifyMember } from "../src/lib/messaging.js";
+
+/** Union of chat texts from both channels-aware senders. */
+function allTexts(): string[] {
+  return [
+    ...vi.mocked(sendText).mock.calls.map((c) => c[0].text),
+    ...vi.mocked(notifyMember).mock.calls.map((c) => String(c[1])),
+  ];
+}
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { createUnit, joinUnit, setUnitAdmin, broadcastToScope } from "../src/services/units.js";
 import { computeDividendPreview, distributeDividend } from "../src/services/dividends.js";
@@ -11,6 +19,10 @@ import { createContribution } from "../src/services/cooperative.js";
 
 vi.mock("../src/lib/messaging.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
+  notifyMember: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
+  sendSecurePrompt: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
 }));
 
 const ADMIN_PHONE = "2348090000001";
@@ -43,6 +55,10 @@ beforeEach(async () => {
   vi.clearAllMocks();
     await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
+  await prisma.coopPost.deleteMany();
+  await prisma.deductionItem.deleteMany();
+  await prisma.deductionWaiver.deleteMany();
+  await prisma.deductionBatch.deleteMany();
   await prisma.webhookEvent.deleteMany();
   await prisma.beneficiary.deleteMany();
   await prisma.pollBallot.deleteMany();
@@ -97,7 +113,8 @@ describe("workplaces (units)", () => {
 
     // Unit admin broadcasts -> only unit members receive it.
     await broadcastToScope({ senderPhone: PHONE, message: "Meeting Friday", scope: "unit" });
-    const calls = vi.mocked(sendText).mock.calls.map((c) => c[0].to);
+    const calls = vi.mocked(sendText).mock.calls.map((c) => c[0].to)
+      .concat(vi.mocked(notifyMember).mock.calls.map((c) => String(c[0].phone ?? c[0])));
     expect(calls).toContain(PHONE);
     expect(calls).toContain(OTHER_PHONE);
     expect(calls).not.toContain(ADMIN_PHONE);
@@ -105,7 +122,8 @@ describe("workplaces (units)", () => {
     // Coop admin broadcasts -> everyone in the coop receives it.
     vi.clearAllMocks();
     await broadcastToScope({ senderPhone: ADMIN_PHONE, message: "All hands", scope: "coop" });
-    const all = vi.mocked(sendText).mock.calls.map((c) => c[0].to);
+    const all = vi.mocked(sendText).mock.calls.map((c) => c[0].to)
+      .concat(vi.mocked(notifyMember).mock.calls.map((c) => String(c[0].phone ?? c[0])));
     expect(all).toContain(PHONE);
     expect(all).toContain(OTHER_PHONE);
     expect(all).toContain(ADMIN_PHONE);
@@ -151,7 +169,7 @@ describe("recurring contributions + interest", () => {
     const sent = await runAutoSaveReminders();
     expect(sent).toBe(1);
 
-    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const texts = allTexts().join("\n");
     expect(texts).toContain("Time to save");
     expect(texts).toContain("NGN 2,000.00");
 
@@ -236,7 +254,7 @@ describe("monthly statements + birthday greetings", () => {
     const member = await prisma.member.findFirst({ where: { phone: PHONE } });
     expect(member!.lastStatementSentAt).not.toBeNull();
 
-    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const texts = allTexts().join("\n");
     expect(texts).toContain("statement");
     expect(texts).toContain("NGN 5,000.00");
 
@@ -265,7 +283,7 @@ describe("monthly statements + birthday greetings", () => {
     const sent = await runBirthdayGreetings(new Date("2026-08-15"));
     expect(sent).toBe(1);
 
-    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const texts = allTexts().join("\n");
     expect(texts).toContain("Happy Birthday");
 
     const updated = await prisma.member.findUnique({ where: { id: member.id } });

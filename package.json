@@ -9,8 +9,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "prisma:generate": "prisma generate",
+    "prisma:generate:local": "prisma generate --schema prisma/schema.local.prisma",
     "prisma:migrate": "prisma migrate dev",
     "prisma:push": "prisma db push",
+    "prisma:push:local": "prisma db push --schema prisma/schema.local.prisma",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

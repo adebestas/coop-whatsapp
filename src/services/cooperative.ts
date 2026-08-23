@@ -48,9 +48,21 @@ export async function findOrCreateMember(
     });
     if (twin) {
       const platform = twin.phone.startsWith("tg:") ? "Telegram" : "WhatsApp";
+      const newPlatform = phone.startsWith("tg:") ? "Telegram" : "WhatsApp";
+      // Same human, second platform: link it as an alerts-only channel.
+      // Notifications follow their most-used app; accounts stay singular so
+      // transactions always happen in one place.
+      await prisma.member.update({
+        where: { id: twin.id },
+        data: { altChannelId: phone },
+      });
       return {
-        ok: false,
-        message: `You already have an account on *${platform}* with this phone number. You can only use one platform — finish your transactions there.`,
+        ok: true,
+        memberId: twin.id,
+        message:
+          `Welcome back, *${twin.name}*! Your account lives on *${platform}* — ` +
+          `this *${newPlatform}* chat will now receive your alerts.\n\n` +
+          `For saving, loans and withdrawals, keep using *${platform}*.`,
       };
     }
   }

@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { notifyMember } from "../lib/messaging.js";
 import { resolveProvider } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
 import { recordLedger } from "./ledger.js";
@@ -297,6 +297,6 @@ export function namesMatch(accountName: string, registeredName: string): boolean
   return a.size > 0;
 }
 
-async function notify(member: { phone: string }, text: string): Promise<void> {
-  await sendText({ to: member.phone, text }).catch(() => {});
+async function notify(member: { phone: string; altChannelId?: string | null; preferredChannel?: string | null }, text: string): Promise<void> {
+  await notifyMember(member, text).catch(() => {});
 }

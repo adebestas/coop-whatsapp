@@ -1,7 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../src/lib/prisma.js";
 import { handleMessage } from "../src/services/conversation.js";
-import { sendText } from "../src/lib/messaging.js";
+import { sendText, notifyMember } from "../src/lib/messaging.js";
+
+/** Union of chat texts from both channels-aware senders. */
+function allTexts(): string[] {
+  return [
+    ...vi.mocked(sendText).mock.calls.map((c) => c[0].text),
+    ...vi.mocked(notifyMember).mock.calls.map((c) => String(c[1])),
+  ];
+}
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { verifyMemberPin } from "../src/services/pin.js";
 import { addGuarantor } from "../src/services/guarantors.js";
@@ -11,6 +19,10 @@ import { createTicket, listTickets, resolveTicket } from "../src/services/suppor
 
 vi.mock("../src/lib/messaging.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
+  notifyMember: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
+  sendSecurePrompt: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
 }));
 
 const ADMIN_PHONE = "2348090000001";
@@ -43,6 +55,7 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
 beforeEach(async () => {
   vi.clearAllMocks();
   for (const m of [
+    "coopPost", "deductionItem", "deductionWaiver", "deductionBatch",
     "posting", "journalEntry", "webhookEvent",
     "beneficiary", "pollBallot", "pollOption", "purchasePoll", "externalPayment",
     "guarantorDeduction", "ledgerEntry",
@@ -227,7 +240,7 @@ describe("support tickets", () => {
     expect(ticket!.resolution).toContain("credited");
 
     // The member was notified in-chat.
-    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const texts = allTexts().join("\n");
     expect(texts).toContain("resolved");
   });
 

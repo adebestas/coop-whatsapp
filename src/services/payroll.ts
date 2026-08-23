@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
@@ -171,7 +171,7 @@ export async function runPayroll(
     paid += 1;
     total += amount;
 
-    if (limit.warning) await sendText({ to: triggeredBy.phone, text: limit.warning }).catch(() => {});
+    if (limit.warning) await notifyMember(triggeredBy, limit.warning).catch(() => {});
   }
 
   await audit({

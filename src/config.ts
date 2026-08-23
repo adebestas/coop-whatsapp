@@ -7,6 +7,10 @@ export const config = {
     token: process.env.WHATSAPP_TOKEN ?? "",
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID ?? "",
     verifyToken: process.env.WHATSAPP_VERIFY_TOKEN ?? "dev-verify-token",
+    // Published WhatsApp Flow used for hidden PIN/OTP entry (see flows/pin-flow.json).
+    pinFlowId: process.env.WHATSAPP_PIN_FLOW_ID ?? "",
+    // "draft" lets you test an unpublished Flow; publish before go-live.
+    pinFlowMode: process.env.WHATSAPP_PIN_FLOW_MODE ?? "published",
   },
   telegram: {
     token: process.env.TELEGRAM_BOT_TOKEN ?? "",

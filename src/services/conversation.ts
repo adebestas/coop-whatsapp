@@ -1,5 +1,7 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { sendText, sendSecurePrompt, platformOf } from "../lib/messaging.js";
+import { deleteTelegramMessage } from "../lib/telegram.js";
+import { randomBytes } from "node:crypto";
 import {
   createContribution,
   findOrCreateMember,
@@ -20,6 +22,9 @@ import { checkMoneyRateLimit } from "./fraud.js";
 import { verifyMemberPin } from "./pin.js";
 import { resolveBankCode } from "../lib/banks.js";
 import { createTicket, listTickets, resolveTicket } from "./support.js";
+import { listPosts } from "./posts.js";
+import { myDeduction, requestMonthWaiver } from "./deductions.js";
+import { aiEnabled, suggestCommand } from "../lib/ai.js";
 import { startVote, addCandidate, castVote, closeVote, showResults } from "./votes.js";
 import { castBuyVote, listBuyPolls } from "./buypoll.js";
 import {
@@ -57,7 +62,8 @@ export type BotState =
   | "awaiting_withdraw_account"
   | "awaiting_withdraw_bank"
   | "awaiting_withdraw_pin"
-  | "awaiting_death_cert";
+  | "awaiting_death_cert"
+  | "awaiting_ai_confirm";
 
 interface FlowData {
   joinCode?: string;
@@ -82,6 +88,22 @@ interface FlowData {
   withdrawBankCode?: string;
   withdrawBankName?: string;
   deathClaimId?: string;
+  /** AI fallback translator: proposed command awaiting user confirmation. */
+  aiCommand?: string;
+  aiArgs?: string[];
+  /** One-time token binding the current PIN prompt to a WhatsApp Flow card. */
+  flowToken?: string;
+}
+
+/** States where the user is typing a secret — flow-token guarded, Telegram messages deleted after read. */
+const SECRET_STATES: BotState[] = ["awaiting_pin", "awaiting_pin_confirm", "awaiting_withdraw_pin"];
+
+/** Metadata about how a message arrived (channel-specific extras). */
+export interface MessageMeta {
+  /** Echoed flow_token from a completed WhatsApp Flow card submission. */
+  flowToken?: string;
+  /** Telegram message id — secret replies are deleted right after reading. */
+  telegramMessageId?: number;
 }
 
 function isAwaitingState(state: BotState): boolean {
@@ -93,7 +115,11 @@ function parseCommand(text: string): { cmd: string; args: string[] } {
   return { cmd: parts[0] ?? "", args: parts.slice(1) };
 }
 
-export async function handleMessage(phone: string, text: string): Promise<void> {
+export async function handleMessage(
+  phone: string,
+  text: string,
+  meta: MessageMeta = {},
+): Promise<void> {
   const session = await prisma.session.upsert({
     where: { phone },
     create: { phone, state: "idle" },
@@ -116,11 +142,40 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
 
   // Multi-turn flow: the bot is waiting for an answer to a question.
   if (isAwaitingState(session.state as BotState)) {
-    await handleAwaitingInput(phone, session.state as BotState, text, session.data);
+    await handleAwaitingInput(phone, session.state as BotState, text, session.data, meta);
     return;
   }
 
   const member = await getMemberByPhone(phone);
+
+  // Linked alternate channel (same human, other platform): alerts-only.
+  // Learn their most-used app, but never execute commands here — banking
+  // stays on the account's home platform.
+  if (!member) {
+    const altOwner = await prisma.member.findFirst({ where: { altChannelId: phone } });
+    if (altOwner) {
+      const pref = platformOf(phone);
+      if (altOwner.preferredChannel !== pref) {
+        await prisma.member.update({
+          where: { id: altOwner.id },
+          data: { preferredChannel: pref },
+        });
+      }
+      const home = altOwner.phone.startsWith("tg:") ? "Telegram" : "WhatsApp";
+      await sendText({
+        to: phone,
+        text: `🔔 This chat receives your cooperative *alerts* only. For saving, loans and withdrawals, please use your *${home}* chat.`,
+      });
+      return;
+    }
+  } else if (member.preferredChannel !== platformOf(phone)) {
+    // Auto-learn the member's most-used platform from where they type.
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { preferredChannel: platformOf(phone) },
+    });
+  }
+
   const { cmd, args } = parseCommand(text);
 
   // Admin commands take priority (approve, reject, pending, payout).
@@ -182,6 +237,28 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
     case "ledger":
       await handleLedger(phone);
       break;
+
+    case "posts": {
+      const member = await getMemberByPhone(phone);
+      if (!member) {
+        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+        break;
+      }
+      await sendText({ to: phone, text: await listPosts(member.cooperativeId) });
+      break;
+    }
+
+    case "mydeduction": {
+      const result = await myDeduction(phone);
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "skipmonth": {
+      const result = await requestMonthWaiver(phone);
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
 
     case "history":
     case "statement":
@@ -328,13 +405,40 @@ export async function handleMessage(phone: string, text: string): Promise<void> 
       return;
     }
 
-    default:
+    default: {
+      // Optional AI fallback (GROQ_API_KEY): translate free text / pidgin
+      // into a real command, then ask the human to confirm it.
+      if (aiEnabled() && text.trim().length >= 4 && !/^[\d\s.,]+$/.test(text)) {
+        const suggestion = await suggestCommand(text);
+        if (suggestion) {
+          await prisma.session.upsert({
+            where: { phone },
+            create: {
+              phone,
+              state: "awaiting_ai_confirm",
+              data: JSON.stringify({ aiCommand: suggestion.command, aiArgs: suggestion.args }),
+            },
+            update: {
+              state: "awaiting_ai_confirm",
+              data: JSON.stringify({ aiCommand: suggestion.command, aiArgs: suggestion.args }),
+            },
+          });
+          await sendText({
+            to: phone,
+            text:
+              `🤖 Did you mean *${[suggestion.command, ...suggestion.args].join(" ")}*?\n\n` +
+              `Reply *yes* to run it or *no* to cancel.`,
+          });
+          return;
+        }
+      }
       await sendText({
         to: phone,
         text:
           `I didn't quite get that. Reply *menu* to see your options.\n\n` +
           `Tip: you can type things like "save 2000", "loan 50000 3", or "balance".`,
       });
+    }
   }
 }
 
@@ -406,8 +510,28 @@ async function handleAwaitingInput(
   state: BotState,
   text: string,
   dataJson: string,
+  meta: MessageMeta = {},
 ): Promise<void> {
   const data = safeParse(dataJson) as FlowData;
+
+  if (SECRET_STATES.includes(state)) {
+    // Telegram: scrub the typed secret from chat history immediately.
+    if (meta.telegramMessageId) {
+      void deleteTelegramMessage(phone.slice(3), meta.telegramMessageId).catch(() => {});
+    }
+    // WhatsApp Flow cards echo a one-time token. If a token arrives and it
+    // doesn't match the outstanding challenge, this submission is stale or
+    // replayed (e.g. an old card resubmitted) — kill the flow. Typed text
+    // carries no token and stays accepted so the plain-chat fallback works.
+    if (data.flowToken && meta.flowToken && meta.flowToken !== data.flowToken) {
+      await prisma.session.update({ where: { phone }, data: { state: "idle", data: "{}" } });
+      await sendText({
+        to: phone,
+        text: "That secure entry expired. Reply *menu* to start again.",
+      });
+      return;
+    }
+  }
 
   switch (state) {
     case "awaiting_coop_code": {
@@ -580,15 +704,20 @@ async function handleAwaitingInput(
 
     case "awaiting_pin": {
       if (!/^\d{4}$/.test(text.trim())) {
-        await sendText({ to: phone, text: "Your PIN must be exactly 4 digits (e.g. *1234*)." });
+        await issueSecretChallenge(
+          phone,
+          "awaiting_pin",
+          data,
+          "Your PIN must be exactly 4 digits (e.g. *1234*).",
+        );
         return;
       }
-      await prisma.session.upsert({
-        where: { phone },
-        create: { phone, state: "awaiting_pin_confirm", data: JSON.stringify({ ...data, pin: text.trim() }) },
-        update: { state: "awaiting_pin_confirm", data: JSON.stringify({ ...data, pin: text.trim() }) },
-      });
-      await sendText({ to: phone, text: "Please re-enter your PIN to confirm." });
+      await issueSecretChallenge(
+        phone,
+        "awaiting_pin_confirm",
+        { ...data, pin: text.trim() },
+        "Please re-enter your PIN to confirm.",
+      );
       break;
     }
 
@@ -751,12 +880,12 @@ async function handleAwaitingInput(
       }
       const member = await getMemberByPhone(phone);
       if (member?.bankAccountNumber && member.bankCode) {
-        await prisma.session.upsert({
-          where: { phone },
-          create: { phone, state: "awaiting_withdraw_pin", data: JSON.stringify({ ...data, withdrawAmount: amount }) },
-          update: { state: "awaiting_withdraw_pin", data: JSON.stringify({ ...data, withdrawAmount: amount }) },
-        });
-        await sendText({ to: phone, text: "Enter your 4-digit PIN to confirm the withdrawal." });
+        await issueSecretChallenge(
+          phone,
+          "awaiting_withdraw_pin",
+          { ...data, withdrawAmount: amount },
+          "Enter your 4-digit PIN to confirm the withdrawal.",
+        );
       } else {
         await prisma.session.upsert({
           where: { phone },
@@ -792,12 +921,12 @@ async function handleAwaitingInput(
         await sendText({ to: phone, text: "We don't recognise that bank. Try e.g. *Access*, *GTB*, *Zenith*, *Kuda*, or the 5-digit bank code." });
         return;
       }
-      await prisma.session.upsert({
-        where: { phone },
-        create: { phone, state: "awaiting_withdraw_pin", data: JSON.stringify({ ...data, withdrawBankCode: bank.code, withdrawBankName: bank.name }) },
-        update: { state: "awaiting_withdraw_pin", data: JSON.stringify({ ...data, withdrawBankCode: bank.code, withdrawBankName: bank.name }) },
-      });
-      await sendText({ to: phone, text: "Enter your 4-digit PIN to confirm the withdrawal." });
+      await issueSecretChallenge(
+        phone,
+        "awaiting_withdraw_pin",
+        { ...data, withdrawBankCode: bank.code, withdrawBankName: bank.name },
+        "Enter your 4-digit PIN to confirm the withdrawal.",
+      );
       break;
     }
 
@@ -816,7 +945,10 @@ async function handleAwaitingInput(
       // Brute-force protection: 3 wrong PINs locks the account for 15 minutes.
       const pinCheck = await verifyMemberPin(member, input);
       if (!pinCheck.ok) {
-        await sendText({ to: phone, text: pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel." });
+        const msg = pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel.";
+        await sendText({ to: phone, text: msg });
+        // Re-issue the challenge so Flow users get a fresh card to retry with.
+        await issueSecretChallenge(phone, "awaiting_withdraw_pin", data, msg);
         return;
       }
       const bank =
@@ -838,6 +970,19 @@ async function handleAwaitingInput(
       const result = await submitCertificate(data.deathClaimId ?? "", cert);
       await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
       await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "awaiting_ai_confirm": {
+      const answer = text.trim().toLowerCase();
+      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
+      if (answer === "yes" || answer === "1" || answer === "ok") {
+        const proposed = [data.aiCommand, ...(data.aiArgs ?? [])].filter(Boolean).join(" ");
+        // Re-enter the normal pipeline — every gate (PIN/2FA/roles) applies.
+        await handleMessage(phone, proposed);
+        return;
+      }
+      await sendText({ to: phone, text: "Okay, cancelled. Reply *menu* to see your options." });
       break;
     }
 
@@ -921,12 +1066,12 @@ async function handleWithdraw(phone: string, args: string[]): Promise<void> {
   }
   const member = await getMemberByPhone(phone);
   if (member?.bankAccountNumber && member.bankCode) {
-    await prisma.session.upsert({
-      where: { phone },
-      create: { phone, state: "awaiting_withdraw_pin", data: JSON.stringify({ withdrawAmount: amount }) },
-      update: { state: "awaiting_withdraw_pin", data: JSON.stringify({ withdrawAmount: amount }) },
-    });
-    await sendText({ to: phone, text: `Withdraw ${amount.toLocaleString()} to ${member.bankName ?? member.bankCode} ****${member.bankAccountNumber.slice(-4)}? Enter your 4-digit PIN to confirm.` });
+    await issueSecretChallenge(
+      phone,
+      "awaiting_withdraw_pin",
+      { withdrawAmount: amount },
+      `Withdraw ${amount.toLocaleString()} to ${member.bankName ?? member.bankCode} ****${member.bankAccountNumber.slice(-4)}? Enter your 4-digit PIN to confirm.`,
+    );
     return;
   }
   await prisma.session.upsert({
@@ -1146,15 +1291,33 @@ async function askNokName(phone: string, data: FlowData): Promise<void> {
 }
 
 async function askPin(phone: string, data: FlowData): Promise<void> {
+  await issueSecretChallenge(
+    phone,
+    "awaiting_pin",
+    data,
+    "Now choose a 4-digit PIN. You'll use it to approve transactions.",
+  );
+}
+
+/**
+ * Persist a flow state and prompt the user for a secret (PIN). A fresh
+ * one-time token is stored with the session and bound to the WhatsApp Flow
+ * card; on Telegram / plain chat it degrades to an ordinary text prompt.
+ */
+async function issueSecretChallenge(
+  phone: string,
+  state: BotState,
+  data: FlowData,
+  text: string,
+): Promise<void> {
+  const flowToken = randomBytes(16).toString("hex");
+  const nextData: FlowData = { ...data, flowToken };
   await prisma.session.upsert({
     where: { phone },
-    create: { phone, state: "awaiting_pin", data: JSON.stringify(data) },
-    update: { state: "awaiting_pin", data: JSON.stringify(data) },
+    create: { phone, state, data: JSON.stringify(nextData) },
+    update: { state, data: JSON.stringify(nextData) },
   });
-  await sendText({
-    to: phone,
-    text: `Now choose a 4-digit PIN. You'll use it to approve transactions.`,
-  });
+  await sendSecurePrompt({ to: phone, text, flowToken });
 }
 
 /**

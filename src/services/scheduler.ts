@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
 import { showHistory } from "./statements.js";
 
@@ -54,10 +54,10 @@ export async function runAutoSaveReminders(now = new Date()): Promise<number> {
   let sent = 0;
   for (const m of due) {
     const interval = m.autoSaveInterval === "weekly" ? "week" : "month";
-    await sendText({
-      to: m.phone,
-      text: `⏰ Time to save! Your *${interval}ly* contribution of *${formatBalance(m.autoSaveAmount ?? 0)}* is due.\n\nReply *save ${m.autoSaveAmount}* to pay now.`,
-    });
+    await notifyMember(
+      m,
+      `⏰ Time to save! Your *${interval}ly* contribution of *${formatBalance(m.autoSaveAmount ?? 0)}* is due.\n\nReply *save ${m.autoSaveAmount}* to pay now.`,
+    );
     // Schedule the next one so we don't nag every few minutes.
     const next = new Date(m.autoSaveNextDue!);
     next.setDate(next.getDate() + (m.autoSaveInterval === "weekly" ? 7 : 30));
@@ -112,7 +112,10 @@ export async function runMonthlyStatements(now = new Date()): Promise<number> {
     const stmt = await showHistory(m.phone);
     if (!stmt.ok) continue;
     const text = `${stmt.message}\n\n_Generated ${now.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })} — reply *menu* for options._`;
-    await sendText({ to: m.phone, text }).catch(() => {});
+    await notifyMember(
+      m,
+      `${stmt.message}\n\n_Generated ${now.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })} — reply *menu* for options._`,
+    ).catch(() => {});
     await prisma.member.update({ where: { id: m.id }, data: { lastStatementSentAt: now } });
     sent++;
   }
@@ -133,10 +136,10 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
   for (const m of members) {
     if (!m.dateOfBirth) continue;
     if (m.dateOfBirth.getMonth() !== now.getMonth() || m.dateOfBirth.getDate() !== now.getDate()) continue;
-    await sendText({
-      to: m.phone,
-      text: `🎂 *Happy Birthday, ${m.name}!* 🎉\n\nMay your new year be full of blessings and growth. Your cooperative family celebrates you today. 🥳`,
-    }).catch(() => {});
+    await notifyMember(
+      m,
+      `🎂 *Happy Birthday, ${m.name}!* 🎉\n\nMay your new year be full of blessings and growth. Your cooperative family celebrates you today. 🥳`,
+    ).catch(() => {});
     await prisma.member.update({
       where: { id: m.id },
       data: { lastBirthdayGreetedYear: now.getFullYear() },
@@ -214,9 +217,8 @@ export async function runDailyDigest(now = new Date()): Promise<number> {
 async function notifySuperAdminsDigest(cooperativeId: string, text: string): Promise<void> {
   const supers = await prisma.member.findMany({
     where: { cooperativeId, role: "superadmin", status: "active" },
-    select: { phone: true },
   });
   for (const s of supers) {
-    await sendText({ to: s.phone, text }).catch(() => {});
+    await notifyMember(s, text).catch(() => {});
   }
 }

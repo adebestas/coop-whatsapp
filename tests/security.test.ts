@@ -14,6 +14,10 @@ import { approveClaim } from "../src/services/deathclaims.js";
 
 vi.mock("../src/lib/messaging.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
+  notifyMember: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
+  sendSecurePrompt: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
 }));
 
 vi.mock("../src/services/payments/index.js", async (importOriginal) => {
@@ -95,6 +99,10 @@ beforeEach(async () => {
   for (const m of [
     "posting",
     "journalEntry",
+    "coopPost",
+    "deductionItem",
+    "deductionWaiver",
+    "deductionBatch",
     "webhookEvent",
     "beneficiary",
     "pollBallot",

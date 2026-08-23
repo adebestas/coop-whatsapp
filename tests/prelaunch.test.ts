@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../src/lib/prisma.js";
-import { sendText } from "../src/lib/messaging.js";
+import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { totpAt } from "../src/lib/totp.js";
 import {
@@ -16,6 +16,10 @@ import { resolveProvider } from "../src/services/payments/index.js";
 
 vi.mock("../src/lib/messaging.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
+  notifyMember: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
+  sendSecurePrompt: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
 }));
 
 // Configurable fake provider so poller tests can script transfer outcomes.
@@ -99,6 +103,10 @@ beforeEach(async () => {
   for (const m of [
     "posting",
     "journalEntry",
+    "coopPost",
+    "deductionItem",
+    "deductionWaiver",
+    "deductionBatch",
     "webhookEvent",
     "beneficiary",
     "pollBallot",
@@ -317,9 +325,13 @@ describe("daily movement digest", () => {
     const sent = await runDailyDigest(now);
     expect(sent).toBe(1);
 
-    const texts = vi
-      .mocked(sendText)
-      .mock.calls.map((c) => c[0] as { to: string; text: string });
+    const texts = [
+      ...vi.mocked(sendText).mock.calls.map((c) => c[0] as { to: string; text: string }),
+      ...vi.mocked(notifyMember).mock.calls.map((c) => ({
+        to: typeof c[0] === "string" ? c[0] : String((c[0] as { phone?: string }).phone),
+        text: String(c[1]),
+      })),
+    ];
     const digest = texts.find((t) => t.to === superA.phone && t.text.includes("Daily summary"));
     expect(digest).toBeTruthy();
     expect(digest!.text).toContain("NGN 3,000");

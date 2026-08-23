@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { notifyMember } from "../lib/messaging.js";
 import { resolveProvider } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
@@ -312,7 +312,7 @@ async function payExternal(
 
     const initiator = await prisma.member.findUnique({ where: { id: payment.initiatedById } });
     const doneMsg = `💸 Pay-anyone *${payment.id.slice(-6)}*: ${formatBalance(payment.amount)} paid to *${payment.beneficiaryName}*. Ref ${reference.slice(-6)}.`;
-    if (initiator) await sendText({ to: initiator.phone, text: doneMsg }).catch(() => {});
+    if (initiator) await notifyMember(initiator, doneMsg).catch(() => {});
     await notifySupers(payment.cooperativeId, doneMsg);
     if (limit.warning) await notifySupers(payment.cooperativeId, limit.warning);
 
@@ -378,9 +378,8 @@ export async function listPendingExternal(cooperativeId: string) {
 export async function notifySupers(cooperativeId: string, text: string) {
   const supers = await prisma.member.findMany({
     where: { cooperativeId, OR: [{ role: "superadmin" }, { role: "admin", unitId: null }] },
-    select: { phone: true },
   });
   for (const s of supers) {
-    await sendText({ to: s.phone, text }).catch(() => {});
+    await notifyMember(s, text).catch(() => {});
   }
 }

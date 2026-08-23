@@ -1,6 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
-import { sendText } from "../lib/messaging.js";
+import { sendText, notifyMember } from "../lib/messaging.js";
 import { sendToBank } from "./disbursements.js";
 import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
 
@@ -344,11 +344,14 @@ export async function notifySuperAdmins(cooperativeId: string, text: string): Pr
   const supers = await prisma.member.findMany({
     where: { cooperativeId, role: "superadmin", status: "active" },
   });
-  const targets = new Set<string>();
-  for (const s of supers) if (s.phone) targets.add(s.phone);
-  if (coop?.adminPhone) targets.add(coop.adminPhone);
-  for (const to of targets) {
-    await sendText({ to, text }).catch(() => {});
+  const seen = new Set<string>();
+  for (const s of supers) {
+    if (!s.phone || seen.has(s.phone)) continue;
+    seen.add(s.phone);
+    await notifyMember(s, text).catch(() => {});
+  }
+  if (coop?.adminPhone && !seen.has(coop.adminPhone)) {
+    await sendText({ to: coop.adminPhone, text }).catch(() => {});
   }
 }
 

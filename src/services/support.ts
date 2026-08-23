@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { notifyMember } from "../lib/messaging.js";
 
 export interface TicketResult {
   ok: boolean;
@@ -42,12 +42,11 @@ export async function createTicket(phone: string, message: string): Promise<Tick
   });
   for (const agent of agents) {
     if (agent.phone === phone) continue;
-    void sendText({
-      to: agent.phone,
-      text:
-        `🎫 New ticket *${ticket.id.slice(-6)}* from ${member.name}:\n"${text.slice(0, 200)}"\n\n` +
+    void notifyMember(
+      agent,
+      `🎫 New ticket *${ticket.id.slice(-6)}* from ${member.name}:\n"${text.slice(0, 200)}"\n\n` +
         `Reply *resolve ${ticket.id.slice(-6)} <note>* when handled.`,
-    }).catch(() => {});
+    ).catch(() => {});
   }
 
   return {
@@ -111,12 +110,11 @@ export async function resolveTicket(
     data: { status: "resolved", assignedToId: agent.id, resolution: note.trim().slice(0, 500) || null },
   });
 
-  void sendText({
-    to: ticket.member.phone,
-    text:
-      `✅ Your ticket *${ticket.id.slice(-6)}* has been resolved.\n` +
+  void notifyMember(
+    ticket.member,
+    `✅ Your ticket *${ticket.id.slice(-6)}* has been resolved.\n` +
       (note.trim() ? `Note: ${note.trim()}` : ""),
-  }).catch(() => {});
+  ).catch(() => {});
 
   return { ok: true, message: `Ticket *${ticket.id.slice(-6)}* resolved. ${ticket.member.name} has been notified.` };
 }

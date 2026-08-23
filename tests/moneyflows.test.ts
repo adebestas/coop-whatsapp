@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../src/lib/prisma.js";
-import { sendText } from "../src/lib/messaging.js";
+import { sendText, notifyMember } from "../src/lib/messaging.js";
+
+/** Union of chat texts from both channels-aware senders. */
+function allTexts(): string[] {
+  return [
+    ...vi.mocked(sendText).mock.calls.map((c) => c[0].text),
+    ...vi.mocked(notifyMember).mock.calls.map((c) => String(c[1])),
+  ];
+}
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { requestExternalPayment, approveExternalPayment } from "../src/services/payanyone.js";
 import { recordLedger, computePnl } from "../src/services/ledger.js";
@@ -12,6 +20,10 @@ import { resolveProvider } from "../src/services/payments/index.js";
 
 vi.mock("../src/lib/messaging.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
+  notifyMember: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
+  sendSecurePrompt: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
 }));
 
 const ADMIN_PHONE = "2348090000001";
@@ -73,6 +85,7 @@ async function makeMember(
 beforeEach(async () => {
   vi.clearAllMocks();
   for (const m of [
+    "coopPost", "deductionItem", "deductionWaiver", "deductionBatch",
     "posting", "journalEntry", "webhookEvent",
     "beneficiary", "pollBallot", "pollOption", "purchasePoll", "externalPayment",
     "guarantorDeduction", "ledgerEntry",
@@ -133,7 +146,7 @@ describe("pay anyone (3-super approval)", () => {
     });
     expect(entry).not.toBeNull();
 
-    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const texts = allTexts().join("\n");
     expect(texts).toContain("paid");
   });
 });
@@ -201,7 +214,7 @@ describe("guarantor deductions", () => {
       expect(pending!.status).toBe("notified");
       expect(pending!.amount).toBe(1000); // 50% of flat interest (20000 x 10%)
 
-      const textsAfterNotice = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+      const textsAfterNotice = allTexts().join("\n");
       expect(textsAfterNotice).toContain("10-day deduction notice");
 
       // Borrower still owes when the notice window passes -> savings hit.

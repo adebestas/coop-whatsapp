@@ -1,5 +1,7 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { sendText, notifyMember } from "../lib/messaging.js";
+import { listPosts, normalizeTitle, displayTitle } from "./posts.js";
+import { buildBatch, submitBatch, approveBatch, rejectBatch, setCommitment, waiveMonth } from "./deductions.js";
 import { approveLoan, listPendingLoans, rejectLoan } from "./loans.js";
 import { formatBalance } from "./cooperative.js";
 import { sendToBank } from "./disbursements.js";
@@ -963,6 +965,209 @@ export async function handleAdminCommand(
         action: "dividend.distribute",
         detail: result.message,
       });
+      return true;
+    }
+
+    case "setpost": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can assign executive posts." });
+        return true;
+      }
+      const [rawTitle, rawCode] = args;
+      if (!rawTitle || !rawCode) {
+        await sendText({ to: phone, text: "Usage: *setpost <post> <member code>*, e.g. *setpost treasurer A1B2C3*." });
+        return true;
+      }
+      const code = rawCode.toUpperCase();
+      const holder = await prisma.member.findFirst({ where: { code, cooperativeId: coopId } });
+      if (!holder) {
+        await sendText({ to: phone, text: `No member found with code ${code}.` });
+        return true;
+      }
+      const title = normalizeTitle(rawTitle);
+      await prisma.coopPost.upsert({
+        where: { cooperativeId_title: { cooperativeId: coopId, title } },
+        create: { cooperativeId: coopId, title, incumbentId: holder.id, appointedById: admin.id, appointedAt: new Date() },
+        update: { incumbentId: holder.id, appointedById: admin.id, appointedAt: new Date() },
+      });
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorId: admin.id,
+        actorRole: roleLabel(ctx),
+        action: "post.set",
+        targetType: "coopPost",
+        detail: `${displayTitle(title)} -> ${holder.name} (${code})`,
+      });
+      await notifyMember(holder, `🏛 You have been appointed *${displayTitle(title)}*. Congratulations!`);
+      await sendText({ to: phone, text: `✅ ${displayTitle(title)} is now ${holder.name} (${code}).` });
+      return true;
+    }
+
+    case "removepost": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can remove executive posts." });
+        return true;
+      }
+      const rawTitle = args[0];
+      if (!rawTitle) {
+        await sendText({ to: phone, text: "Usage: *removepost <post>*" });
+        return true;
+      }
+      const title = normalizeTitle(rawTitle);
+      const post = await prisma.coopPost.findUnique({
+        where: { cooperativeId_title: { cooperativeId: coopId, title } },
+        include: { incumbent: true },
+      });
+      if (!post) {
+        await sendText({ to: phone, text: `No post called "${rawTitle}" exists.` });
+        return true;
+      }
+      await prisma.coopPost.update({ where: { id: post.id }, data: { incumbentId: null } });
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorId: admin.id,
+        actorRole: roleLabel(ctx),
+        action: "post.remove",
+        targetType: "coopPost",
+        detail: displayTitle(title),
+      });
+      if (post.incumbent) {
+        await notifyMember(post.incumbent, `🏛 You are no longer *${displayTitle(title)}*. The seat is now vacant.`);
+      }
+      await sendText({ to: phone, text: `✅ ${displayTitle(title)} is now vacant.` });
+      return true;
+    }
+
+    case "newbatch": {
+      const result = await buildBatch(phone, args.join(" ") || undefined);
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "submitbatch": {
+      if (!args[0]) {
+        await sendText({ to: phone, text: "Usage: *submitbatch <ref>*" });
+        return true;
+      }
+      const result = await submitBatch(phone, args[0]);
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "approvebatch":
+    case "rejectbatch": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can approve or reject deduction batches." });
+        return true;
+      }
+      if (!args[0]) {
+        await sendText({ to: phone, text: `Usage: *${cmd} <ref>*` + (cmd === "rejectbatch" ? " [reason]" : "") });
+        return true;
+      }
+      const result =
+        cmd === "approvebatch"
+          ? await approveBatch(phone, args[0])
+          : await rejectBatch(phone, args[0], args.slice(1).join(" ") || undefined);
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "setcommit": {
+      const [code, amountArg] = args;
+      const amount = Number(amountArg);
+      if (!code || !Number.isFinite(amount)) {
+        await sendText({ to: phone, text: "Usage: *setcommit <member code> <amount>* — 0 stops the deduction." });
+        return true;
+      }
+      const result = await setCommitment(phone, code, amount);
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "waive": {
+      const [code, period] = args;
+      if (!code) {
+        await sendText({ to: phone, text: "Usage: *waive <member code> [YYYY-MM]*" });
+        return true;
+      }
+      const result = await waiveMonth(phone, code, period);
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "relink": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can relink a member's account." });
+        return true;
+      }
+      const [rawCode, newChannel] = args;
+      if (!rawCode || !newChannel) {
+        await sendText({ to: phone, text: 'Usage: *relink <member code> <new number>* — e.g. *relink A1B2C3 2348012345678* (or tg:<chatid>).' });
+        return true;
+      }
+      const target = await prisma.member.findFirst({ where: { code: rawCode.toUpperCase(), cooperativeId: coopId } });
+      if (!target) {
+        await sendText({ to: phone, text: `No member found with code ${rawCode.toUpperCase()}.` });
+        return true;
+      }
+      const oldPhone = target.phone;
+      await prisma.member.update({
+        where: { id: target.id },
+        data: { phone: newChannel, preferredChannel: null },
+      });
+      await prisma.session.deleteMany({ where: { phone: oldPhone } });
+      await prisma.session.deleteMany({ where: { phone: newChannel } });
+      // Best-effort heads-up to the old channel in case it is still alive.
+      await sendText({ to: oldPhone, text: "🔐 This account has been moved to a new number by your co-op admin. If this was not you, contact them immediately." }).catch(() => {});
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorId: admin.id,
+        actorRole: "superadmin",
+        action: "account.relink",
+        targetType: "member",
+        targetId: target.id,
+        detail: `${oldPhone} -> ${newChannel}`,
+      });
+      await sendText({
+        to: phone,
+        text: `✅ ${target.name}'s account moved from ${oldPhone} to ${newChannel}. Ask them to send *setpin 1234 1234* style commands to set a fresh PIN.`,
+      });
+      return true;
+    }
+
+    case "unlink": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can unlink a member's second channel." });
+        return true;
+      }
+      const code = args[0]?.toUpperCase();
+      if (!code) {
+        await sendText({ to: phone, text: "Usage: *unlink <member code>*" });
+        return true;
+      }
+      const target = await prisma.member.findFirst({ where: { code, cooperativeId: coopId } });
+      if (!target) {
+        await sendText({ to: phone, text: `No member found with code ${code}.` });
+        return true;
+      }
+      await prisma.member.update({
+        where: { id: target.id },
+        data: { altChannelId: null, preferredChannel: null },
+      });
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorId: admin.id,
+        actorRole: "superadmin",
+        action: "account.unlink",
+        targetType: "member",
+        targetId: target.id,
+        detail: target.code,
+      });
+      await sendText({ to: phone, text: `✅ Second channel detached from ${target.name}. They now chat only on ${target.phone}.` });
       return true;
     }
 

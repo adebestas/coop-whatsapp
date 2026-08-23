@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
@@ -60,15 +60,14 @@ export async function scanGuarantorDefaults(): Promise<number> {
         update: { status: "notified", deductAt },
       });
 
-      await sendText({
-        to: g.member.phone,
-        text:
-          `⚠️ *10-day deduction notice*\n\n` +
+      await notifyMember(
+        g.member,
+        `⚠️ *10-day deduction notice*\n\n` +
           `${loan.member.name} has defaulted on loan *${loan.id.slice(-6)}* for ${DEFAULT_GRACE_MONTHS}+ months.\n` +
           `As guarantor, *${formatBalance(share)}* (50% of the loan's interest) will be deducted from your savings on ` +
           `*${deductAt.toISOString().slice(0, 10)}*.\n\n` +
           `If the borrower clears the arrears before then, the deduction is cancelled.`,
-      }).catch(() => {});
+      ).catch(() => {});
       notices += 1;
     }
   }
@@ -147,10 +146,10 @@ export async function executeDueDeductions(): Promise<{ deducted: number; cancel
       detail: `${formatBalance(d.amount)} from ${d.guarantor.name} for loan ${d.loanId.slice(-6)}`,
     });
 
-    await sendText({
-      to: d.guarantor.phone,
-      text: `⚠️ As notified 10 days ago, *${formatBalance(d.amount)}* was deducted from your savings — your borrower on loan *${d.loanId.slice(-6)}* is still in default.`,
-    }).catch(() => {});
+    await notifyMember(
+      d.guarantor,
+      `⚠️ As notified 10 days ago, *${formatBalance(d.amount)}* was deducted from your savings — your borrower on loan *${d.loanId.slice(-6)}* is still in default.`,
+    ).catch(() => {});
     deducted += 1;
   }
 

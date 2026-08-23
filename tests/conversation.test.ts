@@ -7,6 +7,10 @@ import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
 vi.mock("../src/lib/messaging.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
+  notifyMember: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
+  sendSecurePrompt: vi.fn().mockResolvedValue(true),
+  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
 }));
 
 const PHONE = "2348012345678";
@@ -49,6 +53,10 @@ beforeEach(async () => {
   vi.clearAllMocks();
     await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
+  await prisma.coopPost.deleteMany();
+  await prisma.deductionItem.deleteMany();
+  await prisma.deductionWaiver.deleteMany();
+  await prisma.deductionBatch.deleteMany();
   await prisma.webhookEvent.deleteMany();
   await prisma.beneficiary.deleteMany();
   await prisma.pollBallot.deleteMany();

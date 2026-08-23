@@ -1,6 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { generateGuarantorCode } from "../lib/security.js";
-import { sendText } from "../lib/messaging.js";
+import { notifyMember } from "../lib/messaging.js";
 import { formatBalance, getMemberByPhone } from "./cooperative.js";
 
 export const REQUIRED_GUARANTORS = 2;
@@ -122,7 +122,7 @@ export async function addGuarantor(phone: string, loanId: string, memberCode: st
     `*${loan.member.name}* has listed you as a guarantor for a loan of *₦${loan.amount.toLocaleString()}*.\n\n` +
     `To accept, reply with:\n*confirm ${code}*\n\n` +
     `Only accept if you trust this member — you're vouching for them.`;
-  void sendText({ to: guarantor.phone, text: requestText }).catch((err) =>
+  void notifyMember(guarantor, requestText).catch((err) =>
     console.error("[guarantor] failed to notify", err),
   );
 
