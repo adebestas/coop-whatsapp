@@ -35,7 +35,7 @@ import {
 } from "./buypoll.js";
 import { payrollOverview, runPayroll, setSalary } from "./payroll.js";
 import { runExport, type ExportKind } from "./exports.js";
-import { checkDailyPayoutLimit } from "./fraud.js";
+import { checkDailyPayoutLimit, checkVelocity } from "./fraud.js";
 import { runBackup } from "./backup.js";
 import { runReconciliation } from "./reconcile.js";
 import { resolveProvider } from "./payments/index.js";
@@ -1227,6 +1227,12 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
     return;
   }
 
+  // Fraud guard: velocity check — max 5 money-out per 10 minutes per member.
+  if (!checkVelocity(target.id)) {
+    await sendText({ to: admin.phone, text: `🛑 Too many transactions for ${target.name} in a short period. Please wait a few minutes and try again.` });
+    return;
+  }
+
   // Fraud guard: daily ceiling on total money-out.
   const limit = await checkDailyPayoutLimit(coop.id, amount);
   if (!limit.ok) {
@@ -1234,6 +1240,17 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
     return;
   }
 
+  // ✅ DEBIT-FIRST: Lock wallet before sending money (prevents race condition)
+  const debited = await prisma.wallet.updateMany({
+    where: { memberId: target.id, balance: { gte: amount } },
+    data: { balance: { decrement: amount } },
+  });
+  if (debited.count === 0) {
+    await sendText({ to: admin.phone, text: `Insufficient balance. No money moved.` });
+    return;
+  }
+
+  // Now send to bank
   const result = await sendToBank({
     memberId: target.id,
     amount,
@@ -1243,18 +1260,14 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
     note: `Super admin payout to ${target.name} — ${narration}`,
     successMessage: `✅ ${formatBalance(amount)} sent to your bank account. Narration: "${narration}".`,
   });
-  if (!result.ok) {
-    await sendText({ to: admin.phone, text: `Payout failed: ${result.message}` });
-    return;
-  }
 
-  // Money moved — debit the wallet.
-  const debited = await prisma.wallet.updateMany({
-    where: { memberId: target.id, balance: { gte: amount } },
-    data: { balance: { decrement: amount } },
-  });
-  if (debited.count === 0) {
-    await sendText({ to: admin.phone, text: `⚠️ Payout sent but wallet debit failed (insufficient balance race). Investigate immediately.` });
+  if (!result.ok) {
+    // Refund the wallet on failure
+    await prisma.wallet.update({
+      where: { id: target.wallet!.id },
+      data: { balance: { increment: amount } },
+    });
+    await sendText({ to: admin.phone, text: `Payout failed: ${result.message}. Wallet refunded.` });
     return;
   }
 

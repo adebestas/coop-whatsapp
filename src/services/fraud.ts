@@ -96,3 +96,26 @@ export function checkMoneyRateLimit(phone: string): boolean {
 export function resetMoneyRateLimit(): void {
   moneyCommandLog.clear();
 }
+
+// ---- Transaction velocity (per member, money-out) ----
+const velocityLog = new Map<string, number[]>();
+const VELOCITY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+const VELOCITY_MAX = 5; // max 5 money-out per window
+
+/**
+ * Check if a member has exceeded the velocity limit for money-out transactions.
+ * Returns true if the transaction is allowed, false if blocked.
+ */
+export function checkVelocity(memberId: string): boolean {
+  const now = Date.now();
+  const timestamps = (velocityLog.get(memberId) ?? []).filter((t) => now - t < VELOCITY_WINDOW_MS);
+  if (timestamps.length >= VELOCITY_MAX) return false;
+  timestamps.push(now);
+  velocityLog.set(memberId, timestamps);
+  return true;
+}
+
+/** Test hook: clear the in-memory velocity log. */
+export function resetVelocity(): void {
+  velocityLog.clear();
+}

@@ -21,8 +21,8 @@ model Cooperative {
   currency           String              @default("NGN")
   adminPhone         String? // WhatsApp number of the coop super admin
   status             String              @default("active") // active | suspended
-  loanInterestRate   Float               @default(2) // fallback monthly % charged on loans
-  dailyPayoutLimit   Float               @default(1000000) // fraud guard: max total money-out per day
+  loanInterestRate   Float               @default(2) // fallback monthly % charged on loans (percentage)
+  dailyPayoutLimit   Int                 @default(100000000) // fraud guard: max total money-out per day in kobo (₦1M)
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   members            Member[]
@@ -81,7 +81,7 @@ model Member {
   unitId                  String?
   unit                    Unit?               @relation("UnitMembership", fields: [unitId], references: [id], onDelete: SetNull)
   adminOf                 Unit[]              @relation("UnitAdmin")
-  autoSaveAmount          Float? // recurring contribution amount
+  autoSaveAmount          Int? // recurring contribution amount in kobo
   autoSaveInterval        String? // weekly | monthly
   autoSaveNextDue         DateTime? // when the next reminder should fire
   autoSaveEnabled         Boolean             @default(false)
@@ -102,7 +102,7 @@ model Member {
   ticketsAssigned         SupportTicket[]     @relation("TicketAssignee")
   voteCandidates          VoteCandidate[]     @relation("VoteCandidates")
   voteBallots             VoteBallot[]        @relation("VoteBallots")
-  salaryAmount            Float? // monthly salary/stipend for super admins (0 = off)
+  salaryAmount            Int? // monthly salary/stipend for super admins in kobo (0 = off)
   salaryKind              String? // salary | stipend
   externalPaymentsInitiated ExternalPayment[] @relation("ExternalPayInitiator")
   externalPaymentsApproved1 ExternalPayment[] @relation("ExternalPayApprover1")
@@ -115,7 +115,7 @@ model Member {
   guarantorDeductions     GuarantorDeduction[]
   beneficiaries           Beneficiary[]
   postsHeld               CoopPost[]          @relation("PostIncumbent")
-  monthlyDeduction        Float? // agreed salary deduction remitted by employer
+  monthlyDeduction        Int? // agreed salary deduction remitted by employer in kobo
   deductionItems          DeductionItem[]
   deductionWaivers        DeductionWaiver[]
   batchesCreated          DeductionBatch[]    @relation("DeductionBatchCreator")
@@ -146,8 +146,8 @@ model Unit {
 
 model Wallet {
   id         String   @id @default(cuid())
-  balance    Float    @default(0) // in minor? store as float cents-safe in NGN with 2dp
-  totalSaved Float    @default(0)
+  balance    Int      @default(0) // stored in kobo (₦1 = 100 kobo) — prevents float rounding
+  totalSaved Int      @default(0) // stored in kobo
   memberId   String   @unique
   member     Member   @relation(fields: [memberId], references: [id])
   createdAt  DateTime @default(now())
@@ -157,7 +157,7 @@ model Wallet {
 // ---- Savings / contributions ----
 model Contribution {
   id            String      @id @default(cuid())
-  amount        Float
+  amount        Int // stored in kobo (₦1 = 100 kobo)
   type          String      @default("savings") // savings | weekly | monthly | emergency
   note          String?
   reference     String      @unique // merchant ref for reconciliation
@@ -173,19 +173,19 @@ model Contribution {
 // ---- Loans ----
 model Loan {
   id                 String          @id @default(cuid())
-  amount             Float
-  interestRate       Float           @default(0) // monthly %
+  amount             Int // stored in kobo
+  interestRate       Float           @default(0) // monthly % (percentage, not money)
   tenureMonths       Int             @default(1)
   status             String          @default("pending") // pending | guaranteed | approved | disbursed | rejected | paid
-  balance            Float
-  monthlyPayment     Float? // installment amount after approval
+  balance            Int // stored in kobo
+  monthlyPayment     Int? // installment amount in kobo
   bankAccountNumber  String? // member's bank account for disbursement
   bankCode           String? // provider bank code
   bankName           String? // bank display name
   disbursementStatus String? // pending | successful | failed | name_mismatch
   disbursementError  String? // provider error or name-mismatch detail
-  adminCharge        Float   @default(2000) // flat admin charge deducted from disbursement
-  disbursementAmount Float? // amount actually sent = amount - adminCharge
+  adminCharge        Int   @default(200000) // flat admin charge in kobo (₦2,000)
+  disbursementAmount Int? // amount actually sent in kobo = amount - adminCharge
   adminApprovedById  String? // who gave the first (admin) approval
   finalApprovedById  String? // first super admin approval
   superApproved2ById String? // second super admin approval — triggers disbursement
@@ -222,7 +222,7 @@ model Guarantor {
 
 model LoanRepayment {
   id     String   @id @default(cuid())
-  amount Float
+  amount Int // stored in kobo
   loanId String
   loan   Loan     @relation(fields: [loanId], references: [id])
   paidAt DateTime @default(now())
@@ -231,7 +231,7 @@ model LoanRepayment {
 // ---- Payouts (admin disbursements to members) ----
 model Payout {
   id            String      @id @default(cuid())
-  amount        Float
+  amount        Int // stored in kobo
   reference     String      @unique
   // Deterministic per-logical-operation key so provider retries never
   // double-pay: e.g. TFR-LOAN-<loanId>. Unique => second create is rejected.
@@ -285,7 +285,7 @@ model Posting {
   entry     JournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
   account   String // assets:bank | income:<cat> | expense:<cat> | member_wallet:<walletId>
   direction String // DEBIT | CREDIT
-  amount    Float
+  amount    Int // stored in kobo
   memberId  String?
 
   @@index([account])
@@ -297,7 +297,7 @@ model Posting {
 // approval, before the money is sent to the member's bank account.
 model WithdrawalRequest {
   id                String      @id @default(cuid())
-  amount            Float
+  amount            Int // stored in kobo
   status            String      @default("pending") // pending | admin_approved | paid | rejected
   bankAccountNumber String
   bankCode          String
@@ -378,6 +378,9 @@ model AuditLog {
   action        String // e.g. loan.approve, withdraw.finalize, claim.payout, role.set
   targetType    String? // loan | withdrawal | deathclaim | member | ...
   targetId      String?
+  amount        Int? // transaction amount in kobo (financial audit)
+  balanceBefore Int? // wallet balance before the operation in kobo
+  balanceAfter  Int? // wallet balance after the operation in kobo
   detail        String? // human-readable summary
   prevHash      String? // hash of the previous entry (tamper-evident chain)
   hash          String? // sha256 of this entry's content + prevHash
@@ -396,7 +399,7 @@ model LedgerEntry {
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
   type          String // income | expense | appropriation
   category      String // interest | fine | admin_charge | salary | stipend | purchase | external_payment | dividend
-  amount        Float
+  amount        Int // stored in kobo
   note          String?
   reference     String? // link to the source record (loan id, payout ref, ...)
   createdAt     DateTime    @default(now())
@@ -413,7 +416,7 @@ model ExternalPayment {
   bankAccountNumber String
   bankCode          String
   bankName          String?
-  amount            Float
+  amount            Int // stored in kobo
   purpose           String?
   status            String      @default("pending") // pending | approved1 | approved2 | paid | rejected | failed
   initiatedById     String
@@ -455,7 +458,7 @@ model PollOption {
   pollId            String
   poll              PurchasePoll @relation(fields: [pollId], references: [id], onDelete: Cascade)
   name              String // e.g. "Industrial generator"
-  estimatedCost     Float
+  estimatedCost     Int // stored in kobo
   bankAccountNumber String? // vendor account for the auto pay-anyone request
   bankCode          String?
   bankName          String?
@@ -489,7 +492,7 @@ model GuarantorDeduction {
   loanId        String
   guarantorId   String
   guarantor     Member    @relation(fields: [guarantorId], references: [id])
-  amount        Float // 50% of the loan's flat interest
+  amount        Int // stored in kobo (50% of the loan's flat interest)
   status        String    @default("notified") // notified | deducted | cancelled
   noticeSentAt  DateTime
   deductAt      DateTime // notice date + 10 days
@@ -575,8 +578,8 @@ model Dividend {
   cooperativeId String
   cooperative   Cooperative     @relation(fields: [cooperativeId], references: [id])
   reference     String          @unique
-  rate          Float // percentage of totalSaved
-  totalPool     Float
+  rate          Float // percentage of totalSaved (percentage, not money)
+  totalPool     Int // stored in kobo
   status        String          @default("pending") // pending | distributed
   createdAt     DateTime        @default(now())
   distributedAt DateTime?
@@ -589,7 +592,7 @@ model DividendEntry {
   dividend   Dividend  @relation(fields: [dividendId], references: [id], onDelete: Cascade)
   memberId   String
   member     Member    @relation(fields: [memberId], references: [id], onDelete: Cascade)
-  amount     Float
+  amount     Int // stored in kobo
   status     String    @default("pending") // pending | paid
   paidAt     DateTime?
   createdAt  DateTime  @default(now())
@@ -643,7 +646,7 @@ model DeductionBatch {
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
   ref           String      @unique
   status        String      @default("draft") // draft | submitted | approved | rejected
-  totalAmount   Float       @default(0)
+  totalAmount   Int         @default(0) // stored in kobo
   note          String?
   createdById   String
   createdBy     Member      @relation("DeductionBatchCreator", fields: [createdById], references: [id])
@@ -663,7 +666,7 @@ model DeductionItem {
   member     Member         @relation(fields: [memberId], references: [id])
   kind       String         @default("savings") // savings | loan
   loanId     String? // set when kind = loan
-  amount     Float
+  amount     Int // stored in kobo
   status     String         @default("pending") // pending | credited
   creditedAt DateTime?
 

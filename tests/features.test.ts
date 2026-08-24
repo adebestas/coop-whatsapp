@@ -135,20 +135,20 @@ describe("ledger + statement", () => {
     const coop = await makeCoop("TEST12", "Test Coop");
     await makeMember(PHONE, coop.id);
 
-    await createContribution(PHONE, 5000);
+    await createContribution(PHONE, 10000);
     await handleMessage(PHONE, "ledger");
 
     let texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
     expect(texts).toContain("Ledger");
     expect(texts).toContain("Total savings in");
-    expect(texts).toContain("NGN 5,000.00");
+    expect(texts).toContain("NGN 10,000.00");
 
     vi.clearAllMocks();
     await handleMessage(PHONE, "history");
     texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
     expect(texts).toContain("statement");
     expect(texts).toContain("Deposits");
-    expect(texts).toContain("NGN 5,000.00");
+    expect(texts).toContain("NGN 10,000.00");
   });
 });
 
@@ -246,7 +246,7 @@ describe("monthly statements + birthday greetings", () => {
   it("sends each active member a statement on the 1st of the month", async () => {
     const coop = await makeCoop("TEST17", "Test Coop");
     await makeMember(PHONE, coop.id);
-    await createContribution(PHONE, 5000);
+    await createContribution(PHONE, 10000);
 
     const sent = await runMonthlyStatements(new Date("2026-08-01"));
     expect(sent).toBe(1);
@@ -256,7 +256,7 @@ describe("monthly statements + birthday greetings", () => {
 
     const texts = allTexts().join("\n");
     expect(texts).toContain("statement");
-    expect(texts).toContain("NGN 5,000.00");
+    expect(texts).toContain("NGN 10,000.00");
 
     // Same month: no duplicate statement.
     vi.clearAllMocks();

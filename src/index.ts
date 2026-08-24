@@ -12,9 +12,51 @@ import { runBackup } from "./services/backup.js";
 import { runReconciliation } from "./services/reconcile.js";
 import { runTransferPolling, transferPollIntervalMs } from "./services/statuspoller.js";
 import { validateEnvironment } from "./lib/envcheck.js";
+import { prisma } from "./lib/prisma.js";
+import { closeQueues } from "./lib/queue.js";
+import { closeRedis } from "./lib/cache.js";
 
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
+
+// ===== Graceful Shutdown =====
+let isShuttingDown = false;
+
+async function shutdown(signal: string) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  console.log(`[shutdown] ${signal} received, starting graceful shutdown...`);
+
+  try {
+    // 1. Stop accepting new connections
+    await app.close();
+    console.log("[shutdown] HTTP server closed");
+
+    // 2. Close queue workers
+    await closeQueues();
+    console.log("[shutdown] Queue workers closed");
+
+    // 3. Disconnect Redis
+    await closeRedis();
+    console.log("[shutdown] Redis disconnected");
+
+    // 4. Disconnect database
+    await prisma.$disconnect();
+    console.log("[shutdown] Database disconnected");
+
+    console.log("[shutdown] Graceful shutdown complete");
+    process.exit(0);
+  } catch (err) {
+    console.error("[shutdown] Error during shutdown:", err);
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+let app: ReturnType<typeof buildApp>;
 
 async function main() {
   // Fail fast on missing configuration — never run a money bot half-configured.
@@ -27,7 +69,7 @@ async function main() {
     process.exit(1);
   }
 
-  const app = buildApp();
+  app = buildApp();
 
   try {
     await app.listen({ port: config.port, host: config.host });

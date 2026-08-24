@@ -1,6 +1,8 @@
 import { prisma } from "../lib/prisma.js";
 import { generateMemberCode, hashPin } from "../lib/security.js";
 import { audit } from "./audit.js";
+import { LIMITS } from "../lib/money.js";
+import { formatBalance as formatKobo } from "../lib/money.js";
 
 export interface JoinResult {
   ok: boolean;
@@ -125,28 +127,38 @@ export async function createContribution(phone: string, amount: number): Promise
   if (!Number.isFinite(amount) || amount <= 0) {
     return { ok: false, message: "Please enter a valid amount, e.g. *save 2000*." };
   }
+  if (amount < LIMITS.MIN_SAVE) {
+    return { ok: false, message: `Minimum save amount is *${formatKobo(LIMITS.MIN_SAVE)}*.` };
+  }
+  if (amount > LIMITS.MAX_SAVE) {
+    return { ok: false, message: `Maximum save amount is *${formatKobo(LIMITS.MAX_SAVE)}*.` };
+  }
 
   const reference = `CON-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  await prisma.contribution.create({
-    data: {
-      amount,
-      reference,
-      status: "confirmed",
-      paidAt: new Date(),
-      memberId: member.id,
-      cooperativeId: member.cooperativeId,
-    },
-  });
 
-  await prisma.wallet.update({
-    where: { id: member.wallet.id },
-    data: {
-      balance: { increment: amount },
-      totalSaved: { increment: amount },
-    },
-  });
+  // ✅ Wrapped in transaction — both succeed or both fail (prevents money loss)
+  await prisma.$transaction([
+    prisma.contribution.create({
+      data: {
+        amount,
+        reference,
+        status: "confirmed",
+        paidAt: new Date(),
+        memberId: member.id,
+        cooperativeId: member.cooperativeId,
+      },
+    }),
+    prisma.wallet.update({
+      where: { id: member.wallet.id },
+      data: {
+        balance: { increment: amount },
+        totalSaved: { increment: amount },
+      },
+    }),
+  ]);
 
-  const balance = (member.wallet.balance ?? 0) + amount;
+  const balanceBefore = member.wallet.balance ?? 0;
+  const balance = balanceBefore + amount;
   await audit({
     cooperativeId: member.cooperativeId,
     actorPhone: phone,
@@ -154,6 +166,9 @@ export async function createContribution(phone: string, amount: number): Promise
     actorRole: member.role,
     action: "contribution.create",
     targetType: "contribution",
+    amount,
+    balanceBefore,
+    balanceAfter: balance,
     detail: formatBalance(amount),
   });
   return {

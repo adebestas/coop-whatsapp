@@ -1,4 +1,4 @@
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomInt, scryptSync, timingSafeEqual } from "node:crypto";
 
 const KEY_LEN = 64;
 
@@ -22,7 +22,7 @@ export function generateMemberCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   const parts = [6, 4].map((len) => {
     let s = "";
-    for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    for (let i = 0; i < len; i++) s += chars[randomInt(chars.length)]; // ✅ Cryptographically secure
     return s;
   });
   return parts.join("-");
@@ -31,6 +31,6 @@ export function generateMemberCode(): string {
 export function generateGuarantorCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let s = "";
-  for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 6; i++) s += chars[randomInt(chars.length)]; // ✅ Cryptographically secure
   return `GT-${s}`;
 }

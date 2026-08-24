@@ -14,17 +14,27 @@
     "prisma:push": "prisma db push",
     "prisma:push:local": "prisma db push --schema prisma/schema.local.prisma",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "db:seed": "npx tsx src/scripts/seed-test.ts",
+    "db:reset": "npx tsx src/scripts/db-reset.ts --confirm",
+    "db:reset:seed": "npm run db:reset && npm run db:seed"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "@fastify/env": "^5.0.2",
+    "@fastify/helmet": "^13.1.1",
     "@fastify/rate-limit": "^11.2.0",
     "@fastify/static": "^10.1.3",
     "@prisma/client": "^6.2.1",
+    "bullmq": "^6.2.0",
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
     "fastify": "^5.2.0",
+    "ioredis": "^6.0.0",
     "nodemailer": "^9.0.5",
     "pdfkit": "^0.19.1",
     "pino": "^9.6.0",
@@ -32,11 +42,17 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.10.2",
     "@types/nodemailer": "^8.0.1",
     "@types/pdfkit": "^0.17.6",
+    "eslint": "^10.9.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.6",
+    "prettier": "^3.9.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.67.0",
     "vitest": "^2.1.8"
   }
 }

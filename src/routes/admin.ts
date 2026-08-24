@@ -9,8 +9,41 @@ import { verifyPin } from "../lib/security.js";
  * require `Authorization: Bearer <token>`.
  */
 import crypto from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
+
+// ===== Login Rate Limiting =====
+// Prevents brute-force attacks on 4-digit PINs
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_WINDOW_MS = 60_000; // 1 minute
+
+function checkLoginRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
+  const now = Date.now();
+  const attempt = loginAttempts.get(ip);
+
+  if (!attempt || now > attempt.resetAt) {
+    loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
+    return { allowed: true };
+  }
+
+  if (attempt.count >= MAX_LOGIN_ATTEMPTS) {
+    const retryAfter = Math.ceil((attempt.resetAt - now) / 1000);
+    return { allowed: false, retryAfter };
+  }
+
+  attempt.count++;
+  return { allowed: true };
+}
+
+// Clean up old entries periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, attempt] of loginAttempts) {
+    if (now > attempt.resetAt) loginAttempts.delete(ip);
+  }
+}, 60_000);
 
 function sign(phone: string): string {
   const secret = process.env.ADMIN_JWT_SECRET ?? "dev-admin-secret-change-me";
@@ -25,7 +58,12 @@ function verify(token: string): string | null {
   const secret = process.env.ADMIN_JWT_SECRET ?? "dev-admin-secret-change-me";
   const payload = `${parts[0]}.${parts[1]}`;
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-  if (sig !== parts[2]) return null;
+  // ✅ Constant-time comparison prevents timing attacks
+  try {
+    if (!timingSafeEqual(Buffer.from(sig), Buffer.from(parts[2]))) return null;
+  } catch {
+    return null;
+  }
   const issuedAt = Number(parts[1]);
   if (Date.now() - issuedAt > TOKEN_TTL_MS) return null;
   return parts[0];
@@ -36,6 +74,16 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const body = req.body as { phone?: string; pin?: string };
     const phone = body.phone?.replace(/[^0-9]/g, "");
     const pin = body.pin;
+    const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0] || req.ip;
+
+    // Rate limit: max 5 attempts per minute per IP
+    const rateLimit = checkLoginRateLimit(ip);
+    if (!rateLimit.allowed) {
+      return reply.code(429).send({
+        error: "Too many login attempts",
+        retryAfter: rateLimit.retryAfter,
+      });
+    }
 
     if (!phone || !pin) {
       return reply.code(400).send({ error: "phone and pin required" });

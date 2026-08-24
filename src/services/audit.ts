@@ -9,6 +9,9 @@ export interface AuditEntry {
   action: string;
   targetType?: string;
   targetId?: string;
+  amount?: number; // transaction amount in kobo
+  balanceBefore?: number; // wallet balance before in kobo
+  balanceAfter?: number; // wallet balance after in kobo
   detail?: string;
 }
 
@@ -37,6 +40,9 @@ export async function audit(entry: AuditEntry): Promise<void> {
       action: entry.action,
       targetType: entry.targetType ?? null,
       targetId: entry.targetId ?? null,
+      amount: entry.amount ?? null,
+      balanceBefore: entry.balanceBefore ?? null,
+      balanceAfter: entry.balanceAfter ?? null,
       detail: entry.detail?.slice(0, 500) ?? null,
     };
     const prevHash = last?.hash ?? null;
@@ -78,6 +84,9 @@ export async function verifyAuditChain(cooperativeId: string) {
       action: e.action,
       targetType: e.targetType,
       targetId: e.targetId,
+      amount: e.amount,
+      balanceBefore: e.balanceBefore,
+      balanceAfter: e.balanceAfter,
       detail: e.detail,
     };
     if (e.hash !== hashEntry(e.prevHash, payload) || e.prevHash !== prevHash) {

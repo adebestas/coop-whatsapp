@@ -180,18 +180,29 @@ export const monnifyAdapter: ProviderAdapter = {
         return { ok: false, error: init.responseMessage ?? "transfer rejected" };
       }
 
-      // Sandbox/dev uses a fixed OTP; production would relay it to an admin.
-      const otp = process.env.MONNIFY_TRANSFER_OTP ?? "";
-      if (otp) {
-        const validate = await api<MonnifyResponse<{ status: string }>>(
-          "POST",
-          "/api/v2/disbursements/single/complete",
-          { reference: init.responseBody.transferReference, authorizationCode: otp },
-        );
-        if (!validate.requestSuccessful || validate.responseBody.status === "FAILED") {
-          return { ok: false, error: validate.responseMessage ?? "transfer validation failed" };
-        }
-        return { ok: true, providerRef: init.responseBody.reference };
+      // Step 2: Complete transfer with OTP
+      // ⚠️ PRODUCTION WARNING: Monnify generates a NEW OTP for each transfer.
+      // The OTP is sent to the account holder via SMS/email from Monnify.
+      // For production, you need one of:
+      //   1. Monnify's "business factor" API for programmatic OTP
+      //   2. Route OTP to admin via WhatsApp for manual entry
+      //   3. Use Monnify's "resend OTP" endpoint to trigger delivery
+      const otp = process.env.MONNIFY_TRANSFER_OTP;
+      if (!otp) {
+        console.warn("[Monnify] MONNIFY_TRANSFER_OTP not set — transfers will fail in production");
+        return {
+          ok: false,
+          error: "Monnify OTP not configured. Set MONNIFY_TRANSFER_OTP environment variable.",
+        };
+      }
+
+      const validate = await api<MonnifyResponse<{ status: string }>>(
+        "POST",
+        "/api/v2/disbursements/single/complete",
+        { reference: init.responseBody.transferReference, authorizationCode: otp },
+      );
+      if (!validate.requestSuccessful || validate.responseBody.status === "FAILED") {
+        return { ok: false, error: validate.responseMessage ?? "transfer validation failed" };
       }
       return { ok: true, providerRef: init.responseBody.reference };
     } catch (err: any) {

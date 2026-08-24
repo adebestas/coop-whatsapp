@@ -87,10 +87,10 @@ async function getGuaranteedLoan(borrowerName?: string) {
   // Loans are capped at 2x savings — give the borrower history first.
   await prisma.wallet.update({
     where: { memberId: borrower.id },
-    data: { balance: 30000, totalSaved: 30000 },
+    data: { balance: 200000, totalSaved: 200000 },
   });
 
-  await handleMessage(PHONE, "loan 50000 2");
+  await handleMessage(PHONE, "loan 200000 2");
   await handleMessage(PHONE, "0123456789");
   await handleMessage(PHONE, "Access");
 
@@ -250,9 +250,9 @@ describe("withdrawals", () => {
     const coop = await makeCoop("TEST22");
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin" }); // the coop's super admin
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 10000 } });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 100000 } });
 
-    await handleMessage(PHONE, "withdraw 4000");
+    await handleMessage(PHONE, "withdraw 40000");
     await handleMessage(PHONE, "0123456789"); // account
     await handleMessage(PHONE, "Access"); // bank
     await handleMessage(PHONE, "1234"); // PIN
@@ -265,7 +265,7 @@ describe("withdrawals", () => {
       where: { id: member.id },
       include: { wallet: true },
     });
-    expect(updated!.wallet!.balance).toBe(10000);
+    expect(updated!.wallet!.balance).toBe(100000);
     expect(updated!.bankAccountNumber).toBe("0123456789");
     expect(updated!.bankCode).toBe("044");
 
@@ -276,7 +276,7 @@ describe("withdrawals", () => {
       where: { id: member.id },
       include: { wallet: true },
     });
-    expect(updated!.wallet!.balance).toBe(6000);
+    expect(updated!.wallet!.balance).toBe(60000);
     expect(updated!.lastWithdrawalAt).not.toBeNull();
 
     const paid = await prisma.withdrawalRequest.findUnique({ where: { id: req!.id } });
@@ -285,7 +285,7 @@ describe("withdrawals", () => {
 
     const payout = await prisma.payout.findFirst({ where: { memberId: member.id } });
     expect(payout).not.toBeNull();
-    expect(payout!.amount).toBe(4000);
+    expect(payout!.amount).toBe(40000);
     expect(payout!.status).toBe("successful");
 
     const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
@@ -297,9 +297,9 @@ describe("withdrawals", () => {
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
     const plainAdmin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" }); // not the coop adminPhone
     await prisma.cooperative.update({ where: { id: coop.id }, data: { adminPhone: null } });
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 10000 } });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 100000 } });
 
-    await handleMessage(PHONE, "withdraw 4000");
+    await handleMessage(PHONE, "withdraw 40000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
     await handleMessage(PHONE, "1234");
@@ -326,7 +326,7 @@ describe("withdrawals", () => {
     after = await prisma.withdrawalRequest.findUnique({ where: { id: req!.id } });
     expect(after!.status).toBe("paid");
     const updated = await prisma.member.findUnique({ where: { id: member.id }, include: { wallet: true } });
-    expect(updated!.wallet!.balance).toBe(6000);
+    expect(updated!.wallet!.balance).toBe(60000);
     void plainAdmin;
   });
 
@@ -334,13 +334,13 @@ describe("withdrawals", () => {
     const coop = await makeCoop("TEST26");
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin" }); // the coop's super admin
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 10000 } });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 100000 } });
     await prisma.member.update({
       where: { id: member.id },
       data: { lastWithdrawalAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }, // 1 month ago
     });
 
-    await handleMessage(PHONE, "withdraw 4000");
+    await handleMessage(PHONE, "withdraw 40000");
     let texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
     expect(texts).toContain("once every 6 months");
     expect(await prisma.withdrawalRequest.count()).toBe(0);
@@ -349,7 +349,7 @@ describe("withdrawals", () => {
     await handleMessage(ADMIN_PHONE, `overridewithdrawal ${PHONE}`);
     vi.mocked(sendText).mock.calls.length = 0;
 
-    await handleMessage(PHONE, "withdraw 4000");
+    await handleMessage(PHONE, "withdraw 40000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
     await handleMessage(PHONE, "1234");
@@ -364,15 +364,15 @@ describe("withdrawals", () => {
   it("rejects a withdrawal above the 45% cap without touching the wallet", async () => {
     const coop = await makeCoop("TEST23");
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 10000 } });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 100000 } });
 
-    await handleMessage(PHONE, "withdraw 5000"); // max is 4500
+    await handleMessage(PHONE, "withdraw 60000"); // max is 45000
 
     const updated = await prisma.member.findUnique({
       where: { id: member.id },
       include: { wallet: true },
     });
-    expect(updated!.wallet!.balance).toBe(10000);
+    expect(updated!.wallet!.balance).toBe(100000);
     expect(await prisma.payout.count()).toBe(0);
     expect(await prisma.withdrawalRequest.count()).toBe(0);
 
@@ -383,10 +383,10 @@ describe("withdrawals", () => {
   it("does not pay a withdrawal when the account name does not match", async () => {
     const coop = await makeCoop("TEST24");
     const member = await makeMember(PHONE, coop.id, { name: "Chinedu Eze" });
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 10000 } });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 100000 } });
     state.resolveName = "SADE BALOGUN";
 
-    await handleMessage(PHONE, "withdraw 4000");
+    await handleMessage(PHONE, "withdraw 40000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
     await handleMessage(PHONE, "1234");
@@ -401,7 +401,7 @@ describe("withdrawals", () => {
       where: { id: member.id },
       include: { wallet: true },
     });
-    expect(updated!.wallet!.balance).toBe(10000); // money never left
+    expect(updated!.wallet!.balance).toBe(100000); // money never left
     expect(await prisma.payout.count()).toBe(0);
 
     const after = await prisma.withdrawalRequest.findUnique({ where: { id: req!.id } });

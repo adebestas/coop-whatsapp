@@ -378,6 +378,9 @@ model AuditLog {
   action        String // e.g. loan.approve, withdraw.finalize, claim.payout, role.set
   targetType    String? // loan | withdrawal | deathclaim | member | ...
   targetId      String?
+  amount        Int? // transaction amount in kobo (financial audit)
+  balanceBefore Int? // wallet balance before the operation in kobo
+  balanceAfter  Int? // wallet balance after the operation in kobo
   detail        String? // human-readable summary
   prevHash      String? // hash of the previous entry (tamper-evident chain)
   hash          String? // sha256 of this entry's content + prevHash

@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
 import fastifyStatic from "@fastify/static";
 import rateLimit from "@fastify/rate-limit";
 import path from "node:path";
@@ -43,7 +44,31 @@ export function buildApp() {
     },
   );
 
-  void app.register(cors, { origin: true });
+  // Restrict CORS to actual dashboard origin (prevents cross-site attacks)
+  const dashboardOrigin = process.env.DASHBOARD_ORIGIN;
+  void app.register(cors, {
+    origin: dashboardOrigin ? [dashboardOrigin] : false,
+    credentials: true,
+  });
+
+  // Security headers — defense in depth against XSS, clickjacking, etc.
+  void app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "https:"],
+        fontSrc: ["'self'"],
+        connectSrc: ["'self'"],
+        frameAncestors: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false, // Allow WhatsApp webhook images
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  });
 
   // Rate limiting — blunt-force protection on every public route.
   // Providers retry aggressively, so webhooks get a generous but bounded

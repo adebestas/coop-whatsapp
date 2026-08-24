@@ -1,7 +1,22 @@
 import type { FastifyInstance } from "fastify";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { config, isAllowed } from "../config.js";
 import { handleMessage } from "../services/conversation.js";
 import { extractWhatsAppMessages } from "../lib/inbound.js";
+
+/**
+ * Verify WhatsApp webhook signature (X-Hub-Signature-256).
+ * Prevents attackers from injecting fake messages.
+ */
+function verifyWhatsAppSignature(rawBody: string, signature: string | undefined): boolean {
+  if (!signature || !process.env.WHATSAPP_TOKEN) return false;
+  const expected = createHmac("sha256", process.env.WHATSAPP_TOKEN).update(rawBody).digest("hex");
+  try {
+    return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+  } catch {
+    return false;
+  }
+}
 
 export async function webhookRoutes(app: FastifyInstance) {
   // ---- GET: Meta verifies your webhook URL ----
@@ -20,6 +35,14 @@ export async function webhookRoutes(app: FastifyInstance) {
   // ---- POST: Meta delivers incoming messages ----
   app.post("/webhook", async (req, reply) => {
     const body = req.body as any;
+    const rawBody = (req as any).rawBody as string;
+    const signature = req.headers["x-hub-signature-256"] as string;
+
+    // Verify webhook signature — blocks fake messages from attackers
+    if (!verifyWhatsAppSignature(rawBody, signature)) {
+      app.log.warn("WhatsApp webhook signature verification failed");
+      return reply.code(401).send({ error: "Invalid signature" });
+    }
 
     // Only process messages, ignore status updates etc.
     const entries: any[] = body?.entry ?? [];

@@ -42,7 +42,7 @@ async function makeMember(
       ...(opts.bank
         ? { bankAccountNumber: "0123456789", bankCode: "044", bankName: "Access Bank" }
         : {}),
-      wallet: { create: { balance: 20000, totalSaved: 40000 } },
+      wallet: { create: { balance: 100000, totalSaved: 200000 } },
     },
   });
 }
@@ -174,7 +174,7 @@ describe("secure PIN challenges", () => {
         phone: PHONE,
         state: "awaiting_withdraw_pin",
         data: JSON.stringify({
-          withdrawAmount: 1000,
+          withdrawAmount: 10000,
           withdrawAccount: "0123456789",
           withdrawBankCode: "044",
           withdrawBankName: "Access Bank",
@@ -187,7 +187,7 @@ describe("secure PIN challenges", () => {
 
     const wr = await prisma.withdrawalRequest.findFirst({ where: { memberId: member.id } });
     expect(wr).not.toBeNull();
-    expect(wr!.amount).toBe(1000);
+    expect(wr!.amount).toBe(10000);
   });
 
   it("still accepts typed PIN text when a flow challenge is outstanding", async () => {
@@ -198,7 +198,7 @@ describe("secure PIN challenges", () => {
         phone: PHONE,
         state: "awaiting_withdraw_pin",
         data: JSON.stringify({
-          withdrawAmount: 1000,
+          withdrawAmount: 10000,
           withdrawAccount: "0123456789",
           withdrawBankCode: "044",
           withdrawBankName: "Access Bank",

@@ -119,7 +119,7 @@ describe("fraud hardening", () => {
     const coop = await makeCoop("TEST33");
     await makeMember(PHONE, coop.id);
 
-    await handleMessage(PHONE, "save 5000");
+    await handleMessage(PHONE, "save 10000");
     const logs = await prisma.auditLog.findMany({ where: { action: "contribution.create" } });
     expect(logs).toHaveLength(1);
     expect(logs[0].actorPhone).toBe(PHONE);
@@ -132,14 +132,14 @@ describe("nigeria cooperative rules", () => {
     const member = await makeMember(PHONE, coop.id);
     await prisma.wallet.update({
       where: { memberId: member.id },
-      data: { balance: 10000, totalSaved: 10000 },
+      data: { balance: 100000, totalSaved: 100000 },
     });
 
-    const tooBig = await applyForLoan(PHONE, 25000, 3);
+    const tooBig = await applyForLoan(PHONE, 250000, 3);
     expect(tooBig.ok).toBe(false);
     expect(tooBig.message).toContain("2x your savings");
 
-    const ok = await applyForLoan(PHONE, 20000, 3);
+    const ok = await applyForLoan(PHONE, 200000, 3);
     expect(ok.ok).toBe(true);
 
     // Make the loan overdue -> member is now defaulting.
@@ -147,7 +147,7 @@ describe("nigeria cooperative rules", () => {
       where: { memberId: member.id },
       data: { status: "disbursed", dueDate: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000) },
     });
-    const blocked = await applyForLoan(PHONE, 5000, 2);
+    const blocked = await applyForLoan(PHONE, 150000, 2);
     expect(blocked.ok).toBe(false);
     expect(blocked.message).toContain("behind");
   });

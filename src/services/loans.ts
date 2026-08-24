@@ -4,6 +4,7 @@ import { disburseLoan } from "./disbursements.js";
 import { requiredGuarantors } from "./guarantors.js";
 import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
+import { LIMITS } from "../lib/money.js";
 
 export interface ApplyLoanResult {
   ok: boolean;
@@ -53,6 +54,12 @@ export async function applyForLoan(
   }
   if (!Number.isFinite(amount) || amount <= 0 || tenureMonths < 1 || tenureMonths > 12) {
     return { ok: false, message: "Use the format *loan <amount> <months>*, e.g. *loan 50000 3* (up to 12 months)." };
+  }
+  if (amount < LIMITS.MIN_LOAN) {
+    return { ok: false, message: `Minimum loan amount is *${formatBalance(LIMITS.MIN_LOAN)}*.` };
+  }
+  if (amount > LIMITS.MAX_LOAN) {
+    return { ok: false, message: `Maximum loan amount is *${formatBalance(LIMITS.MAX_LOAN)}*.` };
   }
 
   // Rule: a loan can't exceed 2x the member's total savings.

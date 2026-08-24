@@ -1,7 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { sendText, sendSecurePrompt, platformOf } from "../lib/messaging.js";
 import { deleteTelegramMessage } from "../lib/telegram.js";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 import {
   createContribution,
   findOrCreateMember,
@@ -65,35 +65,38 @@ export type BotState =
   | "awaiting_death_cert"
   | "awaiting_ai_confirm";
 
-interface FlowData {
-  joinCode?: string;
-  pin?: string;
-  name?: string;
-  contactPhone?: string;
-  otp?: string;
-  otpExpiresAt?: number;
-  phoneVerified?: boolean;
-  email?: string;
-  dateOfBirth?: string; // ISO date string
-  nokName?: string;
-  nokPhone?: string;
-  loanAmount?: number;
-  loanMonths?: number;
-  loanAccount?: string;
-  loanBankCode?: string;
-  loanBankName?: string;
-  loanId?: string;
-  withdrawAmount?: number;
-  withdrawAccount?: string;
-  withdrawBankCode?: string;
-  withdrawBankName?: string;
-  deathClaimId?: string;
-  /** AI fallback translator: proposed command awaiting user confirmation. */
-  aiCommand?: string;
-  aiArgs?: string[];
-  /** One-time token binding the current PIN prompt to a WhatsApp Flow card. */
-  flowToken?: string;
-}
+import { z } from "zod";
+
+// ===== Session Data Schema (validates against corruption/tampering) =====
+const FlowDataSchema = z.object({
+  joinCode: z.string().optional(),
+  pin: z.string().optional(),
+  name: z.string().optional(),
+  contactPhone: z.string().optional(),
+  otp: z.string().optional(),
+  otpExpiresAt: z.number().optional(),
+  phoneVerified: z.boolean().optional(),
+  email: z.string().optional(),
+  dateOfBirth: z.string().optional(),
+  nokName: z.string().optional(),
+  nokPhone: z.string().optional(),
+  loanAmount: z.number().positive().optional(),
+  loanMonths: z.number().positive().optional(),
+  loanAccount: z.string().optional(),
+  loanBankCode: z.string().optional(),
+  loanBankName: z.string().optional(),
+  loanId: z.string().optional(),
+  withdrawAmount: z.number().positive().optional(),
+  withdrawAccount: z.string().optional(),
+  withdrawBankCode: z.string().optional(),
+  withdrawBankName: z.string().optional(),
+  deathClaimId: z.string().optional(),
+  aiCommand: z.string().optional(),
+  aiArgs: z.array(z.string()).optional(),
+  flowToken: z.string().optional(),
+});
+
+export type FlowData = z.infer<typeof FlowDataSchema>;
 
 /** States where the user is typing a secret — flow-token guarded, Telegram messages deleted after read. */
 const SECRET_STATES: BotState[] = ["awaiting_pin", "awaiting_pin_confirm", "awaiting_withdraw_pin"];
@@ -512,7 +515,7 @@ async function handleAwaitingInput(
   dataJson: string,
   meta: MessageMeta = {},
 ): Promise<void> {
-  const data = safeParse(dataJson) as FlowData;
+  const data = safeParse(dataJson);
 
   if (SECRET_STATES.includes(state)) {
     // Telegram: scrub the typed secret from chat history immediately.
@@ -576,7 +579,7 @@ async function handleAwaitingInput(
       // Verify the number belongs to them: if it's already a WhatsApp member
       // number we can send a code to that WhatsApp. Otherwise continue
       // unverified (flagged on the account).
-      const code = String(Math.floor(100000 + Math.random() * 900000));
+      const code = String(randomInt(100000, 999999)); // ✅ Cryptographically secure OTP
       const delivered = await deliverOtp(contactPhone, code);
       if (delivered) {
         await prisma.session.upsert({
@@ -1341,9 +1344,11 @@ async function deliverOtp(contactPhone: string, code: string): Promise<boolean> 
   }
 }
 
-function safeParse(json: string): unknown {
+function safeParse(json: string): FlowData {
   try {
-    return JSON.parse(json);
+    const parsed = JSON.parse(json);
+    const result = FlowDataSchema.safeParse(parsed);
+    return result.success ? result.data : {};
   } catch {
     return {};
   }

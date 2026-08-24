@@ -13,6 +13,7 @@ interface EnvSpec {
 const REQUIRED_FATAL: EnvSpec[] = [
   { key: "WHATSAPP_TOKEN", fatal: true, hint: "Meta WhatsApp Cloud API access token" },
   { key: "WHATSAPP_PHONE_ID", fatal: true, hint: "Meta WhatsApp phone number id" },
+  { key: "ADMIN_JWT_SECRET", fatal: true, hint: "Random 32+ char string for admin dashboard auth (generate: openssl rand -hex 32)" },
 ];
 
 const RECOMMENDED: EnvSpec[] = [
@@ -50,6 +51,12 @@ export function validateEnvironment(env: NodeJS.ProcessEnv = process.env): EnvRe
   }
   if (sessionSecret && /^(test|secret|changeme|123456|password)/i.test(sessionSecret)) {
     problems.push("⚠️  SESSION_SECRET looks like a placeholder — generate with `openssl rand -hex 32`.");
+  }
+
+  // Check ADMIN_JWT_SECRET for weak values
+  const adminSecret = env.ADMIN_JWT_SECRET ?? "";
+  if (adminSecret && /^(dev-admin-secret-change-me|test|secret|changeme|123456|password)/i.test(adminSecret)) {
+    problems.push("⚠️  ADMIN_JWT_SECRET looks like a placeholder — generate with `openssl rand -hex 32`.");
   }
 
   const twoFaRequired = env.TWO_FA_REQUIRED === "1";

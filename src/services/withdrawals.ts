@@ -3,6 +3,9 @@ import { formatBalance } from "./cooperative.js";
 import { sendText, notifyMember } from "../lib/messaging.js";
 import { sendToBank } from "./disbursements.js";
 import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
+import { LIMITS } from "../lib/money.js";
+import { audit } from "./audit.js";
+import { checkVelocity } from "./fraud.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
@@ -65,6 +68,12 @@ export async function requestWithdrawal(
   const max = Math.floor(balance * WITHDRAW_LIMIT_RATIO);
   if (!Number.isFinite(amount) || amount <= 0) {
     return { ok: false, message: "Enter a valid amount, e.g. *withdraw 5000*." };
+  }
+  if (amount < LIMITS.MIN_WITHDRAW) {
+    return { ok: false, message: `Minimum withdrawal amount is *${formatBalance(LIMITS.MIN_WITHDRAW)}*.` };
+  }
+  if (amount > LIMITS.MAX_WITHDRAW) {
+    return { ok: false, message: `Maximum withdrawal amount is *${formatBalance(LIMITS.MAX_WITHDRAW)}*.` };
   }
   if (amount > max) {
     return {
@@ -210,6 +219,14 @@ export async function finalizeWithdrawal(
     };
   }
 
+  // Velocity check: max 5 money-out per 10 minutes per member.
+  if (!checkVelocity(request.memberId)) {
+    return {
+      ok: false,
+      message: `🛑 Too many transactions in a short period. Please wait a few minutes and try again.`,
+    };
+  }
+
   // STEP 1 — atomic claim.
   const claimed = await prisma.withdrawalRequest.updateMany({
     where: { id: request.id, status: { in: ["pending", "admin_approved"] } },
@@ -279,6 +296,21 @@ export async function finalizeWithdrawal(
         data: { lastWithdrawalAt: new Date(), withdrawalOverride: false },
       }),
     ]);
+
+    const balanceAfter = (wallet.balance ?? 0) - request.amount;
+    await audit({
+      cooperativeId: request.cooperativeId,
+      actorPhone: actor.phone,
+      actorId: actor.id,
+      actorRole: actor.role,
+      action: "withdrawal.finalize",
+      targetType: "withdrawal",
+      targetId: request.id,
+      amount: request.amount,
+      balanceBefore: wallet.balance ?? 0,
+      balanceAfter,
+      detail: `${formatBalance(request.amount)} to ${member.name}`,
+    });
 
     return {
       ok: true,

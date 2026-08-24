@@ -139,18 +139,18 @@ describe("coop whatsapp bot", () => {
     const coop = await makeCoop("TEST02", "Test Coop");
     await makeMember(PHONE, coop.id);
 
-    await handleMessage(PHONE, "save 5000");
+    await handleMessage(PHONE, "save 10000");
     await handleMessage(PHONE, "balance");
 
     const member = await prisma.member.findFirst({
       where: { phone: PHONE },
       include: { wallet: true, contributions: true },
     });
-    expect(member!.wallet!.balance).toBe(5000);
+    expect(member!.wallet!.balance).toBe(10000);
     expect(member!.contributions).toHaveLength(1);
 
     const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text);
-    expect(texts.some((t) => t.includes("NGN 5,000.00"))).toBe(true);
+    expect(texts.some((t) => t.includes("NGN 10,000.00"))).toBe(true);
     expect(texts.some((t) => t.includes("new balance"))).toBe(true);
   });
 
@@ -232,10 +232,10 @@ it("requires guarantor confirmation and two-step admin approval for loans", asyn
     await makeMember(SUPER2_PHONE, coop.id, { role: "superadmin", pin: "7777" });
 
     // Loans are capped at 2x savings — give the borrower some history first.
-    await handleMessage(PHONE, "save 30000");
+    await handleMessage(PHONE, "save 100000");
 
     // Apply for a loan — bot collects bank details, then asks for guarantor 1.
-    await handleMessage(PHONE, "loan 50000 2");
+    await handleMessage(PHONE, "loan 200000 2");
     await handleMessage(PHONE, "0123456789"); // bank account
     await handleMessage(PHONE, "Access"); // bank name
 
@@ -305,7 +305,7 @@ it("requires guarantor confirmation and two-step admin approval for loans", asyn
     await prisma.wallet.updateMany({ data: { balance: { increment: 100000 } } });
     await handleMessage(PHONE, "repay");
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
-    expect(loan!.balance).toBeLessThan(50000 * 1.04);
+    expect(loan!.balance).toBeLessThan(200000 * 1.04);
   });
 
   it("lets an admin borrow with a single guarantor, finalized by the super admin", async () => {
@@ -316,8 +316,8 @@ it("requires guarantor confirmation and two-step admin approval for loans", asyn
     await makeMember(SUPER2_PHONE, coop.id, { role: "superadmin", pin: "7777" });
 
     // Admins need savings too (2x cap) — and only 1 guarantor.
-    await handleMessage(ADMIN_PHONE, "save 10000");
-    await handleMessage(ADMIN_PHONE, "loan 20000 2");
+    await handleMessage(ADMIN_PHONE, "save 100000");
+    await handleMessage(ADMIN_PHONE, "loan 200000 2");
     await handleMessage(ADMIN_PHONE, "0123456789");
     await handleMessage(ADMIN_PHONE, "Access");
 

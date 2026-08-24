@@ -61,13 +61,25 @@ export const paystackAdapter: ProviderAdapter = {
 
   async payout(params: PayoutParams): Promise<PayoutResult> {
     try {
-      // Requires a transfer recipient + bank verification. Here we create the
-      // recipient then transfer. Recipient codes are cached per account.
+      // 1. Create transfer recipient first (Paystack requires recipient_code, not bank_code)
+      const recipientRes = await api<any>("/transferrecipient", "POST", {
+        type: "nuban",
+        name: params.recipientName || "Coop Member",
+        account_number: params.bankAccountNumber,
+        bank_code: params.bankCode,
+        currency: "NGN",
+      });
+      const recipientCode = recipientRes.data?.recipient_code;
+      if (!recipientCode) {
+        return { ok: false, error: "Failed to create Paystack transfer recipient" };
+      }
+
+      // 2. Initiate transfer with recipient code
       const res = await api<any>("/transfer", "POST", {
         source: process.env.PAYSTACK_TRANSFER_SOURCE ?? "balance",
-        amount: Math.round(params.amount * 100),
+        amount: params.amount, // Already in kobo from schema
         reference: params.reference,
-        recipient: params.bankCode, // expects a recipient_code in production
+        recipient: recipientCode, // ✅ Correct: recipient_code, not bank_code
         reason: `Coop payout ${params.reference}`,
       });
       return { ok: true, providerRef: res.data?.transfer_code };

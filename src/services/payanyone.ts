@@ -4,8 +4,9 @@ import { resolveProvider } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
-import { approvalCooldownMs, checkDailyPayoutLimit } from "./fraud.js";
+import { approvalCooldownMs, checkDailyPayoutLimit, checkVelocity } from "./fraud.js";
 import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
+import { LIMITS } from "../lib/money.js";
 
 export interface PayAnyoneResult {
   ok: boolean;
@@ -25,6 +26,9 @@ export async function requestExternalPayment(
 ): Promise<PayAnyoneResult> {
   if (!Number.isFinite(input.amount) || input.amount <= 0) {
     return { ok: false, message: "Use *payanyone <amount> <account> <bank> <name>* — amount must be positive." };
+  }
+  if (input.amount > LIMITS.MAX_PAYANYONE) {
+    return { ok: false, message: `Maximum pay-anyone amount is *${formatBalance(LIMITS.MAX_PAYANYONE)}* per transaction.` };
   }
 
   const limit = await checkDailyPayoutLimit(actor.cooperativeId, input.amount);
@@ -216,6 +220,15 @@ async function payExternal(
 ): Promise<PayAnyoneResult> {
   const payment = await prisma.externalPayment.findUnique({ where: { id: paymentId } });
   if (!payment) return { ok: false, message: "Request not found." };
+
+  // Velocity check: max 5 money-out per 10 minutes.
+  if (!checkVelocity(actor.id)) {
+    await prisma.externalPayment.updateMany({
+      where: { id: payment.id, status: "approved2" },
+      data: { status: "pending", approved3ById: null },
+    });
+    return { ok: false, message: "🛑 Too many transactions in a short period. Please wait a few minutes and try again." };
+  }
 
   const limit = await checkDailyPayoutLimit(actor.cooperativeId, payment.amount);
   if (!limit.ok) {
