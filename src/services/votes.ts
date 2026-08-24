@@ -246,9 +246,14 @@ async function tallyMessage(voteId: string): Promise<string> {
 }
 
 async function findVote(shortId: string) {
-  return prisma.vote.findFirst({
-    where: {
-      OR: [{ id: shortId }, { id: { startsWith: shortId } }, { id: { endsWith: shortId } }],
-    },
+  // Try exact match first
+  const exact = await prisma.vote.findUnique({ where: { id: shortId } });
+  if (exact) return exact;
+
+  // Try suffix match — require exactly one result
+  const matches = await prisma.vote.findMany({
+    where: { id: { endsWith: shortId } },
+    take: 2,
   });
+  return matches.length === 1 ? matches[0] : null;
 }

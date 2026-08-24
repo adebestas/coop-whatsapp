@@ -68,6 +68,11 @@ export function buildApp() {
     },
     crossOriginEmbedderPolicy: false, // Allow WhatsApp webhook images
     crossOriginResourcePolicy: { policy: "cross-origin" },
+    hsts: {
+      maxAge: 31536000, // 1 year
+      includeSubDomains: true,
+      preload: true,
+    },
   });
 
   // Rate limiting — blunt-force protection on every public route.

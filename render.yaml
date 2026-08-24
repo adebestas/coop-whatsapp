@@ -15,7 +15,7 @@ services:
     region: frankfurt    # closest region to Nigeria on Render (also: oregon, ohio, singapore)
     branch: main
     buildCommand: npm ci && npx prisma generate && npm run build
-    preDeployCommand: npx prisma db push   # idempotent schema sync before every deploy
+    preDeployCommand: npx prisma migrate deploy   # run migrations before every deploy
     startCommand: npm start
     healthCheckPath: /health
     autoDeploy: true     # every push to main deploys automatically

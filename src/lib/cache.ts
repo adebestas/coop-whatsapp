@@ -184,3 +184,65 @@ export const CACHE_TTL = {
   OTP: 10 * 60, // 10 min
   RATE_LIMIT: 60, // 1 min
 } as const;
+
+// ===== Redis-backed Rate Limiting =====
+// Falls back to in-memory when Redis is unavailable.
+
+const inMemoryRateLimits = new Map<string, { count: number; resetAt: number }>();
+
+/**
+ * Sliding window rate limit. Returns { allowed, retryAfter? }.
+ * Uses Redis INCR + EXPIRE when connected, falls back to in-memory.
+ */
+export async function checkRateLimit(
+  key: string,
+  maxAttempts: number,
+  windowSeconds: number,
+): Promise<{ allowed: boolean; retryAfter?: number }> {
+  const client = getRedis();
+  const now = Date.now();
+
+  if (client) {
+    try {
+      const redisKey = `rl:${key}`;
+      const current = await client.incr(redisKey);
+      if (current === 1) {
+        await client.expire(redisKey, windowSeconds);
+      }
+      if (current > maxAttempts) {
+        const ttl = await client.ttl(redisKey);
+        return { allowed: false, retryAfter: ttl > 0 ? ttl : windowSeconds };
+      }
+      return { allowed: true };
+    } catch {
+      // Fall through to in-memory
+    }
+  }
+
+  // In-memory fallback
+  const entry = inMemoryRateLimits.get(key);
+  if (!entry || now > entry.resetAt) {
+    inMemoryRateLimits.set(key, { count: 1, resetAt: now + windowSeconds * 1000 });
+    return { allowed: true };
+  }
+  if (entry.count >= maxAttempts) {
+    return { allowed: false, retryAfter: Math.ceil((entry.resetAt - now) / 1000) };
+  }
+  entry.count++;
+  return { allowed: true };
+}
+
+/**
+ * Reset a rate limit key (e.g., after successful login).
+ */
+export async function resetRateLimit(key: string): Promise<void> {
+  const client = getRedis();
+  if (client) {
+    try {
+      await client.del(`rl:${key}`);
+    } catch {
+      // ignore
+    }
+  }
+  inMemoryRateLimits.delete(key);
+}

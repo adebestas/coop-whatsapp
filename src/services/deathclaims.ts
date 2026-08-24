@@ -15,12 +15,20 @@ export interface ClaimResult {
 }
 
 async function findClaim(shortId: string) {
-  return prisma.deathClaim.findFirst({
-    where: {
-      OR: [{ id: shortId }, { id: { startsWith: shortId } }, { id: { endsWith: shortId } }],
-    },
+  // Try exact match first
+  const exact = await prisma.deathClaim.findUnique({
+    where: { id: shortId },
     include: { member: true, validations: true },
   });
+  if (exact) return exact;
+
+  // Try suffix match — require exactly one result
+  const matches = await prisma.deathClaim.findMany({
+    where: { id: { endsWith: shortId } },
+    include: { member: true, validations: true },
+    take: 2,
+  });
+  return matches.length === 1 ? matches[0] : null;
 }
 
 /**

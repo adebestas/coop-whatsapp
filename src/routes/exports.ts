@@ -8,6 +8,12 @@ import { timingSafeEqual } from "node:crypto";
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
 
+function getSecret(): string {
+  const secret = process.env.ADMIN_JWT_SECRET;
+  if (!secret) throw new Error("ADMIN_JWT_SECRET is not configured");
+  return secret;
+}
+
 /**
  * Verify admin dashboard token (shared with admin.ts).
  * Returns the phone number if valid, null otherwise.
@@ -15,7 +21,7 @@ const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
 function verifyToken(token: string): string | null {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
-  const secret = process.env.ADMIN_JWT_SECRET ?? "dev-admin-secret-change-me";
+  const secret = getSecret();
   const payload = `${parts[0]}.${parts[1]}`;
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   try {

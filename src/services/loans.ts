@@ -151,16 +151,20 @@ export async function listPendingLoans(cooperativeId: string, limit = 20) {
 
 /** Resolve a full loan id from a short (suffix) id shown in chat. */
 async function findLoan(shortId: string) {
-  return prisma.loan.findFirst({
-    where: {
-      OR: [
-        { id: shortId },
-        { id: { startsWith: shortId } },
-        { id: { endsWith: shortId } },
-      ],
-    },
+  // Try exact match first
+  const exact = await prisma.loan.findUnique({
+    where: { id: shortId },
     include: { member: true, guarantors: { include: { member: true } } },
   });
+  if (exact) return exact;
+
+  // Try suffix match — require exactly one result
+  const matches = await prisma.loan.findMany({
+    where: { id: { endsWith: shortId } },
+    include: { member: true, guarantors: { include: { member: true } } },
+    take: 2,
+  });
+  return matches.length === 1 ? matches[0] : null;
 }
 
 /**
@@ -376,6 +380,7 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
     return { ok: false, message: "Your wallet balance changed — please try again." };
   }
 
+  // All operations in one transaction for atomicity
   await prisma.$transaction([
     prisma.loan.update({
       where: { id: loan.id },

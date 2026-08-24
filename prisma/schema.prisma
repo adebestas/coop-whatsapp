@@ -43,6 +43,9 @@ model Cooperative {
   deductionBatches  DeductionBatch[]
   externalPayments   ExternalPayment[]
   purchasePolls      PurchasePoll[]
+
+  @@index([status])
+  @@index([code])
 }
 
 // ---- Members (users) ----
@@ -86,7 +89,7 @@ model Member {
   autoSaveNextDue         DateTime? // when the next reminder should fire
   autoSaveEnabled         Boolean             @default(false)
   cooperativeId           String
-  cooperative             Cooperative         @relation(fields: [cooperativeId], references: [id])
+  cooperative             Cooperative         @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
   wallet                  Wallet?
@@ -123,6 +126,8 @@ model Member {
 
   @@unique([cooperativeId, phone])
   @@index([phone])
+  @@index([cooperativeId, role])
+  @@index([status])
 }
 
 // ---- Units / workplaces ----
@@ -149,7 +154,7 @@ model Wallet {
   balance    Int      @default(0) // stored in kobo (₦1 = 100 kobo) — prevents float rounding
   totalSaved Int      @default(0) // stored in kobo
   memberId   String   @unique
-  member     Member   @relation(fields: [memberId], references: [id])
+  member     Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 }
@@ -164,10 +169,13 @@ model Contribution {
   status        String      @default("pending") // pending | confirmed | failed
   paidAt        DateTime?
   memberId      String
-  member        Member      @relation(fields: [memberId], references: [id])
+  member        Member      @relation(fields: [memberId], references: [id], onDelete: Restrict)
   cooperativeId String
-  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
   createdAt     DateTime    @default(now())
+
+  @@index([memberId, status])
+  @@index([cooperativeId, createdAt])
 }
 
 // ---- Loans ----
@@ -192,14 +200,18 @@ model Loan {
   disbursedAt        DateTime?
   dueDate            DateTime? // next installment due date
   memberId           String
-  member             Member          @relation(fields: [memberId], references: [id])
-  superApprover2     Member?         @relation("LoanSuper2", fields: [superApproved2ById], references: [id])
+  member             Member          @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  superApprover2     Member?         @relation("LoanSuper2", fields: [superApproved2ById], references: [id], onDelete: SetNull)
   cooperativeId      String
-  cooperative        Cooperative     @relation(fields: [cooperativeId], references: [id])
+  cooperative        Cooperative     @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
   createdAt          DateTime        @default(now())
   approvedAt         DateTime?
   guarantors         Guarantor[]
   repayments         LoanRepayment[]
+
+  @@index([memberId, status])
+  @@index([cooperativeId, status])
+  @@index([status, createdAt])
 }
 
 // ---- Guarantors ----
@@ -208,9 +220,9 @@ model Loan {
 model Guarantor {
   id          String    @id @default(cuid())
   loanId      String
-  loan        Loan      @relation(fields: [loanId], references: [id])
+  loan        Loan      @relation(fields: [loanId], references: [id], onDelete: Cascade)
   memberId    String
-  member      Member    @relation(fields: [memberId], references: [id])
+  member      Member    @relation(fields: [memberId], references: [id], onDelete: Restrict)
   code        String    @unique // auto-generated unique confirmation code
   status      String    @default("pending") // pending | confirmed | declined
   confirmedAt DateTime?
@@ -218,14 +230,17 @@ model Guarantor {
 
   @@unique([loanId, memberId])
   @@index([code])
+  @@index([memberId, status])
 }
 
 model LoanRepayment {
   id     String   @id @default(cuid())
   amount Int // stored in kobo
   loanId String
-  loan   Loan     @relation(fields: [loanId], references: [id])
+  loan   Loan     @relation(fields: [loanId], references: [id], onDelete: Cascade)
   paidAt DateTime @default(now())
+
+  @@index([loanId, paidAt])
 }
 
 // ---- Payouts (admin disbursements to members) ----
@@ -309,10 +324,14 @@ model WithdrawalRequest {
   finalizedById     String? // super admin who released the money
   rejectedAt        DateTime?
   memberId          String
-  member            Member      @relation(fields: [memberId], references: [id])
+  member            Member      @relation(fields: [memberId], references: [id], onDelete: Restrict)
   cooperativeId     String
-  cooperative       Cooperative @relation(fields: [cooperativeId], references: [id])
+  cooperative       Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
   createdAt         DateTime    @default(now())
+
+  @@index([memberId, status])
+  @@index([cooperativeId, status])
+  @@index([status, createdAt])
 }
 
 // ---- Death claims ----
@@ -325,23 +344,24 @@ model WithdrawalRequest {
 model Beneficiary {
   id            String   @id @default(cuid())
   cooperativeId String
-  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
   memberId      String? // null = external pay-anyone beneficiary
-  member        Member?  @relation(fields: [memberId], references: [id])
+  member        Member?  @relation(fields: [memberId], references: [id], onDelete: SetNull)
   accountNumber String
   bankCode      String
   bankName      String?
   createdAt     DateTime @default(now()) // hold window starts here
 
   @@unique([cooperativeId, accountNumber, bankCode])
+  @@index([cooperativeId, accountNumber])
 }
 
 model DeathClaim {
   id                  String            @id @default(cuid())
   memberId            String // the deceased member
-  member              Member            @relation(fields: [memberId], references: [id])
+  member              Member            @relation(fields: [memberId], references: [id], onDelete: Restrict)
   cooperativeId       String
-  cooperative         Cooperative       @relation(fields: [cooperativeId], references: [id])
+  cooperative         Cooperative       @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
   status              String            @default("awaiting_certificate") // awaiting_certificate | awaiting_validation | validated | approved | paid | rejected
   certificateRef      String? // death certificate upload reference
   familyAccountNumber String?
@@ -353,6 +373,9 @@ model DeathClaim {
   finalizedAt         DateTime?
   createdAt           DateTime          @default(now())
   validations         DeathValidation[]
+
+  @@index([memberId, status])
+  @@index([cooperativeId, status])
 }
 
 model DeathValidation {
@@ -411,7 +434,7 @@ model LedgerEntry {
 model ExternalPayment {
   id                String      @id @default(cuid())
   cooperativeId     String
-  cooperative       Cooperative @relation(fields: [cooperativeId], references: [id])
+  cooperative       Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
   beneficiaryName   String
   bankAccountNumber String
   bankCode          String
@@ -420,19 +443,20 @@ model ExternalPayment {
   purpose           String?
   status            String      @default("pending") // pending | approved1 | approved2 | paid | rejected | failed
   initiatedById     String
-  initiator         Member      @relation("ExternalPayInitiator", fields: [initiatedById], references: [id])
+  initiator         Member      @relation("ExternalPayInitiator", fields: [initiatedById], references: [id], onDelete: Restrict)
   approved1ById     String?
-  approver1         Member?     @relation("ExternalPayApprover1", fields: [approved1ById], references: [id])
+  approver1         Member?     @relation("ExternalPayApprover1", fields: [approved1ById], references: [id], onDelete: SetNull)
   approved2ById     String?
-  approver2         Member?     @relation("ExternalPayApprover2", fields: [approved2ById], references: [id])
+  approver2         Member?     @relation("ExternalPayApprover2", fields: [approved2ById], references: [id], onDelete: SetNull)
   approved3ById     String?
-  approver3         Member?     @relation("ExternalPayApprover3", fields: [approved3ById], references: [id])
+  approver3         Member?     @relation("ExternalPayApprover3", fields: [approved3ById], references: [id], onDelete: SetNull)
   lastApprovedAt    DateTime? // cool-off clock between approvals
   payoutReference   String?
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
 
   @@index([cooperativeId, status])
+  @@index([initiatedById, status])
 }
 
 // ---- Buy votes (what should the coop buy for members?) ----
@@ -621,6 +645,8 @@ model Session {
   state     String   @default("idle") // idle | awaiting_name | awaiting_coop | awaiting_pin | ...
   data      String   @default("{}") // JSON payload for the current flow
   updatedAt DateTime @updatedAt
+
+  @@index([updatedAt])
 }
 
 // ---- Executive posts (organogram) ----

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { verifyPin } from "../lib/security.js";
+import { checkRateLimit } from "../lib/cache.js";
 
 /**
  * Minimal admin auth for the dashboard: members log in with their WhatsApp
@@ -13,40 +14,33 @@ import { timingSafeEqual } from "node:crypto";
 
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
 
-// ===== Login Rate Limiting =====
-// Prevents brute-force attacks on 4-digit PINs
-const loginAttempts = new Map<string, { count: number; resetAt: number }>();
 const MAX_LOGIN_ATTEMPTS = 5;
-const LOGIN_WINDOW_MS = 60_000; // 1 minute
+const LOGIN_WINDOW_SECONDS = 60; // 1 minute
+const MAX_ACCOUNT_ATTEMPTS = 10;
+const ACCOUNT_WINDOW_SECONDS = 15 * 60; // 15 minutes
 
-function checkLoginRateLimit(ip: string): { allowed: boolean; retryAfter?: number } {
-  const now = Date.now();
-  const attempt = loginAttempts.get(ip);
+async function checkLoginRateLimit(ip: string, phone?: string): Promise<{ allowed: boolean; retryAfter?: number }> {
+  // Per-IP limit
+  const ipResult = await checkRateLimit(`login:ip:${ip}`, MAX_LOGIN_ATTEMPTS, LOGIN_WINDOW_SECONDS);
+  if (!ipResult.allowed) return ipResult;
 
-  if (!attempt || now > attempt.resetAt) {
-    loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
-    return { allowed: true };
+  // Per-account limit
+  if (phone) {
+    const acctResult = await checkRateLimit(`login:acct:${phone}`, MAX_ACCOUNT_ATTEMPTS, ACCOUNT_WINDOW_SECONDS);
+    if (!acctResult.allowed) return acctResult;
   }
 
-  if (attempt.count >= MAX_LOGIN_ATTEMPTS) {
-    const retryAfter = Math.ceil((attempt.resetAt - now) / 1000);
-    return { allowed: false, retryAfter };
-  }
-
-  attempt.count++;
   return { allowed: true };
 }
 
-// Clean up old entries periodically
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, attempt] of loginAttempts) {
-    if (now > attempt.resetAt) loginAttempts.delete(ip);
-  }
-}, 60_000);
+function getSecret(): string {
+  const secret = process.env.ADMIN_JWT_SECRET;
+  if (!secret) throw new Error("ADMIN_JWT_SECRET is not configured");
+  return secret;
+}
 
 function sign(phone: string): string {
-  const secret = process.env.ADMIN_JWT_SECRET ?? "dev-admin-secret-change-me";
+  const secret = getSecret();
   const payload = `${phone}.${Date.now()}`;
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   return `${payload}.${sig}`;
@@ -55,7 +49,7 @@ function sign(phone: string): string {
 function verify(token: string): string | null {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
-  const secret = process.env.ADMIN_JWT_SECRET ?? "dev-admin-secret-change-me";
+  const secret = getSecret();
   const payload = `${parts[0]}.${parts[1]}`;
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   // ✅ Constant-time comparison prevents timing attacks
@@ -76,8 +70,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const pin = body.pin;
     const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0] || req.ip;
 
-    // Rate limit: max 5 attempts per minute per IP
-    const rateLimit = checkLoginRateLimit(ip);
+    // Rate limit: max 5 attempts per minute per IP, 10 per 15 min per account
+    const rateLimit = await checkLoginRateLimit(ip, phone);
     if (!rateLimit.allowed) {
       return reply.code(429).send({
         error: "Too many login attempts",

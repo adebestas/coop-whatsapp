@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { sendText, sendSecurePrompt, platformOf } from "../lib/messaging.js";
 import { deleteTelegramMessage } from "../lib/telegram.js";
 import { randomBytes, randomInt } from "node:crypto";
+import { hashOtp, verifyOtp } from "../lib/security.js";
 import {
   createContribution,
   findOrCreateMember,
@@ -25,6 +26,8 @@ import { createTicket, listTickets, resolveTicket } from "./support.js";
 import { listPosts } from "./posts.js";
 import { myDeduction, requestMonthWaiver } from "./deductions.js";
 import { aiEnabled, suggestCommand } from "../lib/ai.js";
+import { handleAIQuery, isNaturalLanguageQuery } from "../lib/ai-query.js";
+import { generateSupportResponse, generateContextualHelp } from "../lib/ai-support.js";
 import { startVote, addCandidate, castVote, closeVote, showResults } from "./votes.js";
 import { castBuyVote, listBuyPolls } from "./buypoll.js";
 import {
@@ -63,7 +66,8 @@ export type BotState =
   | "awaiting_withdraw_bank"
   | "awaiting_withdraw_pin"
   | "awaiting_death_cert"
-  | "awaiting_ai_confirm";
+  | "awaiting_ai_confirm"
+  | "awaiting_ai_query_confirm";
 
 import { z } from "zod";
 
@@ -93,6 +97,8 @@ const FlowDataSchema = z.object({
   deathClaimId: z.string().optional(),
   aiCommand: z.string().optional(),
   aiArgs: z.array(z.string()).optional(),
+  aiQueryText: z.string().optional(),
+  aiQueryResponse: z.string().optional(),
   flowToken: z.string().optional(),
 });
 
@@ -307,6 +313,38 @@ export async function handleMessage(
       break;
     }
 
+    case "insights": {
+      if (!member || (member.role !== "admin" && member.role !== "superadmin")) {
+        await sendText({ to: phone, text: "Only admins can view financial insights." });
+        return;
+      }
+      const { generateFinancialInsights } = await import("../lib/ai-insights.js");
+      const insights = await generateFinancialInsights(member.cooperativeId);
+      await sendText({ to: phone, text: insights });
+      break;
+    }
+
+    case "contexthelp": {
+      if (!member) {
+        await sendText({ to: phone, text: "Please register first. Reply *join <code>* to get started." });
+        return;
+      }
+      const helpText = await generateContextualHelp(member.id);
+      await sendText({ to: phone, text: helpText });
+      break;
+    }
+
+    case "risk": {
+      if (!member || (member.role !== "admin" && member.role !== "superadmin")) {
+        await sendText({ to: phone, text: "Only admins can view risk assessments." });
+        return;
+      }
+      const { generateLoanRiskAssessment } = await import("../lib/ai-insights.js");
+      const risk = await generateLoanRiskAssessment(member.cooperativeId);
+      await sendText({ to: phone, text: risk });
+      break;
+    }
+
     case "startvote": {
       // startvote unit <unitcode> <title...> | startvote exec <position> <title...>
       const kind = args[0]?.toLowerCase();
@@ -412,6 +450,38 @@ export async function handleMessage(
       // Optional AI fallback (GROQ_API_KEY): translate free text / pidgin
       // into a real command, then ask the human to confirm it.
       if (aiEnabled() && text.trim().length >= 4 && !/^[\d\s.,]+$/.test(text)) {
+        // First try to answer natural language queries about data
+        if (isNaturalLanguageQuery(text)) {
+          const member = await getMemberByPhone(phone);
+          const response = await handleAIQuery(
+            text,
+            phone,
+            member?.role ?? "member",
+            member?.cooperativeId ?? "",
+            member?.id,
+          );
+          if (response) {
+            await prisma.session.upsert({
+              where: { phone },
+              create: {
+                phone,
+                state: "awaiting_ai_query_confirm",
+                data: JSON.stringify({ aiQueryText: text, aiQueryResponse: response }),
+              },
+              update: {
+                state: "awaiting_ai_query_confirm",
+                data: JSON.stringify({ aiQueryText: text, aiQueryResponse: response }),
+              },
+            });
+            await sendText({
+              to: phone,
+              text: response + "\n\n🤖 *Was this helpful?* Reply *yes* or *no*.",
+            });
+            return;
+          }
+        }
+
+        // Then try command translation
         const suggestion = await suggestCommand(text);
         if (suggestion) {
           await prisma.session.upsert({
@@ -435,11 +505,22 @@ export async function handleMessage(
           return;
         }
       }
+      // Try AI support for common questions
+      if (aiEnabled() && text.trim().length >= 4 && isNaturalLanguageQuery(text)) {
+        const member = await getMemberByPhone(phone);
+        const supportResponse = await generateSupportResponse(
+          text,
+          member?.name ?? "there",
+          member?.role ?? "member",
+        );
+        await sendText({ to: phone, text: supportResponse });
+        return;
+      }
       await sendText({
         to: phone,
         text:
           `I didn't quite get that. Reply *menu* to see your options.\n\n` +
-          `Tip: you can type things like "save 2000", "loan 50000 3", or "balance".`,
+          `Tip: you can type things like "save 2000", "loan 50000 3", "balance", or ask questions like "How much have I saved this month?"`,
       });
     }
   }
@@ -477,9 +558,10 @@ function buildMenu(member: { name: string; cooperative: { name: string }; wallet
       `• *vote <election id> <member code>* — vote in an election\n` +
       `• *buypolls* — see what the coop is voting to buy\n` +
       `• *votebuy <poll id> <option #>* — vote for what the coop should buy\n` +
+      `• *contexthelp* — get personalized help based on your account\n` +
       `• *menu* — show this menu\n\n` +
-      `Admins: try *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *units*, *addunit*, *approvewdraw <id>*, *overridewithdrawal <phone>*, *deathclaim*, *claimbank*, *tickets*, *resolve*, *startvote unit|exec ...*, *candidate*, *closevote*, *startbuyvote <title>*, *addoption <id> <item> <cost> <acct> <bank>*, *closebuyvote <id>*, *enable2fa* (protect your account), *verifypin <pin>* (unlock big payouts for 10 min)\n` +
-      `Super admin: *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *paydividend <rate% of profit>*, *pnl*, *payout <amt> <phone> <narration>*, *payanyone <amt> <account> <bank> <narration>* (3 supers), *approvepay <id>*, *setsalary*, *runpayroll <narration>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
+      `Admins: try *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *units*, *addunit*, *approvewdraw <id>*, *overridewithdrawal <phone>*, *deathclaim*, *claimbank*, *tickets*, *resolve*, *startvote unit|exec ...*, *candidate*, *closevote*, *startbuyvote <title>*, *addoption <id> <item> <cost> <acct> <bank>*, *closebuyvote <id>*, *enable2fa* (protect your account), *verifypin <pin>* (unlock big payouts for 10 min), *insights* (AI financial analysis)\n` +
+      `Super admin: *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *paydividend <rate% of profit>*, *pnl*, *payout <amt> <phone> <narration>*, *payanyone <amt> <account> <bank> <narration>* (3 supers), *approvepay <id>*, *setsalary*, *runpayroll <narration>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*, *risk* (AI loan risk assessment)`
   );
 }
 
@@ -580,6 +662,7 @@ async function handleAwaitingInput(
       // number we can send a code to that WhatsApp. Otherwise continue
       // unverified (flagged on the account).
       const code = String(randomInt(100000, 999999)); // ✅ Cryptographically secure OTP
+      const hashedCode = hashOtp(code);
       const delivered = await deliverOtp(contactPhone, code);
       if (delivered) {
         await prisma.session.upsert({
@@ -587,11 +670,11 @@ async function handleAwaitingInput(
           create: {
             phone,
             state: "awaiting_otp",
-            data: JSON.stringify({ ...data, contactPhone, otp: code, otpExpiresAt: Date.now() + OTP_TTL_MS }),
+            data: JSON.stringify({ ...data, contactPhone, otp: hashedCode, otpExpiresAt: Date.now() + OTP_TTL_MS }),
           },
           update: {
             state: "awaiting_otp",
-            data: JSON.stringify({ ...data, contactPhone, otp: code, otpExpiresAt: Date.now() + OTP_TTL_MS }),
+            data: JSON.stringify({ ...data, contactPhone, otp: hashedCode, otpExpiresAt: Date.now() + OTP_TTL_MS }),
           },
         });
         await sendText({
@@ -619,7 +702,7 @@ async function handleAwaitingInput(
         await sendText({ to: phone, text: "That code expired. Reply *resend* for a new one." });
         return;
       }
-      if (input !== data.otp) {
+      if (!data.otp || !verifyOtp(input, data.otp)) {
         await sendText({ to: phone, text: "Wrong code. Check the WhatsApp message and try again." });
         return;
       }
@@ -986,6 +1069,19 @@ async function handleAwaitingInput(
         return;
       }
       await sendText({ to: phone, text: "Okay, cancelled. Reply *menu* to see your options." });
+      break;
+    }
+
+    case "awaiting_ai_query_confirm": {
+      const answer = text.trim().toLowerCase();
+      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
+      if (answer === "yes" || answer === "1" || answer === "ok") {
+        await sendText({ to: phone, text: "Great! Reply *menu* to see your options, or ask me anything else." });
+      } else if (answer === "no" || answer === "0") {
+        await sendText({ to: phone, text: "Got it. Reply *menu* to see your options, or try asking differently." });
+      } else {
+        await sendText({ to: phone, text: "Reply *menu* to see your options." });
+      }
       break;
     }
 

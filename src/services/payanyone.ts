@@ -98,9 +98,16 @@ function superApprovalPrompt(p: {
 }
 
 async function findPayment(shortId: string) {
-  return prisma.externalPayment.findFirst({
-    where: { OR: [{ id: shortId }, { id: { endsWith: shortId } }] },
+  // Try exact match first
+  const exact = await prisma.externalPayment.findUnique({ where: { id: shortId } });
+  if (exact) return exact;
+
+  // Try suffix match — require exactly one result
+  const matches = await prisma.externalPayment.findMany({
+    where: { id: { endsWith: shortId } },
+    take: 2,
   });
+  return matches.length === 1 ? matches[0] : null;
 }
 
 /**

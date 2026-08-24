@@ -44,19 +44,24 @@ export function validateEnvironment(env: NodeJS.ProcessEnv = process.env): EnvRe
     }
   }
 
-  // Weak-secret detector for anything that IS set.
+  // Weak-secret detector for anything that IS set — fail in production, warn otherwise.
+  const isProd = env.NODE_ENV === "production";
+
   const sessionSecret = env.SESSION_SECRET ?? "";
   if (sessionSecret && sessionSecret.length < 32) {
-    problems.push("⚠️  SESSION_SECRET looks too short (<32 chars) — use a long random value.");
+    problems.push(`${isProd ? "❌ FATAL" : "⚠️ "}: SESSION_SECRET looks too short (<32 chars) — use a long random value.`);
   }
   if (sessionSecret && /^(test|secret|changeme|123456|password)/i.test(sessionSecret)) {
-    problems.push("⚠️  SESSION_SECRET looks like a placeholder — generate with `openssl rand -hex 32`.");
+    problems.push(`${isProd ? "❌ FATAL" : "⚠️ "}: SESSION_SECRET looks like a placeholder — generate with \`openssl rand -hex 32\`.`);
   }
 
-  // Check ADMIN_JWT_SECRET for weak values
+  // Check ADMIN_JWT_SECRET for weak values — FATAL in production
   const adminSecret = env.ADMIN_JWT_SECRET ?? "";
   if (adminSecret && /^(dev-admin-secret-change-me|test|secret|changeme|123456|password)/i.test(adminSecret)) {
-    problems.push("⚠️  ADMIN_JWT_SECRET looks like a placeholder — generate with `openssl rand -hex 32`.");
+    problems.push(`❌ FATAL: ADMIN_JWT_SECRET is a placeholder — generate with \`openssl rand -hex 32\`.`);
+  }
+  if (!adminSecret && isProd) {
+    problems.push("❌ FATAL: ADMIN_JWT_SECRET is not set — required for production.");
   }
 
   const twoFaRequired = env.TWO_FA_REQUIRED === "1";

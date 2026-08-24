@@ -10,6 +10,21 @@ export interface BuyPollResult {
   poll?: { id: string; title: string };
 }
 
+/** Resolve short ID to full purchase poll ID, ensuring uniqueness. */
+async function resolvePollId(shortId: string, cooperativeId: string) {
+  // Try exact match first
+  const exact = await prisma.purchasePoll.findUnique({ where: { id: shortId }, select: { id: true } });
+  if (exact) return exact.id;
+
+  // Try suffix match — require exactly one result
+  const matches = await prisma.purchasePoll.findMany({
+    where: { id: { endsWith: shortId }, cooperativeId },
+    select: { id: true },
+    take: 2,
+  });
+  return matches.length === 1 ? matches[0].id : null;
+}
+
 /**
  * Buy votes: members vote on what item the cooperative should buy for them.
  * The winning option auto-creates a pay-anyone request for the vendor, which
@@ -99,11 +114,10 @@ export async function castBuyVote(
   shortId: string,
   optionNumber: number,
 ): Promise<BuyPollResult> {
+  const pollId = await resolvePollId(shortId, voter.cooperativeId);
+  if (!pollId) return { ok: false, message: "Buy-vote not found. Check the id." };
   const poll = await prisma.purchasePoll.findFirst({
-    where: {
-      cooperativeId: voter.cooperativeId,
-      OR: [{ id: shortId }, { id: { endsWith: shortId } }],
-    },
+    where: { id: pollId, cooperativeId: voter.cooperativeId },
     include: { options: { orderBy: { createdAt: "asc" } } },
   });
   if (!poll) return { ok: false, message: "Buy-vote not found. Check the id." };
@@ -135,11 +149,10 @@ export async function closeBuyPoll(
   actor: { id: string; phone: string; role: string; cooperativeId: string },
   shortId: string,
 ): Promise<BuyPollResult> {
+  const pollId = await resolvePollId(shortId, actor.cooperativeId);
+  if (!pollId) return { ok: false, message: "Buy-vote not found." };
   const poll = await prisma.purchasePoll.findFirst({
-    where: {
-      cooperativeId: actor.cooperativeId,
-      OR: [{ id: shortId }, { id: { endsWith: shortId } }],
-    },
+    where: { id: pollId, cooperativeId: actor.cooperativeId },
     include: {
       options: { include: { ballots: true } },
     },
@@ -220,22 +233,17 @@ export async function listBuyPolls(cooperativeId: string) {
   });
 }
 
-function findOpenPoll(
+async function findOpenPoll(
   cooperativeId: string,
   shortId: string,
 ): Promise<BuyPollResult> {
-  return prisma.purchasePoll
-    .findFirst({
-      where: {
-        cooperativeId,
-        status: "open",
-        OR: [{ id: shortId }, { id: { endsWith: shortId } }],
-      },
-      select: { id: true, title: true },
-    })
-    .then((p) =>
-      p
-        ? { ok: true as const, message: "", poll: p }
-        : { ok: false as const, message: "Open buy-vote not found. Check the id (or it's already closed)." },
-    );
+  const pollId = await resolvePollId(shortId, cooperativeId);
+  if (!pollId) return { ok: false, message: "Open buy-vote not found. Check the id (or it's already closed)." };
+  const poll = await prisma.purchasePoll.findFirst({
+    where: { id: pollId, cooperativeId, status: "open" },
+    select: { id: true, title: true },
+  });
+  return poll
+    ? { ok: true, message: "", poll }
+    : { ok: false, message: "Open buy-vote not found. Check the id (or it's already closed)." };
 }

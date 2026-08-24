@@ -413,7 +413,7 @@ describe("startup environment validation", () => {
       const report = validateEnvironment({
         WHATSAPP_TOKEN: "x",
         WHATSAPP_PHONE_ID: "y",
-        ADMIN_JWT_SECRET: "test-secret-key-32-chars-minimum",
+        ADMIN_JWT_SECRET: "a-real-secret-key-that-is-not-a-placeholder-1234567890ab",
       } as any);
       expect(report.ok).toBe(true);
       expect(report.problems.some((p) => p.includes("No payment provider"))).toBe(true);

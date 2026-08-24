@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   app:
     build:
@@ -10,8 +8,9 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=postgresql://coop:coop@postgres:5432/coop_db
-      - SESSION_SECRET=${SESSION_SECRET:-change-me-in-production}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-coop}:${POSTGRES_PASSWORD:-coop}@postgres:5432/${POSTGRES_DB:-coop_db}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET}
       - WHATSAPP_TOKEN=${WHATSAPP_TOKEN}
       - WHATSAPP_PHONE_ID=${WHATSAPP_PHONE_ID}
       - WHATSAPP_VERIFY_TOKEN=${WHATSAPP_VERIFY_TOKEN}
@@ -21,6 +20,7 @@ services:
       - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY}
       - FLUTTERWAVE_WEBHOOK_HASH=${FLUTTERWAVE_WEBHOOK_HASH}
       - GROQ_API_KEY=${GROQ_API_KEY}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379
     depends_on:
       postgres:
         condition: service_healthy
@@ -33,15 +33,13 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      - POSTGRES_USER=coop
-      - POSTGRES_PASSWORD=coop
-      - POSTGRES_DB=coop_db
-    ports:
-      - "5432:5432"
+      - POSTGRES_USER=${POSTGRES_USER:-coop}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-coop}
+      - POSTGRES_DB=${POSTGRES_DB:-coop_db}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U coop -d coop_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-coop} -d ${POSTGRES_DB:-coop_db}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -51,12 +49,11 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-changeme}
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5

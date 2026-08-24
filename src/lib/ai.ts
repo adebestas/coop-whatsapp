@@ -13,7 +13,7 @@ export const KNOWN_COMMANDS = [
   // member basics
   "menu", "help", "balance", "ledger", "history", "statement", "posts", "mydeduction",
   "save", "loan", "repay", "plan", "dividend", "joinunit", "phone", "support", "tickets", "mytickets",
-  "skipmonth", "vote", "votebuy", "buypolls", "results",
+  "skipmonth", "vote", "votebuy", "buypolls", "results", "contexthelp",
   // admin
   "pending", "approve", "reject", "finalize", "payout", "overridewithdrawal",
   "broadcast", "createunit", "units", "setunitadmin", "paydividend", "recordfine",
@@ -23,6 +23,8 @@ export const KNOWN_COMMANDS = [
   "setpost", "removepost", "relink", "unlink", "setrole", "setsalary", "runpayroll",
   "pay", "approvewdraw", "approvewithdraw", "audit", "backup", "reconcile", "pnl",
   "export", "enable2fa", "disable2fa", "verifypin", "setplanfor",
+  // ai-powered
+  "insights", "risk",
 ] as const;
 
 export interface Suggestion {

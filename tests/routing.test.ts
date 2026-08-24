@@ -104,15 +104,25 @@ describe("channel linking", () => {
     const coop = await makeCoop("TESTR1", "Routing Coop");
     const wa = await makeMember(PHONE, coop.id, { contactPhone: "2348087654321" });
 
+    // Clear mock calls before OTP delivery
+    vi.mocked(sendWhatsApp).mockClear();
+
     await handleMessage("tg:555", "join TESTR1");
     await handleMessage("tg:555", "Ada Obi");
     await handleMessage("tg:555", "08087654321"); // real phone → OTP sent to WhatsApp
 
-    // OTP was delivered to the WhatsApp channel — fetch it from the session.
-    const session = await prisma.session.findUnique({ where: { phone: "tg:555" } });
-    const data = JSON.parse(session!.data);
-    expect(data.otp).toBeTruthy();
-    await handleMessage("tg:555", String(data.otp));
+    // OTP is now hashed in session — extract it from the WhatsApp mock calls instead
+    const otpCall = vi.mocked(sendWhatsApp).mock.calls.find((c) => {
+      const arg = c[0] as { to: string; text: string };
+      return typeof arg === "object" && arg.text?.includes("verification code");
+    });
+    expect(otpCall).toBeTruthy();
+    const arg = otpCall![0] as { to: string; text: string };
+    const otpMatch = arg.text.match(/\*(\d{6})\*/);
+    expect(otpMatch).toBeTruthy();
+    const otp = otpMatch![1];
+
+    await handleMessage("tg:555", otp);
     await handleMessage("tg:555", "skip"); // email optional
     await handleMessage("tg:555", "skip"); // birthday optional
     await handleMessage("tg:555", "Chidi Okafor");

@@ -17,6 +17,22 @@ export interface WithdrawResult {
   message: string;
 }
 
+/** Resolve short ID to full withdrawal request ID, ensuring uniqueness. */
+async function resolveRequestId(shortId: string): Promise<string | null> {
+  // Try exact match first
+  const exact = await prisma.withdrawalRequest.findUnique({ where: { id: shortId }, select: { id: true } });
+  if (exact) return exact.id;
+
+  // Try suffix match — require exactly one result
+  const matches = await prisma.withdrawalRequest.findMany({
+    where: { id: { endsWith: shortId } },
+    select: { id: true },
+    take: 2,
+  });
+  if (matches.length === 1) return matches[0].id;
+  return null; // Not found or ambiguous
+}
+
 /** The maximum a member can withdraw right now (45% of current balance). */
 export async function withdrawLimit(phone: string): Promise<{ balance: number; max: number } | null> {
   const member = await prisma.member.findFirst({
@@ -138,8 +154,10 @@ export async function approveWithdrawal(
   requestId: string,
   actor: { id: string; role: string; phone: string },
 ): Promise<WithdrawResult> {
+  const fullId = await resolveRequestId(requestId);
+  if (!fullId) return { ok: false, message: "Withdrawal request not found. Check the id." };
   const request = await prisma.withdrawalRequest.findFirst({
-    where: { OR: [{ id: requestId }, { id: { startsWith: requestId } }, { id: { endsWith: requestId } }] },
+    where: { id: fullId },
     include: { member: true },
   });
   if (!request) return { ok: false, message: "Withdrawal request not found. Check the id." };
@@ -195,8 +213,10 @@ export async function finalizeWithdrawal(
   requestId: string,
   actor: { id: string; role: string; phone: string },
 ): Promise<WithdrawResult> {
+  const fullId = await resolveRequestId(requestId);
+  if (!fullId) return { ok: false, message: "Withdrawal request not found." };
   const request = await prisma.withdrawalRequest.findFirst({
-    where: { OR: [{ id: requestId }, { id: { startsWith: requestId } }, { id: { endsWith: requestId } }] },
+    where: { id: fullId },
     include: { member: true },
   });
   if (!request) return { ok: false, message: "Withdrawal request not found." };
@@ -338,8 +358,10 @@ export async function finalizeWithdrawal(
 }
 
 export async function rejectWithdrawal(requestId: string): Promise<WithdrawResult> {
+  const fullId = await resolveRequestId(requestId);
+  if (!fullId) return { ok: false, message: "Withdrawal request not found." };
   const request = await prisma.withdrawalRequest.findFirst({
-    where: { OR: [{ id: requestId }, { id: { startsWith: requestId } }, { id: { endsWith: requestId } }] },
+    where: { id: fullId },
     include: { member: true },
   });
   if (!request) return { ok: false, message: "Withdrawal request not found." };
