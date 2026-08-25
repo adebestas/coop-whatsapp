@@ -369,14 +369,14 @@ export async function handleAwaitingInput(
       await issueSecretChallenge(
         phone,
         "awaiting_pin_confirm",
-        { ...data, pin: text.trim() },
+        { ...data, pin: hashPin(text.trim()) },
         "Please re-enter your PIN to confirm.",
       );
       break;
     }
 
     case "awaiting_pin_confirm": {
-      if (text.trim() !== data.pin) {
+      if (hashPin(text.trim()) !== data.pin) {
         await sendText({ to: phone, text: "PINs didn't match. Let's start again — choose a 4-digit PIN." });
         await prisma.session.upsert({
           where: { phone },

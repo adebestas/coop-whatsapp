@@ -31,6 +31,62 @@ export async function sendText({ to, text }: SendTextParams): Promise<boolean> {
   return true;
 }
 
+/**
+ * Send a pre-approved WhatsApp template message.
+ * Templates must be registered and approved by Meta before use.
+ *
+ * Registered templates (commented for Meta approval):
+ *   - coop_notification: balance alerts, dividend announcements
+ *   - coop_otp: verification codes
+ *   - coop_statement: monthly statements
+ */
+export async function sendTemplate(
+  to: string,
+  templateName: string,
+  langCode: string,
+  params?: string[],
+): Promise<boolean> {
+  const url = `${API_BASE}/${config.whatsapp.phoneNumberId}/messages`;
+  const components: Record<string, unknown>[] = [];
+
+  if (params && params.length > 0) {
+    components.push({
+      type: "body",
+      parameters: params.map((p) => ({ type: "text", text: p })),
+    });
+  }
+
+  const payload: Record<string, unknown> = {
+    messaging_product: "whatsapp",
+    to,
+    type: "template",
+    template: {
+      name: templateName,
+      language: { code: langCode },
+    },
+  };
+
+  if (components.length > 0) {
+    (payload.template as Record<string, unknown>).components = components;
+  }
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.whatsapp.token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    console.error(`[whatsapp] template send failed (${res.status}): ${body}`);
+    return false;
+  }
+  return true;
+}
+
 export interface SendFlowParams {
   to: string;
   flowId: string;

@@ -7,6 +7,7 @@ import { LIMITS } from "../lib/money.js";
 import { audit } from "./audit.js";
 import { checkVelocity } from "./fraud.js";
 import { getCoopConfig } from "./coop-config.js";
+import { recordLedger } from "./ledger.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
@@ -357,6 +358,17 @@ export async function finalizeWithdrawal(
         data: { lastWithdrawalAt: new Date(), withdrawalOverride: false },
       }),
     ]);
+
+    // Record ledger entry for the withdrawal
+    await recordLedger({
+      cooperativeId: request.cooperativeId,
+      type: "expense",
+      category: "withdrawal",
+      amount: request.amount,
+      note: `Member withdrawal by ${member.name}`,
+      reference: request.id,
+      fundType: "member",
+    });
 
     const balanceAfter = (wallet.balance ?? 0) - request.amount;
     await audit({

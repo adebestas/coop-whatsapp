@@ -16,6 +16,8 @@ export interface CoopConfig {
   autoApproveLoans: boolean;
   requireGuarantors: boolean;
   minGuarantors: number;
+  largeTxThreshold: number;
+  reportingThreshold: number;
 }
 
 export interface BrandingConfig {
@@ -46,6 +48,8 @@ const DEFAULT_CONFIG: CoopConfig = {
   autoApproveLoans: false,
   requireGuarantors: true,
   minGuarantors: 2,
+  largeTxThreshold: 500_000_000,
+  reportingThreshold: 500_000_000,
 };
 
 export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> {
@@ -74,6 +78,8 @@ export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> 
     autoApproveLoans: config.autoApproveLoans,
     requireGuarantors: config.requireGuarantors,
     minGuarantors: config.minGuarantors,
+    largeTxThreshold: (config as any).largeTxThreshold ?? DEFAULT_CONFIG.largeTxThreshold,
+    reportingThreshold: (config as any).reportingThreshold ?? DEFAULT_CONFIG.reportingThreshold,
   };
 
   await cacheSet(cacheKey, result, CACHE_TTL);

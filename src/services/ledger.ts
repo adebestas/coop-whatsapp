@@ -13,6 +13,7 @@ export type LedgerCategory =
   | "purchase"
   | "external_payment"
   | "dividend"
+  | "withdrawal"
   | "other";
 
 /**

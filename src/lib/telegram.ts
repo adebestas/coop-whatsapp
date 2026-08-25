@@ -4,7 +4,7 @@ const API_BASE = "https://api.telegram.org";
 
 export interface TelegramMessage {
   message_id: number;
-  chat: { id: number };
+  chat: { id: number; type: string };
   text?: string;
 }
 
@@ -14,18 +14,32 @@ export interface TelegramUpdate {
 }
 
 /**
+ * Convert WhatsApp-style formatting to Telegram HTML.
+ * WhatsApp: *bold*, _italic_, ~strikethrough~, ```code```
+ * Telegram HTML: <b>, <i>, <s>, <code>
+ */
+function convertToTelegramHTML(text: string): string {
+  let result = text;
+  result = result.replace(/\*([^*]+)\*/g, "<b>$1</b>");
+  result = result.replace(/_([^_]+)_/g, "<i>$1</i>");
+  result = result.replace(/~([^~]+)~/g, "<s>$1</s>");
+  result = result.replace(/```([^`]+)```/g, "<code>$1</code>");
+  result = result.replace(/`([^`]+)`/g, "<code>$1</code>");
+  return result;
+}
+
+/**
  * Send a text message to a Telegram chat.
- * Strips WhatsApp-style *bold* markers since Telegram renders them literally.
+ * Converts WhatsApp-style formatting to HTML for proper rendering.
  */
 export async function sendTelegramMessage(chatId: string | number, text: string): Promise<boolean> {
   if (!config.telegram.token) return false;
-  // Telegram doesn't understand *bold*; drop the asterisks for a clean read.
-  const clean = text.replace(/\*/g, "");
+  const htmlText = convertToTelegramHTML(text);
 
   const res = await fetch(`${API_BASE}/bot${config.telegram.token}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: clean }),
+    body: JSON.stringify({ chat_id: chatId, text: htmlText, parse_mode: "HTML" }),
   });
   if (!res.ok) {
     const body = await res.text();

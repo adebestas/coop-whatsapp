@@ -151,8 +151,8 @@ export async function handleMessage(
 ): Promise<void> {
   const session = await prisma.session.upsert({
     where: { phone },
-    create: { phone, state: "idle" },
-    update: {},
+    create: { phone, state: "idle", lastInboundAt: new Date() },
+    update: { lastInboundAt: new Date() },
   });
 
   const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -174,6 +174,32 @@ export async function handleMessage(
   }
 
   const member = await getMemberByPhone(phone);
+
+  // Opt-out: skip all processing for opted-out members (except opt-in command)
+  const { cmd: preCmd } = parseCommand(text);
+  if (member?.optedOut && preCmd !== "optin") {
+    return;
+  }
+
+  // Handle opt-out / opt-in commands
+  if (preCmd === "stop" || preCmd === "unsubscribe" || preCmd === "optout") {
+    if (member) {
+      await prisma.member.update({ where: { id: member.id }, data: { optedOut: true } });
+      await sendText({ to: phone, text: "You have been opted out of all messages. Reply *optin* to re-enable." });
+    } else {
+      await sendText({ to: phone, text: "You are not a registered member." });
+    }
+    return;
+  }
+  if (preCmd === "optin") {
+    if (member) {
+      await prisma.member.update({ where: { id: member.id }, data: { optedOut: false } });
+      await sendText({ to: phone, text: "Welcome back! You have been re-enabled for messages. Reply *menu* to see your options." });
+    } else {
+      await sendText({ to: phone, text: "You are not a registered member. Reply *join* to get started." });
+    }
+    return;
+  }
 
   if (!member) {
     const altOwner = await prisma.member.findFirst({ where: { altChannelId: phone } });

@@ -54,12 +54,12 @@ function sign(phone: string, cooperativeId: string, role: string): string {
 
 function verify(token: string): AdminTokenPayload | null {
   const parts = token.split(".");
-  if (parts.length !== 4) return null;
+  if (parts.length !== 5) return null;
   const secret = getSecret();
   const payload = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   try {
-    if (!timingSafeEqual(Buffer.from(sig), Buffer.from(parts[3]))) return null;
+    if (!timingSafeEqual(Buffer.from(sig), Buffer.from(parts[4]))) return null;
   } catch {
     return null;
   }

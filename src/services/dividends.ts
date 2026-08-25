@@ -36,11 +36,34 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
   const educationAmount = Math.floor(pool * EDUCATION_FUND_RATE);
   const developmentAmount = Math.floor(pool * DEVELOPMENT_FUND_RATE);
   const totalDeductions = reserveAmount + educationAmount + developmentAmount;
-  const memberPool = pool - totalDeductions;
+  const memberPoolKobo = Math.round(pool * 100) - Math.round(totalDeductions * 100);
+  const memberPool = memberPoolKobo / 100;
 
-  // Everyone's share is proportional to their lifetime savings.
-  const mine = entries.find((m) => m.id === member.id);
-  const myShare = mine && totalSaved > 0 ? ((mine.wallet?.totalSaved ?? 0) / totalSaved) * memberPool : 0;
+  // Compute shares as kobo integers to avoid rounding drift
+  const eligible = entries.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
+  const rawShares = eligible.map((m) => ({
+    memberId: m.id,
+    name: m.name,
+    raw: totalSaved > 0 ? (m.wallet?.totalSaved ?? 0) / totalSaved * memberPoolKobo : 0,
+    kobo: 0,
+    remainder: 0,
+  }));
+  for (const s of rawShares) {
+    s.kobo = Math.floor(s.raw);
+    s.remainder = s.raw - s.kobo;
+  }
+  let assigned = rawShares.reduce((sum, s) => sum + s.kobo, 0);
+  let leftover = memberPoolKobo - assigned;
+  // Distribute leftover kobo to members with largest fractional remainders
+  rawShares.sort((a, b) => b.remainder - a.remainder);
+  for (const s of rawShares) {
+    if (leftover <= 0) break;
+    s.kobo += 1;
+    leftover -= 1;
+  }
+
+  const myRaw = rawShares.find((s) => s.memberId === member.id);
+  const myShare = myRaw ? myRaw.kobo / 100 : 0;
 
   const lines = [
     `*🎉 Dividend calculator (real-time)*`,
@@ -63,7 +86,8 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
   if (entries.length <= 5 && pool > 0) {
     lines.push(``, `*Shares:*`);
     for (const m of entries) {
-      const share = totalSaved > 0 ? ((m.wallet?.totalSaved ?? 0) / totalSaved) * memberPool : 0;
+      const s = rawShares.find((r) => r.memberId === m.id);
+      const share = s ? s.kobo / 100 : 0;
       lines.push(`• ${m.name} — ${formatBalance(share)}`);
     }
   }
@@ -109,7 +133,8 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
   const educationAmount = Math.floor(pool * EDUCATION_FUND_RATE);
   const developmentAmount = Math.floor(pool * DEVELOPMENT_FUND_RATE);
   const totalDeductions = reserveAmount + educationAmount + developmentAmount;
-  const memberPool = pool - totalDeductions;
+  const memberPoolKobo = Math.round(pool * 100) - Math.round(totalDeductions * 100);
+  const memberPool = memberPoolKobo / 100;
 
   // Create reserve allocation record
   await prisma.reserveAllocation.create({
@@ -183,6 +208,28 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
     fundType: "reserve",
   });
 
+  // Compute shares as kobo integers with remainder distribution
+  const eligible = members.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
+  const rawShares = eligible.map((m) => ({
+    member: m,
+    raw: totalSaved > 0 ? (m.wallet?.totalSaved ?? 0) / totalSaved * memberPoolKobo : 0,
+    kobo: 0,
+    remainder: 0,
+  }));
+  for (const s of rawShares) {
+    s.kobo = Math.floor(s.raw);
+    s.remainder = s.raw - s.kobo;
+  }
+  let assigned = rawShares.reduce((sum, s) => sum + s.kobo, 0);
+  let leftover = memberPoolKobo - assigned;
+  rawShares.sort((a, b) => b.remainder - a.remainder);
+  for (const s of rawShares) {
+    if (leftover <= 0) break;
+    s.kobo += 1;
+    leftover -= 1;
+  }
+
+  // ATOMICITY: create all DividendEntry records with status "pending" first
   const dividend = await prisma.dividend.create({
     data: {
       cooperativeId: admin.cooperativeId,
@@ -192,38 +239,41 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
       status: "distributed",
       distributedAt: new Date(),
       entries: {
-        create: members
-          .filter((m) => (m.wallet?.totalSaved ?? 0) > 0)
-          .map((m) => ({
-            memberId: m.id,
-            amount: ((m.wallet?.totalSaved ?? 0) / totalSaved) * memberPool,
-            status: "paid",
-            paidAt: new Date(),
-          })),
+        create: rawShares.map((s) => ({
+          memberId: s.member.id,
+          amount: s.kobo / 100,
+          status: "pending" as const,
+        })),
       },
     },
+    include: { entries: true },
   });
 
-  // Credit wallets + record the appropriation in the ledger.
+  // Credit wallets and mark each entry as "paid" individually
   let paidCount = 0;
-  for (const m of members) {
-    const share = totalSaved > 0 ? ((m.wallet?.totalSaved ?? 0) / totalSaved) * memberPool : 0;
-    if (share <= 0) continue;
+  for (const s of rawShares) {
+    const shareKobo = s.kobo;
+    if (shareKobo <= 0) continue;
+    const share = shareKobo / 100;
     paidCount += 1;
+    const entry = dividend.entries.find((e) => e.memberId === s.member.id);
     await prisma.$transaction([
-      prisma.wallet.update({ where: { id: m.wallet!.id }, data: { balance: { increment: share } } }),
+      prisma.wallet.update({ where: { id: s.member.wallet!.id }, data: { balance: { increment: share } } }),
       prisma.contribution.create({
         data: {
           amount: share,
           type: "dividend",
           note: `Dividend at ${rate}% of profit (${reference})`,
-          reference: `DIV-${dividend.id.slice(-8)}-${m.id.slice(-6)}`,
+          reference: `DIV-${dividend.id.slice(-8)}-${s.member.id.slice(-6)}`,
           status: "confirmed",
           paidAt: new Date(),
-          memberId: m.id,
+          memberId: s.member.id,
           cooperativeId: admin.cooperativeId,
         },
       }),
+      ...(entry
+        ? [prisma.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } })]
+        : []),
     ]);
   }
 
@@ -249,6 +299,54 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
       `• Total deductions: *${formatBalance(totalDeductions)}*\n\n` +
       `Member dividends: *${formatBalance(memberPool)}* shared among ${paidCount} member(s)\n\n` +
       `_Distributed proportional to savings._`,
+  };
+}
+
+/**
+ * Resume a partial dividend distribution — credits any "pending" entries
+ * that were interrupted. Idempotent: safe to call multiple times.
+ */
+export async function resumeDividendDistribution(
+  dividendId: string,
+): Promise<{ ok: boolean; message: string; paidCount: number; remainingCount: number }> {
+  const dividend = await prisma.dividend.findUnique({
+    where: { id: dividendId },
+    include: { entries: { where: { status: "pending" }, include: { member: { include: { wallet: true } } } } },
+  });
+  if (!dividend) return { ok: false, message: "Dividend not found.", paidCount: 0, remainingCount: 0 };
+  if (dividend.entries.length === 0) {
+    return { ok: true, message: "All entries already paid.", paidCount: 0, remainingCount: 0 };
+  }
+
+  let paidCount = 0;
+  for (const entry of dividend.entries) {
+    const wallet = entry.member?.wallet;
+    if (!wallet) continue;
+    const share = entry.amount;
+    await prisma.$transaction([
+      prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: share } } }),
+      prisma.contribution.create({
+        data: {
+          amount: share,
+          type: "dividend",
+          note: `Dividend at ${dividend.rate}% of profit (${dividend.reference})`,
+          reference: `DIV-${dividend.id.slice(-8)}-${entry.memberId.slice(-6)}`,
+          status: "confirmed",
+          paidAt: new Date(),
+          memberId: entry.memberId,
+          cooperativeId: dividend.cooperativeId,
+        },
+      }),
+      prisma.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } }),
+    ]);
+    paidCount += 1;
+  }
+
+  return {
+    ok: true,
+    message: `Resumed: ${paidCount} entry(ies) paid.`,
+    paidCount,
+    remainingCount: 0,
   };
 }
 

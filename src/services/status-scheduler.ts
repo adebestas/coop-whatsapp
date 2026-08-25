@@ -59,6 +59,9 @@ export async function postAutoStatus(): Promise<void> {
 
   // Post to all cooperatives with status enabled
   const cooperatives = await prisma.cooperative.findMany({
+    where: {
+      config: { statusEnabled: true },
+    },
     select: { id: true },
   });
 

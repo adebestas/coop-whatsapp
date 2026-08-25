@@ -219,7 +219,12 @@ export async function checkRateLimit(
     }
   }
 
-  // In-memory fallback
+  // In-memory fallback — fail closed for money operations
+  console.warn(`[RateLimit] Redis unavailable, using in-memory fallback for key: ${key}`);
+  const isMoneyOperation = key.includes("money");
+  if (isMoneyOperation) {
+    return { allowed: false, retryAfter: windowSeconds };
+  }
   const entry = inMemoryRateLimits.get(key);
   if (!entry || now > entry.resetAt) {
     inMemoryRateLimits.set(key, { count: 1, resetAt: now + windowSeconds * 1000 });

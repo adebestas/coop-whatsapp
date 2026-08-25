@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { computePnl } from "./ledger.js";
+import { getFundBalances } from "./dividends.js";
 
 export interface ReconciliationReport {
   ok: boolean;
@@ -47,8 +48,13 @@ export async function runWalletReconciliation(
   const bankCredits = bankPostings.find((r) => r.direction === "CREDIT")?._sum.amount ?? 0;
   const bankBalance = bankDebits - bankCredits;
 
-  // 3. Calculate discrepancy
-  const discrepancy = bankBalance - totalWalletBalances;
+  // 3. Calculate expected balance: member wallets + statutory funds
+  const funds = await getFundBalances(cooperativeId);
+  const statutoryFunds = funds.reserve + funds.education + funds.development;
+  const expectedBalance = totalWalletBalances + statutoryFunds;
+
+  // 4. Calculate discrepancy
+  const discrepancy = bankBalance - expectedBalance;
 
   // 4. Determine status
   let status: string;
@@ -118,15 +124,19 @@ export async function runWalletReconciliation(
   lines.push("");
 
   if (discrepancy === 0) {
-    lines.push(`Total wallet balances: ${formatBalance(totalWalletBalances)}`);
-    lines.push(`Bank balance:          ${formatBalance(bankBalance)}`);
-    lines.push(`Discrepancy:           ${formatBalance(0)} ✅`);
+    lines.push(`Member wallets:      ${formatBalance(totalWalletBalances)}`);
+    lines.push(`Statutory funds:     ${formatBalance(statutoryFunds)} (reserve ${formatBalance(funds.reserve)} + education ${formatBalance(funds.education)} + development ${formatBalance(funds.development)})`);
+    lines.push(`Expected (bank):     ${formatBalance(expectedBalance)}`);
+    lines.push(`Actual (bank):       ${formatBalance(bankBalance)}`);
+    lines.push(`Discrepancy:         ${formatBalance(0)} ✅`);
   } else {
     lines.push(`⚠️ *DISCREPANCY DETECTED!*`);
     lines.push("");
-    lines.push(`Expected (wallets): ${formatBalance(totalWalletBalances)}`);
-    lines.push(`Actual (bank):      ${formatBalance(bankBalance)}`);
-    lines.push(`Gap:                ${formatBalance(Math.abs(discrepancy))}`);
+    lines.push(`Member wallets:      ${formatBalance(totalWalletBalances)}`);
+    lines.push(`Statutory funds:     ${formatBalance(statutoryFunds)}`);
+    lines.push(`Expected total:      ${formatBalance(expectedBalance)}`);
+    lines.push(`Actual (bank):       ${formatBalance(bankBalance)}`);
+    lines.push(`Gap:                 ${formatBalance(Math.abs(discrepancy))}`);
     lines.push("");
     lines.push("*Possible causes:*");
     lines.push("- Unrecorded transactions");

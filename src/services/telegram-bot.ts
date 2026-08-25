@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { getTelegramUpdates } from "../lib/telegram.js";
+import { getTelegramUpdates, sendTelegramMessage } from "../lib/telegram.js";
 import { handleMessage } from "./conversation.js";
 
 let offset = 0;
@@ -23,6 +23,15 @@ export async function startTelegramBot(): Promise<void> {
         offset = Math.max(offset, update.update_id + 1);
         const message = update.message;
         if (!message?.text) continue;
+
+        // Only handle private chats — ignore group/supergroup/channel messages
+        if (message.chat.type !== "private") {
+          await sendTelegramMessage(
+            message.chat.id,
+            "I only work in private chats. Please message me directly.",
+          );
+          continue;
+        }
 
         const chatId = message.chat.id;
         const userId = `tg:${chatId}`;

@@ -1,6 +1,9 @@
-import { sendText as sendWhatsApp, sendFlowMessage } from "./whatsapp.js";
+import { sendText as sendWhatsApp, sendFlowMessage, sendTemplate as sendWhatsAppTemplate } from "./whatsapp.js";
 import { sendTelegramMessage } from "./telegram.js";
 import { config } from "../config.js";
+import { prisma } from "./prisma.js";
+
+const WHATSAPP_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Channel-aware message sender.
@@ -13,6 +16,19 @@ import { config } from "../config.js";
  */
 export async function sendText(params: { to: string; text: string }): Promise<boolean> {
   const { to, text } = params;
+
+  // WhatsApp 24-hour session window check
+  if (!to.startsWith("tg:")) {
+    const session = await prisma.session.findUnique({ where: { phone: to } });
+    if (session?.lastInboundAt) {
+      const elapsed = Date.now() - session.lastInboundAt.getTime();
+      if (elapsed > WHATSAPP_SESSION_WINDOW_MS) {
+        console.warn(`[messaging] session window expired for ${to} — skipping outbound`);
+        return false;
+      }
+    }
+  }
+
   if (to.startsWith("tg:")) {
     return sendTelegramMessage(to.slice(3), text);
   }
@@ -72,4 +88,18 @@ export async function notifyMember(
     return sendText({ to: member.altChannelId, text });
   }
   return sendText({ to: member.phone, text });
+}
+
+/**
+ * Channel-aware template sender (WhatsApp only).
+ * Telegram does not support template messages; falls back to plain text.
+ */
+export async function sendTemplate(
+  to: string,
+  templateName: string,
+  langCode: string,
+  params?: string[],
+): Promise<boolean> {
+  if (to.startsWith("tg:")) return false;
+  return sendWhatsAppTemplate(to, templateName, langCode, params);
 }

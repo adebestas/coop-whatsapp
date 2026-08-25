@@ -1,10 +1,11 @@
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
+import { getCoopConfig } from "./coop-config.js";
 
 // ===== AML/STR Constants =====
 
 /** Single transaction above this amount (kobo) triggers a large-transaction alert. */
-export const LARGE_TX_THRESHOLD = 1_000_000; // ₦10,000
+export const LARGE_TX_THRESHOLD = 500_000_000; // ₦5,000,000
 
 /** Maximum number of money-out transactions within the rapid-sequence window. */
 export const RAPID_SEQUENCE_MAX = 3;
@@ -18,8 +19,8 @@ export const ROUND_NUMBER_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Percentage of the reporting threshold that constitutes structuring (e.g. 0.96 = within 4%). */
 export const STRUCTURING_RATIO = 0.96;
-/** Reporting threshold in kobo used for structuring detection (₦5,000). */
-export const REPORTING_THRESHOLD = 500_000;
+/** Reporting threshold in kobo used for structuring detection (₦5,000,000). */
+export const REPORTING_THRESHOLD = 500_000_000;
 
 // ===== Types =====
 
@@ -51,11 +52,11 @@ export interface STRReport {
 // ===== Monitoring Rules =====
 
 /**
- * Rule 1: Large transaction alert — any single transaction > ₦10,000 (1,000,000 kobo).
+ * Rule 1: Large transaction alert — any single transaction above the cooperative's threshold.
  */
-function checkLargeTransaction(amount: number): string | null {
-  if (amount > LARGE_TX_THRESHOLD) {
-    return `Large transaction: ${formatBalance(amount)} exceeds ₦${(LARGE_TX_THRESHOLD / 100).toLocaleString()} threshold`;
+function checkLargeTransaction(amount: number, largeTxThreshold: number): string | null {
+  if (amount > largeTxThreshold) {
+    return `Large transaction: ${formatBalance(amount)} exceeds ${formatBalance(largeTxThreshold)} threshold`;
   }
   return null;
 }
@@ -137,9 +138,9 @@ async function checkRoundNumberPattern(memberId: string, cooperativeId: string):
 /**
  * Rule 4: Structuring detection — transactions just below the reporting threshold.
  */
-async function checkStructuring(memberId: string, cooperativeId: string): Promise<string | null> {
+async function checkStructuring(memberId: string, cooperativeId: string, reportingThreshold: number): Promise<string | null> {
   const since = new Date(Date.now() - ROUND_NUMBER_WINDOW_MS);
-  const minAmount = Math.floor(REPORTING_THRESHOLD * STRUCTURING_RATIO);
+  const minAmount = Math.floor(reportingThreshold * STRUCTURING_RATIO);
 
   const [withdrawals, payouts] = await Promise.all([
     prisma.withdrawalRequest.findMany({
@@ -147,7 +148,7 @@ async function checkStructuring(memberId: string, cooperativeId: string): Promis
         memberId,
         status: "paid",
         createdAt: { gte: since },
-        amount: { gte: minAmount, lt: REPORTING_THRESHOLD },
+        amount: { gte: minAmount, lt: reportingThreshold },
       },
       select: { amount: true, createdAt: true },
     }),
@@ -157,7 +158,7 @@ async function checkStructuring(memberId: string, cooperativeId: string): Promis
         cooperativeId,
         status: "successful",
         createdAt: { gte: since },
-        amount: { gte: minAmount, lt: REPORTING_THRESHOLD },
+        amount: { gte: minAmount, lt: reportingThreshold },
       },
       select: { amount: true, createdAt: true },
     }),
@@ -166,7 +167,7 @@ async function checkStructuring(memberId: string, cooperativeId: string): Promis
   const structuringTx = [...withdrawals, ...payouts];
   if (structuringTx.length >= 2) {
     const amounts = structuringTx.map((s) => formatBalance(s.amount)).join(", ");
-    return `Possible structuring: ${structuringTx.length} transactions near ₦${(REPORTING_THRESHOLD / 100).toLocaleString()} threshold (${amounts})`;
+    return `Possible structuring: ${structuringTx.length} transactions near ${formatBalance(reportingThreshold)} threshold (${amounts})`;
   }
   return null;
 }
@@ -179,7 +180,11 @@ async function checkStructuring(memberId: string, cooperativeId: string): Promis
 export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult> {
   const reasons: string[] = [];
 
-  const large = checkLargeTransaction(tx.amount);
+  const coopConfig = await getCoopConfig(tx.cooperativeId);
+  const largeTxThreshold = coopConfig.largeTxThreshold;
+  const reportingThreshold = coopConfig.reportingThreshold;
+
+  const large = checkLargeTransaction(tx.amount, largeTxThreshold);
   if (large) reasons.push(large);
 
   const rapid = await checkRapidSequence(tx.memberId, tx.direction, tx.id);
@@ -190,7 +195,7 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
     const round = await checkRoundNumberPattern(tx.memberId, tx.cooperativeId);
     if (round) reasons.push(round);
 
-    const structuring = await checkStructuring(tx.memberId, tx.cooperativeId);
+    const structuring = await checkStructuring(tx.memberId, tx.cooperativeId, reportingThreshold);
     if (structuring) reasons.push(structuring);
   }
 

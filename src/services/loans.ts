@@ -38,8 +38,8 @@ export interface ApplyLoanResult {
 export const LOAN_TO_SAVINGS_RATIO = 2;
 /** Flat fine (% of the late installment) charged per month overdue. */
 export const LATE_FINE_RATE = 2;
-/** Flat admin charge deducted from every loan at disbursement. */
-export const LOAN_ADMIN_CHARGE = 2000;
+/** Flat admin charge deducted from every loan at disbursement (₦2,000 in kobo). */
+export const LOAN_ADMIN_CHARGE = 200000;
 
 /**
  * Tiered flat interest on the principal (not per month):
@@ -138,6 +138,7 @@ export async function applyForLoan(
   const loan = await prisma.loan.create({
     data: {
       amount,
+      adminCharge: LOAN_ADMIN_CHARGE,
       interestRate,
       tenureMonths,
       status: "pending",

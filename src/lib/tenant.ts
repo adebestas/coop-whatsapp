@@ -2,7 +2,9 @@ import { prisma } from "./prisma.js";
 
 /**
  * Wraps a function with automatic cooperativeId filtering.
- * Ensures all Prisma queries within the function are filtered by cooperativeId.
+ * Tenant isolation is enforced at the admin route level via req.adminCoopId —
+ * all admin queries use the coopId from the verified JWT token. Use
+ * validateTenantAccess() to verify actor and target cooperatives match.
  */
 export async function withTenant<T>(
   cooperativeId: string,

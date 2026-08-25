@@ -143,6 +143,7 @@ model Member {
   pinLockedUntil          DateTime? // brute-force lockout window
   totpSecret              String? // base32 TOTP secret — when set, money-out commands need a live 6-digit code
   status                  String              @default("active") // pending | active | suspended | deceased
+  optedOut                Boolean             @default(false) // true = member opted out of all outbound messages
   bankAccountNumber       String? // member's bank account for withdrawals
   bankCode                String?
   bankName                String?
@@ -779,11 +780,12 @@ model Broadcast {
 
 // ---- Chat state machine (multi-turn onboarding / flows) ----
 model Session {
-  id        String   @id @default(cuid())
-  phone     String   @unique
-  state     String   @default("idle") // idle | awaiting_name | awaiting_coop | awaiting_pin | ...
-  data      String   @default("{}") // JSON payload for the current flow
-  updatedAt DateTime @updatedAt
+  id             String    @id @default(cuid())
+  phone          String    @unique
+  state          String    @default("idle") // idle | awaiting_name | awaiting_coop | awaiting_pin | ...
+  data           String    @default("{}") // JSON payload for the current flow
+  lastInboundAt  DateTime? // tracks WhatsApp 24-hour customer service window
+  updatedAt      DateTime  @updatedAt
 
   @@index([updatedAt])
 }
@@ -868,6 +870,7 @@ model CooperativeConfig {
   autoApproveLoans         Boolean  @default(false)
   requireGuarantors        Boolean  @default(true)
   minGuarantors            Int      @default(2)
+  statusEnabled            Boolean  @default(true) // per-coop toggle for auto status posts
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
