@@ -70,3 +70,16 @@ services:
         value: "20"
       - key: TRANSFER_POLL_MINUTES
         value: "10"
+      # ---- Backup storage (S3 recommended — local disk is EPHEMERAL on Render) ----
+      # Backups on Render's ephemeral disk are lost on redeploy/sleep.
+      # Set these to use an S3-compatible bucket for persistent backups.
+      - key: BACKUP_BUCKET
+        sync: false          # optional: S3 bucket name (e.g. "coop-backups-prod")
+      - key: BACKUP_KEY
+        sync: false          # optional: S3 access key
+      - key: BACKUP_SECRET
+        sync: false          # optional: S3 secret key
+      - key: BACKUP_ENDPOINT
+        sync: false          # optional: S3 endpoint for non-AWS providers (e.g. Cloudflare R2)
+      - key: BACKUP_REGION
+        value: "eu-west-1"   # default region; override for non-AWS S3

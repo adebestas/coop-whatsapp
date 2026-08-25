@@ -141,13 +141,40 @@ export async function handleTickets(phone: string): Promise<void> {
 }
 
 export async function handleResolve(phone: string, args: string[]): Promise<void> {
-  const ticketCode = args[0];
+  const id = args[0];
   const note = args.slice(1).join(" ");
-  if (!ticketCode) {
-    await sendText({ to: phone, text: "Usage: *resolve <ticket id> <note>*" });
+  if (!id) {
+    await sendText({ to: phone, text: "Usage: *resolve <ticket or grievance id> <response>*" });
     return;
   }
-  const result = await resolveTicket(phone, ticketCode, note);
+
+  // Check if it's a grievance first
+  const grievance = await prisma.grievance.findFirst({
+    where: {
+      OR: [{ id }, { id: { endsWith: id } }],
+      status: "open",
+    },
+  });
+  if (grievance) {
+    const adminMember = await prisma.member.findFirst({ where: { phone, role: { in: ["admin", "superadmin"] } } });
+    if (!adminMember) {
+      await sendText({ to: phone, text: "Only admins can resolve grievances." });
+      return;
+    }
+    if (!note) {
+      await sendText({ to: phone, text: "Usage: *resolve <grievance id> <response>*" });
+      return;
+    }
+    await prisma.grievance.update({
+      where: { id: grievance.id },
+      data: { status: "resolved", response: note, resolvedById: adminMember.id, resolvedAt: new Date() },
+    });
+    await sendText({ to: phone, text: `✅ Grievance *${grievance.id.slice(-6)}* resolved.` });
+    return;
+  }
+
+  // Fall back to support ticket resolution
+  const result = await resolveTicket(phone, id, note);
   await sendText({ to: phone, text: result.message });
 }
 

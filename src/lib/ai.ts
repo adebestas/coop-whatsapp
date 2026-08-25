@@ -6,7 +6,7 @@
  * approval gates intact.
  */
 
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+import { GROQ_URL, groqAvailable, groqModel, groqHeaders, GROQ_TIMEOUT_MS } from "./groq.js";
 
 /** Every command the bot understands (admin + member). Keep in sync. */
 export const KNOWN_COMMANDS = [
@@ -14,6 +14,7 @@ export const KNOWN_COMMANDS = [
   "menu", "help", "balance", "ledger", "history", "statement", "posts", "mydeduction",
   "save", "loan", "repay", "plan", "dividend", "joinunit", "phone", "support", "tickets", "mytickets",
   "skipmonth", "vote", "votebuy", "buypolls", "results", "pollresults", "contexthelp",
+  "grievance", "grievances", "byelaws", "members",
   // admin
   "pending", "approve", "reject", "finalize", "payout", "overridewithdrawal",
   "broadcast", "createunit", "units", "setunitadmin", "paydividend", "recordfine",
@@ -42,7 +43,7 @@ Rules: amounts are plain numbers without currency symbols or commas. Member code
 If the person asks a question the commands cannot answer, reply {"command":null,"args":[]}.`;
 
 export function aiEnabled(): boolean {
-  return !!process.env.GROQ_API_KEY;
+  return groqAvailable();
 }
 
 /** Ask the LLM to map free text to a known command. Returns null when disabled or unsure. */
@@ -51,12 +52,9 @@ export async function suggestCommand(text: string): Promise<Suggestion | null> {
   try {
     const res = await fetch(GROQ_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-      },
+      headers: groqHeaders(),
       body: JSON.stringify({
-        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
+        model: groqModel(),
         temperature: 0,
         max_tokens: 100,
         messages: [
@@ -64,7 +62,7 @@ export async function suggestCommand(text: string): Promise<Suggestion | null> {
           { role: "user", content: text },
         ],
       }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
     });
     if (!res.ok) return null;
     const body = (await res.json()) as {

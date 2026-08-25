@@ -88,8 +88,10 @@ export function buildMenu(member: { name: string; cooperative: { name: string };
       `• *reserveinfo* — view Reserve Fund dashboard\n` +
       `• *mydata* — view all personal data we hold about you (NDPR right of access)\n` +
       `• *deleteaccount* — delete your account and erase personal data\n` +
+      `• *grievance <msg>* — submit a complaint to admin\n` +
+      `• *byelaws* — view cooperative byelaws\n` +
       `• *menu* — show this menu\n\n` +
-      `Admins: try *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *units*, *addunit*, *approvewdraw <id>*, *overridewithdrawal <phone>*, *deathclaim*, *claimbank*, *tickets*, *resolve*, *startvote unit|exec ...*, *candidate*, *closevote*, *startbuyvote <title>*, *addoption <id> <item> <cost> <acct> <bank>*, *closebuyvote <id>*, *enable2fa* (protect your account), *verifypin <pin>* (unlock big payouts for 10 min), *insights* (AI financial analysis)\n` +
+      `Admins: try *members*, *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *units*, *addunit*, *approvewdraw <id>*, *overridewithdrawal <phone>*, *deathclaim*, *claimbank*, *tickets*, *grievances*, *resolve*, *startvote unit|exec ...*, *candidate*, *closevote*, *startbuyvote <title>*, *addoption <id> <item> <cost> <acct> <bank>*, *closebuyvote <id>*, *enable2fa* (protect your account), *verifypin <pin>* (unlock big payouts for 10 min), *insights* (AI financial analysis)\n` +
       `Election types: *startvote unit <unitcode> <title>* (🏢 workplace — only that unit votes), *startvote exec <position> <title>* (🏛️ executive — all members vote)\n` +
       `Super admin: *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *paydividend <rate% of profit>*, *pnl* (all time), *pnl today|month|last month|2026-08|2026-08-01 2026-08-31*, *monthly [2026-08]*, *expense <amount> <category> <desc>*, *payout <amt> <phone> <narration>*, *payanyone <amt> <account> <bank> <narration>* (3 supers), *approvepay <id>*, *setsalary*, *runpayroll <narration>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*, *risk* (AI loan risk assessment)`
   );
@@ -412,10 +414,19 @@ export async function handleAwaitingInput(
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "idle" },
-        update: { state: "idle", data: "{}" },
+        create: { phone, state: "awaiting_optin", data: JSON.stringify({ memberId: result.memberId }) },
+        update: { state: "awaiting_optin", data: JSON.stringify({ memberId: result.memberId }) },
       });
-      await sendText({ to: phone, text: result.message });
+      await sendText({
+        to: phone,
+        text:
+          result.message +
+          "\n\n" +
+          "📱 *Message Consent*\n\n" +
+          "Do you consent to receive messages from this cooperative? " +
+          "This includes savings alerts, loan updates, and important notices.\n\n" +
+          "Reply *YES* to opt-in or *NO* to skip.",
+      });
 
       // Auto-notify new member of active elections they can participate in
       if (result.ok && result.memberId) {
@@ -671,6 +682,35 @@ export async function handleAwaitingInput(
       const { handleDeleteAccountPin } = await import("./admin-actions.js");
       await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
       await handleDeleteAccountPin(phone, input);
+      break;
+    }
+
+    case "awaiting_optin": {
+      const answer = text.trim().toLowerCase();
+      const memberId = data.memberId as string | undefined;
+      if (memberId) {
+        if (answer === "yes" || answer === "y") {
+          await prisma.member.update({
+            where: { id: memberId },
+            data: { optedOut: false, consentAt: new Date() },
+          });
+          await prisma.dataConsent.create({
+            data: {
+              memberId,
+              consentType: "registration",
+              granted: true,
+            },
+          });
+          await sendText({ to: phone, text: "✅ You're all set! You'll receive messages from your cooperative. Reply *menu* to see your options." });
+        } else {
+          await prisma.member.update({
+            where: { id: memberId },
+            data: { optedOut: true },
+          });
+          await sendText({ to: phone, text: "You've been opted out of messages. Reply *optin* at any time to re-enable." });
+        }
+      }
+      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle", data: "{}" }, update: { state: "idle", data: "{}" } });
       break;
     }
 

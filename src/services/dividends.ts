@@ -135,129 +135,132 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
   const totalDeductions = reserveAmount + educationAmount + developmentAmount;
   const memberPoolKobo = pool - totalDeductions;
 
-  // Create reserve allocation record
-  await prisma.reserveAllocation.create({
-    data: {
+  return prisma.$transaction(async (tx) => {
+    // Create reserve allocation record
+    await tx.reserveAllocation.create({
+      data: {
+        cooperativeId: admin.cooperativeId,
+        amount: reserveAmount,
+        source: "dividend_declaration",
+        referenceId: reference,
+        note: `20% statutory reserve from dividend at ${rate}% of net profit`,
+      },
+    });
+
+    // Create education fund record
+    await tx.educationFund.create({
+      data: {
+        cooperativeId: admin.cooperativeId,
+        amount: educationAmount,
+        source: "dividend_declaration",
+        referenceId: reference,
+        note: `2% education fund from dividend at ${rate}% of net profit`,
+      },
+    });
+
+    // Create development fund record
+    await tx.developmentFund.create({
+      data: {
+        cooperativeId: admin.cooperativeId,
+        amount: developmentAmount,
+        source: "dividend_declaration",
+        referenceId: reference,
+        note: `5% development fund from dividend at ${rate}% of net profit`,
+      },
+    });
+
+    // Update cooperative fund balances
+    await tx.cooperative.update({
+      where: { id: admin.cooperativeId },
+      data: {
+        reserveFundBalance: { increment: reserveAmount },
+      },
+    });
+
+    // Post ledger entries for all allocations
+    await recordLedger({
       cooperativeId: admin.cooperativeId,
+      type: "appropriation",
+      category: "dividend",
       amount: reserveAmount,
-      source: "dividend_declaration",
-      referenceId: reference,
       note: `20% statutory reserve from dividend at ${rate}% of net profit`,
-    },
-  });
+      reference,
+      fundType: "reserve",
+      tx,
+    });
 
-  // Create education fund record
-  await prisma.educationFund.create({
-    data: {
+    await recordLedger({
       cooperativeId: admin.cooperativeId,
+      type: "appropriation",
+      category: "dividend",
       amount: educationAmount,
-      source: "dividend_declaration",
-      referenceId: reference,
       note: `2% education fund from dividend at ${rate}% of net profit`,
-    },
-  });
+      reference,
+      fundType: "reserve",
+      tx,
+    });
 
-  // Create development fund record
-  await prisma.developmentFund.create({
-    data: {
+    await recordLedger({
       cooperativeId: admin.cooperativeId,
+      type: "appropriation",
+      category: "dividend",
       amount: developmentAmount,
-      source: "dividend_declaration",
-      referenceId: reference,
       note: `5% development fund from dividend at ${rate}% of net profit`,
-    },
-  });
+      reference,
+      fundType: "reserve",
+      tx,
+    });
 
-  // Update cooperative fund balances
-  await prisma.cooperative.update({
-    where: { id: admin.cooperativeId },
-    data: {
-      reserveFundBalance: { increment: reserveAmount },
-    },
-  });
+    // Compute shares as kobo integers with remainder distribution
+    const eligible = members.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
+    const rawShares = eligible.map((m) => ({
+      member: m,
+      raw: totalSaved > 0 ? (m.wallet?.totalSaved ?? 0) / totalSaved * memberPoolKobo : 0,
+      kobo: 0,
+      remainder: 0,
+    }));
+    for (const s of rawShares) {
+      s.kobo = Math.floor(s.raw);
+      s.remainder = s.raw - s.kobo;
+    }
+    let assigned = rawShares.reduce((sum, s) => sum + s.kobo, 0);
+    let leftover = memberPoolKobo - assigned;
+    rawShares.sort((a, b) => b.remainder - a.remainder);
+    for (const s of rawShares) {
+      if (leftover <= 0) break;
+      s.kobo += 1;
+      leftover -= 1;
+    }
 
-  // Post ledger entries for all allocations
-  await recordLedger({
-    cooperativeId: admin.cooperativeId,
-    type: "appropriation",
-    category: "dividend",
-    amount: reserveAmount,
-    note: `20% statutory reserve from dividend at ${rate}% of net profit`,
-    reference,
-    fundType: "reserve",
-  });
-
-  await recordLedger({
-    cooperativeId: admin.cooperativeId,
-    type: "appropriation",
-    category: "dividend",
-    amount: educationAmount,
-    note: `2% education fund from dividend at ${rate}% of net profit`,
-    reference,
-    fundType: "reserve",
-  });
-
-  await recordLedger({
-    cooperativeId: admin.cooperativeId,
-    type: "appropriation",
-    category: "dividend",
-    amount: developmentAmount,
-    note: `5% development fund from dividend at ${rate}% of net profit`,
-    reference,
-    fundType: "reserve",
-  });
-
-  // Compute shares as kobo integers with remainder distribution
-  const eligible = members.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
-  const rawShares = eligible.map((m) => ({
-    member: m,
-    raw: totalSaved > 0 ? (m.wallet?.totalSaved ?? 0) / totalSaved * memberPoolKobo : 0,
-    kobo: 0,
-    remainder: 0,
-  }));
-  for (const s of rawShares) {
-    s.kobo = Math.floor(s.raw);
-    s.remainder = s.raw - s.kobo;
-  }
-  let assigned = rawShares.reduce((sum, s) => sum + s.kobo, 0);
-  let leftover = memberPoolKobo - assigned;
-  rawShares.sort((a, b) => b.remainder - a.remainder);
-  for (const s of rawShares) {
-    if (leftover <= 0) break;
-    s.kobo += 1;
-    leftover -= 1;
-  }
-
-  // ATOMICITY: create all DividendEntry records with status "pending" first
-  const dividend = await prisma.dividend.create({
+    // ATOMICITY: create all DividendEntry records with status "pending" first
+    const dividend = await tx.dividend.create({
       data: {
         cooperativeId: admin.cooperativeId,
         rate,
         totalPool: memberPoolKobo,
-      reference,
-      status: "distributed",
-      distributedAt: new Date(),
-      entries: {
-        create: rawShares.map((s) => ({
-          memberId: s.member.id,
-          amount: s.kobo,
-          status: "pending" as const,
-        })),
+        reference,
+        status: "distributed",
+        distributedAt: new Date(),
+        entries: {
+          create: rawShares.map((s) => ({
+            memberId: s.member.id,
+            amount: s.kobo,
+            status: "pending" as const,
+          })),
+        },
       },
-    },
-    include: { entries: true },
-  });
+      include: { entries: true },
+    });
 
-  // Credit wallets and mark each entry as "paid" individually
-  let paidCount = 0;
-  for (const s of rawShares) {
-    const shareKobo = s.kobo;
-    if (shareKobo <= 0) continue;
-    paidCount += 1;
-    const entry = dividend.entries.find((e) => e.memberId === s.member.id);
-    await prisma.$transaction([
-      prisma.wallet.update({ where: { id: s.member.wallet!.id }, data: { balance: { increment: shareKobo } } }),
-      prisma.contribution.create({
+    // Credit wallets and mark each entry as "paid" individually
+    let paidCount = 0;
+    for (const s of rawShares) {
+      const shareKobo = s.kobo;
+      if (shareKobo <= 0) continue;
+      paidCount += 1;
+      const entry = dividend.entries.find((e) => e.memberId === s.member.id);
+      await tx.wallet.update({ where: { id: s.member.wallet!.id }, data: { balance: { increment: shareKobo } } });
+      await tx.contribution.create({
         data: {
           amount: shareKobo,
           type: "dividend",
@@ -268,36 +271,37 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
           memberId: s.member.id,
           cooperativeId: admin.cooperativeId,
         },
-      }),
-      ...(entry
-        ? [prisma.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } })]
-        : []),
-    ]);
-  }
+      });
+      if (entry) {
+        await tx.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } });
+      }
+    }
 
-  await recordLedger({
-    cooperativeId: admin.cooperativeId,
-    type: "appropriation",
-    category: "dividend",
-    amount: memberPoolKobo,
-    note: `Dividend at ${rate}% of net profit (after statutory deductions)`,
-    reference: dividend.id,
-    fundType: "operational",
+    await recordLedger({
+      cooperativeId: admin.cooperativeId,
+      type: "appropriation",
+      category: "dividend",
+      amount: memberPoolKobo,
+      note: `Dividend at ${rate}% of net profit (after statutory deductions)`,
+      reference: dividend.id,
+      fundType: "operational",
+      tx,
+    });
+
+    return {
+      ok: true,
+      message:
+        `🎉 Dividend distributed!\n\n` +
+        `Total profit pool: *${formatBalance(pool)}* (${rate}% of ${formatBalance(pnl.netProfit)})\n\n` +
+        `*Statutory Deductions (Nigerian Cooperative Standard):*\n` +
+        `• Reserve Fund (20%): *${formatBalance(reserveAmount)}*\n` +
+        `• Education Fund (2%): *${formatBalance(educationAmount)}*\n` +
+        `• Development Fund (5%): *${formatBalance(developmentAmount)}*\n` +
+        `• Total deductions: *${formatBalance(totalDeductions)}*\n\n` +
+        `Member dividends: *${formatBalance(memberPoolKobo)}* shared among ${paidCount} member(s)\n\n` +
+        `_Distributed proportional to savings._`,
+    };
   });
-
-  return {
-    ok: true,
-    message:
-      `🎉 Dividend distributed!\n\n` +
-      `Total profit pool: *${formatBalance(pool)}* (${rate}% of ${formatBalance(pnl.netProfit)})\n\n` +
-      `*Statutory Deductions (Nigerian Cooperative Standard):*\n` +
-      `• Reserve Fund (20%): *${formatBalance(reserveAmount)}*\n` +
-      `• Education Fund (2%): *${formatBalance(educationAmount)}*\n` +
-      `• Development Fund (5%): *${formatBalance(developmentAmount)}*\n` +
-      `• Total deductions: *${formatBalance(totalDeductions)}*\n\n` +
-      `Member dividends: *${formatBalance(memberPoolKobo)}* shared among ${paidCount} member(s)\n\n` +
-      `_Distributed proportional to savings._`,
-  };
 }
 
 /**
@@ -321,6 +325,18 @@ export async function resumeDividendDistribution(
     const wallet = entry.member?.wallet;
     if (!wallet) continue;
     const share = entry.amount;
+
+    // DEDUP: Verify no existing DividendEntry with status "paid" for this member+dividend.
+    // Prevents double-credit if resumeDividendDistribution is called concurrently.
+    const alreadyPaid = await prisma.dividendEntry.findFirst({
+      where: {
+        dividendId: entry.dividendId,
+        memberId: entry.memberId,
+        status: "paid",
+      },
+    });
+    if (alreadyPaid) continue;
+
     await prisma.$transaction([
       prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: share } } }),
       prisma.contribution.create({

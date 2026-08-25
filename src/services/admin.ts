@@ -537,6 +537,31 @@ export async function handleAdminCommand(
       return true;
     }
 
+    case "members": {
+      const members = await prisma.member.findMany({
+        where: { cooperativeId: coopId },
+        select: {
+          name: true,
+          code: true,
+          role: true,
+          status: true,
+          createdAt: true,
+          phone: true,
+          wallet: { select: { balance: true } },
+        },
+        orderBy: { name: "asc" },
+      });
+      if (members.length === 0) {
+        await sendText({ to: phone, text: "No members in this cooperative." });
+        return true;
+      }
+      const body = members.map((m) =>
+        `• *${m.name}* (${m.code}) — ${m.role}, ${m.status}\n  Joined: ${m.createdAt.toLocaleDateString("en-GB")} · Balance: ${formatBalance(m.wallet?.balance ?? 0)}`,
+      ).join("\n");
+      await sendText({ to: phone, text: `*Members (${members.length})*\n\n${body}` });
+      return true;
+    }
+
     case "audit": {
       const entries = await recentAudit(coopId);
       if (entries.length === 0) {
@@ -1131,6 +1156,14 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Usage: *paydividend <rate%>*, e.g. *paydividend 5* to pay a 5% dividend." });
         return true;
       }
+      const lastDiv = await prisma.dividend.findFirst({ where: { cooperativeId: coopId }, orderBy: { createdAt: "desc" } });
+      if (lastDiv) {
+        const diff = Math.abs(rate - lastDiv.rate);
+        if (diff > 5) {
+          await sendText({ to: phone, text: `Rate change of ${diff}% exceeds 5% threshold. Requires member vote.` });
+          return true;
+        }
+      }
       const result = await distributeDividend(phone, rate);
       await sendText({ to: phone, text: result.message });
       await audit({
@@ -1514,6 +1547,82 @@ export async function handleAdminCommand(
         `_These funds are built from statutory deductions on dividend distributions._`,
       ];
       await sendText({ to: phone, text: body.join("\n") });
+      return true;
+    }
+
+    case "grievances": {
+      const grievanceList = await prisma.grievance.findMany({
+        where: { cooperativeId: coopId, status: "open" },
+        include: { member: { select: { name: true, code: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+      });
+      if (grievanceList.length === 0) {
+        await sendText({ to: phone, text: "No open grievances. ✅" });
+        return true;
+      }
+      const gBody = grievanceList.map((g) =>
+        `• *${g.id.slice(-6)}* — ${g.member.name} (${g.member.code}): ${g.message.slice(0, 100)}${g.message.length > 100 ? "..." : ""}`,
+      ).join("\n");
+      await sendText({ to: phone, text: `*Open Grievances*\n\n${gBody}\n\nResolve with *resolve <id> <response>*` });
+      return true;
+    }
+
+    case "agm": {
+      const subcommand = args[0];
+      if (subcommand === "schedule") {
+        if (!isSuper) { await sendText({ to: phone, text: "Only super admins can schedule AGM." }); return true; }
+        const dateStr = args[1];
+        if (!dateStr) { await sendText({ to: phone, text: "Usage: *agm schedule YYYY-MM-DD*" }); return true; }
+        const agmDate = new Date(dateStr);
+        if (isNaN(agmDate.getTime())) { await sendText({ to: phone, text: "Invalid date format." }); return true; }
+        await prisma.cooperativeConfig.upsert({ where: { cooperativeId: coopId }, update: { nextAGMDate: agmDate }, create: { cooperativeId: coopId, nextAGMDate: agmDate } });
+        await sendText({ to: phone, text: `AGM scheduled for ${agmDate.toLocaleDateString("en-GB")}` });
+        return true;
+      }
+      if (subcommand === "info") {
+        const config = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
+        if (!config?.nextAGMDate) { await sendText({ to: phone, text: "No AGM scheduled yet." }); return true; }
+        await sendText({ to: phone, text: `Next AGM: ${config.nextAGMDate.toLocaleDateString("en-GB")}` });
+        return true;
+      }
+      await sendText({ to: phone, text: "Usage: *agm schedule YYYY-MM-DD* or *agm info*" });
+      return true;
+    }
+
+    case "byelaws": {
+      const subcommand = args[0];
+      if (subcommand === "add" && isSuper) {
+        const title = args[1];
+        const content = args.slice(2).join(" ");
+        if (!title || !content) { await sendText({ to: phone, text: "Usage: *byelaws add <title> <content>*" }); return true; }
+        await prisma.byelaw.create({ data: { cooperativeId: coopId, title, content } });
+        await sendText({ to: phone, text: `Byelaw "${title}" added.` });
+        return true;
+      }
+      const byelaws = await prisma.byelaw.findMany({ where: { cooperativeId: coopId }, orderBy: { createdAt: "desc" } });
+      if (byelaws.length === 0) { await sendText({ to: phone, text: "No byelaws registered yet." }); return true; }
+      const byelawLines = ["*📜 Cooperative Byelaws*", ""];
+      for (const b of byelaws) { byelawLines.push(`*${b.title}*`, b.content, ""); }
+      await sendText({ to: phone, text: byelawLines.join("\n") });
+      return true;
+    }
+
+    case "members": {
+      const allMembers = await prisma.member.findMany({ where: { cooperativeId: coopId }, include: { wallet: true }, orderBy: { createdAt: "asc" } });
+      const memberLines = [`*👥 Members (${allMembers.length})*`, ""];
+      for (const m of allMembers) { memberLines.push(`• ${m.name} — ${m.status} — ${m.createdAt.toLocaleDateString("en-GB")} — ${formatBalance(m.wallet?.balance ?? 0)}`); }
+      await sendText({ to: phone, text: memberLines.join("\n") });
+      return true;
+    }
+
+    case "strs": {
+      if (!isSuper) { await sendText({ to: phone, text: "Only super admins can view STRs." }); return true; }
+      const strs = await prisma.sTR.findMany({ where: { cooperativeId: coopId }, include: { member: true }, orderBy: { createdAt: "desc" }, take: 20 });
+      if (strs.length === 0) { await sendText({ to: phone, text: "No STRs filed." }); return true; }
+      const strLines = ["*📋 Suspicious Transaction Reports*", ""];
+      for (const s of strs) { strLines.push(`• ${s.member.name} — ${formatBalance(s.amount)} — ${s.status} — ${s.reason}`); }
+      await sendText({ to: phone, text: strLines.join("\n") });
       return true;
     }
 

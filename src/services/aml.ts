@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { getCoopConfig } from "./coop-config.js";
+import { notifyMember } from "../lib/messaging.js";
 
 // ===== AML/STR Constants =====
 
@@ -232,6 +233,23 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
     if (depositStructuring) reasons.push(depositStructuring);
   }
 
+  // CBN ₦5M threshold: check aggregate outflow within 24 hours
+  if (tx.direction === "out") {
+    const agg = await checkAggregateThreshold(tx.memberId, tx.cooperativeId);
+    if (agg.exceeds) {
+      const aggReason = `Aggregate outflow ₦${(agg.total / 100).toLocaleString()} in 24h exceeds ₦5,000,000 CBN threshold`;
+      reasons.push(aggReason);
+      await autoFileSTR(tx, aggReason);
+    }
+  }
+
+  // Auto-file STR for single large transactions at or above ₦5,000,000
+  if (tx.amount >= REPORTING_THRESHOLD) {
+    const singleReason = `Single transaction ${formatBalance(tx.amount)} meets CBN ₦5,000,000 STR threshold`;
+    reasons.push(singleReason);
+    await autoFileSTR(tx, singleReason);
+  }
+
   return { flagged: reasons.length > 0, reasons };
 }
 
@@ -355,4 +373,85 @@ export async function handleSTR(
     ok: true,
     message: str.summary,
   };
+}
+
+/**
+ * Auto-file an STR with the CBN when a transaction meets or exceeds the
+ * ₦5,000,000 threshold — single transaction or aggregate within 24 hours.
+ * Creates a pending STR record and notifies the cooperative super admin.
+ */
+export async function autoFileSTR(
+  tx: TransactionDetail,
+  reason: string,
+): Promise<{ filed: boolean; strId?: string }> {
+  try {
+    // Prevent duplicate STR for the same member on the same day
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const existing = await prisma.sTR.findFirst({
+      where: {
+        memberId: tx.memberId,
+        cooperativeId: tx.cooperativeId,
+        createdAt: { gte: todayStart },
+      },
+    });
+    if (existing) return { filed: false };
+
+    const str = await prisma.sTR.create({
+      data: {
+        cooperativeId: tx.cooperativeId,
+        memberId: tx.memberId,
+        amount: tx.amount,
+        reason,
+        status: "pending",
+      },
+    });
+
+    // Notify super admin(s)
+    const members = await prisma.member.findMany({
+      where: { cooperativeId: tx.cooperativeId, role: "superadmin", status: "active" },
+    });
+    for (const admin of members) {
+      await notifyMember(admin, `🚨 *STR Filed (Pending)*\n\nMember: ${tx.memberId}\nAmount: ${formatBalance(tx.amount)}\nReason: ${reason}\n\nThis report must be filed with the CBN.`);
+    }
+
+    return { filed: true, strId: str.id };
+  } catch (err) {
+    console.error("[aml] autoFileSTR failed:", err);
+    return { filed: false };
+  }
+}
+
+/**
+ * Check if a member's aggregate outflow within 24 hours meets or exceeds
+ * the CBN ₦5,000,000 threshold. Returns the total amount if so.
+ */
+export async function checkAggregateThreshold(
+  memberId: string,
+  cooperativeId: string,
+): Promise<{ exceeds: boolean; total: number }> {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  const [withdrawals, payouts] = await Promise.all([
+    prisma.withdrawalRequest.aggregate({
+      where: {
+        memberId,
+        status: "paid",
+        createdAt: { gte: since },
+      },
+      _sum: { amount: true },
+    }),
+    prisma.payout.aggregate({
+      where: {
+        memberId,
+        cooperativeId,
+        status: "successful",
+        createdAt: { gte: since },
+      },
+      _sum: { amount: true },
+    }),
+  ]);
+
+  const total = (withdrawals._sum.amount ?? 0) + (payouts._sum.amount ?? 0);
+  return { exceeds: total >= LARGE_TX_THRESHOLD, total };
 }

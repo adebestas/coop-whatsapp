@@ -2,7 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { sendText, platformOf } from "../lib/messaging.js";
 import { getMemberByPhone } from "./cooperative.js";
 import { handleAdminCommand } from "./admin.js";
-import { checkMoneyRateLimit } from "./fraud.js";
+import { checkMoneyRateLimit, checkAIRateLimit } from "./fraud.js";
 import { aiEnabled, suggestCommand } from "../lib/ai.js";
 import { handleAIQuery, isNaturalLanguageQuery } from "../lib/ai-query.js";
 import { generateSupportResponse } from "../lib/ai-support.js";
@@ -87,6 +87,7 @@ export type BotState =
   | "awaiting_ai_query_confirm"
   | "awaiting_consent"
   | "awaiting_delete_account_pin"
+  | "awaiting_optin"
   | "awaiting_onboard_name"
   | "awaiting_onboard_code"
   | "awaiting_onboard_state"
@@ -122,6 +123,7 @@ export const FlowDataSchema = z.object({
   aiQueryResponse: z.string().optional(),
   flowToken: z.string().optional(),
   consentGiven: z.boolean().optional(),
+  memberId: z.string().optional(),
 });
 
 export type FlowData = z.infer<typeof FlowDataSchema>;
@@ -183,6 +185,11 @@ export async function handleMessage(
     return;
   }
 
+  // Consent check: skip messages for members who haven't consented (except opt-in command)
+  if (member && member.consentAt === null && preCmd !== "optin") {
+    return;
+  }
+
   // Handle opt-out / opt-in commands
   if (preCmd === "stop" || preCmd === "unsubscribe" || preCmd === "optout") {
     if (member) {
@@ -195,7 +202,7 @@ export async function handleMessage(
   }
   if (preCmd === "optin") {
     if (member) {
-      await prisma.member.update({ where: { id: member.id }, data: { optedOut: false } });
+      await prisma.member.update({ where: { id: member.id }, data: { optedOut: false, consentAt: member.consentAt ?? new Date() } });
       await sendText({ to: phone, text: "Welcome back! You have been re-enabled for messages. Reply *menu* to see your options." });
     } else {
       await sendText({ to: phone, text: "You are not a registered member. Reply *join* to get started." });
@@ -417,10 +424,57 @@ export async function handleMessage(
       await handleMyData(phone);
       break;
 
+    case "grievance": {
+      const grievanceMsg = args.join(" ").trim();
+      if (!grievanceMsg) {
+        await sendText({ to: phone, text: "Usage: *grievance <your complaint>* — submit a grievance to the cooperative admin." });
+        break;
+      }
+      const grievMember = await getMemberByPhone(phone);
+      if (!grievMember) {
+        await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+        break;
+      }
+      await prisma.grievance.create({
+        data: {
+          cooperativeId: grievMember.cooperativeId,
+          memberId: grievMember.id,
+          message: grievanceMsg,
+        },
+      });
+      await sendText({ to: phone, text: "✅ Your grievance has been submitted. Admins will review it. Reply *grievances* to check status." });
+      break;
+    }
+
+    case "byelaws": {
+      const byelawMember = await getMemberByPhone(phone);
+      if (!byelawMember) {
+        await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+        break;
+      }
+      const coopByelaws = await prisma.cooperative.findUnique({
+        where: { id: byelawMember.cooperativeId },
+        select: { description: true, name: true },
+      });
+      if (coopByelaws?.description) {
+        await sendText({ to: phone, text: `*📜 Byelaws — ${coopByelaws.name}*\n\n${coopByelaws.description}` });
+      } else {
+        await sendText({ to: phone, text: "No byelaws have been posted for your cooperative yet. The admin can set them with *setconfig description <text>*." });
+      }
+      break;
+    }
+
     default: {
       if (aiEnabled() && text.trim().length >= 4 && !/^[\d\s.,]+$/.test(text)) {
         if (isNaturalLanguageQuery(text)) {
-          const member = await getMemberByPhone(phone);
+          const aiMember = await getMemberByPhone(phone);
+          if (aiMember && !checkAIRateLimit(aiMember.id)) {
+            await sendText({
+              to: phone,
+              text: "⏳ You've reached the limit of 10 AI queries per hour. Please try again later.",
+            });
+            break;
+          }
           const response = await handleAIQuery(
             text,
             phone,

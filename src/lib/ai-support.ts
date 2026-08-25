@@ -10,8 +10,7 @@
  */
 
 import { prisma } from "./prisma.js";
-
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+import { GROQ_URL, groqAvailable, groqModel, groqHeaders, GROQ_TIMEOUT_MS, groqFetch } from "./groq.js";
 
 interface FAQItem {
   question: string;
@@ -127,25 +126,19 @@ export async function generateSupportResponse(
   }
 
   // Then try AI
-  if (!process.env.GROQ_API_KEY) {
+  if (!groqAvailable()) {
     return generateFallbackSupport(truncated, memberName);
   }
 
   try {
-    const res = await fetch(GROQ_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
-        temperature: 0.3,
-        max_tokens: 200,
-        messages: [
-          {
-            role: "system",
-            content: `You are a helpful assistant for a Nigerian cooperative banking platform.
+    const res = await groqFetch({
+      model: groqModel(),
+      temperature: 0.3,
+      max_tokens: 200,
+      messages: [
+        {
+          role: "system",
+          content: `You are a helpful assistant for a Nigerian cooperative banking platform.
 Member name: ${sanitizePromptInput(memberName)}, Role: ${sanitizePromptInput(memberRole)}
 
 Available commands:
@@ -161,12 +154,10 @@ Available commands:
 
 Answer questions concisely. Always suggest the relevant command.
 If unsure, direct them to reply *help* for the full command list.`,
-          },
-          { role: "user", content: truncated },
-        ],
-      }),
-      signal: AbortSignal.timeout(8000),
-    });
+        },
+        { role: "user", content: truncated },
+      ],
+    }, GROQ_TIMEOUT_MS);
 
     if (!res.ok) return generateFallbackSupport(truncated, memberName);
     const body = (await res.json()) as {

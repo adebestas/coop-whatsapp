@@ -20,6 +20,35 @@ import { closeRedis } from "./lib/cache.js";
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
 
+// ===== Structured Logger =====
+const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 } as const;
+type LogLevel = keyof typeof LOG_LEVELS;
+const CURRENT_LOG_LEVEL: LogLevel = (process.env.LOG_LEVEL as LogLevel) ?? "info";
+
+function structuredLog(level: LogLevel, message: string, meta?: Record<string, unknown>): void {
+  if (LOG_LEVELS[level] > LOG_LEVELS[CURRENT_LOG_LEVEL]) return;
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+    pid: process.pid,
+    ...(meta ? { meta } : {}),
+  };
+  const line = JSON.stringify(entry);
+  if (level === "error") {
+    process.stderr.write(line + "\n");
+  } else {
+    process.stdout.write(line + "\n");
+  }
+}
+
+const log = {
+  info: (msg: string, meta?: Record<string, unknown>) => structuredLog("info", msg, meta),
+  warn: (msg: string, meta?: Record<string, unknown>) => structuredLog("warn", msg, meta),
+  error: (msg: string, meta?: Record<string, unknown>) => structuredLog("error", msg, meta),
+  debug: (msg: string, meta?: Record<string, unknown>) => structuredLog("debug", msg, meta),
+};
+
 // ===== Graceful Shutdown =====
 let isShuttingDown = false;
 
@@ -27,29 +56,29 @@ async function shutdown(signal: string) {
   if (isShuttingDown) return;
   isShuttingDown = true;
 
-  console.log(`[shutdown] ${signal} received, starting graceful shutdown...`);
+  log.info("shutdown started", { signal });
 
   try {
     // 1. Stop accepting new connections
     await app.close();
-    console.log("[shutdown] HTTP server closed");
+    log.info("HTTP server closed");
 
     // 2. Close queue workers
     await closeQueues();
-    console.log("[shutdown] Queue workers closed");
+    log.info("queue workers closed");
 
     // 3. Disconnect Redis
     await closeRedis();
-    console.log("[shutdown] Redis disconnected");
+    log.info("Redis disconnected");
 
     // 4. Disconnect database
     await prisma.$disconnect();
-    console.log("[shutdown] Database disconnected");
+    log.info("database disconnected");
 
-    console.log("[shutdown] Graceful shutdown complete");
+    log.info("graceful shutdown complete");
     process.exit(0);
   } catch (err) {
-    console.error("[shutdown] Error during shutdown:", err);
+    log.error("shutdown error", { error: err instanceof Error ? err.message : String(err) });
     process.exit(1);
   }
 }

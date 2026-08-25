@@ -119,3 +119,26 @@ export function checkVelocity(memberId: string): boolean {
 export function resetVelocity(): void {
   velocityLog.clear();
 }
+
+// ---- AI query rate limiting (per member, per hour) ----
+const aiQueryLog = new Map<string, number[]>();
+const AI_QUERY_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const AI_QUERY_MAX_PER_HOUR = 10;
+
+/**
+ * Check if a member has exceeded the rate limit for AI queries.
+ * Returns true if the query is allowed, false if blocked.
+ */
+export function checkAIRateLimit(memberId: string): boolean {
+  const now = Date.now();
+  const timestamps = (aiQueryLog.get(memberId) ?? []).filter((t) => now - t < AI_QUERY_WINDOW_MS);
+  if (timestamps.length >= AI_QUERY_MAX_PER_HOUR) return false;
+  timestamps.push(now);
+  aiQueryLog.set(memberId, timestamps);
+  return true;
+}
+
+/** Test hook: clear the in-memory AI query log. */
+export function resetAIRateLimit(): void {
+  aiQueryLog.clear();
+}

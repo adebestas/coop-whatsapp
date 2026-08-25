@@ -43,12 +43,15 @@ model Cooperative {
   coopPosts         CoopPost[]
   deductionBatches  DeductionBatch[]
   externalPayments   ExternalPayment[]
+  grievances         Grievance[]
   purchasePolls      PurchasePoll[]
   reconciliationLogs ReconciliationLog[]
   reserveAllocations   ReserveAllocation[]
   educationFunds      EducationFund[]
   developmentFunds    DevelopmentFund[]
   statusPosts         StatusPost[]
+  byelaws              Byelaw[]
+  strs                 STR[]
   config             CooperativeConfig?
   branding            BrandingConfig?
   subscription       Subscription?
@@ -167,6 +170,7 @@ model Member {
   cooperativeId           String
   cooperative             Cooperative         @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
   progress                MemberProgress?
+  consentAt               DateTime?           // when the member opted in to messages
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
   wallet                  Wallet?
@@ -178,6 +182,7 @@ model Member {
   withdrawalRequests      WithdrawalRequest[]
   deathClaims             DeathClaim[]
   deathValidations        DeathValidation[]
+  deathClaimApprovals     DeathClaimApproval[] @relation("DeathClaimApprovals")
   ticketsOpened           SupportTicket[]     @relation("TicketMember")
   ticketsAssigned         SupportTicket[]     @relation("TicketAssignee")
   voteCandidates          VoteCandidate[]     @relation("VoteCandidates")
@@ -194,6 +199,8 @@ model Member {
   pollBallots             PollBallot[]        @relation("PollVoter")
   guarantorDeductions     GuarantorDeduction[]
   beneficiaries           Beneficiary[]
+  grievances              Grievance[]
+  grievancesResolved      Grievance[]         @relation("GrievanceResolver")
   postsHeld               CoopPost[]          @relation("PostIncumbent")
   monthlyDeduction        Int? // agreed salary deduction remitted by employer in kobo
   deductionItems          DeductionItem[]
@@ -203,6 +210,7 @@ model Member {
   favoritePayees          FavoritePayee[]
   dataConsents            DataConsent[]
   dataConsentGiven        Boolean             @default(false)
+  strs                    STR[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -508,6 +516,7 @@ model DeathClaim {
   finalizedAt         DateTime?
   createdAt           DateTime          @default(now())
   validations         DeathValidation[]
+  approvals            DeathClaimApproval[]
 
   @@index([memberId, status])
   @@index([cooperativeId, status])
@@ -683,6 +692,26 @@ model SupportTicket {
   cooperative Cooperative @relation(fields: [cooperativeId], references: [id])
 
   @@index([cooperativeId, status])
+}
+
+// ---- Grievances (member complaints) ----
+model Grievance {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  memberId      String
+  member        Member   @relation(fields: [memberId], references: [id])
+  message       String
+  status        String   @default("open") // open | resolved
+  response      String? // admin response
+  resolvedById  String? // admin who resolved
+  resolvedBy    Member?  @relation("GrievanceResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([cooperativeId, status])
+  @@index([memberId])
 }
 
 // ---- Voting engine (unit admin + executive elections) ----
@@ -872,6 +901,9 @@ model CooperativeConfig {
   requireGuarantors        Boolean  @default(true)
   minGuarantors            Int      @default(2)
   statusEnabled            Boolean  @default(true) // per-coop toggle for auto status posts
+  nextAGMDate              DateTime?
+  lastDividendRate         Int?
+  pendingDividendRate      Int?
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
@@ -920,4 +952,46 @@ model DataConsent {
   createdAt     DateTime @default(now())
 
   @@index([memberId])
+}
+
+// ---- Byelaws (cooperative rules) ----
+model Byelaw {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  title         String
+  content       String
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId])
+}
+
+// ---- Death Claim multi-super-admin approvals ----
+model DeathClaimApproval {
+  id              String      @id @default(cuid())
+  deathClaimId    String
+  deathClaim      DeathClaim  @relation(fields: [deathClaimId], references: [id], onDelete: Cascade)
+  approvedById    String
+  approvedBy      Member      @relation("DeathClaimApprovals", fields: [approvedById], references: [id])
+  approvedAt      DateTime    @default(now())
+
+  @@unique([deathClaimId, approvedById])
+  @@index([deathClaimId])
+}
+
+// ---- Suspicious Transaction Reports (CBN filing) ----
+model STR {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  amount        Int         // total suspicious amount in kobo
+  reason        String      // human-readable reason for filing
+  status        String      @default("pending") // pending | filed
+  filedAt       DateTime?
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId, createdAt])
+  @@index([memberId, status])
 }

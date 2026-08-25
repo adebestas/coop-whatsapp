@@ -31,11 +31,14 @@ export async function recordLedger(input: {
   txRef?: string;
   /** Fund segregation: member (trust), operational, or reserve. */
   fundType?: string;
+  /** Optional transaction client for atomic operations. */
+  tx?: Pick<typeof prisma, "ledgerEntry" | "journalEntry">;
 }) {
   const amount = roundMoney(input.amount);
   if (amount <= 0) return;
 
   const fundType = input.fundType ?? "operational";
+  const client = input.tx ?? prisma;
 
   // Double-entry mapping: money in/out of the cooperative bank account.
   const postings =
@@ -54,8 +57,9 @@ export async function recordLedger(input: {
             { account: "equity:appropriations", direction: "CREDIT" as const, amount },
           ];
 
-  await prisma.$transaction([
-    prisma.ledgerEntry.create({
+  if (input.tx) {
+    // Inside an interactive transaction — write directly using tx client
+    await client.ledgerEntry.create({
       data: {
         cooperativeId: input.cooperativeId,
         type: input.type,
@@ -65,8 +69,23 @@ export async function recordLedger(input: {
         reference: input.reference,
         fundType,
       },
-    }),
-  ]);
+    });
+  } else {
+    // Standalone call — wrap in its own batch transaction
+    await prisma.$transaction([
+      prisma.ledgerEntry.create({
+        data: {
+          cooperativeId: input.cooperativeId,
+          type: input.type,
+          category: input.category,
+          amount,
+          note: input.note,
+          reference: input.reference,
+          fundType,
+        },
+      }),
+    ]);
+  }
   // Non-blocking on duplicates here (callers that need strict idempotency
   // use postJournal directly with a deterministic txRef).
   await postJournalSafe({
@@ -74,7 +93,7 @@ export async function recordLedger(input: {
     txRef: input.txRef,
     description: input.note ?? `${input.type}:${input.category}`,
     postings,
-  });
+  }, client);
 }
 
 /** Journal posting that never breaks the main write (best-effort parity). */
@@ -83,9 +102,9 @@ async function postJournalSafe(opts: {
   txRef?: string;
   description: string;
   postings: Parameters<typeof postJournal>[0]["postings"];
-}) {
+}, client: Pick<typeof prisma, "journalEntry"> = prisma) {
   try {
-    await postJournal({ ...opts, txRef: opts.txRef ?? `jr_${crypto.randomUUID()}`, description: opts.description });
+    await postJournal({ ...opts, txRef: opts.txRef ?? `jr_${crypto.randomUUID()}`, description: opts.description }, client);
   } catch (err) {
     console.error("[ledger] journal posting failed", err);
   }

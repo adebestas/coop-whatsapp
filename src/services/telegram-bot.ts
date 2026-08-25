@@ -40,6 +40,14 @@ async function setTelegramCommands(): Promise<void> {
  * Runs a long-polling loop that feeds Telegram messages into the same
  * conversation handler used for WhatsApp. Telegram user ids are prefixed
  * with "tg:" so the channel dispatcher knows where to reply.
+ *
+ * NOTE: Long polling is used here for development convenience. In production,
+ * switch to webhooks for lower latency and better scalability:
+ *   1. Set a webhook URL: POST /bot<TOKEN>/setWebhook?url=<YOUR_DOMAIN>/telegram/webhook
+ *   2. Add an Express/Fastify route at /telegram/webhook that calls handleMessage()
+ *   3. Remove this long-polling loop and the getTelegramUpdates import.
+ *   4. Ensure the webhook endpoint validates Telegram's X-Telegram-Bot-Api-Secret-Token header.
+ * See: https://core.telegram.org/bots/api#setwebhook
  */
 export async function startTelegramBot(): Promise<void> {
   if (!config.telegram.token) {

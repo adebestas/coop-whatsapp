@@ -22,8 +22,43 @@ import {
   type CoopSnapshot,
   type MemberSnapshot,
 } from "./ai-data.js";
+import { GROQ_URL, groqAvailable, groqModel, groqHeaders, GROQ_TIMEOUT_MS, groqFetch } from "./groq.js";
 
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+/** Sleep for the given milliseconds. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch with exponential backoff retry. Only retries on 5xx errors.
+ * Max 3 retries with delays of 1s, 2s, 4s.
+ */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  maxRetries = 3,
+): Promise<Response> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, init);
+      // Only retry on 5xx server errors, not 4xx client errors
+      if (res.ok || res.status < 500) return res;
+      lastError = new Error(`HTTP ${res.status}`);
+      if (attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+        await sleep(delay);
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 1000;
+        await sleep(delay);
+      }
+    }
+  }
+  throw lastError;
+}
 
 export type AIQueryType =
   | "member_balance"
@@ -47,23 +82,17 @@ interface AIQueryIntent {
  * Classify the user's natural language query into a structured intent.
  */
 async function classifyIntent(text: string): Promise<AIQueryIntent | null> {
-  if (!process.env.GROQ_API_KEY) return null;
+  if (!groqAvailable()) return null;
 
   try {
-    const res = await fetch(GROQ_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
-        temperature: 0,
-        max_tokens: 150,
-        messages: [
-          {
-            role: "system",
-            content: `You classify Nigerian cooperative banking questions into intents.
+    const res = await groqFetch({
+      model: groqModel(),
+      temperature: 0,
+      max_tokens: 150,
+      messages: [
+        {
+          role: "system",
+          content: `You classify Nigerian cooperative banking questions into intents.
 
 Reply with STRICT JSON only: {"type":"<intent>","args":{}}
 
@@ -85,12 +114,10 @@ Args can include:
 - "target": "me", "all", "coop"
 
 If unsure, return {"type":"help","args":{}}`,
-          },
-          { role: "user", content: text },
-        ],
-      }),
-      signal: AbortSignal.timeout(8000),
-    });
+        },
+        { role: "user", content: text },
+      ],
+    }, GROQ_TIMEOUT_MS);
     if (!res.ok) return null;
     const body = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
@@ -125,7 +152,7 @@ async function generateResponse(
   intent: AIQueryType,
   data: Record<string, unknown>,
 ): Promise<string> {
-  if (!process.env.GROQ_API_KEY) return "AI is not available.";
+  if (!groqAvailable()) return "AI is not available.";
 
   const systemPrompt = `You are a cooperative banking assistant for a Nigerian cooperative.
 Answer the member's question using the provided data. Be concise and helpful.
@@ -134,26 +161,18 @@ If data shows zero or empty, say so clearly. Be warm and professional.
 Never make up data. Only use what's provided.`;
 
   try {
-    const res = await fetch(GROQ_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
-        temperature: 0.3,
-        max_tokens: 300,
-        messages: [
-          { role: "system", content: systemPrompt },
-          {
-            role: "user",
-            content: `Question: ${question}\n\nData (JSON):\n${JSON.stringify(data, null, 2)}`,
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(8000),
-    });
+    const res = await groqFetch({
+      model: groqModel(),
+      temperature: 0.3,
+      max_tokens: 300,
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `Question: ${question}\n\nData (JSON):\n${JSON.stringify(data, null, 2)}`,
+        },
+      ],
+    }, GROQ_TIMEOUT_MS);
     if (!res.ok) return formatFallbackResponse(intent, data);
     const body = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;

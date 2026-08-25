@@ -33,23 +33,60 @@ function convertToTelegramHTML(text: string): string {
   return result;
 }
 
+/** Telegram's maximum message length in characters. */
+const TELEGRAM_MAX_LENGTH = 4096;
+
+/**
+ * Split a long message into chunks that fit within Telegram's 4096-char limit.
+ * Tries to split on newlines first, then falls back to hard truncation.
+ */
+function splitMessage(text: string): string[] {
+  if (text.length <= TELEGRAM_MAX_LENGTH) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= TELEGRAM_MAX_LENGTH) {
+      chunks.push(remaining);
+      break;
+    }
+
+    // Find the last newline within the limit
+    let splitAt = remaining.lastIndexOf("\n", TELEGRAM_MAX_LENGTH);
+    if (splitAt <= 0) {
+      // No good newline — hard truncate at limit
+      splitAt = TELEGRAM_MAX_LENGTH;
+    }
+
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).replace(/^\n/, "");
+  }
+
+  return chunks;
+}
+
 /**
  * Send a text message to a Telegram chat.
  * Converts WhatsApp-style formatting to HTML for proper rendering.
+ * Automatically splits messages exceeding Telegram's 4096-char limit.
  */
 export async function sendTelegramMessage(chatId: string | number, text: string): Promise<boolean> {
   if (!config.telegram.token) return false;
-  const htmlText = convertToTelegramHTML(text);
 
-  const res = await fetch(`${API_BASE}/bot${config.telegram.token}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text: htmlText, parse_mode: "HTML" }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    console.error(`[telegram] send failed (${res.status}): ${body}`);
-    return false;
+  const chunks = splitMessage(text);
+  for (const chunk of chunks) {
+    const htmlText = convertToTelegramHTML(chunk);
+    const res = await fetch(`${API_BASE}/bot${config.telegram.token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: htmlText, parse_mode: "HTML" }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      console.error(`[telegram] send failed (${res.status}): ${body}`);
+      return false;
+    }
   }
   return true;
 }
