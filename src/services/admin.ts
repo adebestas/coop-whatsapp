@@ -45,6 +45,7 @@ import { getSegregationReport, getReserveReport } from "./reconciliation.js";
 import { resolveProvider } from "./payments/index.js";
 import { assertMoneyAuthorized, assertFreshPin, disable2fa, enable2fa, refreshPin } from "./auth2fa.js";
 import { getCoopConfig, updateCoopConfig, getBranding, getSubscription } from "./coop-config.js";
+import { checkMultiSigRequirement, processMultiSigResponse, auditSuperadminCommand } from "../lib/security-hardening.js";
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
 
@@ -234,6 +235,28 @@ export async function handleAdminCommand(
       const pinCheck = await assertFreshPin(phone, amount);
       if (!pinCheck.ok) return guardFailed(phone, pinCheck.message);
       await handlePayout(ctx, amount, targetPhone, narration);
+      return true;
+    }
+
+    case "approvemultisig":
+    case "rejectmultisig": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the super admin can approve multi-sig requests." });
+        return true;
+      }
+      const pendingIdSuffix = args[0];
+      if (!pendingIdSuffix) {
+        await sendText({ to: phone, text: "Usage: *approvemultisig <request id suffix>* or *rejectmultisig <request id suffix>*" });
+        return true;
+      }
+      const action = cmd === "approvemultisig" ? "approve" : "reject";
+      const result = await processMultiSigResponse({
+        cooperativeId: coopId,
+        pendingIdSuffix,
+        responderPhone: phone,
+        action,
+      });
+      await sendText({ to: phone, text: result.message });
       return true;
     }
 
@@ -2085,6 +2108,30 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
     return;
   }
 
+  // Multi-sig check: large payouts need second superadmin approval (playbook Attack 6 mitigation)
+  const multiSig = await checkMultiSigRequirement({
+    cooperativeId: coop.id,
+    amount,
+    initiatorPhone: admin.phone,
+    targetId: target.id,
+  });
+  if (multiSig.needsApproval) {
+    await auditSuperadminCommand({
+      cooperativeId: coop.id,
+      actorPhone: admin.phone,
+      actorId: admin.id,
+      command: "payout.pending_multisig",
+      target: target.name,
+      detail: `${formatBalance(amount)} to ${target.name} — awaiting second superadmin approval`,
+      isHighRisk: true,
+    });
+    await sendText({
+      to: admin.phone,
+      text: `🔐 Payout of ${formatBalance(amount)} needs a second superadmin approval.\n\nOther superadmins have been notified. Once approved, reply *payout ${targetPhone} ${amount / 100} ${narration}* again to proceed.`,
+    });
+    return;
+  }
+
   // STEP 1 — atomic claim: create the request in "processing" state so concurrent
   // calls for the same member are rejected. Also debits the wallet in the same
   // transaction so the debit and claim are inseparable.
@@ -2163,6 +2210,17 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
       targetType: "member",
       targetId: target.id,
       detail: `${formatBalance(amount)} to ${target.name} — ${narration}`,
+    });
+
+    // Enhanced audit: alert other superadmins about large payouts
+    await auditSuperadminCommand({
+      cooperativeId: coop.id,
+      actorPhone: admin.phone,
+      actorId: admin.id,
+      command: "payout.completed",
+      target: target.name,
+      detail: `${formatBalance(amount)} to ${target.name} — ${narration}`,
+      isHighRisk: amount >= 100_000_00, // ₦100k+
     });
 
     if (limit.warning) {

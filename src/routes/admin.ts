@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { verifyPin } from "../lib/security.js";
 import { checkRateLimit, getRedis } from "../lib/cache.js";
+import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 
 /**
  * Minimal admin auth for the dashboard: members log in with their WhatsApp
@@ -133,6 +134,16 @@ export async function adminApiRoutes(app: FastifyInstance) {
       include: { cooperative: true },
     });
     if (!member || !member.pin || !verifyPin(pin, member.pin)) {
+      // Record suspicious event for auto-freeze (playbook Attack 8)
+      if (member) {
+        await recordSuspiciousEvent({
+          memberId: member.id,
+          cooperativeId: member.cooperativeId,
+          memberPhone: phone,
+          event: "admin_login_failed",
+          detail: `Failed login from IP ${ip}`,
+        });
+      }
       return reply.code(401).send({ error: "invalid credentials" });
     }
 

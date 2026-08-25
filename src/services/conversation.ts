@@ -10,6 +10,7 @@ import { FIVE_LESSONS, getLesson, getTotalLessons } from "./literacy.js";
 import { getReserveInfo } from "./dividends.js";
 import { getAnniversaryMessage } from "./anniversary.js";
 import { formatBalance } from "./cooperative.js";
+import { validateDeviceSession, checkTenureLimit } from "../lib/security-hardening.js";
 
 // ---- Tier-based transaction limits (CBN KYC requirements) ----
 const TIER_LIMITS = {
@@ -165,6 +166,8 @@ export interface MessageMeta {
   flowToken?: string;
   /** Telegram message id — secret replies are deleted right after reading. */
   telegramMessageId?: number;
+  /** Client IP for anomaly detection. */
+  ip?: string;
 }
 
 function isAwaitingState(state: BotState): boolean {
@@ -197,6 +200,18 @@ export async function handleMessage(
       to: phone,
       text: "That request expired. Reply *menu* to start again.",
     });
+    return;
+  }
+
+  // Device binding: detect SIM swap / session hijack (playbook Attack 1, 6)
+  const platform = phone.startsWith("tg:") ? "telegram" : "whatsapp";
+  const deviceCheck = await validateDeviceSession({
+    memberPhone: phone,
+    platform,
+    ip: meta.ip ?? "unknown",
+  });
+  if (!deviceCheck.ok) {
+    await sendText({ to: phone, text: `⚠️ ${deviceCheck.reason}\n\nIf this was you, try again in a few minutes.` });
     return;
   }
 

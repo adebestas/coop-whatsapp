@@ -8,6 +8,7 @@ import { audit } from "./audit.js";
 import { checkVelocity } from "./fraud.js";
 import { getCoopConfig } from "./coop-config.js";
 import { recordLedger } from "./ledger.js";
+import { checkTenureLimit } from "../lib/security-hardening.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
@@ -138,6 +139,16 @@ export async function requestWithdrawal(
         ok: false,
         message: `You can withdraw at most *${formatBalance(max)}* (45% of your ${formatBalance(balance)} balance).`,
       } as const;
+    }
+
+    // Tenure-based daily limit check (playbook Attack 9 mitigation)
+    const tenureCheck = await checkTenureLimit({
+      memberId: member.id,
+      amount,
+      cooperativeId: member.cooperativeId,
+    });
+    if (!tenureCheck.allowed) {
+      return { ok: false, message: tenureCheck.message } as const;
     }
 
     const accNo = bank?.accountNumber ?? member.bankAccountNumber;

@@ -58,6 +58,7 @@ export async function webhookRoutes(app: FastifyInstance) {
           // user gets a fallback message instead of silent failure.
           void handleMessage(inbound.from, inbound.text, {
             flowToken: inbound.flowToken,
+            ip: req.ip,
           }).catch((err) => {
             app.log.error({ err, from: inbound.from }, "handleMessage failed");
             sendText({
