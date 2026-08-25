@@ -275,7 +275,9 @@ export async function handleAdminCommand(
       }
       // Look up the amount so large payouts require a fresh PIN too.
       const req = await prisma.withdrawalRequest.findFirst({
-        where: { OR: [{ id }, { id: { startsWith: id } }, { id: { endsWith: id } }] },
+        where: id.length >= 8
+          ? { OR: [{ id }, { id: { endsWith: id } }] }
+          : { id },
       });
       if (req) {
         const pinCheck = await assertFreshPin(phone, req.amount);
@@ -868,6 +870,12 @@ export async function handleAdminCommand(
 
       const officerLines = officers.map(o => `• ${o.title}: ${o.incumbent?.name ?? "Vacant"}`).join("\n");
 
+      const lastDividend = await prisma.dividend.findFirst({
+        where: { cooperativeId: coopId },
+        orderBy: { createdAt: "desc" },
+        select: { rate: true },
+      });
+
       const report = [
         `*ANNUAL RETURN — ${reportYear}*`,
         `*${coopFull.name}*`,
@@ -908,7 +916,7 @@ export async function handleAdminCommand(
         `*PART G: DIVIDENDS*`,
         `• Total dividends declared: *${formatBalance(totalDividends._sum.totalPool ?? 0)}*`,
         `• Number of dividend distributions: *${totalDividends._count}*`,
-        `• Dividend rate: *${coopConfig ? `${coopConfig.loanInterestRate}%` : "N/A"}*`,
+        `• Dividend rate: *${lastDividend ? `${lastDividend.rate}%` : coopConfig ? `${coopConfig.lastDividendRate ?? coopConfig.loanInterestRate}%` : "N/A"}*`,
         "",
         `*PART H: STATUTORY FUNDS*`,
         `• Reserve Fund (20%): *${formatBalance(reserve)}*`,
@@ -939,6 +947,12 @@ export async function handleAdminCommand(
         `• Development Fund: *${formatBalance(funds.development)}*`,
         ``,
         `_These funds are built from statutory deductions on dividend distributions._`,
+        // NOTE: Reserve, education, and development funds have no withdrawal
+        // mechanism by design — they accumulate statutorily per the Nigerian
+        // Cooperative Societies Act. If legitimate spends are needed (e.g.,
+        // education fund for member training, development fund for projects),
+        // a dedicated `fundwithdraw` admin command should be added with
+        // appropriate approval gates and audit trails.
       ];
       await sendText({ to: phone, text: body.join("\n") });
       return true;
@@ -1771,6 +1785,253 @@ export async function handleAdminCommand(
       return true;
     }
 
+    case "tin": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can manage TIN." });
+        return true;
+      }
+      const sub = args[0]?.toLowerCase();
+      if (sub === "set") {
+        const tin = args.slice(1).join(" ").trim();
+        if (!tin) {
+          await sendText({ to: phone, text: "Usage: *tin set <TIN>* — e.g. *tin set 12345678-0001*" });
+          return true;
+        }
+        await prisma.cooperativeConfig.upsert({
+          where: { cooperativeId: coopId },
+          update: { taxIdentificationNumber: tin },
+          create: { cooperativeId: coopId, taxIdentificationNumber: tin },
+        });
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: phone,
+          actorId: admin.id,
+          actorRole: "superadmin",
+          action: "tin.set",
+          detail: `TIN -> ${tin}`,
+        });
+        await sendText({ to: phone, text: `✅ TIN set to *${tin}*.` });
+        return true;
+      }
+      if (sub === "info") {
+        const config = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
+        const tin = config?.taxIdentificationNumber;
+        const coopType = config?.cooperativeType ?? "member";
+        const commIncome = config?.commercialIncome ?? 0;
+        const body = [
+          "*🏛 Tax Identification Number*",
+          "",
+          `• TIN: *${tin ?? "Not set"}*`,
+          `• Cooperative type: *${coopType}*`,
+          `• Commercial income: *${formatBalance(commIncome)}*`,
+          "",
+          tin ? "_TIN is registered with FIRS._" : "_Use *tin set <TIN>* to register._",
+        ];
+        await sendText({ to: phone, text: body.join("\n") });
+        return true;
+      }
+      await sendText({ to: phone, text: "Usage: *tin set <TIN>* or *tin info*" });
+      return true;
+    }
+
+    case "paye": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can manage PAYE." });
+        return true;
+      }
+      const sub = args[0]?.toLowerCase();
+      if (sub === "add") {
+        const memberCode = args[1]?.toUpperCase();
+        const gross = Number(args[2]);
+        if (!memberCode || !Number.isFinite(gross) || gross <= 0) {
+          await sendText({ to: phone, text: "Usage: *paye add <member code> <gross amount>* — e.g. *paye add A1B2C3 500000*" });
+          return true;
+        }
+        const target = await prisma.member.findFirst({ where: { code: memberCode, cooperativeId: coopId } });
+        if (!target) {
+          await sendText({ to: phone, text: `No member with code *${memberCode}*.` });
+          return true;
+        }
+        const now = new Date();
+        const month = now.getMonth() + 1;
+        const year = now.getFullYear();
+        const existing = await prisma.pAYERecord.findUnique({
+          where: { cooperativeId_memberId_month_year: { cooperativeId: coopId, memberId: target.id, month, year } },
+        });
+        if (existing) {
+          await sendText({ to: phone, text: `PAYE already recorded for ${target.name} in ${month}/${year}. Use *paye remit* to mark as remitted.` });
+          return true;
+        }
+        // Nigeria PAYE: first ₦300k/month exempt, then 7% up to ₦500k, 11% up to ₦1.16M, 15% up to ₦1.62M, 19% up to ₦3.22M, 21% up to ₦6.42M, 24% above
+        const grossKobo = gross;
+        const exemptKobo = 30_000_00; // ₦300,000
+        let taxable = Math.max(0, grossKobo - exemptKobo);
+        let tax = 0;
+        const brackets = [
+          { limit: 20_000_00, rate: 0.07 },  // ₦200k @ 7%
+          { limit: 66_000_00, rate: 0.11 },  // ₦660k @ 11%
+          { limit: 46_000_00, rate: 0.15 },  // ₦460k @ 15%
+          { limit: 160_000_00, rate: 0.19 }, // ₦1.6M @ 19%
+          { limit: 320_000_00, rate: 0.21 }, // ₦3.2M @ 21%
+          { limit: Infinity, rate: 0.24 },   // above @ 24%
+        ];
+        for (const b of brackets) {
+          if (taxable <= 0) break;
+          const chunk = Math.min(taxable, b.limit);
+          tax += Math.round(chunk * b.rate);
+          taxable -= chunk;
+        }
+        const net = grossKobo - tax;
+        const record = await prisma.pAYERecord.create({
+          data: {
+            cooperativeId: coopId,
+            memberId: target.id,
+            month,
+            year,
+            grossAmount: grossKobo,
+            taxAmount: tax,
+            netAmount: net,
+          },
+        });
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: phone,
+          actorId: admin.id,
+          actorRole: "superadmin",
+          action: "paye.add",
+          targetType: "paye",
+          targetId: record.id,
+          detail: `${target.name}: gross ${formatBalance(grossKobo)}, tax ${formatBalance(tax)}, net ${formatBalance(net)}`,
+        });
+        await sendText({
+          to: phone,
+          text: `✅ PAYE recorded for *${target.name}* (${month}/${year}):\n\n• Gross: *${formatBalance(grossKobo)}*\n• Tax: *${formatBalance(tax)}*\n• Net: *${formatBalance(net)}*\n\nRecord ID: *${record.id.slice(-6)}*`,
+        });
+        return true;
+      }
+      if (sub === "report") {
+        const now = new Date();
+        const m = args[1] ? Number(args[1]) : now.getMonth() + 1;
+        const y = args[2] ? Number(args[2]) : now.getFullYear();
+        if (!Number.isFinite(m) || m < 1 || m > 12 || !Number.isFinite(y)) {
+          await sendText({ to: phone, text: "Usage: *paye report [month] [year]* — e.g. *paye report 8 2026*" });
+          return true;
+        }
+        const records = await prisma.pAYERecord.findMany({
+          where: { cooperativeId: coopId, month: m, year: y },
+          include: { member: { select: { name: true, code: true } } },
+          orderBy: { createdAt: "asc" },
+        });
+        if (records.length === 0) {
+          await sendText({ to: phone, text: `No PAYE records for ${m}/${y}.` });
+          return true;
+        }
+        let totalGross = 0, totalTax = 0, totalNet = 0;
+        const lines = records.map((r) => {
+          totalGross += r.grossAmount;
+          totalTax += r.taxAmount;
+          totalNet += r.netAmount;
+          const status = r.status === "remitted" ? "✅" : "⏳";
+          return `• ${r.member.name} (${r.member.code}) — Gross: ${formatBalance(r.grossAmount)} — Tax: ${formatBalance(r.taxAmount)} — ${status}`;
+        });
+        const report = [
+          `*📊 PAYE Report — ${m}/${y}*`,
+          "",
+          ...lines,
+          "",
+          `*Totals:* Gross: *${formatBalance(totalGross)}* · Tax: *${formatBalance(totalTax)}* · Net: *${formatBalance(totalNet)}*`,
+          `Records: *${records.length}* · Remitted: *${records.filter((r) => r.status === "remitted").length}/${records.length}*`,
+          "",
+          `_SIRS filing ID: ${coopId.slice(-6)}-${y}${String(m).padStart(2, "0")}_`,
+        ];
+        await sendText({ to: phone, text: report.join("\n") });
+        return true;
+      }
+      if (sub === "remit") {
+        const id = args[1];
+        if (!id) {
+          await sendText({ to: phone, text: "Usage: *paye remit <record id>* — marks PAYE as remitted to state IRS." });
+          return true;
+        }
+        const record = await prisma.pAYERecord.findFirst({
+          where: { OR: [{ id }, { id: { startsWith: id } }, { id: { endsWith: id } }], cooperativeId: coopId },
+          include: { member: { select: { name: true } } },
+        });
+        if (!record) {
+          await sendText({ to: phone, text: `No PAYE record found with id *${id}*.` });
+          return true;
+        }
+        if (record.status === "remitted") {
+          await sendText({ to: phone, text: `PAYE for ${record.member.name} (${record.month}/${record.year}) already remitted.` });
+          return true;
+        }
+        await prisma.pAYERecord.update({ where: { id: record.id }, data: { status: "remitted", remittedAt: new Date() } });
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: phone,
+          actorId: admin.id,
+          actorRole: "superadmin",
+          action: "paye.remit",
+          targetType: "paye",
+          targetId: record.id,
+          detail: `${record.member.name} — ${formatBalance(record.taxAmount)} remitted`,
+        });
+        await sendText({ to: phone, text: `✅ PAYE for *${record.member.name}* (${record.month}/${record.year}) marked as remitted to state IRS.` });
+        return true;
+      }
+      await sendText({ to: phone, text: "Usage:\n• *paye add <member code> <gross>* — record PAYE\n• *paye report [month] [year]* — SIRS report\n• *paye remit <id>* — mark as remitted" });
+      return true;
+    }
+
+    case "taxstatus": {
+      const config = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
+      const tin = config?.taxIdentificationNumber;
+      const coopType = config?.cooperativeType ?? "member";
+      const commIncome = config?.commercialIncome ?? 0;
+
+      // CIT exemption: member-type cooperatives are exempt from Companies Income Tax
+      const citExempt = coopType === "member";
+
+      // PAYE compliance: count pending vs remitted
+      const payeCounts = await prisma.pAYERecord.groupBy({
+        by: ["status"],
+        where: { cooperativeId: coopId },
+        _count: true,
+      });
+      const pendingPAYE = payeCounts.find((p) => p.status === "pending")?._count ?? 0;
+      const remittedPAYE = payeCounts.find((p) => p.status === "remitted")?._count ?? 0;
+
+      // Income ratio
+      const totalIncome = await prisma.ledgerEntry.aggregate({
+        where: { cooperativeId: coopId, type: "income" },
+        _sum: { amount: true },
+      });
+      const memberIncome = (totalIncome._sum.amount ?? 0) - commIncome;
+      const ratio = memberIncome > 0 ? ((commIncome / memberIncome) * 100).toFixed(1) : "0";
+
+      const body = [
+        "*🏛 Tax Compliance Status*",
+        "",
+        `*TIN:* ${tin ?? "⚠️ Not set — use *tin set <TIN>*"}`,
+        `*Cooperative type:* ${coopType}`,
+        "",
+        `*CIT status:* ${citExempt ? "✅ Exempt (member cooperative)" : "⚠️ Taxable (commercial cooperative)"}`,
+        "",
+        `*PAYE compliance:*`,
+        `• Pending: *${pendingPAYE}* records`,
+        `• Remitted: *${remittedPAYE}* records`,
+        pendingPAYE > 0 ? "• ⚠️ Unremitted PAYE — use *paye remit <id>*" : "• ✅ All PAYE up to date",
+        "",
+        `*Income breakdown:*`,
+        `• Member income: *${formatBalance(Math.max(0, memberIncome))}*`,
+        `• Commercial income: *${formatBalance(commIncome)}*`,
+        `• Ratio: *${ratio}%* commercial`,
+        commIncome > memberIncome ? "• ⚠️ Commercial income exceeds member income — review classification" : "",
+      ].filter(Boolean);
+      await sendText({ to: phone, text: body.join("\n") });
+      return true;
+    }
+
     default:
       return false;
   }
@@ -1845,54 +2106,104 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
     return;
   }
 
-  // ✅ DEBIT-FIRST: Lock wallet before sending money (prevents race condition)
-  const debited = await prisma.wallet.updateMany({
-    where: { memberId: target.id, balance: { gte: amount } },
-    data: { balance: { decrement: amount } },
-  });
-  if (debited.count === 0) {
-    await sendText({ to: admin.phone, text: `Insufficient balance. No money moved.` });
-    return;
-  }
-
-  // Now send to bank
-  const result = await sendToBank({
-    memberId: target.id,
-    amount,
-    bankAccountNumber: target.bankAccountNumber,
-    bankCode: target.bankCode,
-    bankName: target.bankName ?? undefined,
-    note: `Super admin payout to ${target.name} — ${narration}`,
-    successMessage: `✅ ${formatBalance(amount)} sent to your bank account. Narration: "${narration}".`,
-  });
-
-  if (!result.ok) {
-    // Refund the wallet on failure
-    await prisma.wallet.update({
-      where: { id: target.wallet!.id },
-      data: { balance: { increment: amount } },
+  // STEP 1 — atomic claim: create the request in "processing" state so concurrent
+  // calls for the same member are rejected. Also debits the wallet in the same
+  // transaction so the debit and claim are inseparable.
+  const claimed = await prisma.$transaction(async (tx) => {
+    const wallet = await tx.wallet.findUnique({ where: { memberId: target.id } });
+    if (!wallet || wallet.balance < amount) {
+      return { ok: false as const, message: "Insufficient balance. No money moved." };
+    }
+    const debited = await tx.wallet.updateMany({
+      where: { id: wallet.id, balance: { gte: amount } },
+      data: { balance: { decrement: amount } },
     });
-    await sendText({ to: admin.phone, text: `Payout failed: ${result.message}. Wallet refunded.` });
+    if (debited.count === 0) {
+      return { ok: false as const, message: "Insufficient balance. No money moved." };
+    }
+    const request = await tx.withdrawalRequest.create({
+      data: {
+        amount,
+        status: "processing",
+        bankAccountNumber: target.bankAccountNumber!,
+        bankCode: target.bankCode!,
+        bankName: target.bankName ?? null,
+        memberId: target.id,
+        cooperativeId: coop.id,
+        finalizedById: admin.id,
+      },
+    });
+    return { ok: true as const, request, wallet };
+  });
+
+  if (!claimed.ok) {
+    await sendText({ to: admin.phone, text: claimed.message });
     return;
   }
 
-  await audit({
-    cooperativeId: coop.id,
-    actorPhone: admin.phone,
-    actorId: admin.id,
-    actorRole: "superadmin",
-    action: "payout.send",
-    targetType: "member",
-    targetId: target.id,
-    detail: `${formatBalance(amount)} to ${target.name} — ${narration}`,
-  });
+  try {
+    // STEP 2 — send to bank (outside the transaction so the provider call
+    // doesn't hold a DB lock).
+    const result = await sendToBank({
+      memberId: target.id,
+      amount,
+      bankAccountNumber: target.bankAccountNumber,
+      bankCode: target.bankCode,
+      bankName: target.bankName ?? undefined,
+      note: `Super admin payout to ${target.name} — ${narration}`,
+      idempotencyKey: `TFR-PO-${claimed.request.id}`,
+      successMessage: `✅ ${formatBalance(amount)} sent to your bank account. Narration: "${narration}".`,
+    });
 
-  if (limit.warning) {
-    await sendText({ to: admin.phone, text: limit.warning });
+    if (!result.ok) {
+      // STEP 3b — refund on failure and hand back for retry.
+      await prisma.$transaction([
+        prisma.wallet.update({ where: { id: claimed.wallet.id }, data: { balance: { increment: amount } } }),
+        prisma.withdrawalRequest.updateMany({
+          where: { id: claimed.request.id, status: "processing" },
+          data: { status: "admin_approved" },
+        }),
+      ]);
+      console.error(`[payout] sendToBank failed, refunded: ${claimed.request.id} — ${result.message}`);
+      await sendText({ to: admin.phone, text: `Payout failed: ${result.message}. Wallet refunded.` });
+      return;
+    }
+
+    // STEP 3a — success: mark paid.
+    await prisma.withdrawalRequest.updateMany({
+      where: { id: claimed.request.id, status: "processing" },
+      data: { status: "paid", finalizedAt: new Date() },
+    });
+
+    await audit({
+      cooperativeId: coop.id,
+      actorPhone: admin.phone,
+      actorId: admin.id,
+      actorRole: "superadmin",
+      action: "payout.send",
+      targetType: "member",
+      targetId: target.id,
+      detail: `${formatBalance(amount)} to ${target.name} — ${narration}`,
+    });
+
+    if (limit.warning) {
+      await sendText({ to: admin.phone, text: limit.warning });
+    }
+
+    await sendText({
+      to: admin.phone,
+      text: `Payout of ${formatBalance(amount)} to *${target.name}* was sent ✅ and their wallet debited.`,
+    });
+  } catch (err: any) {
+    // Crash safety — anything thrown after the debit must restore funds.
+    await prisma.$transaction([
+      prisma.wallet.update({ where: { id: claimed.wallet.id }, data: { balance: { increment: amount } } }),
+      prisma.withdrawalRequest.updateMany({
+        where: { id: claimed.request.id, status: "processing" },
+        data: { status: "admin_approved" },
+      }),
+    ]).catch(() => {});
+    console.error(`[payout] threw, refunded: ${claimed.request.id}`, err);
+    await sendText({ to: admin.phone, text: `Payout failed and the wallet was refunded (${String(err?.message ?? err).slice(0, 120)}).` });
   }
-
-  await sendText({
-    to: admin.phone,
-    text: `Payout of ${formatBalance(amount)} to *${target.name}* was sent ✅ and their wallet debited.`,
-  });
 }

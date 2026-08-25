@@ -14,8 +14,7 @@
 import { prisma } from "./prisma.js";
 import { formatBalance } from "../services/cooperative.js";
 import { getCoopSnapshot, getSavingsTrend, getLoanPerformance } from "./ai-data.js";
-
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+import { groqFetch, groqAvailable, groqModel, GROQ_TIMEOUT_MS } from "./groq.js";
 
 /**
  * Generate AI-powered financial insights.
@@ -23,7 +22,7 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 export async function generateFinancialInsights(
   cooperativeId: string,
 ): Promise<string> {
-  if (!process.env.GROQ_API_KEY) {
+  if (!groqAvailable()) {
     return generateFallbackInsights(cooperativeId);
   }
 
@@ -36,20 +35,14 @@ export async function generateFinancialInsights(
   const data = { snapshot, trends, performance };
 
   try {
-    const res = await fetch(GROQ_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
-        temperature: 0.3,
-        max_tokens: 500,
-        messages: [
-          {
-            role: "system",
-            content: `You are a financial analyst for a Nigerian cooperative.
+    const res = await groqFetch({
+      model: groqModel(),
+      temperature: 0.3,
+      max_tokens: 500,
+      messages: [
+        {
+          role: "system",
+          content: `You are a financial analyst for a Nigerian cooperative.
 Generate concise, actionable insights from the provided data.
 Focus on:
 1. Financial health assessment
@@ -59,15 +52,13 @@ Focus on:
 
 Use the format: ₦XX,XXX for amounts. Be specific with numbers.
 Keep it under 300 words. Be professional but warm.`,
-          },
-          {
-            role: "user",
-            content: `Generate financial insights for this cooperative:\n\n${JSON.stringify(data, null, 2)}`,
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(10000),
-    });
+        },
+        {
+          role: "user",
+          content: `Generate financial insights for this cooperative:\n\n${JSON.stringify(data, null, 2)}`,
+        },
+      ],
+    }, GROQ_TIMEOUT_MS);
 
     if (!res.ok) return generateFallbackInsights(cooperativeId);
     const body = (await res.json()) as {

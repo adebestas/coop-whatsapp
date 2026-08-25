@@ -27,6 +27,7 @@ export async function sendSavingsReminders(cooperativeId: string): Promise<numbe
     where: {
       cooperativeId,
       status: "active",
+      consentAt: { not: null },
     },
     include: {
       contributions: {
@@ -69,11 +70,12 @@ export async function sendLoanReminders(cooperativeId: string): Promise<number> 
       status: { in: ["approved", "disbursed"] },
       dueDate: { gte: now, lte: sevenDaysFromNow },
     },
-    include: { member: true },
+    include: { member: { where: { consentAt: { not: null } } } },
   });
 
   let sent = 0;
   for (const loan of loans) {
+    if (!loan.member) continue;
     const daysUntilDue = Math.ceil(
       (loan.dueDate!.getTime() - now.getTime()) / (24 * 60 * 60 * 1000),
     );
@@ -103,11 +105,12 @@ export async function sendOverdueAlerts(cooperativeId: string): Promise<number> 
       status: "disbursed",
       dueDate: { lt: now },
     },
-    include: { member: true },
+    include: { member: { where: { consentAt: { not: null } } } },
   });
 
   let sent = 0;
   for (const loan of overdueLoans) {
+    if (!loan.member) continue;
     const daysOverdue = Math.ceil(
       (now.getTime() - loan.dueDate!.getTime()) / (24 * 60 * 60 * 1000),
     );
@@ -131,7 +134,7 @@ export async function sendOverdueAlerts(cooperativeId: string): Promise<number> 
  */
 export async function sendLowBalanceWarnings(cooperativeId: string): Promise<number> {
   const members = await prisma.member.findMany({
-    where: { cooperativeId, status: "active" },
+    where: { cooperativeId, status: "active", consentAt: { not: null } },
     include: {
       wallet: true,
       loans: {
@@ -206,7 +209,7 @@ export async function sendTrendAlerts(cooperativeId: string): Promise<number> {
   if (Math.abs(changePercent) < 20) return 0;
 
   const members = await prisma.member.findMany({
-    where: { cooperativeId, status: "active" },
+    where: { cooperativeId, status: "active", consentAt: { not: null } },
   });
 
   let sent = 0;
@@ -237,7 +240,7 @@ export async function sendMonthlySummaries(cooperativeId: string): Promise<numbe
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
   const members = await prisma.member.findMany({
-    where: { cooperativeId, status: "active" },
+    where: { cooperativeId, status: "active", consentAt: { not: null } },
     include: {
       wallet: true,
       contributions: {

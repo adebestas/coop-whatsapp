@@ -49,6 +49,7 @@ model Cooperative {
   educationFunds      EducationFund[]
   developmentFunds    DevelopmentFund[]
   statusPosts         StatusPost[]
+  payeRecords          PAYERecord[]
   config             CooperativeConfig?
   branding            BrandingConfig?
   subscription       Subscription?
@@ -202,6 +203,7 @@ model Member {
   favoritePayees          FavoritePayee[]
   dataConsents            DataConsent[]
   dataConsentGiven        Boolean             @default(false)
+  payeRecords             PAYERecord[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -869,6 +871,13 @@ model CooperativeConfig {
   autoApproveLoans         Boolean  @default(false)
   requireGuarantors        Boolean  @default(true)
   minGuarantors            Int      @default(2)
+  statusEnabled            Boolean  @default(true) // per-coop toggle for auto status posts
+  nextAGMDate              DateTime?
+  lastDividendRate         Int?
+  pendingDividendRate      Int?
+  taxIdentificationNumber  String?
+  cooperativeType          String   @default("member") // member | commercial
+  commercialIncome         Int      @default(0) // kobo from non-member activities
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
@@ -917,4 +926,24 @@ model DataConsent {
   createdAt     DateTime @default(now())
 
   @@index([memberId])
+}
+
+// ---- PAYE (Pay As You Earn) records for state IRS remittance ----
+model PAYERecord {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id])
+  month         Int // 1-12
+  year          Int
+  grossAmount   Int // kobo
+  taxAmount     Int // kobo
+  netAmount     Int // kobo
+  status        String      @default("pending") // pending | remitted
+  remittedAt    DateTime?
+  createdAt     DateTime    @default(now())
+
+  @@unique([cooperativeId, memberId, month, year])
+  @@index([cooperativeId, year, month])
 }

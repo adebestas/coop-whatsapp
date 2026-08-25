@@ -155,7 +155,7 @@ Available commands:
 Answer questions concisely. Always suggest the relevant command.
 If unsure, direct them to reply *help* for the full command list.`,
         },
-        { role: "user", content: truncated },
+        { role: "user", content: `<user_message>${truncated}</user_message>` },
       ],
     }, GROQ_TIMEOUT_MS);
 

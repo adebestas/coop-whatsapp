@@ -283,6 +283,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
   });
 }
 
+// NOTE: Dead code — requireAdminCoop is not called anywhere in the codebase.
+// Auth is now handled via the preHandler hook (JWT token verification).
 async function requireAdminCoop(phone: string): Promise<string> {
   const member = await prisma.member.findFirst({ where: { phone, role: "admin" } });
   if (!member) throw new Error("not an admin");

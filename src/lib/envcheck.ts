@@ -12,17 +12,21 @@ interface EnvSpec {
 
 const REQUIRED_FATAL: EnvSpec[] = [
   { key: "WHATSAPP_TOKEN", fatal: true, hint: "Meta WhatsApp Cloud API access token" },
-  { key: "WHATSAPP_PHONE_ID", fatal: true, hint: "Meta WhatsApp phone number id" },
+  { key: "WHATSAPP_PHONE_NUMBER_ID", fatal: true, hint: "Meta WhatsApp phone number id" },
   { key: "ADMIN_JWT_SECRET", fatal: true, hint: "Random 32+ char string for admin dashboard auth (generate: openssl rand -hex 32)" },
+  { key: "DATABASE_URL", fatal: true, hint: "PostgreSQL connection string" },
 ];
 
 const RECOMMENDED: EnvSpec[] = [
+  { key: "REDIS_URL", fatal: false, hint: "Redis connection string for caching and rate limiting" },
+  { key: "GROQ_API_KEY", fatal: false, hint: "Groq API key for AI features (optional — fallback responses used if missing)" },
   { key: "MONNIFY_API_KEY", fatal: false, hint: "Monnify payouts/virtual accounts (primary provider)" },
   { key: "MONNIFY_SECRET_KEY", fatal: false },
   { key: "MONNIFY_CONTRACT_CODE", fatal: false },
   { key: "PAYSTACK_SECRET_KEY", fatal: false, hint: "Paystack fallback provider" },
   { key: "FLUTTERWAVE_WEBHOOK_HASH", fatal: false, hint: "Flutterwave webhook signature secret" },
   { key: "SESSION_SECRET", fatal: false, hint: "random 32+ char string for signing" },
+  { key: "TELEGRAM_BOT_TOKEN", fatal: false, hint: "Telegram bot token (optional — WhatsApp-only if missing)" },
 ];
 
 export interface EnvReport {

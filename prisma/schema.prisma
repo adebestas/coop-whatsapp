@@ -52,6 +52,7 @@ model Cooperative {
   statusPosts         StatusPost[]
   byelaws              Byelaw[]
   strs                 STR[]
+  payeRecords          PAYERecord[]
   config             CooperativeConfig?
   branding            BrandingConfig?
   subscription       Subscription?
@@ -211,6 +212,7 @@ model Member {
   dataConsents            DataConsent[]
   dataConsentGiven        Boolean             @default(false)
   strs                    STR[]
+  payeRecords             PAYERecord[]
   tier                    String              @default("tier1") // tier1 (no BVN) | tier2 (with BVN)
 
   @@unique([cooperativeId, phone])
@@ -906,6 +908,9 @@ model CooperativeConfig {
   nextAGMDate              DateTime?
   lastDividendRate         Int?
   pendingDividendRate      Int?
+  taxIdentificationNumber  String?
+  cooperativeType          String   @default("member") // member | commercial
+  commercialIncome         Int      @default(0) // kobo from non-member activities
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
@@ -996,4 +1001,24 @@ model STR {
 
   @@index([cooperativeId, createdAt])
   @@index([memberId, status])
+}
+
+// ---- PAYE (Pay As You Earn) records for state IRS remittance ----
+model PAYERecord {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id])
+  month         Int // 1-12
+  year          Int
+  grossAmount   Int // kobo
+  taxAmount     Int // kobo
+  netAmount     Int // kobo
+  status        String      @default("pending") // pending | remitted
+  remittedAt    DateTime?
+  createdAt     DateTime    @default(now())
+
+  @@unique([cooperativeId, memberId, month, year])
+  @@index([cooperativeId, year, month])
 }

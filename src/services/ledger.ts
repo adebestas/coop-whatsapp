@@ -53,6 +53,12 @@ export async function recordLedger(input: {
             { account: "assets:bank", direction: "CREDIT" as const, amount },
           ]
         : [
+            // Appropriation: debits equity (retained earnings) and credits the
+            // bank account, representing a distribution of profits. For larger
+            // cooperatives that need to track declared-but-unpaid dividends,
+            // consider introducing an intermediate "liabilities:dividend_payable"
+            // account — debit equity into payable, then debit payable when
+            // wallets are actually credited.
             { account: "equity:retained_earnings", direction: "DEBIT" as const, amount },
             { account: "assets:bank", direction: "CREDIT" as const, amount },
           ];

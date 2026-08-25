@@ -326,20 +326,22 @@ export async function resumeDividendDistribution(
     if (!wallet) continue;
     const share = entry.amount;
 
-    // DEDUP: Verify no existing DividendEntry with status "paid" for this member+dividend.
-    // Prevents double-credit if resumeDividendDistribution is called concurrently.
-    const alreadyPaid = await prisma.dividendEntry.findFirst({
-      where: {
-        dividendId: entry.dividendId,
-        memberId: entry.memberId,
-        status: "paid",
-      },
-    });
-    if (alreadyPaid) continue;
+    // DEDUP inside the transaction: prevents double-credit if
+    // resumeDividendDistribution is called concurrently (TOCTOU guard).
+    // The @@unique([dividendId, memberId]) constraint is the ultimate backstop.
+    let paid = false;
+    await prisma.$transaction(async (tx) => {
+      const alreadyPaid = await tx.dividendEntry.findFirst({
+        where: {
+          dividendId: entry.dividendId,
+          memberId: entry.memberId,
+          status: "paid",
+        },
+      });
+      if (alreadyPaid) return;
 
-    await prisma.$transaction([
-      prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: share } } }),
-      prisma.contribution.create({
+      await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: share } } });
+      await tx.contribution.create({
         data: {
           amount: share,
           type: "dividend",
@@ -350,10 +352,11 @@ export async function resumeDividendDistribution(
           memberId: entry.memberId,
           cooperativeId: dividend.cooperativeId,
         },
-      }),
-      prisma.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } }),
-    ]);
-    paidCount += 1;
+      });
+      await tx.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } });
+      paid = true;
+    });
+    if (paid) paidCount += 1;
   }
 
   return {
@@ -364,7 +367,16 @@ export async function resumeDividendDistribution(
   };
 }
 
-/** Get fund balances for a cooperative */
+/**
+ * Get fund balances for a cooperative.
+ *
+ * NOTE: Reserve fund uses the denormalized `coop.reserveFundBalance` column
+ * (incremented atomically during dividend distribution), while education and
+ * development funds are aggregated from their respective transaction tables.
+ * This hybrid approach can diverge if records are edited outside the normal
+ * flow. A periodic reconciliation job should verify that the denormalized
+ * balance matches the sum of allocation records.
+ */
 export async function getFundBalances(cooperativeId: string): Promise<{
   reserve: number;
   education: number;

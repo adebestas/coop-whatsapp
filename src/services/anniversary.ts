@@ -13,6 +13,7 @@ export async function getAnniversaryMessage(
     name: string;
     createdAt: Date;
     wallet?: { totalSaved: number } | null;
+    cooperative: { name: string };
   },
   now = new Date(),
 ): Promise<string> {
@@ -31,7 +32,7 @@ export async function getAnniversaryMessage(
   const lines = [
     `🎉 *Happy Anniversary, ${member.name}!*`,
     ``,
-    `Today marks ${years} year${years > 1 ? "s" : ""} since you joined Lagos Workers Cooperative.`,
+    `Today marks ${years} year${years > 1 ? "s" : ""} since you joined ${member.cooperative.name}.`,
     ``,
     `In that time, you've:`,
     `• Saved ${formatBalance(totalSaved)}`,
@@ -53,7 +54,7 @@ export async function checkAnniversaries(now = new Date()): Promise<number> {
         not: now.getFullYear(),
       },
     },
-    include: { wallet: true },
+    include: { wallet: true, cooperative: true },
   });
 
   let sent = 0;

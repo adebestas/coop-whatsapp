@@ -1,6 +1,10 @@
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 
+// NOTE: Rate limits in this file use in-memory Maps which reset on process
+// restart and are per-instance. Migrate to Redis-backed rate limiting
+// (e.g. via cache.ts) before deploying to multi-instance environments.
+
 /** Minimum gap between consecutive approvals of the same money-out request. */
 export function approvalCooldownMs(): number {
   const raw = process.env.PAYMENT_COOLDOWN_MINUTES;
@@ -100,6 +104,9 @@ export function resetMoneyRateLimit(): void {
 }
 
 // ---- Transaction velocity (per member, money-out) ----
+// NOTE: In-memory Map — resets on process restart and is per-instance.
+// For production multi-instance deployments, use Redis-backed tracking
+// (e.g. via cache.ts) to share velocity state across instances.
 const velocityLog = new Map<string, number[]>();
 const VELOCITY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 const VELOCITY_MAX = 5; // max 5 money-out per window
@@ -123,6 +130,9 @@ export function resetVelocity(): void {
 }
 
 // ---- AI query rate limiting (per member, per hour) ----
+// NOTE: In-memory Map — resets on process restart and is per-instance.
+// For production multi-instance deployments, use Redis-backed rate limiting
+// (e.g. via cache.ts) to share state across instances.
 const aiQueryLog = new Map<string, number[]>();
 const AI_QUERY_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 const AI_QUERY_MAX_PER_HOUR = 10;

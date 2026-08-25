@@ -487,7 +487,7 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
     amount: interestPortion,
     note: `Installment interest on loan ${loan.id.slice(-6)}`,
     reference: loan.id,
-    fundType: "member",
+    fundType: "operational",
   });
   if (fine > 0) {
     await recordLedger({
@@ -497,7 +497,7 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
       amount: fine,
       note: `Late fine on loan ${loan.id.slice(-6)}`,
       reference: loan.id,
-      fundType: "member",
+      fundType: "operational",
     });
   }
 

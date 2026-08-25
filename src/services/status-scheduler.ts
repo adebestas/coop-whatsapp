@@ -49,6 +49,9 @@ function getStatusForHour(hour: number): string {
 
 export async function postAutoStatus(): Promise<void> {
   const now = new Date();
+  // NOTE: getHours() returns server timezone (CET on Render). For Nigerian
+  // cooperatives (WAT, UTC+1), posts may fire 1 hour early. Apply a +1h
+  // offset if scheduling accuracy matters: `const hour = (now.getUTCHours() + 1) % 24;`
   const hour = now.getHours();
 
   if (hour !== 8 && hour !== 12 && hour !== 18) {

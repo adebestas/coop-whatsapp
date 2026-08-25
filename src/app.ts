@@ -95,8 +95,8 @@ export function buildApp() {
       const redis = getRedis();
       if (redis) await redis.ping();
       return { status: "ok", db: "connected", redis: redis ? "connected" : "unavailable" };
-    } catch (e: any) {
-      return reply.status(503).send({ status: "error", error: e.message });
+    } catch {
+      return reply.status(503).send({ status: "error", message: "Service unavailable" });
     }
   });
 

@@ -49,7 +49,7 @@ export async function setAutoSave(
 /** Send reminders to members whose recurring contribution is due now. */
 export async function runAutoSaveReminders(now = new Date()): Promise<number> {
   const due = await prisma.member.findMany({
-    where: { autoSaveEnabled: true, autoSaveNextDue: { lte: now } },
+    where: { autoSaveEnabled: true, autoSaveNextDue: { lte: now }, consentAt: { not: null } },
   });
   let sent = 0;
   for (const m of due) {
@@ -101,6 +101,7 @@ export async function runMonthlyStatements(now = new Date()): Promise<number> {
   const members = await prisma.member.findMany({
     where: {
       status: "active",
+      consentAt: { not: null },
       OR: [{ lastStatementSentAt: null }, { lastStatementSentAt: { lt: monthStart } }],
     },
     include: { cooperative: true },
@@ -127,6 +128,7 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
   const members = await prisma.member.findMany({
     where: {
       status: "active",
+      consentAt: { not: null },
       dateOfBirth: { not: null },
       OR: [{ lastBirthdayGreetedYear: null }, { lastBirthdayGreetedYear: { not: now.getFullYear() } }],
     },

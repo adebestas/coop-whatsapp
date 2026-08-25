@@ -115,7 +115,7 @@ Args can include:
 
 If unsure, return {"type":"help","args":{}}`,
         },
-        { role: "user", content: text },
+        { role: "user", content: `<user_message>${text}</user_message>` },
       ],
     }, GROQ_TIMEOUT_MS);
     if (!res.ok) return null;
@@ -169,7 +169,7 @@ Never make up data. Only use what's provided.`;
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: `Question: ${question}\n\nData (JSON):\n${JSON.stringify(data, null, 2)}`,
+          content: `Question: <user_message>${question}</user_message>\n\nData (JSON):\n${JSON.stringify(data, null, 2)}`,
         },
       ],
     }, GROQ_TIMEOUT_MS);
