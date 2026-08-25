@@ -8,6 +8,9 @@ export interface SendTextParams {
 }
 
 export async function sendText({ to, text }: SendTextParams): Promise<boolean> {
+  if (text.length > 4096) {
+    text = text.substring(0, 4093) + "...";
+  }
   const url = `${API_BASE}/${config.whatsapp.phoneNumberId}/messages`;
   const res = await fetch(url, {
     method: "POST",

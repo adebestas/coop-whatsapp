@@ -1322,12 +1322,11 @@ export async function handleAdminCommand(
         return true;
       }
       const oldPhone = target.phone;
-      await prisma.member.update({
-        where: { id: target.id },
-        data: { phone: newChannel, preferredChannel: null },
-      });
-      await prisma.session.deleteMany({ where: { phone: oldPhone } });
-      await prisma.session.deleteMany({ where: { phone: newChannel } });
+      await prisma.$transaction([
+        prisma.member.update({ where: { id: target.id }, data: { phone: newChannel, preferredChannel: null } }),
+        prisma.session.deleteMany({ where: { phone: oldPhone } }),
+        prisma.session.deleteMany({ where: { phone: newChannel } }),
+      ]);
       // Best-effort heads-up to the old channel in case it is still alive.
       await sendText({ to: oldPhone, text: "🔐 This account has been moved to a new number by your co-op admin. If this was not you, contact them immediately." }).catch(() => {});
       await audit({

@@ -834,6 +834,9 @@ export async function handleAwaitingInput(
         memberCode = generateMemberCode();
       }
 
+      // NOTE: Admin PIN is sent in plaintext over WhatsApp.
+      // This is acceptable due to WhatsApp's end-to-end encryption, but the admin
+      // should change their PIN immediately after onboarding (setpin command).
       const adminPin = String(randomInt(1000, 9000));
       const member = await prisma.member.create({
         data: {

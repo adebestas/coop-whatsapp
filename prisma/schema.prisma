@@ -570,6 +570,7 @@ model LedgerEntry {
   note          String?
   reference     String? // link to the source record (loan id, payout ref, ...)
   fundType      String      @default("operational") // member | operational | reserve
+  status        String      @default("posted") // posted | failed
   createdAt     DateTime    @default(now())
 
   @@index([cooperativeId, createdAt])

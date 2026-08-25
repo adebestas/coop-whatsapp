@@ -527,11 +527,18 @@ export async function handleMessage(
         }
       }
       if (aiEnabled() && text.trim().length >= 4 && isNaturalLanguageQuery(text)) {
-        const member = await getMemberByPhone(phone);
+        const supportMember = await getMemberByPhone(phone);
+        if (!supportMember) {
+          await sendText({
+            to: phone,
+            text: "You need to be a registered member to use AI support. Reply *join* to get started.",
+          });
+          return;
+        }
         const supportResponse = await generateSupportResponse(
           text,
-          member?.name ?? "there",
-          member?.role ?? "member",
+          supportMember.name,
+          supportMember.role,
         );
         await sendText({ to: phone, text: supportResponse });
         return;

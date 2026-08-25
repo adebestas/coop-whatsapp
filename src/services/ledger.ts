@@ -53,8 +53,8 @@ export async function recordLedger(input: {
             { account: "assets:bank", direction: "CREDIT" as const, amount },
           ]
         : [
-            { account: `appropriation:${input.category}`, direction: "DEBIT" as const, amount },
-            { account: "equity:appropriations", direction: "CREDIT" as const, amount },
+            { account: "equity:retained_earnings", direction: "DEBIT" as const, amount },
+            { account: "assets:bank", direction: "CREDIT" as const, amount },
           ];
 
   if (input.tx) {
@@ -102,11 +102,33 @@ async function postJournalSafe(opts: {
   txRef?: string;
   description: string;
   postings: Parameters<typeof postJournal>[0]["postings"];
-}, client: Pick<typeof prisma, "journalEntry"> = prisma) {
+}, client: Pick<typeof prisma, "journalEntry" | "ledgerEntry"> = prisma) {
   try {
     await postJournal({ ...opts, txRef: opts.txRef ?? `jr_${crypto.randomUUID()}`, description: opts.description }, client);
   } catch (err) {
-    console.error("[ledger] journal posting failed", err);
+    console.error("[ledger] journal posting failed", {
+      cooperativeId: opts.cooperativeId,
+      txRef: opts.txRef,
+      description: opts.description,
+      postings: opts.postings,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
+    try {
+      await client.ledgerEntry.create({
+        data: {
+          cooperativeId: opts.cooperativeId,
+          type: "expense",
+          category: "other",
+          amount: 0,
+          note: `[JOURNAL_RECONCILIATION] ${opts.description} — txRef: ${opts.txRef ?? "none"} — error: ${err instanceof Error ? err.message : String(err)}`,
+          fundType: "operational",
+          status: "failed",
+        },
+      });
+    } catch (reconErr) {
+      console.error("[ledger] journal reconciliation record also failed", reconErr);
+    }
   }
 }
 

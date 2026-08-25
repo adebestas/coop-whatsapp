@@ -53,19 +53,18 @@ export async function revokeToken(token: string): Promise<void> {
 
 /**
  * Check whether a token has been revoked (exists in the Redis blacklist).
- * Returns false (not revoked) when Redis is unavailable so that tokens
- * continue to work during a Redis outage — the HMAC + TTL check still
- * protects against forgery and expired tokens.
+ * Returns true (revoked) when Redis is unavailable so that revoked tokens
+ * cannot be used during a Redis outage (fail closed).
  */
 async function isTokenRevoked(token: string): Promise<boolean> {
   const client = getRedis();
-  if (!client) return false;
+  if (!client) return true;
   const hash = crypto.createHash("sha256").update(token).digest("hex");
   try {
     const exists = await client.exists(`${TOKEN_BLACKLIST_PREFIX}${hash}`);
     return exists === 1;
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -187,7 +186,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
           _sum: { amount: true },
         }),
         prisma.loan.count({ where: { cooperativeId: coopId, status: { in: ["approved", "disbursed"] } } }),
-        prisma.wallet.aggregate({ _sum: { balance: true, totalSaved: true } }),
+        prisma.wallet.aggregate({ where: { member: { cooperativeId: coopId } }, _sum: { balance: true, totalSaved: true } }),
         prisma.payout.count({ where: { cooperativeId: coopId } }),
       ]);
 

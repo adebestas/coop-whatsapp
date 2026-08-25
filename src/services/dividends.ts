@@ -196,7 +196,7 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
       amount: educationAmount,
       note: `2% education fund from dividend at ${rate}% of net profit`,
       reference,
-      fundType: "reserve",
+      fundType: "education",
       tx,
     });
 
@@ -207,7 +207,7 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
       amount: developmentAmount,
       note: `5% development fund from dividend at ${rate}% of net profit`,
       reference,
-      fundType: "reserve",
+      fundType: "development",
       tx,
     });
 

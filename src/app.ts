@@ -9,6 +9,8 @@ import { webhookRoutes } from "./routes/webhook.js";
 import { paymentWebhookRoutes } from "./routes/payments.js";
 import { adminApiRoutes } from "./routes/admin.js";
 import { serveExportFile } from "./routes/exports.js";
+import { prisma } from "./lib/prisma.js";
+import { getRedis } from "./lib/cache.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -87,7 +89,16 @@ export function buildApp() {
     timeWindow: "1 minute",
   });
 
-  app.get("/health", async () => ({ status: "ok", ts: new Date().toISOString() }));
+  app.get("/health", async (req, reply) => {
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      const redis = getRedis();
+      if (redis) await redis.ping();
+      return { status: "ok", db: "connected", redis: redis ? "connected" : "unavailable" };
+    } catch (e: any) {
+      return reply.status(503).send({ status: "error", error: e.message });
+    }
+  });
 
   void app.register(webhookRoutes);
   void app.register(paymentWebhookRoutes);

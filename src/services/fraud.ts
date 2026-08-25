@@ -79,6 +79,8 @@ export async function checkDailyPayoutLimit(
 }
 
 // ---- Chat command rate limiting (per phone, money commands) ----
+// NOTE: These in-memory rate limits reset on process restart.
+// For production, use Redis-backed rate limiting (e.g. via cache.ts) to persist across restarts.
 const moneyCommandLog = new Map<string, number[]>();
 const MONEY_WINDOW_MS = 60 * 60 * 1000;
 const MONEY_MAX_PER_HOUR = 6;
