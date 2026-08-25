@@ -782,11 +782,12 @@ model Broadcast {
 
 // ---- Chat state machine (multi-turn onboarding / flows) ----
 model Session {
-  id        String   @id @default(cuid())
-  phone     String   @unique
-  state     String   @default("idle") // idle | awaiting_name | awaiting_coop | awaiting_pin | ...
-  data      String   @default("{}") // JSON payload for the current flow
-  updatedAt DateTime @updatedAt
+  id             String    @id @default(cuid())
+  phone          String    @unique
+  state          String    @default("idle") // idle | awaiting_name | awaiting_coop | awaiting_pin | ...
+  data           String    @default("{}") // JSON payload for the current flow
+  lastInboundAt  DateTime? // tracks WhatsApp 24-hour customer service window
+  updatedAt      DateTime  @updatedAt
 
   @@index([updatedAt])
 }
