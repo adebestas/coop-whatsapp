@@ -70,12 +70,12 @@ export async function sendLoanReminders(cooperativeId: string): Promise<number> 
       status: { in: ["approved", "disbursed"] },
       dueDate: { gte: now, lte: sevenDaysFromNow },
     },
-    include: { member: { where: { consentAt: { not: null } } } },
+    include: { member: true },
   });
 
   let sent = 0;
   for (const loan of loans) {
-    if (!loan.member) continue;
+    if (!loan.member || loan.member.consentAt === null) continue;
     const daysUntilDue = Math.ceil(
       (loan.dueDate!.getTime() - now.getTime()) / (24 * 60 * 60 * 1000),
     );
@@ -105,12 +105,12 @@ export async function sendOverdueAlerts(cooperativeId: string): Promise<number> 
       status: "disbursed",
       dueDate: { lt: now },
     },
-    include: { member: { where: { consentAt: { not: null } } } },
+    include: { member: true },
   });
 
   let sent = 0;
   for (const loan of overdueLoans) {
-    if (!loan.member) continue;
+    if (!loan.member || loan.member.consentAt === null) continue;
     const daysOverdue = Math.ceil(
       (now.getTime() - loan.dueDate!.getTime()) / (24 * 60 * 60 * 1000),
     );

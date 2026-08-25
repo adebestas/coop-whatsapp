@@ -115,7 +115,7 @@ async function getGuaranteedLoan(borrowerName?: string) {
 
 beforeEach(async () => {
   vi.clearAllMocks();
-  resetMoneyRateLimit();
+  await resetMoneyRateLimit();
   state.resolveName = "ADA OBI";
   state.resolveFails = false;
   state.payoutFails = false;

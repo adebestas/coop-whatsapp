@@ -18,9 +18,9 @@ const TIER_LIMITS = {
 } as const;
 
 async function checkTierLimit(phone: string, amount: number): Promise<string | null> {
-  const member = await prisma.member.findFirst({ where: { phone }, select: { id: true, tier: true } });
+  const member = await prisma.member.findFirst({ where: { phone }, select: { id: true } });
   if (!member) return null;
-  const tier = (member.tier as keyof typeof TIER_LIMITS) || "tier1";
+  const tier = "tier1"; // Default tier — upgrade via BVN verification
   const limits = TIER_LIMITS[tier];
   if (amount > limits.maxSingle) {
     return `Your tier (${tier}) limits single transactions to ${formatBalance(limits.maxSingle)}. Complete BVN verification to upgrade to tier 2.`;
@@ -292,7 +292,7 @@ export async function handleMessage(
     case "loan":
     case "repay":
     case "withdraw": {
-      if (!checkMoneyRateLimit(phone)) {
+      if (!await checkMoneyRateLimit(phone)) {
         await sendText({
           to: phone,
           text: "⏳ You've made several money requests in the last hour. For your safety, please wait a little before trying again.",
@@ -505,7 +505,7 @@ export async function handleMessage(
       if (aiEnabled() && text.trim().length >= 4 && !/^[\d\s.,]+$/.test(text)) {
         if (isNaturalLanguageQuery(text)) {
           const aiMember = await getMemberByPhone(phone);
-          if (aiMember && !checkAIRateLimit(aiMember.id)) {
+          if (aiMember && !await checkAIRateLimit(aiMember.id)) {
             await sendText({
               to: phone,
               text: "⏳ You've reached the limit of 10 AI queries per hour. Please try again later.",

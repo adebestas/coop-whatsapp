@@ -823,6 +823,7 @@ export async function handleAdminCommand(
         devFund,
         coopConfig,
         officers,
+        pnl,
       ] = await Promise.all([
         prisma.contribution.aggregate({
           where: { cooperativeId: coopId, status: "confirmed", createdAt: { gte: startOfYear, lt: endOfYear } },
@@ -857,6 +858,7 @@ export async function handleAdminCommand(
         prisma.developmentFund.aggregate({ where: { cooperativeId: coopId }, _sum: { amount: true } }),
         prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } }),
         prisma.coopPost.findMany({ where: { cooperativeId: coopId }, include: { incumbent: true } }),
+        computePnl(coopId, startOfYear, endOfYear),
       ]);
 
       const totalSavings = walletAgg._sum.totalSaved ?? 0;
@@ -908,10 +910,10 @@ export async function handleAdminCommand(
         `• Number of active loans: *${activeLoans._count}*`,
         "",
         `*PART F: INCOME & EXPENDITURE*`,
-        `• Total income (contributions): *${formatBalance(totalContributions._sum.amount ?? 0)}*`,
-        `• Total expenditure (loans disbursed): *${formatBalance(outstandingLoans)}*`,
+        `• Total income: *${formatBalance(pnl.totalIncome)}*`,
+        `• Total expenditure: *${formatBalance(pnl.totalExpense)}*`,
         `• Total withdrawals by members: *${formatBalance(totalWithdrawals._sum.amount ?? 0)}*`,
-        `• Net surplus: *${formatBalance((totalContributions._sum.amount ?? 0) - (totalWithdrawals._sum.amount ?? 0))}*`,
+        `• Net surplus: *${formatBalance(pnl.netProfit)}*`,
         "",
         `*PART G: DIVIDENDS*`,
         `• Total dividends declared: *${formatBalance(totalDividends._sum.totalPool ?? 0)}*`,
@@ -2094,7 +2096,7 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
   }
 
   // Fraud guard: velocity check — max 5 money-out per 10 minutes per member.
-  if (!checkVelocity(target.id)) {
+  if (!await checkVelocity(target.id)) {
     await sendText({ to: admin.phone, text: `🛑 Too many transactions for ${target.name} in a short period. Please wait a few minutes and try again.` });
     return;
   }

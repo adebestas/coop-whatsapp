@@ -382,16 +382,16 @@ describe("pilot float cap", () => {
 });
 
 describe("money command rate limit", () => {
-  it("caps rapid-fire money commands per phone (6/hour), per phone independently", () => {
-    resetMoneyRateLimit();
+  it("caps rapid-fire money commands per phone (6/hour), per phone independently", async () => {
+    await resetMoneyRateLimit();
     for (let i = 0; i < 6; i++) {
-      expect(checkMoneyRateLimit("2348010000401")).toBe(true);
+      expect(await checkMoneyRateLimit("2348010000401")).toBe(true);
     }
-    expect(checkMoneyRateLimit("2348010000401")).toBe(false);
+    expect(await checkMoneyRateLimit("2348010000401")).toBe(false);
     // A different phone is unaffected.
-    expect(checkMoneyRateLimit("2348010000402")).toBe(true);
-    resetMoneyRateLimit();
-    expect(checkMoneyRateLimit("2348010000401")).toBe(true);
+    expect(await checkMoneyRateLimit("2348010000402")).toBe(true);
+    await resetMoneyRateLimit();
+    expect(await checkMoneyRateLimit("2348010000401")).toBe(true);
   });
 });
 

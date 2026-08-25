@@ -1,9 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
-
-// NOTE: Rate limits in this file use in-memory Maps which reset on process
-// restart and are per-instance. Migrate to Redis-backed rate limiting
-// (e.g. via cache.ts) before deploying to multi-instance environments.
+import { getRedis } from "../lib/cache.js";
 
 /** Minimum gap between consecutive approvals of the same money-out request. */
 export function approvalCooldownMs(): number {
@@ -83,74 +80,101 @@ export async function checkDailyPayoutLimit(
 }
 
 // ---- Chat command rate limiting (per phone, money commands) ----
-// NOTE: These in-memory rate limits reset on process restart.
-// For production, use Redis-backed rate limiting (e.g. via cache.ts) to persist across restarts.
-const moneyCommandLog = new Map<string, number[]>();
-const MONEY_WINDOW_MS = 60 * 60 * 1000;
+// Uses Redis when available; falls back to per-key in-memory tracking.
+const MONEY_WINDOW_SECONDS = 60 * 60; // 1 hour
 const MONEY_MAX_PER_HOUR = 6;
+const moneyInMemory = new Map<string, { count: number; resetAt: number }>();
 
-export function checkMoneyRateLimit(phone: string): boolean {
+export async function checkMoneyRateLimit(phone: string): Promise<boolean> {
+  const key = `money:${phone}`;
+  const client = getRedis();
+  if (client) {
+    try {
+      const redisKey = `rl:${key}`;
+      const current = await client.incr(redisKey);
+      if (current === 1) await client.expire(redisKey, MONEY_WINDOW_SECONDS);
+      return current <= MONEY_MAX_PER_HOUR;
+    } catch { /* fall through */ }
+  }
+  // In-memory fallback
   const now = Date.now();
-  const stamps = (moneyCommandLog.get(phone) ?? []).filter((t) => now - t < MONEY_WINDOW_MS);
-  if (stamps.length >= MONEY_MAX_PER_HOUR) return false;
-  stamps.push(now);
-  moneyCommandLog.set(phone, stamps);
+  const entry = moneyInMemory.get(key);
+  if (!entry || now > entry.resetAt) {
+    moneyInMemory.set(key, { count: 1, resetAt: now + MONEY_WINDOW_SECONDS * 1000 });
+    return true;
+  }
+  if (entry.count >= MONEY_MAX_PER_HOUR) return false;
+  entry.count++;
   return true;
 }
 
-/** Test hook: clear the in-memory money-command log. */
-export function resetMoneyRateLimit(): void {
-  moneyCommandLog.clear();
+/** Test hook: clear all money rate limit state. */
+export async function resetMoneyRateLimit(): Promise<void> {
+  moneyInMemory.clear();
 }
 
 // ---- Transaction velocity (per member, money-out) ----
-// NOTE: In-memory Map — resets on process restart and is per-instance.
-// For production multi-instance deployments, use Redis-backed tracking
-// (e.g. via cache.ts) to share velocity state across instances.
-const velocityLog = new Map<string, number[]>();
-const VELOCITY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
-const VELOCITY_MAX = 5; // max 5 money-out per window
+// Uses Redis when available; falls back to per-key in-memory tracking.
+const VELOCITY_WINDOW_SECONDS = 10 * 60; // 10 minutes
+const VELOCITY_MAX = 5;
+const velocityInMemory = new Map<string, { count: number; resetAt: number }>();
 
-/**
- * Check if a member has exceeded the velocity limit for money-out transactions.
- * Returns true if the transaction is allowed, false if blocked.
- */
-export function checkVelocity(memberId: string): boolean {
+export async function checkVelocity(memberId: string): Promise<boolean> {
+  const key = `velocity:${memberId}`;
+  const client = getRedis();
+  if (client) {
+    try {
+      const redisKey = `rl:${key}`;
+      const current = await client.incr(redisKey);
+      if (current === 1) await client.expire(redisKey, VELOCITY_WINDOW_SECONDS);
+      return current <= VELOCITY_MAX;
+    } catch { /* fall through */ }
+  }
   const now = Date.now();
-  const timestamps = (velocityLog.get(memberId) ?? []).filter((t) => now - t < VELOCITY_WINDOW_MS);
-  if (timestamps.length >= VELOCITY_MAX) return false;
-  timestamps.push(now);
-  velocityLog.set(memberId, timestamps);
+  const entry = velocityInMemory.get(key);
+  if (!entry || now > entry.resetAt) {
+    velocityInMemory.set(key, { count: 1, resetAt: now + VELOCITY_WINDOW_SECONDS * 1000 });
+    return true;
+  }
+  if (entry.count >= VELOCITY_MAX) return false;
+  entry.count++;
   return true;
 }
 
-/** Test hook: clear the in-memory velocity log. */
-export function resetVelocity(): void {
-  velocityLog.clear();
+/** Test hook: clear velocity state. */
+export async function resetVelocity(): Promise<void> {
+  velocityInMemory.clear();
 }
 
 // ---- AI query rate limiting (per member, per hour) ----
-// NOTE: In-memory Map — resets on process restart and is per-instance.
-// For production multi-instance deployments, use Redis-backed rate limiting
-// (e.g. via cache.ts) to share state across instances.
-const aiQueryLog = new Map<string, number[]>();
-const AI_QUERY_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+// Uses Redis when available; falls back to per-key in-memory tracking.
+const AI_QUERY_WINDOW_SECONDS = 60 * 60; // 1 hour
 const AI_QUERY_MAX_PER_HOUR = 10;
+const aiInMemory = new Map<string, { count: number; resetAt: number }>();
 
-/**
- * Check if a member has exceeded the rate limit for AI queries.
- * Returns true if the query is allowed, false if blocked.
- */
-export function checkAIRateLimit(memberId: string): boolean {
+export async function checkAIRateLimit(memberId: string): Promise<boolean> {
+  const key = `ai:${memberId}`;
+  const client = getRedis();
+  if (client) {
+    try {
+      const redisKey = `rl:${key}`;
+      const current = await client.incr(redisKey);
+      if (current === 1) await client.expire(redisKey, AI_QUERY_WINDOW_SECONDS);
+      return current <= AI_QUERY_MAX_PER_HOUR;
+    } catch { /* fall through */ }
+  }
   const now = Date.now();
-  const timestamps = (aiQueryLog.get(memberId) ?? []).filter((t) => now - t < AI_QUERY_WINDOW_MS);
-  if (timestamps.length >= AI_QUERY_MAX_PER_HOUR) return false;
-  timestamps.push(now);
-  aiQueryLog.set(memberId, timestamps);
+  const entry = aiInMemory.get(key);
+  if (!entry || now > entry.resetAt) {
+    aiInMemory.set(key, { count: 1, resetAt: now + AI_QUERY_WINDOW_SECONDS * 1000 });
+    return true;
+  }
+  if (entry.count >= AI_QUERY_MAX_PER_HOUR) return false;
+  entry.count++;
   return true;
 }
 
-/** Test hook: clear the in-memory AI query log. */
-export function resetAIRateLimit(): void {
-  aiQueryLog.clear();
+/** Test hook: clear AI query rate limit state. */
+export async function resetAIRateLimit(): Promise<void> {
+  aiInMemory.clear();
 }

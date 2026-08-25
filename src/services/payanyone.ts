@@ -229,7 +229,7 @@ async function payExternal(
   if (!payment) return { ok: false, message: "Request not found." };
 
   // Velocity check: max 5 money-out per 10 minutes.
-  if (!checkVelocity(actor.id)) {
+  if (!await checkVelocity(actor.id)) {
     await prisma.externalPayment.updateMany({
       where: { id: payment.id, status: "approved2" },
       data: { status: "pending", approved3ById: null },

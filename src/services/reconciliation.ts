@@ -48,10 +48,16 @@ export async function runWalletReconciliation(
   const bankCredits = bankPostings.find((r) => r.direction === "CREDIT")?._sum.amount ?? 0;
   const bankBalance = bankDebits - bankCredits;
 
-  // 3. Calculate expected balance: member wallets + statutory funds
+  // 3. Calculate expected balance: member wallets + statutory funds + outstanding loans
+  // Outstanding loans are assets:money lent out reduces bank but is still owed to the cooperative
   const funds = await getFundBalances(cooperativeId);
   const statutoryFunds = funds.reserve + funds.education + funds.development;
-  const expectedBalance = totalWalletBalances + statutoryFunds;
+  const activeLoanBalances = await prisma.loan.aggregate({
+    where: { cooperativeId, status: { in: ["approved", "disbursed"] }, balance: { gt: 0 } },
+    _sum: { balance: true },
+  });
+  const outstandingLoans = activeLoanBalances._sum.balance ?? 0;
+  const expectedBalance = totalWalletBalances + statutoryFunds + outstandingLoans;
 
   // 4. Calculate discrepancy
   const discrepancy = bankBalance - expectedBalance;
@@ -126,6 +132,7 @@ export async function runWalletReconciliation(
   if (discrepancy === 0) {
     lines.push(`Member wallets:      ${formatBalance(totalWalletBalances)}`);
     lines.push(`Statutory funds:     ${formatBalance(statutoryFunds)} (reserve ${formatBalance(funds.reserve)} + education ${formatBalance(funds.education)} + development ${formatBalance(funds.development)})`);
+    lines.push(`Outstanding loans:   ${formatBalance(outstandingLoans)}`);
     lines.push(`Expected (bank):     ${formatBalance(expectedBalance)}`);
     lines.push(`Actual (bank):       ${formatBalance(bankBalance)}`);
     lines.push(`Discrepancy:         ${formatBalance(0)} ✅`);
@@ -134,6 +141,7 @@ export async function runWalletReconciliation(
     lines.push("");
     lines.push(`Member wallets:      ${formatBalance(totalWalletBalances)}`);
     lines.push(`Statutory funds:     ${formatBalance(statutoryFunds)}`);
+    lines.push(`Outstanding loans:   ${formatBalance(outstandingLoans)}`);
     lines.push(`Expected total:      ${formatBalance(expectedBalance)}`);
     lines.push(`Actual (bank):       ${formatBalance(bankBalance)}`);
     lines.push(`Gap:                 ${formatBalance(Math.abs(discrepancy))}`);

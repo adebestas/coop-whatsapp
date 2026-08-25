@@ -70,7 +70,7 @@ export async function withLimits<T>(
 
   // 2. Velocity check (money-out only)
   if (ctx.direction === "out") {
-    if (!checkVelocity(ctx.memberId)) {
+    if (!await checkVelocity(ctx.memberId)) {
       return {
         ok: false,
         message: "🛑 Too many transactions in a short period. Please wait a few minutes and try again.",

@@ -53,13 +53,12 @@ export async function recordLedger(input: {
             { account: "assets:bank", direction: "CREDIT" as const, amount },
           ]
         : [
-            // Appropriation: debits equity (retained earnings) and credits the
-            // bank account, representing a distribution of profits. For larger
-            // cooperatives that need to track declared-but-unpaid dividends,
-            // consider introducing an intermediate "liabilities:dividend_payable"
-            // account — debit equity into payable, then debit payable when
-            // wallets are actually credited.
-            { account: "equity:retained_earnings", direction: "DEBIT" as const, amount },
+            // Appropriation: debits a liability account (dividend payable) and
+            // credits the bank account, representing a distribution of profits.
+            // Using liabilities:dividend_payable instead of equity:retained_earnings
+            // ensures the cooperative's obligation to pay is tracked until wallets
+            // are actually credited.
+            { account: "liabilities:dividend_payable", direction: "DEBIT" as const, amount },
             { account: "assets:bank", direction: "CREDIT" as const, amount },
           ];
 
@@ -129,7 +128,6 @@ async function postJournalSafe(opts: {
           amount: 0,
           note: `[JOURNAL_RECONCILIATION] ${opts.description} — txRef: ${opts.txRef ?? "none"} — error: ${err instanceof Error ? err.message : String(err)}`,
           fundType: "operational",
-          status: "failed",
         },
       });
     } catch (reconErr) {

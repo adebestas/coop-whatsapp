@@ -282,7 +282,7 @@ export async function finalizeWithdrawal(
   }
 
   // Velocity check: max 5 money-out per 10 minutes per member.
-  if (!checkVelocity(request.memberId)) {
+  if (!await checkVelocity(request.memberId)) {
     return {
       ok: false,
       message: `🛑 Too many transactions in a short period. Please wait a few minutes and try again.`,
