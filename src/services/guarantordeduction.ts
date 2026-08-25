@@ -134,6 +134,7 @@ export async function executeDueDeductions(): Promise<{ deducted: number; cancel
       amount: d.amount,
       note: `Guarantor recovery on loan ${d.loanId.slice(-6)} (${d.guarantor.name})`,
       reference: d.id,
+      fundType: "member",
     });
     await audit({
       cooperativeId: d.cooperativeId,

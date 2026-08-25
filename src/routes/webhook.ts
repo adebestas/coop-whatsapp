@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { config, isAllowed } from "../config.js";
 import { handleMessage } from "../services/conversation.js";
 import { extractWhatsAppMessages } from "../lib/inbound.js";
+import { sendText } from "../lib/messaging.js";
 
 /**
  * Verify WhatsApp webhook signature (X-Hub-Signature-256).
@@ -53,11 +54,16 @@ export async function webhookRoutes(app: FastifyInstance) {
           if (!isAllowed(inbound.from)) continue;
 
           // Don't await — Meta needs a quick 200 and we don't want a
-          // slow upstream to cause retries. Errors are logged inside.
+          // slow upstream to cause retries. But catch errors so the
+          // user gets a fallback message instead of silent failure.
           void handleMessage(inbound.from, inbound.text, {
             flowToken: inbound.flowToken,
           }).catch((err) => {
             app.log.error({ err, from: inbound.from }, "handleMessage failed");
+            sendText({
+              to: inbound.from,
+              text: "Sorry, something went wrong processing your message. Please try again.",
+            }).catch(() => {});
           });
         }
       }

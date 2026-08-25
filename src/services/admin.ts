@@ -1,12 +1,13 @@
 import { prisma } from "../lib/prisma.js";
 import { sendText, notifyMember } from "../lib/messaging.js";
+import { cacheDel } from "../lib/cache.js";
 import { listPosts, normalizeTitle, displayTitle } from "./posts.js";
 import { buildBatch, submitBatch, approveBatch, rejectBatch, setCommitment, waiveMonth } from "./deductions.js";
 import { approveLoan, listPendingLoans, rejectLoan } from "./loans.js";
 import { formatBalance } from "./cooperative.js";
 import { sendToBank } from "./disbursements.js";
 import { broadcastToScope, createUnit, listUnits, setUnitAdmin, unitAdminOf } from "./units.js";
-import { distributeDividend } from "./dividends.js";
+import { distributeDividend, getFundBalances } from "./dividends.js";
 import {
   approveWithdrawal,
   finalizeWithdrawal,
@@ -18,9 +19,10 @@ import {
   setClaimBank,
   approveClaim,
   rejectClaim,
+  confirmFamily,
 } from "./deathclaims.js";
 import { audit, recentAudit } from "./audit.js";
-import { computePnl } from "./ledger.js";
+import { computePnl, getMonthlySummary, recordLedger } from "./ledger.js";
 import {
   requestExternalPayment,
   approveExternalPayment,
@@ -38,8 +40,11 @@ import { runExport, type ExportKind } from "./exports.js";
 import { checkDailyPayoutLimit, checkVelocity } from "./fraud.js";
 import { runBackup } from "./backup.js";
 import { runReconciliation } from "./reconcile.js";
+import { runWalletReconciliation } from "./reconciliation.js";
+import { getSegregationReport, getReserveReport } from "./reconciliation.js";
 import { resolveProvider } from "./payments/index.js";
 import { assertMoneyAuthorized, assertFreshPin, disable2fa, enable2fa, refreshPin } from "./auth2fa.js";
+import { getCoopConfig, updateCoopConfig, getBranding, getSubscription } from "./coop-config.js";
 
 /**
  * Commands that move (or can move) money out. Each must pass the 2FA gate
@@ -366,11 +371,12 @@ export async function handleAdminCommand(
         return true;
       }
       const code = args[0];
-      if (!code) {
-        await sendText({ to: phone, text: "Usage: *deathclaim <member code>*" });
+      const familyPhone = args[1];
+      if (!code || !familyPhone) {
+        await sendText({ to: phone, text: "Usage: *deathclaim <member code> <family phone>*" });
         return true;
       }
-      const result = await startDeathClaim(phone, code);
+      const result = await startDeathClaim(phone, code, familyPhone);
       await sendText({ to: phone, text: result.message });
       if (result.ok && result.claimId) {
         // The next message from this admin is treated as the certificate upload.
@@ -607,11 +613,52 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Only the *super admin* can view profit & loss." });
         return true;
       }
-      const pnl = await computePnl(coopId);
+      
+      const arg = args.join(" ").trim().toLowerCase();
+      let pnl;
+      
+      if (!arg) {
+        // No args - show all time
+        pnl = await computePnl(coopId);
+      } else if (arg === "today") {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        pnl = await computePnl(coopId, today, new Date());
+      } else if (arg === "month" || arg === "this month") {
+        const now = new Date();
+        pnl = await getMonthlySummary(coopId, now.getFullYear(), now.getMonth());
+      } else if (arg === "last month") {
+        const now = new Date();
+        const lastMonth = now.getMonth() === 0 ? 11 : now.getMonth() - 1;
+        const year = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+        pnl = await getMonthlySummary(coopId, year, lastMonth);
+      } else if (arg.match(/^\d{4}-\d{2}$/)) {
+        // Format: 2026-08
+        const [year, month] = arg.split("-").map(Number);
+        pnl = await getMonthlySummary(coopId, year, month - 1);
+      } else if (arg.includes(" ")) {
+        // Format: 2026-08-01 2026-08-31
+        const [startStr, endStr] = arg.split(" ");
+        const start = new Date(startStr);
+        const end = new Date(endStr);
+        if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+          await sendText({ to: phone, text: "Invalid date format. Use: *pnl 2026-08-01 2026-08-31*" });
+          return true;
+        }
+        pnl = await computePnl(coopId, start, end);
+      } else {
+        await sendText({
+          to: phone,
+          text: "Usage:\n• *pnl* — all time\n• *pnl today* — today\n• *pnl month* — this month\n• *pnl last month* — last month\n• *pnl 2026-08* — specific month\n• *pnl 2026-08-01 2026-08-31* — date range",
+        });
+        return true;
+      }
+      
       const inc = Object.entries(pnl.incomeByCategory).map(([c, a]) => `• ${c}: +${formatBalance(a)}`);
       const exp = Object.entries(pnl.expenseByCategory).map(([c, a]) => `• ${c}: −${formatBalance(a)}`);
+      const periodText = pnl.period ? ` (${pnl.period.start.toLocaleDateString()} - ${pnl.period.end.toLocaleDateString()})` : " (all time)";
       const body = [
-        "*📊 Profit & Loss*",
+        `*📊 Profit & Loss${periodText}*`,
         "",
         "*Income*",
         ...(inc.length > 0 ? inc : ["• (none yet)"]),
@@ -626,6 +673,112 @@ export async function handleAdminCommand(
         "_Dividends are paid from this profit: *paydividend <rate%>*_",
       ];
       await sendText({ to: phone, text: body.join("\n") });
+      return true;
+    }
+
+    case "expense": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can record expenses." });
+        return true;
+      }
+      
+      const match = args.join(" ").trim().match(/^(\d+)\s+(\S+)\s+(.+)$/);
+      if (!match) {
+        await sendText({
+          to: phone,
+          text: "Usage: *expense <amount> <category> <description>*\n\nCategories: salary, stipend, purchase, external_payment, other\nExample: *expense 50000 salary August admin salary*",
+        });
+        return true;
+      }
+      
+      const amount = parseInt(match[1]);
+      const category = match[2];
+      const description = match[3];
+      
+      if (!Number.isFinite(amount) || amount <= 0) {
+        await sendText({ to: phone, text: "Amount must be a positive number." });
+        return true;
+      }
+      
+      const validCategories = ["salary", "stipend", "purchase", "external_payment", "other"];
+      if (!validCategories.includes(category)) {
+        await sendText({ to: phone, text: `Invalid category. Use: ${validCategories.join(", ")}` });
+        return true;
+      }
+      
+      await recordLedger({
+        cooperativeId: coopId,
+        type: "expense",
+        category: category as any,
+        amount,
+        note: description,
+        reference: `EXP-${Date.now()}`,
+      });
+      
+      await sendText({
+        to: phone,
+        text: `✅ Expense recorded!\n\nAmount: *${formatBalance(amount)}*\nCategory: *${category}*\nDescription: *${description}*`,
+      });
+      return true;
+    }
+
+    case "monthly": {
+      const arg = args.join(" ").trim().toLowerCase();
+      let year: number;
+      let month: number;
+      
+      if (!arg) {
+        const now = new Date();
+        year = now.getFullYear();
+        month = now.getMonth();
+      } else if (arg.match(/^\d{4}-\d{2}$/)) {
+        [year, month] = arg.split("-").map(Number);
+        month -= 1;
+      } else {
+        await sendText({ to: phone, text: "Usage: *monthly* or *monthly 2026-08*" });
+        return true;
+      }
+      
+      const pnl = await getMonthlySummary(coopId, year, month);
+      const monthName = new Date(year, month).toLocaleString("default", { month: "long" });
+      
+      const inc = Object.entries(pnl.incomeByCategory).map(([c, a]) => `• ${c}: +${formatBalance(a)}`);
+      const exp = Object.entries(pnl.expenseByCategory).map(([c, a]) => `• ${c}: −${formatBalance(a)}`);
+      
+      const body = [
+        `*📅 Monthly Report: ${monthName} ${year}*`,
+        "",
+        "*Income*",
+        ...(inc.length > 0 ? inc : ["• (none)"]),
+        "",
+        "*Expenses*",
+        ...(exp.length > 0 ? exp : ["• (none)"]),
+        "",
+        `Total income: *${formatBalance(pnl.totalIncome)}*`,
+        `Total expenses: *${formatBalance(pnl.totalExpense)}*`,
+        `NET ${pnl.netProfit >= 0 ? "PROFIT" : "LOSS"}: *${formatBalance(Math.abs(pnl.netProfit))}*`,
+      ];
+      await sendText({ to: phone, text: body.join("\n") });
+      return true;
+    }
+
+    case "fundstatus": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can view fund segregation." });
+        return true;
+      }
+      const report = await getSegregationReport(coopId);
+      await sendText({ to: phone, text: report });
+      return true;
+    }
+
+    case "reservefund": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can view the reserve fund." });
+        return true;
+      }
+      const report = await getReserveReport(coopId);
+      await sendText({ to: phone, text: report });
       return true;
     }
 
@@ -944,6 +1097,24 @@ export async function handleAdminCommand(
       return true;
     }
 
+    case "walletreconcile": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* runs wallet-bank reconciliation." });
+        return true;
+      }
+      const report = await runWalletReconciliation(coopId, phone);
+      await sendText({ to: phone, text: report.message });
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorId: admin.id,
+        actorRole: "superadmin",
+        action: "reconciliation.wallet_bank",
+        detail: `discrepancy: ${formatBalance(report.discrepancy)}, status: ${report.status}`,
+      });
+      return true;
+    }
+
     case "paydividend": {
       // Dividends credit wallets — money movement needs the super admin.
       if (!isSuper) {
@@ -1168,6 +1339,176 @@ export async function handleAdminCommand(
         detail: target.code,
       });
       await sendText({ to: phone, text: `✅ Second channel detached from ${target.name}. They now chat only on ${target.phone}.` });
+      return true;
+    }
+
+    case "str": {
+      const memberPhone = args[0];
+      if (!memberPhone) {
+        await sendText({ to: phone, text: "Usage: *str <member-phone>* — e.g. *str 2348012345678*" });
+        return true;
+      }
+      const { handleSTR } = await import("./aml.js");
+      const result = await handleSTR(memberPhone, coopId);
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "setconfig": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can change config." });
+        return true;
+      }
+      const [key, ...valueParts] = args;
+      const value = valueParts.join(" ");
+      if (!key || !value) {
+        await sendText({
+          to: phone,
+          text:
+            "Usage: *setconfig <key> <value>*\n\n" +
+            "Keys: loanInterestRate, serviceChargePercent, minContribution, minSavings, " +
+            "minWithdrawal, maxWithdrawal, withdrawalCooldownMonths, lateFinePercent, " +
+            "maxLoanMultiplier, autoApproveLoans, requireGuarantors, minGuarantors",
+        });
+        return true;
+      }
+      const validKeys = new Set([
+        "loanInterestRate", "serviceChargePercent", "minContribution", "minSavings",
+        "minWithdrawal", "maxWithdrawal", "withdrawalCooldownMonths", "lateFinePercent",
+        "maxLoanMultiplier", "autoApproveLoans", "requireGuarantors", "minGuarantors",
+      ]);
+      if (!validKeys.has(key)) {
+        await sendText({ to: phone, text: `Unknown config key: *${key}*.` });
+        return true;
+      }
+      const isBoolean = key === "autoApproveLoans" || key === "requireGuarantors";
+      let parsedValue: any;
+      if (isBoolean) {
+        parsedValue = value.toLowerCase() === "true" || value === "1";
+      } else {
+        parsedValue = Number(value);
+        if (!Number.isFinite(parsedValue)) {
+          await sendText({ to: phone, text: `Value must be a number for *${key}*.` });
+          return true;
+        }
+      }
+      await updateCoopConfig(coopId, { [key]: parsedValue });
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorId: admin.id,
+        actorRole: "superadmin",
+        action: "config.set",
+        detail: `${key} = ${value}`,
+      });
+      await sendText({ to: phone, text: `✅ Config updated: *${key}* = *${value}*` });
+      return true;
+    }
+
+    case "showconfig": {
+      const config = await getCoopConfig(coopId);
+      const body = [
+        `*Cooperative Config*`,
+        ``,
+        `• Loan interest rate: *${config.loanInterestRate}%*`,
+        `• Service charge: *${config.serviceChargePercent}%*`,
+        `• Min contribution: *${formatBalance(config.minContribution)}*`,
+        `• Min savings: *${formatBalance(config.minSavings)}*`,
+        `• Min withdrawal: *${formatBalance(config.minWithdrawal)}*`,
+        `• Max withdrawal: *${formatBalance(config.maxWithdrawal)}*`,
+        `• Withdrawal cooldown: *${config.withdrawalCooldownMonths} months*`,
+        `• Late fine: *${config.lateFinePercent}%*`,
+        `• Max loan multiplier: *${config.maxLoanMultiplier}x savings*`,
+        `• Auto-approve loans: *${config.autoApproveLoans ? "yes" : "no"}*`,
+        `• Require guarantors: *${config.requireGuarantors ? "yes" : "no"}*`,
+        `• Min guarantors: *${config.minGuarantors}*`,
+      ];
+      await sendText({ to: phone, text: body.join("\n") });
+      return true;
+    }
+
+    case "setbranding": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can change branding." });
+        return true;
+      }
+      const [bKey, ...bValueParts] = args;
+      const bValue = bValueParts.join(" ");
+      if (!bKey || !bValue) {
+        await sendText({
+          to: phone,
+          text: "Usage: *setbranding <key> <value>*\n\nKeys: displayName, welcomeMessage, footerText, logoUrl",
+        });
+        return true;
+      }
+      const validBrandKeys = new Set(["displayName", "welcomeMessage", "footerText", "logoUrl"]);
+      if (!validBrandKeys.has(bKey)) {
+        await sendText({ to: phone, text: `Unknown branding key: *${bKey}*.` });
+        return true;
+      }
+      await prisma.brandingConfig.upsert({
+        where: { cooperativeId: coopId },
+        create: { cooperativeId: coopId, displayName: bValue },
+        update: { [bKey]: bValue },
+      });
+      await cacheDel(`branding:${coopId}`);
+      await sendText({ to: phone, text: `✅ Branding updated: *${bKey}* = *${bValue}*` });
+      return true;
+    }
+
+    case "billing": {
+      const sub = await getSubscription(coopId);
+      const memberCount = await prisma.member.count({ where: { cooperativeId: coopId, status: "active" } });
+      const body = [
+        `*Subscription & Billing*`,
+        ``,
+        `• Plan: *${sub.plan}*`,
+        `• Status: *${sub.status}*`,
+        `• Members: *${memberCount} / ${sub.memberLimit}*`,
+        `• Monthly price: *${formatBalance(sub.monthlyPrice)}*`,
+        sub.currentPeriodEnd ? `• Renews: *${sub.currentPeriodEnd.toISOString().slice(0, 10)}*` : "",
+      ].filter(Boolean);
+      await sendText({ to: phone, text: body.join("\n") });
+      return true;
+    }
+
+    case "status": {
+      const arg = args.join(" ").trim().toLowerCase();
+      if (arg === "on") {
+        await sendText({ to: phone, text: "✅ Auto-status enabled. The bot will post financial tips 3 times daily (8AM, 12PM, 6PM)." });
+        return true;
+      }
+      if (arg === "off") {
+        await sendText({ to: phone, text: "❌ Auto-status disabled." });
+        return true;
+      }
+      if (arg === "preview") {
+        const { getStatusPosts } = await import("./status-scheduler.js");
+        const posts = await getStatusPosts(coopId);
+        if (posts.length === 0) {
+          await sendText({ to: phone, text: "No status posts scheduled for today." });
+        } else {
+          const list = posts.map((p, i) => `*${i + 1}.* ${p}`).join("\n\n");
+          await sendText({ to: phone, text: `📋 *Today's Status Posts:*\n\n${list}` });
+        }
+        return true;
+      }
+      await sendText({ to: phone, text: "Usage: *status on|off|preview*" });
+      return true;
+    }
+
+    case "fundstatus": {
+      const funds = await getFundBalances(coopId);
+      const body = [
+        `*💰 Cooperative Fund Status*`,
+        ``,
+        `• Reserve Fund: *${formatBalance(funds.reserve)}*`,
+        `• Education Fund: *${formatBalance(funds.education)}*`,
+        `• Development Fund: *${formatBalance(funds.development)}*`,
+        ``,
+        `_These funds are built from statutory deductions on dividend distributions._`,
+      ];
+      await sendText({ to: phone, text: body.join("\n") });
       return true;
     }
 

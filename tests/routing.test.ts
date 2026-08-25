@@ -62,6 +62,7 @@ async function makeMember(
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  await prisma.dataConsent.deleteMany();
   await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
   await prisma.coopPost.deleteMany();
@@ -109,6 +110,7 @@ describe("channel linking", () => {
 
     await handleMessage("tg:555", "join TESTR1");
     await handleMessage("tg:555", "Ada Obi");
+    await handleMessage("tg:555", "YES"); // NDPR consent
     await handleMessage("tg:555", "08087654321"); // real phone → OTP sent to WhatsApp
 
     // OTP is now hashed in session — extract it from the WhatsApp mock calls instead

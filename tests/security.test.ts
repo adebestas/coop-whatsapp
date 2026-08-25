@@ -97,9 +97,10 @@ async function makeMember(
 
 beforeEach(async () => {
   for (const m of [
+    "dataConsent",
     "posting",
     "journalEntry",
-    "coopPost",
+    "coopPost",
     "deductionItem",
     "deductionWaiver",
     "deductionBatch",
@@ -110,6 +111,7 @@ beforeEach(async () => {
     "purchasePoll",
     "externalPayment",
     "guarantorDeduction",
+    "reserveAllocation",
     "ledgerEntry",
     "voteBallot",
     "voteCandidate",

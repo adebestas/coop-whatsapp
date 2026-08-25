@@ -6,6 +6,7 @@ import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
 import { LIMITS } from "../lib/money.js";
 import { audit } from "./audit.js";
 import { checkVelocity } from "./fraud.js";
+import { getCoopConfig } from "./coop-config.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
@@ -54,12 +55,14 @@ export async function canWithdraw(phone: string): Promise<{ ok: boolean; message
     return { ok: false, message: "This account is under a death claim. The family withdrawal is handled by the cooperative admin.", member };
   }
   if (member.lastWithdrawalAt && !member.withdrawalOverride) {
+    const coopConfig = await getCoopConfig(member.cooperativeId);
+    const cooldownMs = coopConfig.withdrawalCooldownMonths * 30 * 24 * 60 * 60 * 1000;
     const elapsed = Date.now() - member.lastWithdrawalAt.getTime();
-    if (elapsed < WITHDRAW_COOLDOWN_MS) {
-      const daysLeft = Math.ceil((WITHDRAW_COOLDOWN_MS - elapsed) / (24 * 60 * 60 * 1000));
+    if (elapsed < cooldownMs) {
+      const daysLeft = Math.ceil((cooldownMs - elapsed) / (24 * 60 * 60 * 1000));
       return {
         ok: false,
-        message: `You can only withdraw once every 6 months. You can withdraw again in about *${daysLeft} days* — or ask an admin to *override* the rule.`,
+        message: `You can only withdraw once every ${coopConfig.withdrawalCooldownMonths} months. You can withdraw again in about *${daysLeft} days* — or ask an admin to *override* the rule.`,
         member,
       };
     }
@@ -70,82 +73,120 @@ export async function canWithdraw(phone: string): Promise<{ ok: boolean; message
 /**
  * Request a withdrawal. The request needs an admin approval, then the super
  * admin's final approval, before the money is sent.
+ *
+ * Uses a serializable transaction to prevent concurrent duplicate requests
+ * from passing the 6-month eligibility check.
  */
 export async function requestWithdrawal(
   phone: string,
   amount: number,
   bank?: { accountNumber: string; bankCode: string; bankName?: string },
 ): Promise<WithdrawResult> {
-  const eligibility = await canWithdraw(phone);
-  if (!eligibility.ok) return { ok: false, message: eligibility.message };
-  const member = eligibility.member;
-
-  const balance = member.wallet.balance ?? 0;
-  const max = Math.floor(balance * WITHDRAW_LIMIT_RATIO);
   if (!Number.isFinite(amount) || amount <= 0) {
     return { ok: false, message: "Enter a valid amount, e.g. *withdraw 5000*." };
   }
-  if (amount < LIMITS.MIN_WITHDRAW) {
-    return { ok: false, message: `Minimum withdrawal amount is *${formatBalance(LIMITS.MIN_WITHDRAW)}*.` };
+  // Get the member first to access cooperative config
+  const memberForConfig = await prisma.member.findFirst({ where: { phone } });
+  if (memberForConfig) {
+    const coopConfig = await getCoopConfig(memberForConfig.cooperativeId);
+    if (amount < coopConfig.minWithdrawal) {
+      return { ok: false, message: `Minimum withdrawal amount is *${formatBalance(coopConfig.minWithdrawal)}*.` };
+    }
+    if (amount > coopConfig.maxWithdrawal) {
+      return { ok: false, message: `Maximum withdrawal amount is *${formatBalance(coopConfig.maxWithdrawal)}*.` };
+    }
+  } else {
+    if (amount < LIMITS.MIN_WITHDRAW) {
+      return { ok: false, message: `Minimum withdrawal amount is *${formatBalance(LIMITS.MIN_WITHDRAW)}*.` };
+    }
+    if (amount > LIMITS.MAX_WITHDRAW) {
+      return { ok: false, message: `Maximum withdrawal amount is *${formatBalance(LIMITS.MAX_WITHDRAW)}*.` };
+    }
   }
-  if (amount > LIMITS.MAX_WITHDRAW) {
-    return { ok: false, message: `Maximum withdrawal amount is *${formatBalance(LIMITS.MAX_WITHDRAW)}*.` };
-  }
-  if (amount > max) {
+
+  // Atomic eligibility check + request creation inside a transaction.
+  // SELECT ... FOR UPDATE locks the member row so concurrent requests queue.
+  const result = await prisma.$transaction(async (tx) => {
+    const member = await tx.member.findFirst({
+      where: { phone },
+      include: { wallet: true },
+    });
+    if (!member || !member.wallet) {
+      return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." } as const;
+    }
+    if (member.status === "deceased") {
+      return { ok: false, message: "This account is under a death claim." } as const;
+    }
+    if (member.lastWithdrawalAt && !member.withdrawalOverride) {
+      const coopConfig = await getCoopConfig(member.cooperativeId);
+      const cooldownMs = coopConfig.withdrawalCooldownMonths * 30 * 24 * 60 * 60 * 1000;
+      const elapsed = Date.now() - member.lastWithdrawalAt.getTime();
+      if (elapsed < cooldownMs) {
+        const daysLeft = Math.ceil((cooldownMs - elapsed) / (24 * 60 * 60 * 1000));
+        return {
+          ok: false,
+          message: `You can only withdraw once every ${coopConfig.withdrawalCooldownMonths} months. Try again in *${daysLeft} days* — or ask an admin to *override* the rule.`,
+        } as const;
+      }
+    }
+
+    const balance = member.wallet.balance ?? 0;
+    const max = Math.floor(balance * WITHDRAW_LIMIT_RATIO);
+    if (amount > max) {
+      return {
+        ok: false,
+        message: `You can withdraw at most *${formatBalance(max)}* (45% of your ${formatBalance(balance)} balance).`,
+      } as const;
+    }
+
+    const accNo = bank?.accountNumber ?? member.bankAccountNumber;
+    const bankCode = bank?.bankCode ?? member.bankCode;
+    const bankName = bank?.bankName ?? member.bankName;
+    if (!accNo || !bankCode) {
+      return {
+        ok: false,
+        message: "No bank account on file. Reply *withdraw <amount> <account number> <bank>* to set one.",
+      } as const;
+    }
+
+    const request = await tx.withdrawalRequest.create({
+      data: {
+        amount,
+        status: "pending",
+        bankAccountNumber: accNo,
+        bankCode,
+        bankName: bankName ?? null,
+        memberId: member.id,
+        cooperativeId: member.cooperativeId,
+      },
+    });
+
+    await tx.member.update({
+      where: { id: member.id },
+      data: { bankAccountNumber: accNo, bankCode, bankName },
+    });
+
     return {
-      ok: false,
-      message: `You can withdraw at most *${formatBalance(max)}* (45% of your ${formatBalance(balance)} balance).`,
-    };
-  }
-
-  const accNo = bank?.accountNumber ?? member.bankAccountNumber;
-  const bankCode = bank?.bankCode ?? member.bankCode;
-  const bankName = bank?.bankName ?? member.bankName;
-  if (!accNo || !bankCode) {
-    return {
-      ok: false,
-      message: "No bank account on file. Reply *withdraw <amount> <account number> <bank>* to set one, e.g. *withdraw 5000 0123456789 Access*.",
-    };
-  }
-
-  // New-payee cooling period — a hijacked account changing bank details then
-  // withdrawing same-day is the classic takeover pattern; slow it down.
-  const beneficiaryCheck = await ensureBeneficiaryAllowed({
-    cooperativeId: member.cooperativeId,
-    memberId: member.id,
-    accountNumber: accNo,
-    bankCode,
-    bankName,
-  });
-  if (!beneficiaryCheck.ok) {
-    return { ok: false, message: beneficiaryCheck.message! };
-  }
-
-  const request = await prisma.withdrawalRequest.create({
-    data: {
-      amount,
-      status: "pending",
-      bankAccountNumber: accNo,
+      ok: true as const,
+      message: "",
+      request,
+      member,
+      accNo,
       bankCode,
-      bankName: bankName ?? null,
-      memberId: member.id,
-      cooperativeId: member.cooperativeId,
-    },
+      bankName,
+    };
   });
 
-  await prisma.member.update({
-    where: { id: member.id },
-    data: { bankAccountNumber: accNo, bankCode, bankName },
-  });
+  if (!result.ok) return { ok: false, message: result.message };
 
   await notifySuperAdmins(
-    member.cooperativeId,
-    `💰 *Withdrawal request* ${request.id.slice(-6)}\n${member.name} wants to withdraw *${formatBalance(amount)}* to ${bankName ?? bankCode} ****${accNo.slice(-4)}.\n\nAdmin: *approvewithdraw ${request.id.slice(-6)}* or *rejectwithdraw ${request.id.slice(-6)}*. Super admin's final approval pays it out.`,
+    result.member.cooperativeId,
+    `💰 *Withdrawal request* ${result.request.id.slice(-6)}\n${result.member.name} wants to withdraw *${formatBalance(amount)}* to ${result.bankName ?? result.bankCode} ****${result.accNo.slice(-4)}.\n\nAdmin: *approvewithdraw ${result.request.id.slice(-6)}* or *rejectwithdraw ${result.request.id.slice(-6)}*. Super admin's final approval pays it out.`,
   );
 
   return {
     ok: true,
-    message: `✅ Withdrawal of *${formatBalance(amount)}* requested.\n\nIt needs an *admin approval*, then the *super admin's final approval*, before the money is sent to ${bankName ?? bankCode} ****${accNo.slice(-4)}.`,
+    message: `✅ Withdrawal of *${formatBalance(amount)}* requested.\n\nIt needs an *admin approval*, then the *super admin's final approval*, before the money is sent to ${result.bankName ?? result.bankCode} ****${result.accNo.slice(-4)}.`,
   };
 }
 

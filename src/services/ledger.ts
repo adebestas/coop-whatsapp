@@ -28,9 +28,13 @@ export async function recordLedger(input: {
   reference?: string;
   /** Optional deterministic journal key for idempotent posting. */
   txRef?: string;
+  /** Fund segregation: member (trust), operational, or reserve. */
+  fundType?: string;
 }) {
   const amount = roundMoney(input.amount);
   if (amount <= 0) return;
+
+  const fundType = input.fundType ?? "operational";
 
   // Double-entry mapping: money in/out of the cooperative bank account.
   const postings =
@@ -58,6 +62,7 @@ export async function recordLedger(input: {
         amount,
         note: input.note,
         reference: input.reference,
+        fundType,
       },
     }),
   ]);
@@ -91,11 +96,24 @@ export type PnlSummary = {
   totalIncome: number;
   totalExpense: number;
   netProfit: number;
+  period?: { start: Date; end: Date };
 };
 
-export async function computePnl(cooperativeId: string): Promise<PnlSummary> {
+export async function computePnl(
+  cooperativeId: string,
+  startDate?: Date,
+  endDate?: Date,
+): Promise<PnlSummary> {
+  const where: any = { cooperativeId, type: { in: ["income", "expense"] } };
+  
+  if (startDate || endDate) {
+    where.createdAt = {};
+    if (startDate) where.createdAt.gte = startDate;
+    if (endDate) where.createdAt.lte = endDate;
+  }
+
   const entries = await prisma.ledgerEntry.findMany({
-    where: { cooperativeId, type: { in: ["income", "expense"] } },
+    where,
     select: { type: true, category: true, amount: true },
   });
 
@@ -117,7 +135,15 @@ export async function computePnl(cooperativeId: string): Promise<PnlSummary> {
     totalIncome: round2(totalIncome),
     totalExpense: round2(totalExpense),
     netProfit: round2(totalIncome - totalExpense),
+    period: startDate || endDate ? { start: startDate ?? new Date(0), end: endDate ?? new Date() } : undefined,
   };
+}
+
+/** Get monthly summary for a given month (0-11) */
+export async function getMonthlySummary(cooperativeId: string, year: number, month: number): Promise<PnlSummary> {
+  const start = new Date(year, month, 1);
+  const end = new Date(year, month + 1, 0, 23, 59, 59);
+  return computePnl(cooperativeId, start, end);
 }
 
 function round2(n: number) {

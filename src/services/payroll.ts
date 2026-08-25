@@ -167,6 +167,7 @@ export async function runPayroll(
       amount,
       note: `${r.salaryKind ?? "stipend"} to ${r.name} — ${narration.trim()}`,
       reference: r.id,
+      fundType: "operational",
     });
     paid += 1;
     total += amount;

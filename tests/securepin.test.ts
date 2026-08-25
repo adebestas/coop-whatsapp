@@ -49,6 +49,7 @@ async function makeMember(
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  await prisma.dataConsent.deleteMany();
   await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
   await prisma.coopPost.deleteMany();
@@ -132,6 +133,7 @@ describe("secure PIN challenges", () => {
     await makeCoop("TESTSP1", "Test Coop");
     await handleMessage(PHONE, "join TESTSP1");
     await handleMessage(PHONE, "Ada Obi");
+    await handleMessage(PHONE, "YES"); // NDPR consent
     await handleMessage(PHONE, "skip");
     await handleMessage(PHONE, "skip");
     await handleMessage(PHONE, "Chidi Okafor");

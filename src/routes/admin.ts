@@ -39,28 +39,33 @@ function getSecret(): string {
   return secret;
 }
 
-function sign(phone: string): string {
+interface AdminTokenPayload {
+  phone: string;
+  cooperativeId: string;
+  role: string;
+}
+
+function sign(phone: string, cooperativeId: string, role: string): string {
   const secret = getSecret();
-  const payload = `${phone}.${Date.now()}`;
+  const payload = `${phone}.${cooperativeId}.${role}.${Date.now()}`;
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   return `${payload}.${sig}`;
 }
 
-function verify(token: string): string | null {
+function verify(token: string): AdminTokenPayload | null {
   const parts = token.split(".");
-  if (parts.length !== 3) return null;
+  if (parts.length !== 4) return null;
   const secret = getSecret();
-  const payload = `${parts[0]}.${parts[1]}`;
+  const payload = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-  // ✅ Constant-time comparison prevents timing attacks
   try {
-    if (!timingSafeEqual(Buffer.from(sig), Buffer.from(parts[2]))) return null;
+    if (!timingSafeEqual(Buffer.from(sig), Buffer.from(parts[3]))) return null;
   } catch {
     return null;
   }
-  const issuedAt = Number(parts[1]);
+  const issuedAt = Number(parts[3]);
   if (Date.now() - issuedAt > TOKEN_TTL_MS) return null;
-  return parts[0];
+  return { phone: parts[0], cooperativeId: parts[1], role: parts[2] };
 }
 
 export async function adminApiRoutes(app: FastifyInstance) {
@@ -90,7 +95,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: "invalid credentials" });
     }
 
-    const token = sign(phone);
+    const token = sign(phone, member.cooperative.id, member.role);
     return {
       token,
       member: {
@@ -111,18 +116,19 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   // ---- Authenticated routes below ----
   app.addHook("preHandler", async (req, reply) => {
-    // Skip auth for login.
     if (req.url === "/api/admin/login") return;
     const auth = req.headers.authorization;
-    const phone = auth?.startsWith("Bearer ") ? verify(auth.slice(7)) : null;
-    if (!phone) {
+    const payload = auth?.startsWith("Bearer ") ? verify(auth.slice(7)) : null;
+    if (!payload) {
       return reply.code(401).send({ error: "unauthorized" });
     }
-    req.adminPhone = phone;
+    req.adminPhone = payload.phone;
+    req.adminCoopId = payload.cooperativeId;
+    req.adminRole = payload.role;
   });
 
   app.get("/api/admin/overview", async (req) => {
-    const coopId = await requireAdminCoop(req.adminPhone!);
+    const coopId = req.adminCoopId!;
     const [memberCount, contributions, contributionAgg, loans, walletAgg, payoutAgg] =
       await Promise.all([
         prisma.member.count({ where: { cooperativeId: coopId } }),
@@ -147,7 +153,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/admin/members", async (req) => {
-    const coopId = await requireAdminCoop(req.adminPhone!);
+    const coopId = req.adminCoopId!;
     return prisma.member.findMany({
       where: { cooperativeId: coopId },
       include: { wallet: true },
@@ -157,7 +163,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/admin/loans", async (req) => {
-    const coopId = await requireAdminCoop(req.adminPhone!);
+    const coopId = req.adminCoopId!;
     const status = (req.query as { status?: string }).status;
     return prisma.loan.findMany({
       where: { cooperativeId: coopId, ...(status ? { status } : {}) },
@@ -172,7 +178,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
   });
 
   app.post("/api/admin/loans/:id/approve", async (req, reply) => {
-    const coopId = await requireAdminCoop(req.adminPhone!);
+    const coopId = req.adminCoopId!;
     const { id } = req.params as { id: string };
     const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
     if (!loan) return reply.code(404).send({ error: "loan not found" });
@@ -200,7 +206,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
   });
 
   app.post("/api/admin/loans/:id/reject", async (req, reply) => {
-    const coopId = await requireAdminCoop(req.adminPhone!);
+    const coopId = req.adminCoopId!;
     const { id } = req.params as { id: string };
     const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
     if (!loan) return reply.code(404).send({ error: "loan not found" });
@@ -209,7 +215,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/admin/payouts", async (req) => {
-    const coopId = await requireAdminCoop(req.adminPhone!);
+    const coopId = req.adminCoopId!;
     return prisma.payout.findMany({
       where: { cooperativeId: coopId },
       include: { member: { select: { name: true, phone: true } } },
@@ -219,7 +225,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
   });
 
   app.get("/api/admin/contributions", async (req) => {
-    const coopId = await requireAdminCoop(req.adminPhone!);
+    const coopId = req.adminCoopId!;
     return prisma.contribution.findMany({
       where: { cooperativeId: coopId },
       include: { member: { select: { name: true, phone: true } } },

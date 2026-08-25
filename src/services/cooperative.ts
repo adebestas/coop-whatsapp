@@ -3,6 +3,7 @@ import { generateMemberCode, hashPin } from "../lib/security.js";
 import { audit } from "./audit.js";
 import { LIMITS } from "../lib/money.js";
 import { formatBalance as formatKobo } from "../lib/money.js";
+import { getCoopConfig } from "./coop-config.js";
 
 export interface JoinResult {
   ok: boolean;
@@ -127,8 +128,9 @@ export async function createContribution(phone: string, amount: number): Promise
   if (!Number.isFinite(amount) || amount <= 0) {
     return { ok: false, message: "Please enter a valid amount, e.g. *save 2000*." };
   }
-  if (amount < LIMITS.MIN_SAVE) {
-    return { ok: false, message: `Minimum save amount is *${formatKobo(LIMITS.MIN_SAVE)}*.` };
+  const coopConfig = await getCoopConfig(member.cooperativeId);
+  if (amount < coopConfig.minContribution) {
+    return { ok: false, message: `Minimum save amount is *${formatKobo(coopConfig.minContribution)}*.` };
   }
   if (amount > LIMITS.MAX_SAVE) {
     return { ok: false, message: `Maximum save amount is *${formatKobo(LIMITS.MAX_SAVE)}*.` };

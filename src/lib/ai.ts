@@ -13,16 +13,19 @@ export const KNOWN_COMMANDS = [
   // member basics
   "menu", "help", "balance", "ledger", "history", "statement", "posts", "mydeduction",
   "save", "loan", "repay", "plan", "dividend", "joinunit", "phone", "support", "tickets", "mytickets",
-  "skipmonth", "vote", "votebuy", "buypolls", "results", "contexthelp",
+  "skipmonth", "vote", "votebuy", "buypolls", "results", "pollresults", "contexthelp",
   // admin
   "pending", "approve", "reject", "finalize", "payout", "overridewithdrawal",
   "broadcast", "createunit", "units", "setunitadmin", "paydividend", "recordfine",
-  "approveclaim", "deathclaim", "validate", "claimbank", "resolve", "tickets",
+  "approveclaim", "deathclaim", "validate", "confirmclaim", "claimbank", "resolve", "tickets",
   "startvote", "candidate", "closevote", "startbuy", "addoption", "closebuy",
   "newbatch", "submitbatch", "approvebatch", "rejectbatch", "setcommit", "waive",
   "setpost", "removepost", "relink", "unlink", "setrole", "setsalary", "runpayroll",
-  "pay", "approvewdraw", "approvewithdraw", "audit", "backup", "reconcile", "pnl",
+  "pay", "approvewdraw", "approvewithdraw", "audit", "backup", "reconcile", "walletreconcile", "reservefund", "pnl",
+  "fundstatus",
   "export", "enable2fa", "disable2fa", "verifypin", "setplanfor",
+  // SaaS config
+  "setconfig", "showconfig", "setbranding", "billing", "onboard",
   // ai-powered
   "insights", "risk",
 ] as const;
@@ -81,11 +84,17 @@ export async function suggestCommand(text: string): Promise<Suggestion | null> {
         typeof a === "string" &&
         a.trim().length > 0 &&
         a.length <= 60 &&
-        !/[\r\n/]/.test(a),
+        // Reject shell metacharacters, newlines, slashes, and semicolons
+        !/[\r\n/;|&<>{}()`]/.test(a),
     );
     // Strict: if the model produced anything smuggly malformed, drop the
     // whole suggestion rather than running a half-cleaned command.
     if (rawArgs.length !== args.length) return null;
+    // Defense-in-depth: verify the reconstructed command still parses to the
+    // same command (prevents arg-space injection attacks).
+    const reconstructed = [command, ...args].join(" ");
+    const reparsed = reconstructed.trim().split(/\s+/);
+    if (reparsed[0] !== command) return null;
     return { command, args };
   } catch {
     return null; // network error, timeout, bad JSON — silently fall back

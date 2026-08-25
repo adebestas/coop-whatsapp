@@ -147,6 +147,7 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
         amount: adminCharge,
         note: `Admin charge on loan ${loan.id.slice(-6)} (confirmed by poller)`,
         reference: loan.id,
+        fundType: "operational",
       });
       actions.push(`Loan ${loan.id.slice(-6)} disbursement confirmed by provider — marked disbursed.`);
       await notifySupers(loan.cooperativeId, `🎉 Poller: loan *${loan.id.slice(-6)}* (${loan.member.name}) disbursement confirmed by the provider.`);
@@ -195,6 +196,7 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
         amount: p.amount,
         note: `Paid ${p.beneficiaryName} — confirmed by poller`,
         reference: p.id,
+        fundType: "operational",
       });
       await audit({
         cooperativeId: p.cooperativeId,

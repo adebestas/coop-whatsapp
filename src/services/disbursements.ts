@@ -269,6 +269,7 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
       amount: adminCharge,
       note: `Admin charge on loan ${loan.id.slice(-6)}`,
       reference: loan.id,
+      fundType: "operational",
     });
     return {
       ok: true,

@@ -5,6 +5,28 @@ import { requiredGuarantors } from "./guarantors.js";
 import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
 import { LIMITS } from "../lib/money.js";
+import { flagTransaction } from "./aml.js";
+import { getCoopConfig } from "./coop-config.js";
+
+/** After a loan leaves the queue, renumber positions for remaining pending loans. */
+async function renumberQueue(cooperativeId: string): Promise<void> {
+  const pending = await prisma.loan.findMany({
+    where: {
+      cooperativeId,
+      status: { in: ["pending", "guaranteed", "admin_approved", "super_approved_1"] },
+      queuePosition: { not: null },
+    },
+    orderBy: { queueJoinedAt: "asc" },
+  });
+
+  const updates = pending.map((loan, idx) =>
+    prisma.loan.update({
+      where: { id: loan.id },
+      data: { queuePosition: idx + 1 },
+    }),
+  );
+  await Promise.all(updates);
+}
 
 export interface ApplyLoanResult {
   ok: boolean;
@@ -64,18 +86,20 @@ export async function applyForLoan(
 
   // Rule: a loan can't exceed 2x the member's total savings.
   const savings = member.wallet?.totalSaved ?? 0;
-  const maxLoan = Math.floor(savings * LOAN_TO_SAVINGS_RATIO);
+  const coopConfig = await getCoopConfig(member.cooperativeId);
+  const loanMultiplier = coopConfig.maxLoanMultiplier;
+  const maxLoan = Math.floor(savings * loanMultiplier);
   if (maxLoan <= 0) {
     return {
       ok: false,
-      message: `Loans are capped at *${LOAN_TO_SAVINGS_RATIO}x your savings* and you have no savings yet. Save first — reply *save <amount>*.`,
+      message: `Loans are capped at *${loanMultiplier}x your savings* and you have no savings yet. Save first — reply *save <amount>*.`,
     };
   }
   if (amount > maxLoan) {
     return {
       ok: false,
       message:
-        `Loans are capped at *${LOAN_TO_SAVINGS_RATIO}x your savings*.\n` +
+        `Loans are capped at *${loanMultiplier}x your savings*.\n` +
         `Your savings: ${formatBalance(savings)} → max loan: *${formatBalance(maxLoan)}*.\n` +
         `Try a smaller amount or save more first.`,
     };
@@ -103,6 +127,14 @@ export async function applyForLoan(
   const total = totalRepayable(amount, interestRate);
   const monthly = total / tenureMonths;
 
+  // Assign queue position: count existing pending loans in this cooperative + 1
+  const pendingCount = await prisma.loan.count({
+    where: {
+      cooperativeId: member.cooperativeId,
+      status: { in: ["pending", "guaranteed", "admin_approved", "super_approved_1"] },
+    },
+  });
+
   const loan = await prisma.loan.create({
     data: {
       amount,
@@ -115,6 +147,8 @@ export async function applyForLoan(
       bankAccountNumber: bank?.accountNumber,
       bankCode: bank?.bankCode,
       bankName: bank?.bankName,
+      queuePosition: pendingCount + 1,
+      queueJoinedAt: new Date(),
     },
   });
 
@@ -180,6 +214,15 @@ export async function approveLoan(
   const loan = await findLoan(loanId);
   if (!loan) return { ok: false, message: "Loan not found. Check the id and try again." };
   const shortId = loan.id.slice(-6);
+
+  // AML check: flag if member has suspicious recent transactions
+  const amlResult = await flagTransaction({
+    memberId: loan.memberId,
+    cooperativeId: loan.cooperativeId,
+    amount: loan.amount,
+    type: "loan_disbursement",
+    direction: "out",
+  });
 
   // Dual-control: nobody approves their own borrowing.
   if (opts.actorId && loan.memberId === opts.actorId) {
@@ -309,9 +352,28 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
   const approvedMsg =
     `Loan *${loan.id.slice(-6)}* fully approved for ${loan.member.name}: ${formatBalance(loan.amount)} @ ${loan.interestRate}% flat for ${loan.tenureMonths} months. Monthly: ${formatBalance(Math.round(monthly))}.`;
 
+  // AML check on final approval
+  const amlCheck = await flagTransaction({
+    memberId: loan.memberId,
+    cooperativeId: loan.cooperativeId,
+    amount: loan.amount,
+    type: "loan_disbursement",
+    direction: "out",
+  });
+  const amlNote = amlCheck.flagged
+    ? `\n\n⚠️ *AML Alert*: ${amlCheck.reasons.join("; ")}`
+    : "";
+
+  // Clear queue position and renumber remaining loans
+  await prisma.loan.update({
+    where: { id: loan.id },
+    data: { queuePosition: null, queueJoinedAt: null },
+  });
+  await renumberQueue(loan.cooperativeId);
+
   // Auto-disburse to the member's bank account (name-verified by the provider).
   const disbursement = await disburseLoan(loan.id);
-  return { ok: true, message: `${approvedMsg}\n\n${disbursement.message}` };
+  return { ok: true, message: `${approvedMsg}${amlNote}\n\n${disbursement.message}` };
 }
 
 export async function rejectLoan(loanId: string): Promise<{ ok: boolean; message: string }> {
@@ -321,7 +383,8 @@ export async function rejectLoan(loanId: string): Promise<{ ok: boolean; message
     return { ok: false, message: `Loan is already ${loan.status}.` };
   }
 
-  await prisma.loan.update({ where: { id: loan.id }, data: { status: "rejected" } });
+  await prisma.loan.update({ where: { id: loan.id }, data: { status: "rejected", queuePosition: null, queueJoinedAt: null } });
+  await renumberQueue(loan.cooperativeId);
   return { ok: true, message: `Loan *${loan.id.slice(-6)}* for ${loan.member.name} was rejected.` };
 }
 
@@ -353,11 +416,13 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
   let fine = 0;
   const now = Date.now();
   if (loan.dueDate && loan.dueDate.getTime() < now) {
+    const coopConfig = await getCoopConfig(member.cooperativeId);
+    const fineRate = coopConfig.lateFinePercent;
     const monthsLate = Math.max(
       1,
       Math.floor((now - loan.dueDate.getTime()) / (30 * 24 * 60 * 60 * 1000)),
     );
-    fine = Math.round(amount * (LATE_FINE_RATE / 100) * monthsLate);
+    fine = Math.round(amount * (fineRate / 100) * monthsLate);
   }
   const totalDue = amount + fine;
 
@@ -417,6 +482,7 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
     amount: interestPortion,
     note: `Installment interest on loan ${loan.id.slice(-6)}`,
     reference: loan.id,
+    fundType: "member",
   });
   if (fine > 0) {
     await recordLedger({
@@ -426,6 +492,7 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
       amount: fine,
       note: `Late fine on loan ${loan.id.slice(-6)}`,
       reference: loan.id,
+      fundType: "member",
     });
   }
 
@@ -459,4 +526,60 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
         ? " This loan is now fully paid 🎉"
         : ` Remaining balance: ${formatBalance(updated?.balance ?? 0)}.`),
   };
+}
+
+/**
+ * Get a member's queue position for their pending loan.
+ * Returns position, total queue size, and estimated wait time.
+ */
+export async function getQueuePosition(
+  memberId: string,
+): Promise<{ position: number; total: number; estimatedWait: string } | null> {
+  const loan = await prisma.loan.findFirst({
+    where: { memberId, status: { in: ["pending", "guaranteed", "admin_approved", "super_approved_1"] } },
+    orderBy: { queueJoinedAt: "asc" },
+  });
+  if (!loan) return null;
+
+  const total = await prisma.loan.count({
+    where: {
+      cooperativeId: loan.cooperativeId,
+      status: { in: ["pending", "guaranteed", "admin_approved", "super_approved_1"] },
+    },
+  });
+
+  const position = loan.queuePosition ?? 1;
+
+  // Calculate estimated wait based on average disbursement rate this month
+  const startOfMonth = new Date();
+  startOfMonth.setDate(1);
+  startOfMonth.setHours(0, 0, 0, 0);
+
+  const disbursedThisMonth = await prisma.loan.count({
+    where: {
+      cooperativeId: loan.cooperativeId,
+      status: { in: ["approved", "disbursed"] },
+      approvedAt: { gte: startOfMonth },
+    },
+  });
+
+  const daysElapsed = Math.max(1, Math.floor((Date.now() - startOfMonth.getTime()) / (24 * 60 * 60 * 1000)));
+  const dailyRate = disbursedThisMonth / daysElapsed;
+
+  let estimatedWait: string;
+  if (dailyRate <= 0) {
+    estimatedWait = "unknown (no loans disbursed this month)";
+  } else {
+    const daysAhead = position - 1; // loans ahead in queue
+    const estimatedDays = Math.ceil(daysAhead / dailyRate);
+    if (estimatedDays <= 0) {
+      estimatedWait = "~1 day";
+    } else if (estimatedDays === 1) {
+      estimatedWait = "~1 day";
+    } else {
+      estimatedWait = `~${estimatedDays} days`;
+    }
+  }
+
+  return { position, total, estimatedWait };
 }

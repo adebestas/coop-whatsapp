@@ -53,6 +53,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
     await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
+  await prisma.dataConsent.deleteMany();
   await prisma.coopPost.deleteMany();
   await prisma.deductionItem.deleteMany();
   await prisma.deductionWaiver.deleteMany();
@@ -94,6 +95,7 @@ describe("coop whatsapp bot", () => {
 
     await handleMessage(PHONE, "join TEST01");
     await handleMessage(PHONE, "Ada Obi");
+    await handleMessage(PHONE, "YES"); // NDPR consent
     await handleMessage(PHONE, "skip"); // email is optional
     await handleMessage(PHONE, "skip"); // birthday is optional
     await handleMessage(PHONE, "Chidi Okafor"); // next of kin
@@ -122,6 +124,7 @@ describe("coop whatsapp bot", () => {
 
     await handleMessage(PHONE, "join TEST06");
     await handleMessage(PHONE, "Ada Obi");
+    await handleMessage(PHONE, "YES"); // NDPR consent
     await handleMessage(PHONE, "ada@example.com");
     await handleMessage(PHONE, "15/08");
     await handleMessage(PHONE, "Ngozi Obi");
@@ -200,6 +203,7 @@ describe("coop whatsapp bot", () => {
 
     await handleMessage(TG, "join TEST05");
     await handleMessage(TG, "Bola Musa");
+    await handleMessage(TG, "YES"); // NDPR consent
     await handleMessage(TG, "08012345678");
     await handleMessage(TG, "skip"); // email is optional
     await handleMessage(TG, "skip"); // birthday is optional

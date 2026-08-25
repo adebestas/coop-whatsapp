@@ -318,6 +318,7 @@ async function payExternal(
       amount: payment.amount,
       note: `Paid ${payment.beneficiaryName}${payment.purpose ? ` — ${payment.purpose}` : ""}`,
       reference: payment.id,
+      fundType: "operational",
     });
     await audit({
       cooperativeId: actor.cooperativeId,

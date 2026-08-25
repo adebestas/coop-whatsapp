@@ -12,6 +12,7 @@ function allTexts(): string[] {
 }
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { verifyMemberPin } from "../src/services/pin.js";
+import { resetRateLimit } from "../src/lib/cache.js";
 import { addGuarantor } from "../src/services/guarantors.js";
 import { applyForLoan, repayLoan } from "../src/services/loans.js";
 import { resolveProvider, markProviderDown, isProviderAvailable } from "../src/services/payments/index.js";
@@ -31,7 +32,16 @@ const PHONE = "2348010000001";
 const G_PHONE = "2348071111111";
 
 async function makeCoop(code: string) {
-  return prisma.cooperative.create({ data: { name: "Test Coop", code } });
+  const coop = await prisma.cooperative.create({ data: { name: "Test Coop", code } });
+  await prisma.cooperativeConfig.create({
+    data: {
+      cooperativeId: coop.id,
+      maxLoanMultiplier: 2,
+      lateFinePercent: 2,
+      minContribution: 10000,
+    },
+  });
+  return coop;
 }
 
 async function makeMember(phone: string, coopId: string, opts: { role?: string; pin?: string } = {}) {
@@ -55,10 +65,10 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
 beforeEach(async () => {
   vi.clearAllMocks();
   for (const m of [
-    "coopPost", "deductionItem", "deductionWaiver", "deductionBatch",
+    "dataConsent", "coopPost", "deductionItem", "deductionWaiver", "deductionBatch",
     "posting", "journalEntry", "webhookEvent",
     "beneficiary", "pollBallot", "pollOption", "purchasePoll", "externalPayment",
-    "guarantorDeduction", "ledgerEntry",
+    "guarantorDeduction", "reserveAllocation", "ledgerEntry",
     "voteBallot", "voteCandidate", "vote", "supportTicket", "auditLog",
     "deathValidation", "deathClaim", "withdrawalRequest", "contribution",
     "loanRepayment", "guarantor", "loan", "payout", "dividendEntry",
@@ -86,14 +96,9 @@ describe("fraud hardening", () => {
     expect(locked.message).toContain("locked");
 
     // After the lock window passes, the correct PIN works again.
-    await prisma.member.update({
-      where: { id: member.id },
-      data: { pinLockedUntil: new Date(Date.now() - 1000) },
-    });
+    await resetRateLimit(`pin:${member.id}`);
     const unlocked = await verifyMemberPin(await prisma.member.findUnique({ where: { id: member.id } }), "1234");
     expect(unlocked.ok).toBe(true);
-    const cleared = await prisma.member.findUnique({ where: { id: member.id } });
-    expect(cleared!.pinFailedCount).toBe(0);
   });
 
   it("expires abandoned multi-turn flows after 30 minutes", async () => {

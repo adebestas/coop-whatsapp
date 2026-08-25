@@ -1,8 +1,8 @@
-import { prisma } from "../lib/prisma.js";
 import { verifyPin } from "../lib/security.js";
+import { checkRateLimit, resetRateLimit } from "../lib/cache.js";
 
 export const PIN_MAX_ATTEMPTS = 3;
-export const PIN_LOCK_MINUTES = 15;
+export const PIN_LOCK_SECONDS = 15 * 60; // 15 minutes
 
 export interface PinResult {
   ok: boolean;
@@ -10,8 +10,9 @@ export interface PinResult {
 }
 
 /**
- * Verify a member's transaction PIN with brute-force lockout:
- * 5 wrong attempts locks the PIN for 15 minutes.
+ * Verify a member's transaction PIN with brute-force lockout.
+ * Uses Redis atomic INCR + EXPIRE for lockout tracking — safe against
+ * concurrent race conditions that the old read-then-write pattern allowed.
  */
 export async function verifyMemberPin(
   member: { id: string; pin: string | null },
@@ -19,40 +20,28 @@ export async function verifyMemberPin(
 ): Promise<PinResult> {
   if (!member.pin) return { ok: false, message: "You have no PIN set yet." };
 
-  // Always work from fresh state so concurrent attempts can't slip through.
-  const current = await prisma.member.findUnique({
-    where: { id: member.id },
-    select: { pinFailedCount: true, pinLockedUntil: true },
-  });
-  const failedCount = current?.pinFailedCount ?? 0;
-  const lockedUntil = current?.pinLockedUntil ?? null;
+  // Check lockout FIRST — even correct PINs must wait out the lock window.
+  const { allowed, retryAfter } = await checkRateLimit(
+    `pin:${member.id}`,
+    PIN_MAX_ATTEMPTS - 1, // blocks on the PIN_MAX_ATTEMPTS-th wrong attempt
+    PIN_LOCK_SECONDS,
+  );
 
-  if (lockedUntil && lockedUntil.getTime() > Date.now()) {
-    const mins = Math.ceil((lockedUntil.getTime() - Date.now()) / 60000);
-    return { ok: false, message: `PIN locked after too many wrong attempts. Try again in *${mins} min*.` };
+  if (!allowed) {
+    const mins = Math.ceil((retryAfter ?? PIN_LOCK_SECONDS) / 60);
+    return {
+      ok: false,
+      message: `Too many wrong PINs. Your PIN is locked for *${mins} min*.`,
+    };
   }
 
   if (verifyPin(pin, member.pin)) {
-    await prisma.member.update({
-      where: { id: member.id },
-      data: { pinFailedCount: 0, pinLockedUntil: null },
-    });
+    await resetRateLimit(`pin:${member.id}`);
     return { ok: true };
   }
 
-  const failed = failedCount + 1;
-  const lock = failed >= PIN_MAX_ATTEMPTS;
-  await prisma.member.update({
-    where: { id: member.id },
-    data: {
-      pinFailedCount: lock ? 0 : failed,
-      pinLockedUntil: lock ? new Date(Date.now() + PIN_LOCK_MINUTES * 60 * 1000) : null,
-    },
-  });
   return {
     ok: false,
-    message: lock
-      ? `Too many wrong PINs. Your PIN is locked for *${PIN_LOCK_MINUTES} minutes*.`
-      : `Incorrect PIN. ${PIN_MAX_ATTEMPTS - failed} attempt(s) left.`,
+    message: `Incorrect PIN. Try again or it will lock after ${PIN_MAX_ATTEMPTS} wrong attempts.`,
   };
 }

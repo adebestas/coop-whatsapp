@@ -23,6 +23,7 @@ model Cooperative {
   status             String              @default("active") // active | suspended
   loanInterestRate   Float               @default(2) // fallback monthly % charged on loans (percentage)
   dailyPayoutLimit   Int                 @default(100000000) // fraud guard: max total money-out per day in kobo (₦1M)
+  reserveFundBalance Int                 @default(0) // statutory reserve fund balance in kobo
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   members            Member[]
@@ -43,9 +44,82 @@ model Cooperative {
   deductionBatches  DeductionBatch[]
   externalPayments   ExternalPayment[]
   purchasePolls      PurchasePoll[]
+  reconciliationLogs ReconciliationLog[]
+  reserveAllocations   ReserveAllocation[]
+  educationFunds      EducationFund[]
+  developmentFunds    DevelopmentFund[]
+  statusPosts         StatusPost[]
+  config             CooperativeConfig?
+  branding            BrandingConfig?
+  subscription       Subscription?
 
   @@index([status])
   @@index([code])
+}
+
+// ---- Wallet-bank reconciliation logs ----
+model ReconciliationLog {
+  id                  String   @id @default(cuid())
+  cooperativeId       String
+  cooperative         Cooperative @relation(fields: [cooperativeId], references: [id])
+  totalWalletBalances Int      // sum of all member wallet balances in kobo
+  bankBalance         Int      // cooperative's bank balance from journal in kobo
+  discrepancy         Int      // difference (bankBalance - totalWalletBalances) in kobo
+  status              String   // ok | discrepancy | investigating
+  notes               String?
+  performedBy         String   // admin phone
+  memberCount         Int      // number of members in the cooperative
+  activeLoans         Int      // count of active loans
+  activeLoanTotal     Int      // total disbursed amount of active loans in kobo
+  pendingWithdrawals  Int      // count of pending withdrawal requests
+  pendingWithdrawalTotal Int   // total pending withdrawal amount in kobo
+  createdAt           DateTime @default(now())
+
+  @@index([cooperativeId, createdAt])
+}
+
+// ---- Statutory reserve fund allocations ----
+// Nigerian cooperative law requires 20% of net profit be allocated to a
+// statutory reserve fund before dividends are distributed to members.
+model ReserveAllocation {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  amount        Int         // amount allocated to reserve in kobo
+  source        String      // dividend_declaration | profit_sharing | manual
+  referenceId   String?     // e.g., dividend batch ID
+  note          String?
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId, createdAt])
+}
+
+// ---- Education Fund ----
+model EducationFund {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  amount        Int         // amount allocated in kobo
+  source        String      // dividend_declaration | manual
+  referenceId   String?
+  note          String?
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId, createdAt])
+}
+
+// ---- Development Fund ----
+model DevelopmentFund {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  amount        Int         // amount allocated in kobo
+  source        String      // dividend_declaration | manual
+  referenceId   String?
+  note          String?
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId, createdAt])
 }
 
 // ---- Members (users) ----
@@ -90,6 +164,7 @@ model Member {
   autoSaveEnabled         Boolean             @default(false)
   cooperativeId           String
   cooperative             Cooperative         @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
+  progress                MemberProgress?
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
   wallet                  Wallet?
@@ -123,6 +198,9 @@ model Member {
   deductionWaivers        DeductionWaiver[]
   batchesCreated          DeductionBatch[]    @relation("DeductionBatchCreator")
   batchesApproved         DeductionBatch[]    @relation("DeductionBatchApprover")
+  favoritePayees          FavoritePayee[]
+  dataConsents            DataConsent[]
+  dataConsentGiven        Boolean             @default(false)
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -199,6 +277,8 @@ model Loan {
   superApproved2ById String? // second super admin approval — triggers disbursement
   disbursedAt        DateTime?
   dueDate            DateTime? // next installment due date
+  queuePosition      Int? // position in the loan approval queue
+  queueJoinedAt      DateTime? // when the member joined the queue
   memberId           String
   member             Member          @relation(fields: [memberId], references: [id], onDelete: Restrict)
   superApprover2     Member?         @relation("LoanSuper2", fields: [superApproved2ById], references: [id], onDelete: SetNull)
@@ -356,6 +436,52 @@ model Beneficiary {
   @@index([cooperativeId, accountNumber])
 }
 
+model FavoritePayee {
+  id            String   @id @default(cuid())
+  memberId      String
+  member        Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  name          String   // user-defined label, e.g. "Mama Ngozi"
+  accountNumber String
+  bankCode      String
+  bankName      String?
+  lastUsedAt    DateTime?
+  useCount      Int      @default(0)
+  createdAt     DateTime @default(now())
+
+  @@unique([memberId, name])
+  @@index([memberId])
+}
+
+// ---- Financial literacy progress ----
+model MemberProgress {
+  id              String   @id @default(cuid())
+  memberId        String   @unique
+  member          Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  currentLesson   Int      @default(1)
+  completedLessons String  @default("[]")
+  enrolledAt      DateTime @default(now())
+  completedAt     DateTime?
+  lastLessonAt    DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([memberId])
+}
+
+// ---- Auto status posts ----
+model StatusPost {
+  id              String   @id @default(cuid())
+  cooperativeId   String
+  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  content         String
+  scheduledTime   DateTime
+  postedAt        DateTime?
+  createdAt       DateTime @default(now())
+
+  @@index([cooperativeId])
+  @@index([scheduledTime])
+}
+
 model DeathClaim {
   id                  String            @id @default(cuid())
   memberId            String // the deceased member
@@ -367,6 +493,13 @@ model DeathClaim {
   familyAccountNumber String?
   familyBankCode      String?
   familyBankName      String?
+  familyPhone         String? // phone of the family member who must confirm
+  familyConfirmed     Boolean           @default(false) // true once family confirms the claim
+  familyConfirmedAt   DateTime? // when the family confirmed
+  familyConfirmCode   String? // hashed OTP code sent to family for confirmation
+  approvalsRequired   Int               @default(2) // number of super admin approvals needed
+  approvalCount       Int               @default(0) // current number of approvals received
+  waitingPeriodEnd    DateTime? // earliest time the claim can be finalized (72h after initiation)
   payoutReference     String?
   createdById         String?
   approvedAt          DateTime?
@@ -425,9 +558,11 @@ model LedgerEntry {
   amount        Int // stored in kobo
   note          String?
   reference     String? // link to the source record (loan id, payout ref, ...)
+  fundType      String      @default("operational") // member | operational | reserve
   createdAt     DateTime    @default(now())
 
   @@index([cooperativeId, createdAt])
+  @@index([cooperativeId, fundType])
 }
 
 // ---- Pay anyone (external disbursement, 3-super-admin rule) ----
@@ -525,6 +660,7 @@ model GuarantorDeduction {
   createdAt     DateTime  @default(now())
 
   @@unique([loanId, guarantorId])
+  @@index([cooperativeId])
   @@index([status, deductAt])
 }
 
@@ -552,14 +688,17 @@ model Vote {
   id            String    @id @default(cuid())
   cooperativeId String
   unitId        String? // null = cooperative-wide election
-  kind          String // unit_admin | executive
-  position      String? // e.g. "President", "Treasurer" for executive votes
+  kind          String // unit | exec — kept for backwards compat
+  electionType  String    @default("general") // workplace | executive | general
+  position      String? // e.g. "President", "Treasurer", "Lagos Admin"
   title         String
   status        String    @default("open") // open | closed
   winnerId      String? // member who won when closed
   createdById   String
   createdAt     DateTime  @default(now())
   closedAt      DateTime?
+  quorumRequired Int     @default(30) // percentage of active members needed for quorum
+  lastResultBroadcastAt DateTime? // last time live results were broadcast
 
   cooperative Cooperative     @relation(fields: [cooperativeId], references: [id])
   candidates  VoteCandidate[]
@@ -682,6 +821,8 @@ model DeductionBatch {
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
   items         DeductionItem[]
+
+  @@index([cooperativeId])
 }
 
 model DeductionItem {
@@ -708,4 +849,71 @@ model DeductionWaiver {
   createdAt   DateTime @default(now())
 
   @@unique([memberId, period])
+}
+
+// ---- Per-cooperative business rules (SaaS config) ----
+model CooperativeConfig {
+  id                       String   @id @default(cuid())
+  cooperativeId            String   @unique
+  cooperative              Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  loanInterestRate         Int      @default(10) // percentage
+  serviceChargePercent     Int      @default(2) // percentage
+  minContribution          Int      @default(200000) // kobo
+  minSavings               Int      @default(100000) // kobo
+  minWithdrawal            Int      @default(500000) // kobo
+  maxWithdrawal            Int      @default(5000000) // kobo
+  withdrawalCooldownMonths Int      @default(6)
+  lateFinePercent          Int      @default(5) // percentage
+  maxLoanMultiplier        Int      @default(3) // max loan = multiplier × savings
+  autoApproveLoans         Boolean  @default(false)
+  requireGuarantors        Boolean  @default(true)
+  minGuarantors            Int      @default(2)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@index([cooperativeId])
+}
+
+// ---- Per-cooperative branding (SaaS config) ----
+model BrandingConfig {
+  id            String   @id @default(cuid())
+  cooperativeId String   @unique
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  displayName   String
+  welcomeMessage String?
+  footerText    String?
+  logoUrl       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([cooperativeId])
+}
+
+// ---- Per-cooperative subscription (SaaS billing) ----
+model Subscription {
+  id               String    @id @default(cuid())
+  cooperativeId    String    @unique
+  cooperative      Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  plan             String    @default("free") // free | starter | pro | enterprise
+  status           String    @default("active") // active | suspended | past_due
+  memberLimit      Int       @default(20)
+  monthlyPrice     Int       @default(0) // kobo
+  currentPeriodEnd DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([cooperativeId])
+}
+
+// ---- NDPR data consent log ----
+model DataConsent {
+  id            String   @id @default(cuid())
+  memberId      String
+  member        Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  consentType   String   // registration | delete_account | data_export
+  granted       Boolean
+  ipAddress     String?
+  createdAt     DateTime @default(now())
+
+  @@index([memberId])
 }

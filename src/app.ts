@@ -13,6 +13,8 @@ import { serveExportFile } from "./routes/exports.js";
 declare module "fastify" {
   interface FastifyRequest {
     adminPhone?: string;
+    adminCoopId?: string;
+    adminRole?: string;
   }
 }
 

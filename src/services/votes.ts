@@ -1,11 +1,121 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { sendText, notifyMember } from "../lib/messaging.js";
 import { audit } from "./audit.js";
+
+const BROADCAST_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between broadcasts
 
 export interface VoteResult {
   ok: boolean;
   message: string;
   voteId?: string;
+}
+
+async function countActiveMembers(cooperativeId: string, unitId: string | null): Promise<number> {
+  const where: { cooperativeId: string; status: string; unitId?: string } = {
+    cooperativeId,
+    status: "active",
+  };
+  if (unitId) {
+    where.unitId = unitId;
+  }
+  return prisma.member.count({ where });
+}
+
+function buildProgressBar(votes: number, maxVotes: number): string {
+  if (maxVotes === 0) return "░░░░░░░░░░";
+  const filled = Math.round((votes / maxVotes) * 10);
+  return "█".repeat(filled) + "░".repeat(10 - filled);
+}
+
+function formatTimeRemaining(createdAt: Date): string {
+  const now = new Date();
+  const diffMs = createdAt.getTime() - now.getTime();
+  if (diffMs <= 0) return "Ended";
+  const days = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+  const hours = Math.floor((diffMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+  if (days > 0) return `${days} day${days > 1 ? "s" : ""} ${hours} hour${hours !== 1 ? "s" : ""}`;
+  if (hours > 0) return `${hours} hour${hours > 1 ? "s" : ""}`;
+  const minutes = Math.floor((diffMs % (60 * 60 * 1000)) / (60 * 1000));
+  return `${minutes} minute${minutes !== 1 ? "s" : ""}`;
+}
+
+function electionTypeLabel(vote: { electionType: string; kind: string; position?: string | null; unitId?: string | null }): string {
+  if (vote.electionType === "workplace" || vote.kind === "unit") return "🏢 Workplace Election";
+  if (vote.electionType === "executive" || vote.kind === "exec") return "🏛️ Executive Election";
+  return "🗳️ General Vote";
+}
+
+function positionLabel(vote: { position?: string | null; title: string }): string {
+  return vote.position ? ` for *${vote.position}*` : "";
+}
+
+async function buildLiveResultsMessage(voteId: string): Promise<string> {
+  const vote = await prisma.vote.findUnique({
+    where: { id: voteId },
+    include: {
+      candidates: {
+        include: { member: { select: { name: true } }, ballots: { select: { id: true } } },
+      },
+    },
+  });
+  if (!vote) return "Election not found.";
+
+  const totalVotes = vote.candidates.reduce((sum, c) => sum + c.ballots.length, 0);
+  const maxVotes = Math.max(...vote.candidates.map((c) => c.ballots.length), 1);
+  const activeMembers = await countActiveMembers(vote.cooperativeId, vote.unitId);
+  const quorumRequired = Math.ceil((activeMembers * vote.quorumRequired) / 100);
+  const quorumMet = totalVotes >= quorumRequired;
+  const quorumPercent = activeMembers > 0 ? Math.round((totalVotes / activeMembers) * 100) : 0;
+
+  const lines = vote.candidates.map((c) => {
+    const votes = c.ballots.length;
+    const pct = totalVotes > 0 ? Math.round((votes / totalVotes) * 100) : 0;
+    const bar = buildProgressBar(votes, maxVotes);
+    return `${c.member.name}: ${bar} ${votes} vote${votes !== 1 ? "s" : ""} (${pct}%)`;
+  });
+
+  const quorumStatus = quorumMet ? "✅" : "❌";
+  const timeRemaining = formatTimeRemaining(vote.createdAt);
+  const typeTag = electionTypeLabel(vote);
+  const posLabel = positionLabel(vote);
+
+  return (
+    `${typeTag} LIVE: ${vote.title}${posLabel}\n\n` +
+    `${lines.join("\n") || "No candidates yet."}\n\n` +
+    `Total votes: ${totalVotes} | Quorum: ${totalVotes}/${quorumRequired} (${quorumPercent}%) ${quorumStatus}\n` +
+    `Time left: ${timeRemaining}`
+  );
+}
+
+async function broadcastLiveResults(voteId: string): Promise<void> {
+  const vote = await prisma.vote.findUnique({ where: { id: voteId } });
+  if (!vote || vote.status !== "open") return;
+
+  const now = new Date();
+  if (vote.lastResultBroadcastAt) {
+    const elapsed = now.getTime() - vote.lastResultBroadcastAt.getTime();
+    if (elapsed < BROADCAST_COOLDOWN_MS) return;
+  }
+
+  const message = await buildLiveResultsMessage(voteId);
+
+  const members = await prisma.member.findMany({
+    where: {
+      cooperativeId: vote.cooperativeId,
+      status: "active",
+      ...(vote.unitId ? { unitId: vote.unitId } : {}),
+    },
+    select: { phone: true, altChannelId: true, preferredChannel: true },
+  });
+
+  for (const member of members) {
+    await notifyMember(member, message);
+  }
+
+  await prisma.vote.update({
+    where: { id: voteId },
+    data: { lastResultBroadcastAt: now },
+  });
 }
 
 /**
@@ -36,9 +146,11 @@ export async function startVote(
 
   let unitId: string | null = null;
   let position: string | null = null;
+  let electionType: string = "general";
   let voteTitle = "";
 
   if (kind === "unit") {
+    electionType = "workplace";
     if (!scopeArg) {
       return { ok: false, message: "Usage: *startvote unit <unitcode> <title>*." };
     }
@@ -49,8 +161,10 @@ export async function startVote(
     });
     if (!unit) return { ok: false, message: `No unit with code *${scopeArg}* in your cooperative.` };
     unitId = unit.id;
-    voteTitle = title.trim() || `Unit admin election — ${unit.name}`;
+    position = `Admin — ${unit.name}`;
+    voteTitle = title.trim() || `Admin for ${unit.name}`;
   } else {
+    electionType = "executive";
     if (!scopeArg) {
       return { ok: false, message: "Usage: *startvote exec <position> <title>* e.g. *startvote exec President Executive election 2026*." };
     }
@@ -71,6 +185,7 @@ export async function startVote(
       cooperativeId: actor.cooperativeId,
       unitId,
       kind,
+      electionType,
       position,
       title: voteTitle.slice(0, 200),
       createdById: actor.id,
@@ -88,14 +203,21 @@ export async function startVote(
     detail: `${kind} — ${voteTitle}`,
   });
 
+  const activeMembers = await countActiveMembers(actor.cooperativeId, unitId);
+  const quorumRequired = Math.ceil((activeMembers * 30) / 100);
+
   return {
     ok: true,
     voteId: vote.id,
     message:
       `🗳️ Election *${vote.id.slice(-6)}* opened: *${voteTitle}*\n` +
-      (kind === "unit" ? "Only members of that unit can stand and vote.\n" : "All cooperative members can stand and vote.\n") +
+      (kind === "unit"
+        ? `🏢 Workplace election${position ? ` — ${position}` : ""}\nOnly members of that unit can stand and vote.\n`
+        : `🏛️ Executive election — ${position ?? "cooperative-wide"}\nAll cooperative members can stand and vote.\n`) +
+      `\n📊 Quorum: ${quorumRequired} votes needed (30% of ${activeMembers} active members)\n` +
       `\nAdd candidates: *candidate ${vote.id.slice(-6)} <member code>*\n` +
       `Members vote: *vote ${vote.id.slice(-6)} <member code>*\n` +
+      `Check results: *pollresults ${vote.id.slice(-6)}*\n` +
       `Close & tally: *closevote ${vote.id.slice(-6)}*`,
   };
 }
@@ -127,7 +249,8 @@ export async function addCandidate(actorPhone: string, voteCode: string, memberC
   return { ok: true, message: `✅ ${candidate.name} added as a candidate for *${vote.title}*.` };
 }
 
-/** A member casts their ballot for a candidate (by member code). */
+/** A member casts their ballot for a candidate (by member code).
+ *  Nominees ARE allowed to vote — one person, one ballot per election. */
 export async function castVote(voterPhone: string, voteCode: string, memberCode: string): Promise<VoteResult> {
   const voter = await prisma.member.findFirst({ where: { phone: voterPhone } });
   if (!voter) return { ok: false, message: "You need to join a cooperative first." };
@@ -158,6 +281,8 @@ export async function castVote(voterPhone: string, voteCode: string, memberCode:
     return { ok: false, message: "You already voted in this election. One person, one vote." };
   }
 
+  await broadcastLiveResults(vote.id);
+
   return { ok: true, message: `🗳️ Vote recorded for *${candidate.member.name}*. Thank you for participating.` };
 }
 
@@ -166,6 +291,16 @@ export async function showResults(phone: string, voteCode: string): Promise<Vote
   const vote = await findVote(voteCode);
   if (!vote) return { ok: false, message: "Election not found." };
   return { ok: true, message: await tallyMessage(vote.id) };
+}
+
+/** Show formatted live results for an ongoing election (pollresults command). */
+export async function showLiveResults(phone: string, voteCode: string): Promise<VoteResult> {
+  const vote = await findVote(voteCode);
+  if (!vote) return { ok: false, message: "Election not found." };
+  if (vote.status !== "open") {
+    return { ok: true, message: await tallyMessage(vote.id) };
+  }
+  return { ok: true, message: await buildLiveResultsMessage(vote.id) };
 }
 
 /** Close an election and tally. Unit elections install the winner as unit admin. */
@@ -188,6 +323,11 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
     return { ok: true, message: "Election closed with no candidates. No winner." };
   }
 
+  const totalVotes = tally.reduce((sum, c) => sum + c.ballots.length, 0);
+  const activeMembers = await countActiveMembers(vote.cooperativeId, vote.unitId);
+  const quorumRequired = Math.ceil((activeMembers * vote.quorumRequired) / 100);
+  const quorumMet = totalVotes >= quorumRequired;
+
   tally.sort((a, b) => b.ballots.length - a.ballots.length);
   const winner = tally[0];
   const tied = tally.filter((c) => c.ballots.length === winner.ballots.length).length > 1;
@@ -197,8 +337,15 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
     data: { status: "closed", closedAt: new Date(), winnerId: tied ? null : winner.memberId },
   });
 
+  let quorumMessage = "";
+  if (quorumMet) {
+    quorumMessage = `✅ Quorum met (${totalVotes} of ${quorumRequired} votes needed). Results are binding.`;
+  } else {
+    quorumMessage = `❌ Quorum not met (${totalVotes} of ${quorumRequired} votes needed). Results are advisory only.`;
+  }
+
   let extra = "";
-  if (!tied && vote.kind === "unit" && vote.unitId) {
+  if (!tied && (vote.kind === "unit" || vote.electionType === "workplace") && vote.unitId) {
     const unit = await prisma.unit.findUnique({ where: { id: vote.unitId } });
     if (unit) {
       await prisma.$transaction([
@@ -207,8 +354,8 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
       ]);
       extra = `\n\n🎉 ${winner.member.name} is now the elected admin of *${unit.name}* (${unit.code}).`;
     }
-  } else if (!tied && vote.kind === "exec") {
-    extra = `\n\n🎉 ${winner.member.name} is elected *${vote.position}*.`;
+  } else if (!tied && (vote.kind === "exec" || vote.electionType === "executive")) {
+    extra = `\n\n🎉 ${winner.member.name} is elected *${vote.position ?? "executive"}*.`;
   }
 
   await audit({
@@ -222,8 +369,8 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
     detail: tied ? "tied result" : `winner: ${winner.member.name}`,
   });
 
-  // Announce to voters/candidates' cooperative via the actors only (keep it light).
-  return { ok: true, message: (await tallyMessage(vote.id)) + extra };
+  const finalMessage = (await tallyMessage(vote.id)) + `\n\n${quorumMessage}` + extra;
+  return { ok: true, message: finalMessage };
 }
 
 async function tallyMessage(voteId: string): Promise<string> {
@@ -236,11 +383,13 @@ async function tallyMessage(voteId: string): Promise<string> {
     },
   });
   if (!vote) return "Election not found.";
+  const typeTag = electionTypeLabel(vote);
+  const posLabel = positionLabel(vote);
   const lines = vote.candidates
     .map((c) => `• ${c.member.name} — ${c.ballots.length} vote(s)`)
     .join("\n");
   return (
-    `🗳️ *${vote.title}* (${vote.status})\n\n${lines || "No candidates yet."}` +
+    `${typeTag} *${vote.title}*${posLabel} (${vote.status})\n\n${lines || "No candidates yet."}` +
     (vote.winnerId ? "" : "")
   );
 }
@@ -256,4 +405,26 @@ async function findVote(shortId: string) {
     take: 2,
   });
   return matches.length === 1 ? matches[0] : null;
+}
+
+/** Get all active elections a member is eligible to vote in (for auto-notify on join). */
+export async function getActiveElectionsForNewMember(
+  cooperativeId: string,
+  unitId: string | null,
+): Promise<Array<{ id: string; title: string; position: string | null; electionType: string; kind: string; createdAt: Date }>> {
+  const votes = await prisma.vote.findMany({
+    where: {
+      cooperativeId,
+      status: "open",
+      OR: [
+        // Executive / coop-wide elections: all members can vote
+        { unitId: null },
+        // Workplace elections: only members of that unit
+        ...(unitId ? [{ unitId }] : []),
+      ],
+    },
+    select: { id: true, title: true, position: true, electionType: true, kind: true, createdAt: true },
+    orderBy: { createdAt: "desc" },
+  });
+  return votes;
 }
