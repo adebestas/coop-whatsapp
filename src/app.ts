@@ -105,6 +105,10 @@ export function buildApp() {
   void app.register(adminApiRoutes);
   void app.register(serveExportFile);
 
+  // Serve the admin dashboard (dashboard/) if present.
+  const dashboardDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../dashboard");
+  void app.register(fastifyStatic, { root: dashboardDir, prefix: "/dashboard/" });
+
   // Serve the built admin dashboard (web/dist) if present.
   const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/dist");
   void app.register(fastifyStatic, { root: webDist });

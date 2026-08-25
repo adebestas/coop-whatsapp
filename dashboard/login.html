@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Coop Admin — Login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="login-page">
+  <div class="login-container">
+    <div class="login-card">
+      <div class="login-logo">
+        <div class="logo-mark">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+            <rect width="48" height="48" rx="12" fill="#008751"/>
+            <path d="M14 34V14h6c5.5 0 9 3.5 9 8s-3.5 8-9 8h-2v4h-4zm4-7.5h2c3 0 5-1.8 5-4.5s-2-4.5-5-4.5h-2v9z" fill="white"/>
+            <circle cx="35" cy="34" r="3" fill="#D4AF37"/>
+          </svg>
+        </div>
+        <h1>Coop Admin</h1>
+        <p class="login-subtitle">Cooperative Management Dashboard</p>
+      </div>
+
+      <form id="loginForm" class="login-form" novalidate>
+        <div class="form-group">
+          <label for="phone">Phone Number</label>
+          <div class="input-wrapper">
+            <span class="input-prefix">+234</span>
+            <input type="tel" id="phone" name="phone" placeholder="801 234 5678" required autocomplete="tel" inputmode="numeric">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="pin">PIN</label>
+          <input type="password" id="pin" name="pin" placeholder="4-digit PIN" required maxlength="4" pattern="[0-9]{4}" autocomplete="current-password" inputmode="numeric">
+        </div>
+
+        <div id="loginError" class="form-error" hidden></div>
+
+        <button type="submit" id="loginBtn" class="btn btn-primary btn-full">
+          <span class="btn-text">Sign In</span>
+          <span class="btn-loader" hidden>
+            <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>
+          </span>
+        </button>
+      </form>
+
+      <p class="login-footer">Secure access for cooperative administrators</p>
+    </div>
+
+    <div class="login-decoration">
+      <div class="deco-pattern"></div>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      // Redirect if already logged in
+      if (localStorage.getItem('coop_token')) {
+        window.location.href = 'index.html';
+        return;
+      }
+
+      const form = document.getElementById('loginForm');
+      const phoneInput = document.getElementById('phone');
+      const pinInput = document.getElementById('pin');
+      const errorEl = document.getElementById('loginError');
+      const loginBtn = document.getElementById('loginBtn');
+
+      form.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        errorEl.hidden = true;
+
+        const phone = phoneInput.value.replace(/[^0-9]/g, '');
+        const pin = pinInput.value.trim();
+
+        if (!phone || phone.length < 10) {
+          showError('Enter a valid phone number');
+          return;
+        }
+        if (!pin || pin.length !== 4) {
+          showError('Enter your 4-digit PIN');
+          return;
+        }
+
+        setLoading(true);
+
+        try {
+          const fullPhone = phone.startsWith('234') ? phone : '234' + phone;
+          const res = await fetch('/api/admin/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: fullPhone, pin })
+          });
+
+          const data = await res.json();
+
+          if (!res.ok) {
+            showError(data.error || 'Login failed');
+            return;
+          }
+
+          localStorage.setItem('coop_token', data.token);
+          localStorage.setItem('coop_member', JSON.stringify(data.member));
+          window.location.href = 'index.html';
+        } catch (err) {
+          showError('Network error. Please try again.');
+        } finally {
+          setLoading(false);
+        }
+      });
+
+      function showError(msg) {
+        errorEl.textContent = msg;
+        errorEl.hidden = false;
+      }
+
+      function setLoading(loading) {
+        loginBtn.disabled = loading;
+        loginBtn.querySelector('.btn-text').hidden = loading;
+        loginBtn.querySelector('.btn-loader').hidden = !loading;
+      }
+    })();
+  </script>
+</body>
+</html>

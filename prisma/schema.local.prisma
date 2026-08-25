@@ -50,6 +50,9 @@ model Cooperative {
   developmentFunds    DevelopmentFund[]
   statusPosts         StatusPost[]
   payeRecords          PAYERecord[]
+  byelaws              Byelaw[]
+  strs                 STR[]
+  grievances           Grievance[]
   config             CooperativeConfig?
   branding            BrandingConfig?
   subscription       Subscription?
@@ -144,6 +147,7 @@ model Member {
   pinLockedUntil          DateTime? // brute-force lockout window
   totpSecret              String? // base32 TOTP secret — when set, money-out commands need a live 6-digit code
   status                  String              @default("active") // pending | active | suspended | deceased
+  optedOut                Boolean             @default(false) // true = member opted out of all outbound messages
   bankAccountNumber       String? // member's bank account for withdrawals
   bankCode                String?
   bankName                String?
@@ -167,6 +171,7 @@ model Member {
   cooperativeId           String
   cooperative             Cooperative         @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
   progress                MemberProgress?
+  consentAt               DateTime?           // when the member opted in to messages
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
   wallet                  Wallet?
@@ -197,6 +202,10 @@ model Member {
   postsHeld               CoopPost[]          @relation("PostIncumbent")
   monthlyDeduction        Int? // agreed salary deduction remitted by employer in kobo
   deductionItems          DeductionItem[]
+  deathClaimApprovals     DeathClaimApproval[] @relation("DeathClaimApprovals")
+  grievances              Grievance[]
+  grievancesResolved      Grievance[]         @relation("GrievanceResolver")
+  strs                    STR[]
   deductionWaivers        DeductionWaiver[]
   batchesCreated          DeductionBatch[]    @relation("DeductionBatchCreator")
   batchesApproved         DeductionBatch[]    @relation("DeductionBatchApprover")
@@ -509,6 +518,7 @@ model DeathClaim {
   finalizedAt         DateTime?
   createdAt           DateTime          @default(now())
   validations         DeathValidation[]
+  approvals            DeathClaimApproval[]
 
   @@index([memberId, status])
   @@index([cooperativeId, status])
@@ -947,4 +957,62 @@ model PAYERecord {
 
   @@unique([cooperativeId, memberId, month, year])
   @@index([cooperativeId, year, month])
+}
+
+model Byelaw {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  title         String
+  content       String
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId])
+}
+
+model DeathClaimApproval {
+  id              String      @id @default(cuid())
+  deathClaimId    String
+  deathClaim      DeathClaim  @relation(fields: [deathClaimId], references: [id], onDelete: Cascade)
+  approvedById    String
+  approvedBy      Member      @relation("DeathClaimApprovals", fields: [approvedById], references: [id])
+  approvedAt      DateTime    @default(now())
+
+  @@unique([deathClaimId, approvedById])
+  @@index([deathClaimId])
+}
+
+model STR {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  amount        Int
+  reason        String
+  status        String      @default("pending")
+  filedAt       DateTime?
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId, createdAt])
+  @@index([memberId, status])
+}
+
+model Grievance {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  memberId      String
+  member        Member   @relation(fields: [memberId], references: [id])
+  message       String
+  status        String   @default("open")
+  response      String?
+  resolvedById  String?
+  resolvedBy    Member?  @relation("GrievanceResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([cooperativeId, status])
+  @@index([memberId])
 }
