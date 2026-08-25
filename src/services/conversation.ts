@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText, platformOf } from "../lib/messaging.js";
+import { sendText } from "../lib/messaging.js";
 import { getMemberByPhone } from "./cooperative.js";
 import { handleAdminCommand } from "./admin.js";
 import { checkMoneyRateLimit, checkAIRateLimit } from "./fraud.js";
@@ -39,7 +39,7 @@ async function checkTierLimit(phone: string, amount: number): Promise<string | n
   return null;
 }
 
-import { z } from "zod";
+import { z } from "zod"; // used by FlowDataSchema below
 
 import { buildMenu, handleAwaitingInput } from "./handlers/session.js";
 import { handleJoinStart, handleOnboardStart } from "./handlers/join.js";
@@ -241,7 +241,7 @@ export async function handleMessage(
   if (!member) {
     const altOwner = await prisma.member.findFirst({ where: { altChannelId: phone } });
     if (altOwner) {
-      const pref = platformOf(phone);
+      const pref = (await import("../lib/messaging.js")).platformOf(phone);
       if (altOwner.preferredChannel !== pref) {
         await prisma.member.update({
           where: { id: altOwner.id },
@@ -255,10 +255,10 @@ export async function handleMessage(
       });
       return;
     }
-  } else if (member.preferredChannel !== platformOf(phone)) {
+  } else if (member.preferredChannel !== (await import("../lib/messaging.js")).platformOf(phone)) {
     await prisma.member.update({
       where: { id: member.id },
-      data: { preferredChannel: platformOf(phone) },
+      data: { preferredChannel: (await import("../lib/messaging.js")).platformOf(phone) },
     });
   }
 

@@ -25,6 +25,8 @@ function hashEntry(prevHash: string | null, payload: Record<string, unknown>): s
  * Append-only, hash-chained trail of every money/admin action. Each entry
  * carries the hash of the previous one — editing history breaks the chain
  * (checked nightly by the reconciliation job). Never throws.
+ *
+ * NOTE: Rare hash chain breaks from concurrent writes are detected by reconciliation.
  */
 export async function audit(entry: AuditEntry): Promise<void> {
   try {

@@ -75,9 +75,10 @@ export async function processPaymentWebhook(
     return { httpStatus: 400, body: { error: "invalid json" } };
   }
   const notification = adapter.parseNotification(parsedBody);
-  const eventId = notification?.transactionId
-    ? `${providerName}:${notification.transactionId}`
-    : `${providerName}:unsigned:${createHash("sha256").update(rawBody).digest("hex").slice(0, 32)}`;
+  if (!notification?.transactionId) {
+    return { httpStatus: 400, body: { error: "Missing transaction ID" } };
+  }
+  const eventId = `${providerName}:${notification.transactionId}`;
 
   // 3. INSERT-first idempotency gate.
   try {

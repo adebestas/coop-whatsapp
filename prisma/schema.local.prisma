@@ -1,5 +1,7 @@
 // LOCAL DEV/TEST SCHEMA (SQLite mirror of schema.prisma).
 // KEEP IN SYNC: any model change must be made in BOTH files.
+// NOTE: Both schemas MUST stay in sync — any model addition/removal/field change
+// must be mirrored in both files.
 
 generator client {
   provider = "prisma-client-js"

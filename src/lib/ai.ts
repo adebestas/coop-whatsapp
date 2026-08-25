@@ -69,8 +69,14 @@ export async function suggestCommand(text: string): Promise<Suggestion | null> {
       choices?: Array<{ message?: { content?: string } }>;
     };
     const raw = body.choices?.[0]?.message?.content ?? "";
-    const jsonText = raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1);
-    const parsed = JSON.parse(jsonText) as { command?: unknown; args?: unknown };
+    // Try full parse first, then substring extraction
+    let parsed: { command?: unknown; args?: unknown };
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      const jsonText = raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1);
+      parsed = JSON.parse(jsonText);
+    }
     if (typeof parsed.command !== "string") return null;
     const command = parsed.command.trim().toLowerCase();
     if (!/^[a-z0-9]+$/.test(command) || !(KNOWN_COMMANDS as readonly string[]).includes(command)) {

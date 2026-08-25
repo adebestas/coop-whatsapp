@@ -463,9 +463,11 @@ export async function notifySuperAdmins(cooperativeId: string, text: string): Pr
 }
 
 async function isSuperAdminOf(phone: string, cooperativeId: string): Promise<boolean> {
-  const member = await prisma.member.findFirst({ where: { phone, cooperativeId } });
+  const member = await prisma.member.findFirst({
+    where: { phone, cooperativeId },
+    include: { cooperative: { select: { adminPhone: true } } },
+  });
   if (!member) return false;
   if (member.role === "superadmin") return true;
-  const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
-  return coop?.adminPhone === phone;
+  return member.cooperative?.adminPhone === phone;
 }

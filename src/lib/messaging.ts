@@ -60,6 +60,7 @@ export async function sendSecurePrompt(params: {
     });
     if (sent) return true;
     // Flow card failed (unpublished flow id, API hiccup) — degrade gracefully.
+    // NOTE: Degrades to plaintext PIN prompt when the secure card isn't available.
   }
   return sendText({ to, text });
 }

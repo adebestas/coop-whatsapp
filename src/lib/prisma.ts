@@ -6,7 +6,8 @@ export const prisma = new PrismaClient({
   log: isProd ? ["error", "warn"] : ["error", "warn", "info"],
   datasources: {
     db: {
-      // Connection pooling: PgBouncer-style pool for production, simple for dev/test
+      // Connection pooling: append ?pool_timeout=10&connection_limit=5 to DATABASE_URL
+      // for production; or use PgBouncer for higher concurrency.
       url: process.env.DATABASE_URL,
     },
   },

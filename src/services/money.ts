@@ -1,7 +1,7 @@
 /**
- * Money helpers. All monetary values are NGN floats today; every write path
- * MUST pass amounts through roundMoney so balances stay on 2dp (Float drift
- * guard). Full integer-kobo storage migration is tracked in AUDIT.md.
+ * Money helpers. All monetary values are stored as kobo integers (NGN * 100).
+ * Every write path MUST pass amounts through roundMoney to ensure integer
+ * consistency. Rounding uses Math.round for nearest-kobo precision.
  */
 export function roundMoney(n: number): number {
   if (!Number.isFinite(n)) return 0;

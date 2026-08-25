@@ -105,6 +105,9 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
   if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
     return { ok: false, message: "Rate must be between 0 and 100, e.g. *paydividend 50* pays 50% of profit." };
   }
+  if (rate > 25) {
+    return { ok: false, message: "Dividend rate cannot exceed 25% per Nigerian Cooperative Societies Act." };
+  }
 
   const pnl = await computePnl(admin.cooperativeId);
   if (pnl.netProfit <= 0) {

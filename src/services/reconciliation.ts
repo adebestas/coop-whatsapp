@@ -158,6 +158,8 @@ export async function runWalletReconciliation(
   lines.push(`Member count: ${memberCount}`);
   lines.push(`Active loans: ${activeLoanCount} (${formatBalance(activeLoanTotal)} disbursed)`);
   lines.push(`Pending withdrawals: ${pendingWithdrawalCount} (${formatBalance(pendingWithdrawalTotal)})`);
+  lines.push("");
+  lines.push("_Note: Discrepancies may include unrecorded journal entries._");
 
   if (lastLog) {
     const daysAgo = Math.floor(
@@ -264,6 +266,7 @@ export async function getReserveReport(cooperativeId: string): Promise<string> {
   const totalAllocated = allocations.reduce((sum, a) => sum + a.amount, 0);
 
   // Compute net profit for compliance check
+  // NOTE: Uses cumulative net profit; should use per-period (e.g. annual) profit for accurate reserve requirements.
   const pnl = await computePnl(cooperativeId);
   const netProfit = pnl.netProfit;
   const requiredReserve = Math.floor(Math.max(0, netProfit) * 0.20);

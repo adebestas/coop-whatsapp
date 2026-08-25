@@ -1696,21 +1696,6 @@ export async function handleAdminCommand(
       return true;
     }
 
-    case "fundstatus": {
-      const funds = await getFundBalances(coopId);
-      const body = [
-        `*💰 Cooperative Fund Status*`,
-        ``,
-        `• Reserve Fund: *${formatBalance(funds.reserve)}*`,
-        `• Education Fund: *${formatBalance(funds.education)}*`,
-        `• Development Fund: *${formatBalance(funds.development)}*`,
-        ``,
-        `_These funds are built from statutory deductions on dividend distributions._`,
-      ];
-      await sendText({ to: phone, text: body.join("\n") });
-      return true;
-    }
-
     case "grievances": {
       const grievanceList = await prisma.grievance.findMany({
         where: { cooperativeId: coopId, status: "open" },
@@ -1766,14 +1751,6 @@ export async function handleAdminCommand(
       const byelawLines = ["*📜 Cooperative Byelaws*", ""];
       for (const b of byelaws) { byelawLines.push(`*${b.title}*`, b.content, ""); }
       await sendText({ to: phone, text: byelawLines.join("\n") });
-      return true;
-    }
-
-    case "members": {
-      const allMembers = await prisma.member.findMany({ where: { cooperativeId: coopId }, include: { wallet: true }, orderBy: { createdAt: "asc" } });
-      const memberLines = [`*👥 Members (${allMembers.length})*`, ""];
-      for (const m of allMembers) { memberLines.push(`• ${m.name} — ${m.status} — ${m.createdAt.toLocaleDateString("en-GB")} — ${formatBalance(m.wallet?.balance ?? 0)}`); }
-      await sendText({ to: phone, text: memberLines.join("\n") });
       return true;
     }
 

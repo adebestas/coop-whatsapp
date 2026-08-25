@@ -1,5 +1,3 @@
-import "dotenv/config";
-
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   host: process.env.HOST ?? "0.0.0.0",
@@ -21,6 +19,15 @@ export const config = {
     .filter(Boolean),
   defaultCoopCode: process.env.DEFAULT_COOP_CODE ?? "TEST01",
 };
+
+export function validateConfig() {
+  if (!config.whatsapp.token && process.env.NODE_ENV === "production") {
+    throw new Error("WHATSAPP_TOKEN is required in production");
+  }
+  if (!config.telegram.token && process.env.NODE_ENV === "production") {
+    console.warn("[config] TELEGRAM_BOT_TOKEN not set — Telegram bot disabled in production");
+  }
+}
 
 export function isAllowed(phone: string): boolean {
   if (config.allowedTestNumbers.length === 0) return true;

@@ -210,31 +210,28 @@ export function initQueueProcessors(): void {
     await sendText({ to, text: message });
   });
 
+  // TODO: Implement these processors
   // Payments queue
   processQueue<PaymentJob>(QUEUE_NAMES.PAYMENTS, async (job) => {
     const { type, payoutId } = job.data;
-    // Payment processing logic here
     console.log(`[Queue] Processing payment ${type} for payout ${payoutId}`);
   });
 
   // Exports queue
   processQueue<ExportJob>(QUEUE_NAMES.EXPORTS, async (job) => {
     const { type, coopId, format, requestedBy } = job.data;
-    // Export generation logic here
     console.log(`[Queue] Generating ${type} export (${format}) for coop ${coopId}`);
   });
 
   // Backups queue
   processQueue<BackupJob>(QUEUE_NAMES.BACKUPS, async (job) => {
     const { type, coopId } = job.data;
-    // Backup logic here
     console.log(`[Queue] Running ${type} backup for coop ${coopId}`);
   });
 
   // Digest queue
   processQueue<DigestJob>(QUEUE_NAMES.DIGEST, async (job) => {
     const { type, coopId } = job.data;
-    // Digest generation logic here
     console.log(`[Queue] Generating ${type} digest for coop ${coopId}`);
   });
 

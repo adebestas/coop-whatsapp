@@ -79,15 +79,16 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
   };
 }
 
-function otherThan(name?: string): string | undefined {
-  return name === "paystack" ? "flutterwave" : name === "flutterwave" ? "paystack" : undefined;
+function otherThan(name?: string) {
+  const providers = ["monnify", "paystack", "flutterwave"];
+  return providers.find(p => p !== name) ?? "paystack";
 }
 
 /**
  * Handle an incoming provider webhook notification and credit the member wallet.
  * Idempotent on TWO layers:
  *  1. The deterministic journal txRef (TOPUP-<provider>-<txid>) is inserted
- *     FIRST inside the transaction — a replayed delivery aborts the whole
+ *     FIRST inside the transaction ï¿½ a replayed delivery aborts the whole
  *     transaction on the unique constraint before any wallet moves.
  *  2. Contribution.reference (`<provider>-<txid>`) is also unique.
  */
@@ -110,7 +111,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
 
   await prisma.$transaction(async (tx) => {
     // Idempotency gate FIRST: duplicate delivery throws P2002 here, which
-    // rolls back everything — the wallet is never credited twice.
+    // rolls back everything ï¿½ the wallet is never credited twice.
     try {
       await postJournal(
         {

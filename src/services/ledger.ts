@@ -124,7 +124,7 @@ async function postJournalSafe(opts: {
         data: {
           cooperativeId: opts.cooperativeId,
           type: "expense",
-          category: "other",
+          category: "journal_miss",
           amount: 0,
           note: `[JOURNAL_RECONCILIATION] ${opts.description} — txRef: ${opts.txRef ?? "none"} — error: ${err instanceof Error ? err.message : String(err)}`,
           fundType: "operational",
@@ -169,6 +169,7 @@ export async function computePnl(
   let totalExpense = 0;
 
   for (const e of entries) {
+    if (e.category === "journal_miss") continue; // Exclude zero-amount reconciliation entries
     const bucket = e.type === "income" ? incomeByCategory : expenseByCategory;
     bucket[e.category] = (bucket[e.category] ?? 0) + e.amount;
     if (e.type === "income") totalIncome += e.amount;

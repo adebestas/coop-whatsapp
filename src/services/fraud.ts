@@ -92,7 +92,7 @@ export async function checkMoneyRateLimit(phone: string): Promise<boolean> {
     try {
       const redisKey = `rl:${key}`;
       const current = await client.incr(redisKey);
-      if (current === 1) await client.expire(redisKey, MONEY_WINDOW_SECONDS);
+      await client.expire(redisKey, MONEY_WINDOW_SECONDS); // Always set — idempotent
       return current <= MONEY_MAX_PER_HOUR;
     } catch { /* fall through */ }
   }
@@ -105,6 +105,12 @@ export async function checkMoneyRateLimit(phone: string): Promise<boolean> {
   }
   if (entry.count >= MONEY_MAX_PER_HOUR) return false;
   entry.count++;
+  // Periodic cleanup of expired entries
+  if (moneyInMemory.size > 1000) {
+    for (const [k, v] of moneyInMemory) {
+      if (now > v.resetAt) moneyInMemory.delete(k);
+    }
+  }
   return true;
 }
 
@@ -126,7 +132,7 @@ export async function checkVelocity(memberId: string): Promise<boolean> {
     try {
       const redisKey = `rl:${key}`;
       const current = await client.incr(redisKey);
-      if (current === 1) await client.expire(redisKey, VELOCITY_WINDOW_SECONDS);
+      await client.expire(redisKey, VELOCITY_WINDOW_SECONDS); // Always set — idempotent
       return current <= VELOCITY_MAX;
     } catch { /* fall through */ }
   }
@@ -138,6 +144,12 @@ export async function checkVelocity(memberId: string): Promise<boolean> {
   }
   if (entry.count >= VELOCITY_MAX) return false;
   entry.count++;
+  // Periodic cleanup of expired entries
+  if (velocityInMemory.size > 1000) {
+    for (const [k, v] of velocityInMemory) {
+      if (now > v.resetAt) velocityInMemory.delete(k);
+    }
+  }
   return true;
 }
 
@@ -159,7 +171,7 @@ export async function checkAIRateLimit(memberId: string): Promise<boolean> {
     try {
       const redisKey = `rl:${key}`;
       const current = await client.incr(redisKey);
-      if (current === 1) await client.expire(redisKey, AI_QUERY_WINDOW_SECONDS);
+      await client.expire(redisKey, AI_QUERY_WINDOW_SECONDS); // Always set — idempotent
       return current <= AI_QUERY_MAX_PER_HOUR;
     } catch { /* fall through */ }
   }
@@ -171,6 +183,12 @@ export async function checkAIRateLimit(memberId: string): Promise<boolean> {
   }
   if (entry.count >= AI_QUERY_MAX_PER_HOUR) return false;
   entry.count++;
+  // Periodic cleanup of expired entries
+  if (aiInMemory.size > 1000) {
+    for (const [k, v] of aiInMemory) {
+      if (now > v.resetAt) aiInMemory.delete(k);
+    }
+  }
   return true;
 }
 

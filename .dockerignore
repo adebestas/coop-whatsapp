@@ -3,6 +3,7 @@ node_modules
 .gitignore
 .env
 .env.*
+!.env.example
 *.md
 docker-compose*.yml
 Dockerfile

@@ -341,7 +341,7 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
     data: {
       status: "approved",
       monthlyPayment: monthly,
-      balance: total,
+      balance: loan.amount,
       superApproved2ById: actorId,
       approvedAt: new Date(),
       dueDate: due,
@@ -477,6 +477,8 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
       : []),
   ]);
 
+  // NOTE: Interest is flat (not declining balance) for simplicity.
+  // For fair member treatment, consider implementing pro-rated interest.
   // P&L: the interest slice of this installment is cooperative income; fines too.
   const totalInterest = totalRepayable(loan.amount, loan.interestRate) - loan.amount;
   const interestPortion = Math.floor(totalInterest / loan.tenureMonths);

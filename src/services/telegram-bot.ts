@@ -49,6 +49,12 @@ async function setTelegramCommands(): Promise<void> {
  *   4. Ensure the webhook endpoint validates Telegram's X-Telegram-Bot-Api-Secret-Token header.
  * See: https://core.telegram.org/bots/api#setwebhook
  */
+/**
+ * Start the Telegram bot using long-polling.
+ *
+ * NOTE: Long-polling does not scale horizontally — for production multi-instance
+ * deployments, switch to webhook mode. See comments above for migration steps.
+ */
 export async function startTelegramBot(): Promise<void> {
   if (!config.telegram.token) {
     console.log("[telegram] no bot token configured — Telegram disabled");

@@ -115,10 +115,12 @@ export async function cacheDelPattern(pattern: string): Promise<void> {
   if (!client) return;
 
   try {
-    const keys = await client.keys(pattern);
-    if (keys.length > 0) {
-      await client.del(...keys);
-    }
+    let cursor = '0';
+    do {
+      const [nextCursor, keys] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+      cursor = nextCursor;
+      if (keys.length > 0) await client.del(...keys);
+    } while (cursor !== '0');
   } catch (err) {
     console.error("[Redis] cacheDelPattern error:", err);
   }
@@ -206,9 +208,7 @@ export async function checkRateLimit(
     try {
       const redisKey = `rl:${key}`;
       const current = await client.incr(redisKey);
-      if (current === 1) {
-        await client.expire(redisKey, windowSeconds);
-      }
+      await client.expire(redisKey, windowSeconds); // Always set — idempotent
       if (current > maxAttempts) {
         const ttl = await client.ttl(redisKey);
         return { allowed: false, retryAfter: ttl > 0 ? ttl : windowSeconds };

@@ -295,6 +295,8 @@ export function namesMatch(accountName: string, registeredName: string): boolean
   for (const word of b) {
     if (!a.has(word)) return false;
   }
+  // Account name must not have more than 2 extra words beyond the registered name
+  if (a.size > b.size + 2) return false;
   return a.size > 0;
 }
 

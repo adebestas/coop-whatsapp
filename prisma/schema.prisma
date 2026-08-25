@@ -1,5 +1,7 @@
 // PROD SCHEMA (PostgreSQL — Render). KEEP IN SYNC with schema.local.prisma:
 // any model change must be made in BOTH files until local Postgres is installed.
+// NOTE: Both schemas MUST stay in sync — any model addition/removal/field change
+// must be mirrored in both files.
 
 generator client {
   provider = "prisma-client-js"

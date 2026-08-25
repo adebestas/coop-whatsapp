@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { generateTotpSecret, otpauthUri, verifyTotp } from "../lib/totp.js";
 import { verifyMemberPin } from "./pin.js";
@@ -110,10 +111,12 @@ export async function refreshPin(phone: string, pin: string): Promise<{ ok: bool
   const result = await verifyMemberPin(member, pin);
   if (!result.ok) return { ok: false, message: result.message ?? "Wrong PIN." };
 
+  const payload = JSON.stringify({ pinVerifiedAt: Date.now() });
+  const sig = crypto.createHmac("sha256", process.env.SESSION_SECRET || "fallback").update(payload).digest("hex");
   const session = await prisma.session.upsert({
     where: { phone },
-    create: { phone, state: "idle", data: JSON.stringify({ pinVerifiedAt: Date.now() }) },
-    update: { data: JSON.stringify({ pinVerifiedAt: Date.now() }) },
+    create: { phone, state: "idle", data: JSON.stringify({ d: payload, s: sig }) },
+    update: { data: JSON.stringify({ d: payload, s: sig }) },
   });
   void session;
   return { ok: true, message: `✅ PIN verified — large payouts are unlocked for the next ${FRESH_PIN_MINUTES} minutes.` };
@@ -127,7 +130,11 @@ export async function assertFreshPin(phone: string, amount: number): Promise<{ o
   const session = await prisma.session.findUnique({ where: { phone } });
   const verifiedAt = (() => {
     try {
-      return Number(JSON.parse(session?.data ?? "{}").pinVerifiedAt ?? 0);
+      const parsed = JSON.parse(session?.data ?? "{}");
+      if (!parsed.d || !parsed.s) return Number(parsed.pinVerifiedAt ?? 0); // legacy plaintext
+      const expectedSig = crypto.createHmac("sha256", process.env.SESSION_SECRET || "fallback").update(parsed.d).digest("hex");
+      if (expectedSig !== parsed.s) return 0; // signature mismatch — tampered
+      return Number(JSON.parse(parsed.d).pinVerifiedAt ?? 0);
     } catch {
       return 0;
     }

@@ -80,27 +80,33 @@ interface AdminTokenPayload {
   role: string;
 }
 
+// NOTE: Token includes cooperativeId for cooperative isolation — becomes critical for multi-tenant deployments.
 function sign(phone: string, cooperativeId: string, role: string): string {
   const secret = getSecret();
-  const payload = `${phone}.${cooperativeId}.${role}.${Date.now()}`;
+  const payload = Buffer.from(JSON.stringify({ phone, cooperativeId, role, iat: Date.now() })).toString("base64url");
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   return `${payload}.${sig}`;
 }
 
 function verify(token: string): AdminTokenPayload | null {
-  const parts = token.split(".");
-  if (parts.length !== 5) return null;
+  const dotIdx = token.lastIndexOf(".");
+  if (dotIdx === -1) return null;
+  const payload = token.slice(0, dotIdx);
+  const sig = token.slice(dotIdx + 1);
   const secret = getSecret();
-  const payload = `${parts[0]}.${parts[1]}.${parts[2]}.${parts[3]}`;
-  const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
+  const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   try {
-    if (!timingSafeEqual(Buffer.from(sig), Buffer.from(parts[4]))) return null;
+    if (!timingSafeEqual(Buffer.from(expected), Buffer.from(sig))) return null;
   } catch {
     return null;
   }
-  const issuedAt = Number(parts[3]);
-  if (Date.now() - issuedAt > TOKEN_TTL_MS) return null;
-  return { phone: parts[0], cooperativeId: parts[1], role: parts[2] };
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+    if (Date.now() - data.iat > TOKEN_TTL_MS) return null;
+    return { phone: data.phone, cooperativeId: data.cooperativeId, role: data.role };
+  } catch {
+    return null;
+  }
 }
 
 export async function adminApiRoutes(app: FastifyInstance) {
@@ -108,7 +114,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const body = req.body as { phone?: string; pin?: string };
     const phone = body.phone?.replace(/[^0-9]/g, "");
     const pin = body.pin;
-    const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0] || req.ip;
+    const ip = req.ip;
 
     // Rate limit: max 5 attempts per minute per IP, 10 per 15 min per account
     const rateLimit = await checkLoginRateLimit(ip, phone);

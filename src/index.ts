@@ -1,5 +1,5 @@
 import { buildApp } from "./app.js";
-import { config } from "./config.js";
+import { config, validateConfig } from "./config.js";
 import { startTelegramBot } from "./services/telegram-bot.js";
 import {
   runAutoSaveReminders,
@@ -15,11 +15,12 @@ import { runTransferPolling, transferPollIntervalMs } from "./services/statuspol
 import { validateEnvironment } from "./lib/envcheck.js";
 import { prisma } from "./lib/prisma.js";
 import { closeQueues } from "./lib/queue.js";
-import { closeRedis } from "./lib/cache.js";
+import { initRedis, closeRedis, isRedisConnected } from "./lib/cache.js";
 
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
 
+// NOTE: Custom structured logger; could be consolidated with Fastify's built-in logger.
 // ===== Structured Logger =====
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 } as const;
 type LogLevel = keyof typeof LOG_LEVELS;
@@ -90,6 +91,7 @@ let app: ReturnType<typeof buildApp>;
 
 async function main() {
   // Fail fast on missing configuration — never run a money bot half-configured.
+  validateConfig();
   const envReport = validateEnvironment();
   for (const problem of envReport.problems) {
     console.error(`[env] ${problem}`);
@@ -100,6 +102,17 @@ async function main() {
   }
 
   app = buildApp();
+
+  // Initialize Redis and verify connectivity
+  initRedis();
+  await new Promise((r) => setTimeout(r, 500)); // Allow connection attempt
+  if (isRedisConnected()) {
+    log.info("Redis connectivity verified");
+  } else if (process.env.REDIS_URL) {
+    log.warn("Redis URL set but not connected — will retry in background");
+  } else {
+    log.warn("Redis not configured — running without cache");
+  }
 
   try {
     await app.listen({ port: config.port, host: config.host });
@@ -114,45 +127,65 @@ async function main() {
 
   // Background jobs: reminders, monthly statements + birthday greetings,
   // guarantor default notices/deductions.
-  setInterval(() => {
-    runAutoSaveReminders().catch((err) => app.log.error("[scheduler] auto-save reminders failed", err));
-    runMonthlyStatements().catch((err) => app.log.error("[scheduler] monthly statements failed", err));
-    runBirthdayGreetings().catch((err) => app.log.error("[scheduler] birthday greetings failed", err));
-    checkAnniversaries().catch((err) => app.log.error("[scheduler] anniversary greetings failed", err));
-    scanGuarantorDefaults()
-      .then(async (n) => {
-        if (n > 0) await executeDueDeductions().catch(() => {});
-      })
-      .catch((err) => app.log.error("[scheduler] guarantor default scan failed", err));
-  }, SCHEDULER_INTERVAL_MS);
+  async function runSchedulerLoop() {
+    while (true) {
+      await new Promise((r) => setTimeout(r, SCHEDULER_INTERVAL_MS));
+      await runAutoSaveReminders().catch((err) => app.log.error("[scheduler] auto-save reminders failed", err));
+      await runMonthlyStatements().catch((err) => app.log.error("[scheduler] monthly statements failed", err));
+      await runBirthdayGreetings().catch((err) => app.log.error("[scheduler] birthday greetings failed", err));
+      await checkAnniversaries().catch((err) => app.log.error("[scheduler] anniversary greetings failed", err));
+      await scanGuarantorDefaults()
+        .then(async (n) => {
+          if (n > 0) await executeDueDeductions().catch(() => {});
+        })
+        .catch((err) => app.log.error("[scheduler] guarantor default scan failed", err));
+    }
+  }
+  void runSchedulerLoop();
 
   // Data-loss protection: full backup every day, plus one at startup.
   void runBackup();
-  setInterval(() => {
-    runBackup().catch((err) => app.log.error("[backup] failed", err));
-  }, BACKUP_INTERVAL_MS);
+  async function runBackupLoop() {
+    while (true) {
+      await new Promise((r) => setTimeout(r, BACKUP_INTERVAL_MS));
+      await runBackup().catch((err) => app.log.error("[backup] failed", err));
+    }
+  }
+  void runBackupLoop();
 
   // Nightly reconciliation + anomaly alerts to super admins.
-  setInterval(() => {
-    runReconciliation().catch((err) => app.log.error("[reconcile] failed", err));
-  }, BACKUP_INTERVAL_MS);
+  async function runReconcileLoop() {
+    while (true) {
+      await new Promise((r) => setTimeout(r, BACKUP_INTERVAL_MS));
+      await runReconciliation().catch((err) => app.log.error("[reconcile] failed", err));
+    }
+  }
+  void runReconcileLoop();
 
   // Payout status polling — settle or refund transfers stuck in "processing".
   const pollMs = transferPollIntervalMs();
   if (pollMs > 0) {
-    setInterval(() => {
-      runTransferPolling()
-        .then((actions) => {
-          for (const a of actions) app.log.info(`[poller] ${a}`);
-        })
-        .catch((err) => app.log.error("[poller] failed", err));
-    }, pollMs);
+    async function runPollerLoop() {
+      while (true) {
+        await new Promise((r) => setTimeout(r, pollMs));
+        await runTransferPolling()
+          .then((actions) => {
+            for (const a of actions) app.log.info(`[poller] ${a}`);
+          })
+          .catch((err) => app.log.error("[poller] failed", err));
+      }
+    }
+    void runPollerLoop();
   }
 
   // Daily movement digest — every super sees every debit (default 8pm).
-  setInterval(() => {
-    runDailyDigest().catch((err) => app.log.error("[digest] failed", err));
-  }, SCHEDULER_INTERVAL_MS);
+  async function runDigestLoop() {
+    while (true) {
+      await new Promise((r) => setTimeout(r, SCHEDULER_INTERVAL_MS));
+      await runDailyDigest().catch((err) => app.log.error("[digest] failed", err));
+    }
+  }
+  void runDigestLoop();
 }
 
 void main();

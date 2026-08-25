@@ -25,6 +25,7 @@ export function buildApp() {
     logger: true,
     // Trust the reverse proxy (nginx/caddy) for correct client IPs in rate limits.
     trustProxy: true,
+    bodyLimit: 256 * 1024, // 256 KB
   });
 
   // Capture the RAW request body before JSON parsing — provider webhook
@@ -92,9 +93,7 @@ export function buildApp() {
   app.get("/health", async (req, reply) => {
     try {
       await prisma.$queryRaw`SELECT 1`;
-      const redis = getRedis();
-      if (redis) await redis.ping();
-      return { status: "ok", db: "connected", redis: redis ? "connected" : "unavailable" };
+      return { status: "ok" };
     } catch {
       return reply.status(503).send({ status: "error", message: "Service unavailable" });
     }

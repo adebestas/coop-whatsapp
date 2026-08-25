@@ -10,6 +10,9 @@
  * - Monthly financial summaries
  *
  * All alerts are opt-in and respect member preferences.
+ *
+ * NOTE: Explicit AI consent should be collected at onboarding (consentAt field)
+ * and enforced before sending AI-generated alerts.
  */
 
 import { prisma } from "./prisma.js";

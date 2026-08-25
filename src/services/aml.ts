@@ -235,7 +235,7 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
 
   // CBN ₦5M threshold: check aggregate outflow within 24 hours
   if (tx.direction === "out") {
-    const agg = await checkAggregateThreshold(tx.memberId, tx.cooperativeId);
+    const agg = await checkAggregateThreshold(tx.memberId, tx.cooperativeId, reportingThreshold);
     if (agg.exceeds) {
       const aggReason = `Aggregate outflow ₦${(agg.total / 100).toLocaleString()} in 24h exceeds ₦5,000,000 CBN threshold`;
       reasons.push(aggReason);
@@ -397,6 +397,8 @@ export async function autoFileSTR(
     });
     if (existing) return { filed: false };
 
+    // TODO: Implement CBN API integration for automated STR filing
+    // CBN requires filing within 72 hours of detection
     const str = await prisma.sTR.create({
       data: {
         cooperativeId: tx.cooperativeId,
@@ -429,6 +431,7 @@ export async function autoFileSTR(
 export async function checkAggregateThreshold(
   memberId: string,
   cooperativeId: string,
+  threshold: number = LARGE_TX_THRESHOLD,
 ): Promise<{ exceeds: boolean; total: number }> {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
@@ -453,5 +456,5 @@ export async function checkAggregateThreshold(
   ]);
 
   const total = (withdrawals._sum.amount ?? 0) + (payouts._sum.amount ?? 0);
-  return { exceeds: total >= LARGE_TX_THRESHOLD, total };
+  return { exceeds: total >= threshold, total };
 }

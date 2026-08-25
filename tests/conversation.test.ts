@@ -10,7 +10,6 @@ vi.mock("../src/lib/messaging.js", () => ({
   notifyMember: vi.fn().mockResolvedValue(true),
   platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
   sendSecurePrompt: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
 }));
 
 const PHONE = "2348012345678";
