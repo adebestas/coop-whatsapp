@@ -78,6 +78,11 @@ async function uploadToS3(filePath: string, key: string): Promise<boolean> {
 /**
  * Full JSON snapshot of every table — the data-loss safety net. Runs daily
  * (scheduler) and can be triggered manually. Old backups are pruned.
+ *
+ * IMPORTANT: For production disaster recovery, use `pg_dump` directly instead
+ * of this JSON export. pg_dump preserves indexes, constraints, sequences,
+ * and is much faster for large databases. Example:
+ *   pg_dump $DATABASE_URL > coop-$(date +%Y%m%d).sql
  */
 export async function runBackup(): Promise<{ ok: boolean; message: string; file?: string }> {
   try {

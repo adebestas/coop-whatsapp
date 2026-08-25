@@ -183,6 +183,8 @@ export async function handleAwaitingInput(
           `By continuing, you consent to the collection and processing of your personal data ` +
           `(name, phone, bank details) for cooperative banking purposes only. Your data is stored ` +
           `securely and never shared with third parties without your consent.\n\n` +
+          `For data protection inquiries, contact our Data Protection Officer (DPO): ` +
+          `dpo@cooperative-app.ng\n\n` +
           `Reply *YES* to consent or *NO* to cancel.`,
       });
       break;

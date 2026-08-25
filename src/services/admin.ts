@@ -46,6 +46,8 @@ import { resolveProvider } from "./payments/index.js";
 import { assertMoneyAuthorized, assertFreshPin, disable2fa, enable2fa, refreshPin } from "./auth2fa.js";
 import { getCoopConfig, updateCoopConfig, getBranding, getSubscription } from "./coop-config.js";
 
+// TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
+
 /**
  * Commands that move (or can move) money out. Each must pass the 2FA gate
  * (live authenticator code when enrolled) before its handler runs.
@@ -119,6 +121,7 @@ export async function handleAdminCommand(
   cmd: string,
   args: string[],
 ): Promise<boolean> {
+  try {
   const ctx = await adminContext(phone);
   if (!ctx) return false;
   const { admin, coop, unitAdmin, isSuper } = ctx;
@@ -787,6 +790,145 @@ export async function handleAdminCommand(
       return true;
     }
 
+    case "annualreport": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can generate annual reports." });
+        return true;
+      }
+      const reportYear = parseInt(args[0]) || new Date().getFullYear();
+      const startOfYear = new Date(reportYear, 0, 1);
+      const endOfYear = new Date(reportYear + 1, 0, 1);
+
+      const coopFull = await prisma.cooperative.findUnique({ where: { id: coopId } });
+      if (!coopFull) {
+        await sendText({ to: phone, text: "Cooperative not found." });
+        return true;
+      }
+
+      const [
+        totalContributions,
+        totalLoansDisbursed,
+        totalLoansRepaid,
+        totalDividends,
+        totalWithdrawals,
+        memberCount,
+        newMembers,
+        deceasedMembers,
+        activeLoans,
+        walletAgg,
+        reserveFund,
+        eduFund,
+        devFund,
+        coopConfig,
+        officers,
+      ] = await Promise.all([
+        prisma.contribution.aggregate({
+          where: { cooperativeId: coopId, status: "confirmed", createdAt: { gte: startOfYear, lt: endOfYear } },
+          _sum: { amount: true },
+        }),
+        prisma.loan.aggregate({
+          where: { cooperativeId: coopId, status: { in: ["approved", "disbursed", "paid"] }, approvedAt: { gte: startOfYear, lt: endOfYear } },
+          _sum: { amount: true },
+          _count: true,
+        }),
+        prisma.loanRepayment.aggregate({
+          where: { loan: { cooperativeId: coopId }, paidAt: { gte: startOfYear, lt: endOfYear } },
+          _sum: { amount: true },
+        }),
+        prisma.dividend.aggregate({
+          where: { cooperativeId: coopId, createdAt: { gte: startOfYear, lt: endOfYear } },
+          _sum: { totalPool: true },
+          _count: true,
+        }),
+        prisma.withdrawalRequest.aggregate({
+          where: { cooperativeId: coopId, status: "paid", finalizedAt: { gte: startOfYear, lt: endOfYear } },
+          _sum: { amount: true },
+          _count: true,
+        }),
+        prisma.member.count({ where: { cooperativeId: coopId, status: "active" } }),
+        prisma.member.count({ where: { cooperativeId: coopId, createdAt: { gte: startOfYear, lt: endOfYear } } }),
+        prisma.member.count({ where: { cooperativeId: coopId, status: "deceased", updatedAt: { gte: startOfYear, lt: endOfYear } } }),
+        prisma.loan.aggregate({ where: { cooperativeId: coopId, status: { in: ["approved", "disbursed"] } }, _sum: { balance: true }, _count: true }),
+        prisma.wallet.aggregate({ where: { member: { cooperativeId: coopId } }, _sum: { balance: true, totalSaved: true } }),
+        prisma.cooperative.findUnique({ where: { id: coopId }, select: { reserveFundBalance: true } }),
+        prisma.educationFund.aggregate({ where: { cooperativeId: coopId }, _sum: { amount: true } }),
+        prisma.developmentFund.aggregate({ where: { cooperativeId: coopId }, _sum: { amount: true } }),
+        prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } }),
+        prisma.coopPost.findMany({ where: { cooperativeId: coopId }, include: { incumbent: true } }),
+      ]);
+
+      const totalSavings = walletAgg._sum.totalSaved ?? 0;
+      const totalBalance = walletAgg._sum.balance ?? 0;
+      const outstandingLoans = totalLoansDisbursed._sum.amount ?? 0;
+      const loanBalance = activeLoans._sum.balance ?? 0;
+      const reserve = reserveFund?.reserveFundBalance ?? 0;
+      const education = eduFund._sum.amount ?? 0;
+      const development = devFund._sum.amount ?? 0;
+      const totalRepaid = totalLoansRepaid._sum.amount ?? 0;
+
+      const officerLines = officers.map(o => `• ${o.title}: ${o.incumbent?.name ?? "Vacant"}`).join("\n");
+
+      const report = [
+        `*ANNUAL RETURN — ${reportYear}*`,
+        `*${coopFull.name}*`,
+        `Registration No: ${coopFull.code}`,
+        "",
+        `*PART A: GENERAL INFORMATION*`,
+        `• Name of Cooperative: ${coopFull.name}`,
+        `• Registration Number: ${coopFull.code}`,
+        `• State: ${coopFull.state || "N/A"}`,
+        `• Date of Registration: ${coopFull.createdAt.toLocaleDateString("en-GB")}`,
+        `• Address: ${coopFull.description || "N/A"}`,
+        "",
+        `*PART B: OFFICERS*`,
+        officerLines || "• No officers registered",
+        "",
+        `*PART C: MEMBERSHIP*`,
+        `• Total active members: *${memberCount}*`,
+        `• New members this year: *${newMembers}*`,
+        `• Deceased members this year: *${deceasedMembers}*`,
+        "",
+        `*PART D: SHARE CAPITAL & SAVINGS*`,
+        `• Total savings mobilized this year: *${formatBalance(totalSavings)}*`,
+        `• Total member wallet balance: *${formatBalance(totalBalance)}*`,
+        "",
+        `*PART E: LOAN ACTIVITIES*`,
+        `• Total loans disbursed: *${formatBalance(outstandingLoans)}*`,
+        `• Number of loans: *${totalLoansDisbursed._count}*`,
+        `• Total loan repayments received: *${formatBalance(totalRepaid)}*`,
+        `• Current outstanding loan balance: *${formatBalance(loanBalance)}*`,
+        `• Number of active loans: *${activeLoans._count}*`,
+        "",
+        `*PART F: INCOME & EXPENDITURE*`,
+        `• Total income (contributions): *${formatBalance(totalContributions._sum.amount ?? 0)}*`,
+        `• Total expenditure (loans disbursed): *${formatBalance(outstandingLoans)}*`,
+        `• Total withdrawals by members: *${formatBalance(totalWithdrawals._sum.amount ?? 0)}*`,
+        `• Net surplus: *${formatBalance((totalContributions._sum.amount ?? 0) - (totalWithdrawals._sum.amount ?? 0))}*`,
+        "",
+        `*PART G: DIVIDENDS*`,
+        `• Total dividends declared: *${formatBalance(totalDividends._sum.totalPool ?? 0)}*`,
+        `• Number of dividend distributions: *${totalDividends._count}*`,
+        `• Dividend rate: *${coopConfig ? `${coopConfig.loanInterestRate}%` : "N/A"}*`,
+        "",
+        `*PART H: STATUTORY FUNDS*`,
+        `• Reserve Fund (20%): *${formatBalance(reserve)}*`,
+        `• Education Fund (2%): *${formatBalance(education)}*`,
+        `• Development Fund (5%): *${formatBalance(development)}*`,
+        `• Total statutory funds: *${formatBalance(reserve + education + development)}*`,
+        "",
+        `*PART I: LOAN POLICY*`,
+        `• Interest rate: *${coopConfig?.loanInterestRate ?? 10}%*`,
+        `• Max loan multiplier: *${coopConfig?.maxLoanMultiplier ?? 3}x savings*`,
+        `• Late fine: *${coopConfig?.lateFinePercent ?? 5}%*`,
+        `• Minimum contribution: *${formatBalance(coopConfig?.minContribution ?? 200000)}*`,
+        "",
+        `_Generated: ${new Date().toLocaleDateString("en-GB")}_`,
+        `_This report is suitable for filing with the State Cooperative Registrar._`,
+      ];
+      await sendText({ to: phone, text: report.join("\n") });
+      return true;
+    }
+
     case "fundstatus": {
       const funds = await getFundBalances(coopId);
       const body = [
@@ -1154,6 +1296,10 @@ export async function handleAdminCommand(
       const rate = Number(args[0]);
       if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
         await sendText({ to: phone, text: "Usage: *paydividend <rate%>*, e.g. *paydividend 5* to pay a 5% dividend." });
+        return true;
+      }
+      if (rate > 25) {
+        await sendText({ to: phone, text: "Dividend rate cannot exceed 25% per the Nigerian Cooperative Societies Act." });
         return true;
       }
       const lastDiv = await prisma.dividend.findFirst({ where: { cooperativeId: coopId }, orderBy: { createdAt: "desc" } });
@@ -1627,6 +1773,11 @@ export async function handleAdminCommand(
 
     default:
       return false;
+  }
+  } catch (err) {
+    console.error("[admin] handleAdminCommand error:", err);
+    await sendText({ to: phone, text: "An error occurred processing your command. Please try again or contact support." });
+    return true;
   }
 }
 

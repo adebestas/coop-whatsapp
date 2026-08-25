@@ -11,6 +11,34 @@ import { getReserveInfo } from "./dividends.js";
 import { getAnniversaryMessage } from "./anniversary.js";
 import { formatBalance } from "./cooperative.js";
 
+// ---- Tier-based transaction limits (CBN KYC requirements) ----
+const TIER_LIMITS = {
+  tier1: { maxSingle: 50_000_00, dailyMax: 300_000_00 }, // ₦50k single, ₦300k daily (in kobo)
+  tier2: { maxSingle: 500_000_00, dailyMax: 5_000_000_00 }, // ₦500k single, ₦5M daily (in kobo)
+} as const;
+
+async function checkTierLimit(phone: string, amount: number): Promise<string | null> {
+  const member = await prisma.member.findFirst({ where: { phone }, select: { id: true, tier: true } });
+  if (!member) return null;
+  const tier = (member.tier as keyof typeof TIER_LIMITS) || "tier1";
+  const limits = TIER_LIMITS[tier];
+  if (amount > limits.maxSingle) {
+    return `Your tier (${tier}) limits single transactions to ${formatBalance(limits.maxSingle)}. Complete BVN verification to upgrade to tier 2.`;
+  }
+  // Check daily limit
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const dailyTotal = await prisma.contribution.aggregate({
+    where: { memberId: member.id, createdAt: { gte: startOfDay }, status: "confirmed" },
+    _sum: { amount: true },
+  });
+  const total = (dailyTotal._sum.amount ?? 0) + amount;
+  if (total > limits.dailyMax) {
+    return `Your tier (${tier}) daily limit is ${formatBalance(limits.dailyMax)}. You've already transacted ${formatBalance(dailyTotal._sum.amount ?? 0)} today.`;
+  }
+  return null;
+}
+
 import { z } from "zod";
 
 import { buildMenu, handleAwaitingInput } from "./handlers/session.js";
@@ -270,6 +298,15 @@ export async function handleMessage(
           text: "⏳ You've made several money requests in the last hour. For your safety, please wait a little before trying again.",
         });
         break;
+      }
+      // Tier-based transaction limit check
+      const amt = Number(args[0]);
+      if (Number.isFinite(amt) && amt > 0) {
+        const tierError = await checkTierLimit(phone, amt);
+        if (tierError) {
+          await sendText({ to: phone, text: `⛔ ${tierError}` });
+          break;
+        }
       }
       if (cmd === "save") await handleSave(phone, args);
       else if (cmd === "loan") await handleLoan(phone, args);

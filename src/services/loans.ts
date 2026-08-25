@@ -36,8 +36,6 @@ export interface ApplyLoanResult {
 
 /** A loan can never exceed this multiple of the borrower's total savings. */
 export const LOAN_TO_SAVINGS_RATIO = 2;
-/** Flat fine (% of the late installment) charged per month overdue. */
-export const LATE_FINE_RATE = 2;
 /** Flat admin charge deducted from every loan at disbursement (₦2,000 in kobo). */
 export const LOAN_ADMIN_CHARGE = 200000;
 
@@ -326,6 +324,12 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
     return { ok: false, message: "Loan isn't ready for final approval." };
   }
 
+  // Cooperative Societies Act: minimum 20 active members before disbursing loans
+  const memberCount = await prisma.member.count({ where: { cooperativeId: loan.cooperativeId, status: "active" } });
+  if (memberCount < 20) {
+    return { ok: false, message: "Cooperative must have at least 20 active members before disbursing loans (Cooperative Societies Act)." };
+  }
+
   const total = totalRepayable(loan.amount, loan.interestRate);
   const monthly = Math.floor(total / loan.tenureMonths);
   const due = new Date();
@@ -413,7 +417,7 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
   }
   const amount = loan.monthlyPayment ?? loan.balance;
 
-  // Late fine: LATE_FINE_RATE% of the installment per month overdue.
+  // Late fine: lateFinePercent% of the installment per month overdue.
   let fine = 0;
   const now = Date.now();
   if (loan.dueDate && loan.dueDate.getTime() < now) {

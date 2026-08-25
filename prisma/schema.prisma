@@ -211,6 +211,7 @@ model Member {
   dataConsents            DataConsent[]
   dataConsentGiven        Boolean             @default(false)
   strs                    STR[]
+  tier                    String              @default("tier1") // tier1 (no BVN) | tier2 (with BVN)
 
   @@unique([cooperativeId, phone])
   @@index([phone])
