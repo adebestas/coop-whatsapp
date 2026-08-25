@@ -295,8 +295,11 @@ export async function handleAIQuery(
   cooperativeId: string,
   memberId?: string,
 ): Promise<string | null> {
+  // Enforce input length limit to prevent abuse and excessive token usage
+  const truncated = text.slice(0, 500);
+
   // 1. Classify intent
-  const intent = await classifyIntent(text);
+  const intent = await classifyIntent(truncated);
   if (!intent) return null;
 
   // 2. Gather data based on intent
@@ -356,7 +359,7 @@ export async function handleAIQuery(
   }
 
   // 3. Generate response
-  return generateResponse(text, intent.type, data);
+  return generateResponse(truncated, intent.type, data);
 }
 
 /**

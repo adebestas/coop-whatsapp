@@ -794,7 +794,7 @@ export async function handleAwaitingInput(
         memberCode = generateMemberCode();
       }
 
-      const adminPin = String(Math.floor(1000 + Math.random() * 9000));
+      const adminPin = String(randomInt(1000, 9000));
       const member = await prisma.member.create({
         data: {
           phone,

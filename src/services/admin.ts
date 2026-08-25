@@ -763,12 +763,17 @@ export async function handleAdminCommand(
     }
 
     case "fundstatus": {
-      if (!isSuper) {
-        await sendText({ to: phone, text: "Only the *super admin* can view fund segregation." });
-        return true;
-      }
-      const report = await getSegregationReport(coopId);
-      await sendText({ to: phone, text: report });
+      const funds = await getFundBalances(coopId);
+      const body = [
+        `*💰 Cooperative Fund Status*`,
+        ``,
+        `• Reserve Fund: *${formatBalance(funds.reserve)}*`,
+        `• Education Fund: *${formatBalance(funds.education)}*`,
+        `• Development Fund: *${formatBalance(funds.development)}*`,
+        ``,
+        `_These funds are built from statutory deductions on dividend distributions._`,
+      ];
+      await sendText({ to: phone, text: body.join("\n") });
       return true;
     }
 

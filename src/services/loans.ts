@@ -52,9 +52,9 @@ export function interestRateFor(tenureMonths: number): number {
   return 10;
 }
 
-/** Total repayable for a flat-rate loan: principal + flat interest. */
+/** Total repayable for a flat-rate loan: principal + flat interest (kobo integers). */
 export function totalRepayable(amount: number, ratePercent: number): number {
-  return Math.round(amount * (1 + ratePercent / 100) * 100) / 100;
+  return Math.round(amount * (1 + ratePercent / 100));
 }
 
 /**
@@ -125,7 +125,7 @@ export async function applyForLoan(
   // Interest is tiered by tenure and charged flat on the principal.
   const interestRate = interestRateFor(tenureMonths);
   const total = totalRepayable(amount, interestRate);
-  const monthly = total / tenureMonths;
+  const monthly = Math.floor(total / tenureMonths);
 
   // Assign queue position: count existing pending loans in this cooperative + 1
   const pendingCount = await prisma.loan.count({
@@ -327,7 +327,7 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
   }
 
   const total = totalRepayable(loan.amount, loan.interestRate);
-  const monthly = total / loan.tenureMonths;
+  const monthly = Math.floor(total / loan.tenureMonths);
   const due = new Date();
   due.setMonth(due.getMonth() + 1);
 
@@ -336,7 +336,7 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
     where: { id: loan.id, status: "super_approved_1" },
     data: {
       status: "approved",
-      monthlyPayment: Math.round(monthly * 100) / 100,
+      monthlyPayment: monthly,
       balance: total,
       superApproved2ById: actorId,
       approvedAt: new Date(),
@@ -475,7 +475,7 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
 
   // P&L: the interest slice of this installment is cooperative income; fines too.
   const totalInterest = totalRepayable(loan.amount, loan.interestRate) - loan.amount;
-  const interestPortion = Math.round((totalInterest / loan.tenureMonths) * 100) / 100;
+  const interestPortion = Math.floor(totalInterest / loan.tenureMonths);
   await recordLedger({
     cooperativeId: member.cooperativeId,
     type: "income",

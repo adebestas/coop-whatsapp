@@ -2,7 +2,39 @@ import { config } from "../config.js";
 import { getTelegramUpdates, sendTelegramMessage } from "../lib/telegram.js";
 import { handleMessage } from "./conversation.js";
 
+const API_BASE = "https://api.telegram.org";
+
 let offset = 0;
+
+/**
+ * Register the bot's command list with Telegram so users see
+ * autocomplete suggestions in the chat input.
+ */
+async function setTelegramCommands(): Promise<void> {
+  if (!config.telegram.token) return;
+  const commands = [
+    { command: "menu", description: "Show available commands" },
+    { command: "balance", description: "Check your wallet balance" },
+    { command: "save", description: "Make a contribution (e.g. /save 5000)" },
+    { command: "withdraw", description: "Request a withdrawal" },
+    { command: "loan", description: "Apply for a loan" },
+    { command: "repay", description: "Repay your loan" },
+    { command: "history", description: "View transaction history" },
+    { command: "help", description: "Get help" },
+  ];
+  try {
+    const res = await fetch(`${API_BASE}/bot${config.telegram.token}/setMyCommands`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commands }),
+    });
+    if (!res.ok) {
+      console.error("[telegram] setMyCommands failed:", await res.text());
+    }
+  } catch (err) {
+    console.error("[telegram] setMyCommands error:", err);
+  }
+}
 
 /**
  * Runs a long-polling loop that feeds Telegram messages into the same
@@ -16,6 +48,7 @@ export async function startTelegramBot(): Promise<void> {
   }
 
   console.log("[telegram] long-polling started");
+  await setTelegramCommands();
   for (;;) {
     try {
       const updates = await getTelegramUpdates(offset);

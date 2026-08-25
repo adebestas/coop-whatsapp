@@ -172,6 +172,33 @@ async function checkStructuring(memberId: string, cooperativeId: string, reporti
   return null;
 }
 
+/**
+ * Rule 5: Deposit structuring — multiple deposits just below the reporting
+ * threshold within 24 hours. Money-in structuring can indicate layering
+ * (breaking large sums into smaller deposits to avoid detection).
+ */
+async function checkDepositStructuring(memberId: string, cooperativeId: string, reportingThreshold: number): Promise<string | null> {
+  const since = new Date(Date.now() - ROUND_NUMBER_WINDOW_MS);
+  const minAmount = Math.floor(reportingThreshold * STRUCTURING_RATIO);
+
+  const contributions = await prisma.contribution.findMany({
+    where: {
+      memberId,
+      cooperativeId,
+      status: "confirmed",
+      createdAt: { gte: since },
+      amount: { gte: minAmount, lt: reportingThreshold },
+    },
+    select: { amount: true, createdAt: true },
+  });
+
+  if (contributions.length >= 2) {
+    const amounts = contributions.map((c) => formatBalance(c.amount)).join(", ");
+    return `Deposit structuring: ${contributions.length} deposits near ${formatBalance(reportingThreshold)} threshold (${amounts})`;
+  }
+  return null;
+}
+
 // ===== Public API =====
 
 /**
@@ -197,6 +224,12 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
 
     const structuring = await checkStructuring(tx.memberId, tx.cooperativeId, reportingThreshold);
     if (structuring) reasons.push(structuring);
+  }
+
+  // Check deposit structuring for money-in transactions
+  if (tx.direction === "in") {
+    const depositStructuring = await checkDepositStructuring(tx.memberId, tx.cooperativeId, reportingThreshold);
+    if (depositStructuring) reasons.push(depositStructuring);
   }
 
   return { flagged: reasons.length > 0, reasons };

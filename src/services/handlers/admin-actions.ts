@@ -2,7 +2,7 @@ import { prisma } from "../../lib/prisma.js";
 import { sendText } from "../../lib/messaging.js";
 import { normalizePhone } from "../../lib/phones.js";
 import { getMemberByPhone, formatBalance } from "../cooperative.js";
-import { showLedger, showHistory } from "../statements.js";
+import { showLedger, showHistory, getMonthlyStatement, getYearlyStatement } from "../statements.js";
 import { confirmGuarantee } from "../guarantors.js";
 import { createTicket, listTickets, resolveTicket } from "../support.js";
 import { listPosts } from "../posts.js";
@@ -89,6 +89,30 @@ export async function handleLedger(phone: string): Promise<void> {
 
 export async function handleHistory(phone: string): Promise<void> {
   const result = await showHistory(phone);
+  await sendText({ to: phone, text: result.message });
+}
+
+export async function handleStatement(phone: string, args: string[]): Promise<void> {
+  const text = args.join(" ").trim().toLowerCase();
+  if (text.startsWith("yearly")) {
+    const yearStr = text.replace("yearly", "").trim();
+    const year = yearStr ? parseInt(yearStr, 10) : new Date().getFullYear();
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      await sendText({ to: phone, text: "Usage: *statement yearly 2026*" });
+      return;
+    }
+    const result = await getYearlyStatement(phone, year);
+    await sendText({ to: phone, text: result.message });
+    return;
+  }
+  if (!text) {
+    const now = new Date();
+    const monthName = now.toLocaleString("en-GB", { month: "long" });
+    const result = await getMonthlyStatement(phone, `${monthName} ${now.getFullYear()}`);
+    await sendText({ to: phone, text: result.message });
+    return;
+  }
+  const result = await getMonthlyStatement(phone, text);
   await sendText({ to: phone, text: result.message });
 }
 

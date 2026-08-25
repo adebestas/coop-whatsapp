@@ -45,6 +45,7 @@ export async function sendTemplate(
   templateName: string,
   langCode: string,
   params?: string[],
+  category: "UTILITY" | "MARKETING" | "AUTHENTICATION" = "UTILITY",
 ): Promise<boolean> {
   const url = `${API_BASE}/${config.whatsapp.phoneNumberId}/messages`;
   const components: Record<string, unknown>[] = [];
@@ -63,6 +64,7 @@ export async function sendTemplate(
     template: {
       name: templateName,
       language: { code: langCode },
+      category,
     },
   };
 

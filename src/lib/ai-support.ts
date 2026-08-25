@@ -102,6 +102,15 @@ function searchFAQ(query: string): FAQItem[] {
 }
 
 /**
+ * Sanitize user-supplied name before inserting into LLM prompt.
+ * Strips newlines, trims whitespace, and caps length to prevent
+ * prompt injection via crafted member names.
+ */
+function sanitizePromptInput(value: string, maxLen = 100): string {
+  return value.replace(/[\r\n]/g, " ").trim().slice(0, maxLen);
+}
+
+/**
  * Generate AI-powered support response for member questions.
  */
 export async function generateSupportResponse(
@@ -110,7 +119,8 @@ export async function generateSupportResponse(
   memberRole: string,
 ): Promise<string> {
   // First try FAQ
-  const faqMatches = searchFAQ(question);
+  const truncated = question.slice(0, 500);
+  const faqMatches = searchFAQ(truncated);
   if (faqMatches.length > 0 && faqMatches[0]) {
     const faq = faqMatches[0];
     return `💡 *${faq.question}*\n\n${faq.answer}\n\nType the command above to get started!`;
@@ -118,7 +128,7 @@ export async function generateSupportResponse(
 
   // Then try AI
   if (!process.env.GROQ_API_KEY) {
-    return generateFallbackSupport(question, memberName);
+    return generateFallbackSupport(truncated, memberName);
   }
 
   try {
@@ -136,7 +146,7 @@ export async function generateSupportResponse(
           {
             role: "system",
             content: `You are a helpful assistant for a Nigerian cooperative banking platform.
-Member name: ${memberName}, Role: ${memberRole}
+Member name: ${sanitizePromptInput(memberName)}, Role: ${sanitizePromptInput(memberRole)}
 
 Available commands:
 - save <amount> — save money
@@ -152,19 +162,19 @@ Available commands:
 Answer questions concisely. Always suggest the relevant command.
 If unsure, direct them to reply *help* for the full command list.`,
           },
-          { role: "user", content: question },
+          { role: "user", content: truncated },
         ],
       }),
       signal: AbortSignal.timeout(8000),
     });
 
-    if (!res.ok) return generateFallbackSupport(question, memberName);
+    if (!res.ok) return generateFallbackSupport(truncated, memberName);
     const body = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    return body.choices?.[0]?.message?.content ?? generateFallbackSupport(question, memberName);
+    return body.choices?.[0]?.message?.content ?? generateFallbackSupport(truncated, memberName);
   } catch {
-    return generateFallbackSupport(question, memberName);
+    return generateFallbackSupport(truncated, memberName);
   }
 }
 

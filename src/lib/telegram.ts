@@ -19,7 +19,12 @@ export interface TelegramUpdate {
  * Telegram HTML: <b>, <i>, <s>, <code>
  */
 function convertToTelegramHTML(text: string): string {
-  let result = text;
+  // Escape HTML special characters BEFORE applying formatting tags.
+  // Otherwise user-supplied <, >, & could inject HTML or break parsing.
+  let result = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
   result = result.replace(/\*([^*]+)\*/g, "<b>$1</b>");
   result = result.replace(/_([^_]+)_/g, "<i>$1</i>");
   result = result.replace(/~([^~]+)~/g, "<s>$1</s>");

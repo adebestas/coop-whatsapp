@@ -7,6 +7,7 @@ import {
   runMonthlyStatements,
   runBirthdayGreetings,
 } from "./services/scheduler.js";
+import { checkAnniversaries } from "./services/anniversary.js";
 import { scanGuarantorDefaults, executeDueDeductions } from "./services/guarantordeduction.js";
 import { runBackup } from "./services/backup.js";
 import { runReconciliation } from "./services/reconcile.js";
@@ -88,6 +89,7 @@ async function main() {
     runAutoSaveReminders().catch((err) => app.log.error("[scheduler] auto-save reminders failed", err));
     runMonthlyStatements().catch((err) => app.log.error("[scheduler] monthly statements failed", err));
     runBirthdayGreetings().catch((err) => app.log.error("[scheduler] birthday greetings failed", err));
+    checkAnniversaries().catch((err) => app.log.error("[scheduler] anniversary greetings failed", err));
     scanGuarantorDefaults()
       .then(async (n) => {
         if (n > 0) await executeDueDeductions().catch(() => {});

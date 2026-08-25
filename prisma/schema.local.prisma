@@ -152,6 +152,7 @@ model Member {
   preferredChannel        String? // whatsapp | telegram — most-used platform, auto-learned
   lastStatementSentAt     DateTime? // month marker for monthly statements
   lastBirthdayGreetedYear Int? // year marker so birthdays only fire once a year
+  lastAnniversaryGreetedYear Int? // year marker so anniversary greetings only fire once a year
   virtualAccountNumber    String? // provider-issued account number for top-ups
   virtualAccountBank      String?
   virtualAccountProvider  String?

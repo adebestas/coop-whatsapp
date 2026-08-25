@@ -29,15 +29,15 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
     include: { wallet: true },
   });
   const totalSaved = entries.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
-  const pool = Math.max(0, pnl.netProfit) * (rate / 100);
+  // pnl.netProfit is kobo; pool stays in kobo
+  const pool = Math.max(0, Math.round(pnl.netProfit * (rate / 100)));
 
-  // Calculate deductions
+  // Calculate deductions in kobo
   const reserveAmount = Math.floor(pool * RESERVE_FUND_RATE);
   const educationAmount = Math.floor(pool * EDUCATION_FUND_RATE);
   const developmentAmount = Math.floor(pool * DEVELOPMENT_FUND_RATE);
   const totalDeductions = reserveAmount + educationAmount + developmentAmount;
-  const memberPoolKobo = Math.round(pool * 100) - Math.round(totalDeductions * 100);
-  const memberPool = memberPoolKobo / 100;
+  const memberPoolKobo = pool - totalDeductions;
 
   // Compute shares as kobo integers to avoid rounding drift
   const eligible = entries.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
@@ -63,7 +63,7 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
   }
 
   const myRaw = rawShares.find((s) => s.memberId === member.id);
-  const myShare = myRaw ? myRaw.kobo / 100 : 0;
+  const myShare = myRaw ? myRaw.kobo : 0;
 
   const lines = [
     `*🎉 Dividend calculator (real-time)*`,
@@ -78,7 +78,7 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
     `• Development Fund (5%): *${formatBalance(developmentAmount)}*`,
     `• Total deductions: *${formatBalance(totalDeductions)}*`,
     ``,
-    `Member pool: *${formatBalance(memberPool)}*`,
+    `Member pool: *${formatBalance(memberPoolKobo)}*`,
     ``,
     `Your share: *${formatBalance(myShare)}* (based on your savings share)`,
   ];
@@ -87,7 +87,7 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
     lines.push(``, `*Shares:*`);
     for (const m of entries) {
       const s = rawShares.find((r) => r.memberId === m.id);
-      const share = s ? s.kobo / 100 : 0;
+      const share = s ? s.kobo : 0;
       lines.push(`• ${m.name} — ${formatBalance(share)}`);
     }
   }
@@ -125,16 +125,15 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
     return { ok: false, message: "No savings yet — nothing to distribute against." };
   }
 
-  const pool = pnl.netProfit * (rate / 100);
+  const pool = Math.max(0, Math.round(pnl.netProfit * (rate / 100)));
   const reference = `DIV-${Date.now()}`;
 
-  // Calculate deductions
+  // Calculate deductions in kobo
   const reserveAmount = Math.floor(pool * RESERVE_FUND_RATE);
   const educationAmount = Math.floor(pool * EDUCATION_FUND_RATE);
   const developmentAmount = Math.floor(pool * DEVELOPMENT_FUND_RATE);
   const totalDeductions = reserveAmount + educationAmount + developmentAmount;
-  const memberPoolKobo = Math.round(pool * 100) - Math.round(totalDeductions * 100);
-  const memberPool = memberPoolKobo / 100;
+  const memberPoolKobo = pool - totalDeductions;
 
   // Create reserve allocation record
   await prisma.reserveAllocation.create({
@@ -231,17 +230,17 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
 
   // ATOMICITY: create all DividendEntry records with status "pending" first
   const dividend = await prisma.dividend.create({
-    data: {
-      cooperativeId: admin.cooperativeId,
-      rate,
-      totalPool: memberPool,
+      data: {
+        cooperativeId: admin.cooperativeId,
+        rate,
+        totalPool: memberPoolKobo,
       reference,
       status: "distributed",
       distributedAt: new Date(),
       entries: {
         create: rawShares.map((s) => ({
           memberId: s.member.id,
-          amount: s.kobo / 100,
+          amount: s.kobo,
           status: "pending" as const,
         })),
       },
@@ -254,14 +253,13 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
   for (const s of rawShares) {
     const shareKobo = s.kobo;
     if (shareKobo <= 0) continue;
-    const share = shareKobo / 100;
     paidCount += 1;
     const entry = dividend.entries.find((e) => e.memberId === s.member.id);
     await prisma.$transaction([
-      prisma.wallet.update({ where: { id: s.member.wallet!.id }, data: { balance: { increment: share } } }),
+      prisma.wallet.update({ where: { id: s.member.wallet!.id }, data: { balance: { increment: shareKobo } } }),
       prisma.contribution.create({
         data: {
-          amount: share,
+          amount: shareKobo,
           type: "dividend",
           note: `Dividend at ${rate}% of profit (${reference})`,
           reference: `DIV-${dividend.id.slice(-8)}-${s.member.id.slice(-6)}`,
@@ -281,7 +279,7 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
     cooperativeId: admin.cooperativeId,
     type: "appropriation",
     category: "dividend",
-    amount: memberPool,
+    amount: memberPoolKobo,
     note: `Dividend at ${rate}% of net profit (after statutory deductions)`,
     reference: dividend.id,
     fundType: "operational",
@@ -297,7 +295,7 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
       `• Education Fund (2%): *${formatBalance(educationAmount)}*\n` +
       `• Development Fund (5%): *${formatBalance(developmentAmount)}*\n` +
       `• Total deductions: *${formatBalance(totalDeductions)}*\n\n` +
-      `Member dividends: *${formatBalance(memberPool)}* shared among ${paidCount} member(s)\n\n` +
+      `Member dividends: *${formatBalance(memberPoolKobo)}* shared among ${paidCount} member(s)\n\n` +
       `_Distributed proportional to savings._`,
   };
 }

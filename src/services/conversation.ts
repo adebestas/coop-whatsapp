@@ -8,6 +8,7 @@ import { handleAIQuery, isNaturalLanguageQuery } from "../lib/ai-query.js";
 import { generateSupportResponse } from "../lib/ai-support.js";
 import { FIVE_LESSONS, getLesson, getTotalLessons } from "./literacy.js";
 import { getReserveInfo } from "./dividends.js";
+import { getAnniversaryMessage } from "./anniversary.js";
 import { formatBalance } from "./cooperative.js";
 
 import { z } from "zod";
@@ -35,6 +36,7 @@ import {
   handleSupport,
   handleLedger,
   handleHistory,
+  handleStatement,
   handlePosts,
   handleMyDeduction,
   handleSkipMonth,
@@ -302,8 +304,11 @@ export async function handleMessage(
       break;
 
     case "history":
-    case "statement":
       await handleHistory(phone);
+      break;
+
+    case "statement":
+      await handleStatement(phone, args);
       break;
 
     case "plan":
@@ -362,6 +367,10 @@ export async function handleMessage(
 
     case "reserveinfo":
       await handleReserveInfo(phone, member);
+      break;
+
+    case "anniversary":
+      await handleAnniversary(phone, member);
       break;
 
     case "risk":
@@ -618,4 +627,31 @@ async function handleReserveInfo(phone: string, member: { cooperativeId: string 
   ];
 
   await sendText({ to: phone, text: body.join("\n") });
+}
+
+async function handleAnniversary(phone: string, member: { id: string; name: string; createdAt: Date; wallet?: { totalSaved: number } | null } | null): Promise<void> {
+  if (!member) {
+    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    return;
+  }
+
+  const now = new Date();
+  const diffMs = now.getTime() - member.createdAt.getTime();
+  const years = Math.floor(diffMs / (365.25 * 24 * 60 * 60 * 1000));
+  const months = Math.floor((diffMs % (365.25 * 24 * 60 * 60 * 1000)) / (30.44 * 24 * 60 * 60 * 1000));
+
+  const regDate = member.createdAt.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
+
+  const message = [
+    `📅 *Your Anniversary Info*`,
+    ``,
+    `Registered: *${regDate}*`,
+    `Membership: *${years} year${years !== 1 ? "s" : ""}${months > 0 ? `, ${months} month${months !== 1 ? "s" : ""}` : ""}*`,
+    ``,
+    years >= 1
+      ? `Your next anniversary is on *${member.createdAt.getDate()} ${member.createdAt.toLocaleString("en-GB", { month: "long" })}* — you'll receive a special thank-you message! 🎉`
+      : `Your first anniversary is coming up on *${member.createdAt.getDate()} ${member.createdAt.toLocaleString("en-GB", { month: "long" })}${member.createdAt.getFullYear() + 1}*! 🎉`,
+  ].join("\n");
+
+  await sendText({ to: phone, text: message });
 }

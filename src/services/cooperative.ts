@@ -114,7 +114,8 @@ export async function getCoopByCode(code: string) {
 }
 
 export function formatBalance(balance: number, currency = "NGN"): string {
-  return `${currency} ${balance.toLocaleString("en-NG", { minimumFractionDigits: 2 })}`;
+  const naira = balance / 100;
+  return `${currency} ${naira.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 export async function createContribution(phone: string, amount: number): Promise<{ ok: boolean; message: string }> {

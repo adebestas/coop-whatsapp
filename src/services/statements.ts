@@ -105,3 +105,173 @@ export async function showHistory(phone: string): Promise<{ ok: boolean; message
   lines.push(``, `Balance: *${formatBalance(member.wallet?.balance ?? 0)}*`);
   return { ok: true, message: lines.join("\n") };
 }
+
+const MONTHS = [
+  "january","february","march","april","may","june",
+  "july","august","september","october","november","december"
+];
+
+function parseMonthYear(args: string): { year: number; month: number } | null {
+  const now = new Date();
+  const parts = args.trim().toLowerCase().split(/\s+/);
+  if (parts.length === 1) {
+    const m = MONTHS.indexOf(parts[0]);
+    if (m >= 0) return { year: now.getFullYear(), month: m + 1 };
+    return null;
+  }
+  if (parts.length === 2) {
+    const m = MONTHS.indexOf(parts[0]);
+    const y = parseInt(parts[1], 10);
+    if (m >= 0 && y > 2000 && y < 2100) return { year: y, month: m + 1 };
+    return null;
+  }
+  return null;
+}
+
+export async function getMonthlyStatement(phone: string, args: string): Promise<{ ok: boolean; message: string }> {
+  const parsed = parseMonthYear(args);
+  if (!parsed) return { ok: false, message: "Usage: *statement august 2026* or just *statement* for current month." };
+
+  const member = await prisma.member.findFirst({
+    where: { phone },
+    include: { cooperative: true, wallet: true },
+  });
+  if (!member) return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
+
+  const start = new Date(parsed.year, parsed.month - 1, 1);
+  const end = new Date(parsed.year, parsed.month, 0, 23, 59, 59, 999);
+  const monthName = start.toLocaleString("en-GB", { month: "long", year: "numeric" });
+
+  const [contributions, loanRepayments, dividends, withdrawals, activeLoan] = await Promise.all([
+    prisma.contribution.findMany({
+      where: { memberId: member.id, status: "confirmed", createdAt: { gte: start, lte: end } },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.loanRepayment.findMany({
+      where: { loan: { memberId: member.id }, paidAt: { gte: start, lte: end } },
+      orderBy: { paidAt: "asc" },
+    }),
+    prisma.dividendEntry.findMany({
+      where: { memberId: member.id, createdAt: { gte: start, lte: end } },
+      include: { dividend: true },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.payout.findMany({
+      where: { memberId: member.id, createdAt: { gte: start, lte: end } },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.loan.findFirst({ where: { memberId: member.id, status: { in: ["approved", "disbursed"] } } }),
+  ]);
+
+  const totalContributions = contributions.reduce((s, c) => s + c.amount, 0);
+  const totalRepaid = loanRepayments.reduce((s, r) => s + r.amount, 0);
+  const totalDividends = dividends.reduce((s, d) => s + d.amount, 0);
+  const totalWithdrawn = withdrawals.reduce((s, w) => s + w.amount, 0);
+
+  const lines = [
+    `📊 *Monthly Statement — ${monthName}*`,
+    ``,
+    `👤 Member: *${member.name}*`,
+    `🏛️ Cooperative: *${member.cooperative.name}*`,
+    ``,
+    `💰 *Savings & Contributions*`,
+    `• Deposits this month: ${formatBalance(totalContributions)}`,
+    `• Dividends received: ${formatBalance(totalDividends)}`,
+    `• Withdrawals: -${formatBalance(totalWithdrawn)}`,
+    `• Current balance: ${formatBalance(member.wallet?.balance ?? 0)}`,
+  ];
+
+  if (activeLoan) {
+    const totalLoanRepaid = loanRepayments.reduce((s, r) => s + r.amount, 0);
+    lines.push(
+      ``,
+      `🏦 *Loan*`,
+      `• Loan amount: ${formatBalance(activeLoan.amount)}`,
+      `• Repaid this month: ${formatBalance(totalRepaid)}`,
+      `• Outstanding balance: ${formatBalance(activeLoan.balance)}`,
+    );
+  }
+
+  const netChange = totalContributions + totalDividends - totalWithdrawn;
+  lines.push(
+    ``,
+    `📈 *Summary*`,
+    `• Net change: ${netChange >= 0 ? "+" : ""}${formatBalance(Math.abs(netChange))}`,
+  );
+
+  return { ok: true, message: lines.join("\n") };
+}
+
+export async function getYearlyStatement(phone: string, year: number): Promise<{ ok: boolean; message: string }> {
+  const member = await prisma.member.findFirst({
+    where: { phone },
+    include: { cooperative: true, wallet: true },
+  });
+  if (!member) return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
+
+  const start = new Date(year, 0, 1);
+  const end = new Date(year, 11, 31, 23, 59, 59, 999);
+
+  const [contributions, loanRepayments, dividends, withdrawals, loans] = await Promise.all([
+    prisma.contribution.aggregate({
+      where: { memberId: member.id, status: "confirmed", createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.loanRepayment.aggregate({
+      where: { loan: { memberId: member.id }, paidAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.dividendEntry.aggregate({
+      where: { memberId: member.id, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.payout.aggregate({
+      where: { memberId: member.id, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.loan.findMany({
+      where: { memberId: member.id, createdAt: { gte: start, lte: end } },
+      select: { amount: true, balance: true, status: true },
+    }),
+  ]);
+
+  const totalContrib = contributions._sum.amount ?? 0;
+  const totalRepaid = loanRepayments._sum?.amount ?? 0;
+  const totalDividends = dividends._sum.amount ?? 0;
+  const totalWithdrawn = withdrawals._sum.amount ?? 0;
+
+  const lines = [
+    `📊 *Yearly Statement — ${year}*`,
+    ``,
+    `👤 Member: *${member.name}*`,
+    `🏛️ Cooperative: *${member.cooperative.name}*`,
+    ``,
+    `💰 *Financial Summary*`,
+    `• Total contributions: ${formatBalance(totalContrib)}`,
+    `• Total dividends: ${formatBalance(totalDividends)}`,
+    `• Total withdrawals: -${formatBalance(totalWithdrawn)}`,
+    `• Current balance: ${formatBalance(member.wallet?.balance ?? 0)}`,
+  ];
+
+  if (loans.length > 0) {
+    const totalBorrowed = loans.reduce((s, l) => s + l.amount, 0);
+    const totalOutstanding = loans.reduce((s, l) => s + l.balance, 0);
+    lines.push(
+      ``,
+      `🏦 *Loan Activity*`,
+      `• Loans taken: ${loans.length}`,
+      `• Total borrowed: ${formatBalance(totalBorrowed)}`,
+      `• Total repaid: ${formatBalance(totalRepaid)}`,
+      `• Outstanding: ${formatBalance(totalOutstanding)}`,
+    );
+  }
+
+  const netChange = totalContrib + totalDividends - totalWithdrawn;
+  lines.push(
+    ``,
+    `📈 *Year Summary*`,
+    `• Net growth: ${netChange >= 0 ? "+" : ""}${formatBalance(Math.abs(netChange))}`,
+  );
+
+  return { ok: true, message: lines.join("\n") };
+}

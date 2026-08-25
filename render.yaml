@@ -8,6 +8,11 @@ databases:
     plan: basic-256mb   # cheapest persistent Postgres; upgrade later if needed
 
 services:
+  - type: redis
+    name: coop-redis
+    plan: starter        # 256MB, persistent; needed for session caching and token blacklisting
+    ipAllowList: []      # only accessible from Render private network
+
   - type: web
     name: coop-bot
     runtime: node
@@ -24,12 +29,16 @@ services:
         fromDatabase:
           name: coop-db
           property: connectionString
+      - key: REDIS_URL
+        fromRedis:
+          name: coop-redis
+          property: connectionString
       - key: NODE_ENV
         value: production
       # ---- Set these in the Render dashboard after first deploy ----
       - key: WHATSAPP_TOKEN
         sync: false
-      - key: WHATSAPP_PHONE_ID
+      - key: WHATSAPP_PHONE_NUMBER_ID
         sync: false
       - key: WHATSAPP_VERIFY_TOKEN
         sync: false

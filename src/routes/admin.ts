@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { verifyPin } from "../lib/security.js";
-import { checkRateLimit } from "../lib/cache.js";
+import { checkRateLimit, getRedis } from "../lib/cache.js";
 
 /**
  * Minimal admin auth for the dashboard: members log in with their WhatsApp
@@ -13,6 +13,8 @@ import crypto from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
 
 const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
+const TOKEN_BLACKLIST_PREFIX = "admin:token:blacklist:";
+const TOKEN_BLACKLIST_TTL_SECONDS = Math.ceil(TOKEN_TTL_MS / 1000);
 
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_WINDOW_SECONDS = 60; // 1 minute
@@ -31,6 +33,40 @@ async function checkLoginRateLimit(ip: string, phone?: string): Promise<{ allowe
   }
 
   return { allowed: true };
+}
+
+/**
+ * Revoke an admin token by storing its hash in Redis with a TTL matching
+ * the token's remaining lifetime. After expiry, the token is no longer
+ * valid even if its HMAC signature is correct.
+ */
+export async function revokeToken(token: string): Promise<void> {
+  const client = getRedis();
+  if (!client) return;
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
+  try {
+    await client.setex(`${TOKEN_BLACKLIST_PREFIX}${hash}`, TOKEN_BLACKLIST_TTL_SECONDS, "1");
+  } catch (err) {
+    console.error("[admin] failed to revoke token:", err);
+  }
+}
+
+/**
+ * Check whether a token has been revoked (exists in the Redis blacklist).
+ * Returns false (not revoked) when Redis is unavailable so that tokens
+ * continue to work during a Redis outage — the HMAC + TTL check still
+ * protects against forgery and expired tokens.
+ */
+async function isTokenRevoked(token: string): Promise<boolean> {
+  const client = getRedis();
+  if (!client) return false;
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
+  try {
+    const exists = await client.exists(`${TOKEN_BLACKLIST_PREFIX}${hash}`);
+    return exists === 1;
+  } catch {
+    return false;
+  }
 }
 
 function getSecret(): string {
@@ -118,13 +154,26 @@ export async function adminApiRoutes(app: FastifyInstance) {
   app.addHook("preHandler", async (req, reply) => {
     if (req.url === "/api/admin/login") return;
     const auth = req.headers.authorization;
-    const payload = auth?.startsWith("Bearer ") ? verify(auth.slice(7)) : null;
+    const rawToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+    const payload = rawToken ? verify(rawToken) : null;
     if (!payload) {
       return reply.code(401).send({ error: "unauthorized" });
+    }
+    if (rawToken && await isTokenRevoked(rawToken)) {
+      return reply.code(401).send({ error: "token revoked" });
     }
     req.adminPhone = payload.phone;
     req.adminCoopId = payload.cooperativeId;
     req.adminRole = payload.role;
+  });
+
+  app.post("/api/admin/logout", async (req, reply) => {
+    const auth = req.headers.authorization;
+    const rawToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+    if (rawToken) {
+      await revokeToken(rawToken);
+    }
+    return reply.code(200).send({ ok: true });
   });
 
   app.get("/api/admin/overview", async (req) => {
