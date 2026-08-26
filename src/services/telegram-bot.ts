@@ -63,9 +63,21 @@ export async function startTelegramBot(): Promise<void> {
 
   console.log("[telegram] long-polling started");
   await setTelegramCommands();
+  let consecutiveEmpty = 0;
   for (;;) {
     try {
       const updates = await getTelegramUpdates(offset);
+      if (updates.length === 0) {
+        consecutiveEmpty++;
+        if (consecutiveEmpty > 3) {
+          // Likely a 409 conflict — another instance is polling
+          await sleep(10000);
+          continue;
+        }
+        await sleep(1000);
+        continue;
+      }
+      consecutiveEmpty = 0;
       for (const update of updates) {
         offset = Math.max(offset, update.update_id + 1);
         const message = update.message;
@@ -90,7 +102,7 @@ export async function startTelegramBot(): Promise<void> {
       }
     } catch (err) {
       console.error("[telegram] polling error:", err);
-      await sleep(3000);
+      await sleep(5000);
     }
   }
 }

@@ -9,6 +9,7 @@ const REDIS_URL = process.env.REDIS_URL;
 
 let redis: Redis | null = null;
 let isConnected = false;
+let lastErrorLog = 0;
 
 /**
  * Initialize Redis connection
@@ -38,7 +39,11 @@ export function initRedis(): Redis | null {
 
     redis.on("error", (err) => {
       isConnected = false;
-      console.error("[Redis] Error:", err.message);
+      const now = Date.now();
+      if (now - lastErrorLog > 30_000) {
+        console.error("[Redis] Error:", err.message);
+        lastErrorLog = now;
+      }
     });
 
     redis.on("close", () => {
