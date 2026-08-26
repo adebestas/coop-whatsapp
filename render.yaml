@@ -17,7 +17,7 @@ services:
     name: coop-bot
     runtime: node
     plan: starter        # free plan SLEEPS after 15 min idle — breaks WhatsApp bot; starter stays on
-    region: oregon        # closest to Nigeria on Render (also: frankfurt, ohio, singapore)
+    region: frankfurt    # closest region to Nigeria on Render (also: oregon, ohio, singapore)
     branch: main
     buildCommand: npm ci && npx prisma generate && npm run build
     preDeployCommand: npx prisma migrate deploy   # run migrations before every deploy
