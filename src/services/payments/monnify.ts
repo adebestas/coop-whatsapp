@@ -11,6 +11,7 @@ import type {
   TransferStatus,
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
+import { forProvider } from "../../lib/money.js";
 
 /**
  * Monnify adapter — primary payment provider.
@@ -20,7 +21,11 @@ import { signaturesMatch } from "./index.js";
  *      MONNIFY_BASE_URL (default: sandbox), MONNIFY_TRANSFER_OTP (sandbox OTP).
  */
 
-const BASE_URL = process.env.MONNIFY_BASE_URL ?? "https://sandbox.monnify.com";
+const BASE_URL = process.env.MONNIFY_BASE_URL || (
+  process.env.NODE_ENV === "production"
+    ? (() => { throw new Error("MONNIFY_BASE_URL is required in production — refusing to start with sandbox URL"); })()
+    : "https://sandbox.monnify.com"
+);
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
@@ -167,7 +172,7 @@ export const monnifyAdapter: ProviderAdapter = {
         transferReference: string;
         status: string;
       }>>("POST", "/api/v2/disbursements/single", {
-        amount: params.amount,
+        amount: forProvider(params.amount, "monnify"),
         bankCode: params.bankCode,
         bankAccountNumber: params.bankAccountNumber,
         narration: `Transfer to ${params.recipientName} (${params.reference.slice(-8)})`,
@@ -181,12 +186,13 @@ export const monnifyAdapter: ProviderAdapter = {
       }
 
       // Step 2: Complete transfer with OTP
-      // ⚠️ PRODUCTION WARNING: Monnify generates a NEW OTP for each transfer.
-      // The OTP is sent to the account holder via SMS/email from Monnify.
-      // For production, you need one of:
-      //   1. Monnify's "business factor" API for programmatic OTP
+      // ⚠️ PRODUCTION LIMITATION: Monnify generates a NEW OTP per transfer,
+      // sent to the account holder via SMS/email from Monnify directly.
+      // This env-var approach only works in sandbox. For production, use one of:
+      //   1. Monnify's "business factor" API for programmatic OTP retrieval
       //   2. Route OTP to admin via WhatsApp for manual entry
-      //   3. Use Monnify's "resend OTP" endpoint to trigger delivery
+      //   3. Use Monnify's "resend OTP" endpoint to trigger re-delivery
+      //   4. Contact Monnify support to enable "auto-approve" for your contract
       const otp = process.env.MONNIFY_TRANSFER_OTP;
       if (!otp) {
         console.warn("[Monnify] MONNIFY_TRANSFER_OTP not set — transfers will fail in production");

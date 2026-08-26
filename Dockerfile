@@ -44,9 +44,6 @@ RUN npx prisma generate
 # Copy built application
 COPY --from=builder /app/dist ./dist
 
-# Copy web dashboard if built
-COPY --from=builder /app/web/dist ./web/dist
-
 # Create necessary directories
 RUN mkdir -p exports backups && \
     chown -R coop:coop /app

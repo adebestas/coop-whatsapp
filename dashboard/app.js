@@ -7,7 +7,7 @@
 
   // ---- Config ----
   const API_BASE = '/api/admin';
-  const STORAGE_TOKEN = 'coop_token';
+  const STORAGE_TOKEN = 'coop_token'; // NOTE: In production, use httpOnly cookies instead of localStorage for JWT storage
   const STORAGE_MEMBER = 'coop_member';
   const STORAGE_THEME = 'coop_theme';
 
@@ -761,6 +761,16 @@
     return Array.from({ length: n }, () =>
       `<div class="stat-card"><div class="skeleton" style="height:14px;width:80px;margin-bottom:12px;"></div><div class="skeleton" style="height:28px;width:120px;"></div></div>`
     ).join('');
+  }
+
+  function showLoader() {
+    const el = document.getElementById('globalLoader');
+    if (el) el.style.display = 'flex';
+  }
+
+  function hideLoader() {
+    const el = document.getElementById('globalLoader');
+    if (el) el.style.display = 'none';
   }
 
   function toast(msg, type = 'info') {

@@ -12,6 +12,7 @@ import { withdrawLimit, requestWithdrawal, canWithdraw } from "../withdrawals.js
 import { computeDividendPreview } from "../dividends.js";
 import { applyForLoan, repayLoan, getQueuePosition } from "../loans.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
+import { safeParse } from "./session.js";
 
 export async function handleBalance(
   phone: string,
@@ -39,8 +40,15 @@ export async function handleSave(phone: string, args: string[]): Promise<void> {
     await sendText({ to: phone, text: "How much would you like to save? (e.g. *2000*)" });
     return;
   }
-  const result = await createContribution(phone, amount);
-  await sendText({ to: phone, text: result.message });
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_save_confirm", data: JSON.stringify({ saveAmount: amount }) },
+    update: { state: "awaiting_save_confirm", data: JSON.stringify({ saveAmount: amount }) },
+  });
+  await sendText({
+    to: phone,
+    text: `You're about to save ₦${amount.toLocaleString()}. Reply *yes* to confirm or *menu* to cancel.`,
+  });
 }
 
 export async function handleFund(phone: string): Promise<void> {

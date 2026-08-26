@@ -10,6 +10,7 @@ import type {
   TransferStatus,
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
+import { forProvider } from "../../lib/money.js";
 
 const API_BASE = "https://api.flutterwave.com/v3";
 
@@ -61,7 +62,7 @@ export const flutterwaveAdapter: ProviderAdapter = {
       const res = await api<any>("/transfers", "POST", {
         account_bank: params.bankCode,
         account_number: params.bankAccountNumber,
-        amount: params.amount,
+        amount: forProvider(params.amount, "flutterwave"),
         currency: params.currency ?? "NGN",
         narration: `Coop payout ${params.reference}`,
         reference: params.reference,

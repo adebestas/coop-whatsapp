@@ -24,7 +24,7 @@ export const KNOWN_COMMANDS = [
   "setpost", "removepost", "relink", "unlink", "setrole", "setsalary", "runpayroll",
   "pay", "approvewdraw", "approvewithdraw", "audit", "backup", "reconcile", "walletreconcile", "reservefund", "pnl",
   "fundstatus",
-  "export", "enable2fa", "disable2fa", "verifypin", "setplanfor",
+  "export", "enable2fa", "disable2fa", "verifypin", "setplanfor", "internalaudit",
   // SaaS config
   "setconfig", "showconfig", "setbranding", "billing", "onboard",
   // ai-powered
@@ -69,13 +69,14 @@ export async function suggestCommand(text: string): Promise<Suggestion | null> {
       choices?: Array<{ message?: { content?: string } }>;
     };
     const raw = body.choices?.[0]?.message?.content ?? "";
-    // Try full parse first, then substring extraction
+    // Try full parse first, then regex extraction
     let parsed: { command?: unknown; args?: unknown };
     try {
       parsed = JSON.parse(raw);
     } catch {
-      const jsonText = raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1);
-      parsed = JSON.parse(jsonText);
+      const jsonMatch = raw.match(/\{[^{}]*\}/);
+      if (!jsonMatch) return null;
+      parsed = JSON.parse(jsonMatch[0]);
     }
     if (typeof parsed.command !== "string") return null;
     const command = parsed.command.trim().toLowerCase();
@@ -100,7 +101,8 @@ export async function suggestCommand(text: string): Promise<Suggestion | null> {
     const reparsed = reconstructed.trim().split(/\s+/);
     if (reparsed[0] !== command) return null;
     return { command, args };
-  } catch {
+  } catch (err) {
+    console.warn("[ai] suggestCommand failed:", err);
     return null; // network error, timeout, bad JSON — silently fall back
   }
 }

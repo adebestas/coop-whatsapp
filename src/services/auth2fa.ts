@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { generateTotpSecret, otpauthUri, verifyTotp } from "../lib/totp.js";
 import { verifyMemberPin } from "./pin.js";
+import { audit } from "./audit.js";
 
 /**
  * Two-factor authentication for money-moving admin/super commands.
@@ -36,6 +37,16 @@ export async function enable2fa(
   await prisma.member.update({ where: { id: member.id }, data: { totpSecret: secret } });
 
   const uri = otpauthUri(secret, member.phone);
+  await audit({
+    cooperativeId: member.cooperativeId,
+    actorPhone: phone,
+    actorId: member.id,
+    actorRole: member.role,
+    action: "security.2fa_enable",
+    targetType: "member",
+    targetId: member.id,
+    detail: "2FA enabled",
+  });
   return {
     ok: true,
     message:
@@ -45,10 +56,24 @@ export async function enable2fa(
   };
 }
 
-export async function disable2fa(phone: string): Promise<{ ok: boolean; message: string }> {
+export async function disable2fa(phone: string, pin?: string): Promise<{ ok: boolean; message: string }> {
   const member = await prisma.member.findFirst({ where: { phone } });
   if (!member?.totpSecret) return { ok: false, message: "2FA isn't enabled on your account." };
+  if (!pin) return { ok: false, message: "Provide your PIN to disable 2FA." };
+  if (!member.pin) return { ok: false, message: "No PIN set on your account. Cannot verify identity." };
+  const pinResult = await verifyMemberPin(member, pin);
+  if (!pinResult.ok) return { ok: false, message: "Wrong PIN. 2FA was not disabled." };
   await prisma.member.update({ where: { id: member.id }, data: { totpSecret: null } });
+  await audit({
+    cooperativeId: member.cooperativeId,
+    actorPhone: phone,
+    actorId: member.id,
+    actorRole: member.role,
+    action: "security.2fa_disable",
+    targetType: "member",
+    targetId: member.id,
+    detail: "2FA disabled",
+  });
   return { ok: true, message: "2FA disabled. Your commands no longer need an authenticator code." };
 }
 
@@ -112,7 +137,8 @@ export async function refreshPin(phone: string, pin: string): Promise<{ ok: bool
   if (!result.ok) return { ok: false, message: result.message ?? "Wrong PIN." };
 
   const payload = JSON.stringify({ pinVerifiedAt: Date.now() });
-  const sig = crypto.createHmac("sha256", process.env.SESSION_SECRET || "fallback").update(payload).digest("hex");
+  const secret = process.env.SESSION_SECRET || (process.env.NODE_ENV === 'production' ? (() => { throw new Error('SESSION_SECRET required') })() : crypto.randomBytes(32).toString('hex'));
+  const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   const session = await prisma.session.upsert({
     where: { phone },
     create: { phone, state: "idle", data: JSON.stringify({ d: payload, s: sig }) },

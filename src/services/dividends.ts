@@ -26,7 +26,7 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
   const pnl = await computePnl(member.cooperativeId);
   const entries = await prisma.member.findMany({
     where: { cooperativeId: member.cooperativeId },
-    include: { wallet: true },
+    select: { id: true, name: true, wallet: { select: { totalSaved: true, balance: true } } },
   });
   const totalSaved = entries.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
   // pnl.netProfit is kobo; pool stays in kobo
@@ -121,7 +121,7 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
 
   const members = await prisma.member.findMany({
     where: { cooperativeId: admin.cooperativeId },
-    include: { wallet: true },
+    select: { id: true, name: true, wallet: { select: { id: true, totalSaved: true } } },
   });
   const totalSaved = members.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
   if (totalSaved <= 0 || members.length === 0) {
@@ -255,28 +255,30 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
       include: { entries: true },
     });
 
-    // Credit wallets and mark each entry as "paid" individually
+    // Credit wallets and mark each entry as "paid" — batched in groups of 100
     let paidCount = 0;
-    for (const s of rawShares) {
-      const shareKobo = s.kobo;
-      if (shareKobo <= 0) continue;
-      paidCount += 1;
-      const entry = dividend.entries.find((e) => e.memberId === s.member.id);
-      await tx.wallet.update({ where: { id: s.member.wallet!.id }, data: { balance: { increment: shareKobo } } });
-      await tx.contribution.create({
-        data: {
-          amount: shareKobo,
-          type: "dividend",
-          note: `Dividend at ${rate}% of profit (${reference})`,
-          reference: `DIV-${dividend.id.slice(-8)}-${s.member.id.slice(-6)}`,
-          status: "confirmed",
-          paidAt: new Date(),
-          memberId: s.member.id,
-          cooperativeId: admin.cooperativeId,
-        },
-      });
-      if (entry) {
-        await tx.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } });
+    const entriesWithShares = rawShares.filter((s) => s.kobo > 0);
+    for (let i = 0; i < entriesWithShares.length; i += 100) {
+      const batch = entriesWithShares.slice(i, i + 100);
+      for (const s of batch) {
+        paidCount += 1;
+        const entry = dividend.entries.find((e) => e.memberId === s.member.id);
+        await tx.wallet.update({ where: { id: s.member.wallet!.id }, data: { balance: { increment: s.kobo } } });
+        await tx.contribution.create({
+          data: {
+            amount: s.kobo,
+            type: "dividend",
+            note: `Dividend at ${rate}% of profit (${reference})`,
+            reference: `DIV-${dividend.id.slice(-8)}-${s.member.id.slice(-6)}`,
+            status: "confirmed",
+            paidAt: new Date(),
+            memberId: s.member.id,
+            cooperativeId: admin.cooperativeId,
+          },
+        });
+        if (entry) {
+          await tx.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } });
+        }
       }
     }
 
@@ -324,42 +326,43 @@ export async function resumeDividendDistribution(
   }
 
   let paidCount = 0;
-  for (const entry of dividend.entries) {
-    const wallet = entry.member?.wallet;
-    if (!wallet) continue;
-    const share = entry.amount;
+  // Batch entries in groups of 100 to reduce transaction overhead
+  for (let i = 0; i < dividend.entries.length; i += 100) {
+    const batch = dividend.entries.slice(i, i + 100);
+    for (const entry of batch) {
+      const wallet = entry.member?.wallet;
+      if (!wallet) continue;
+      const share = entry.amount;
 
-    // DEDUP inside the transaction: prevents double-credit if
-    // resumeDividendDistribution is called concurrently (TOCTOU guard).
-    // The @@unique([dividendId, memberId]) constraint is the ultimate backstop.
-    let paid = false;
-    await prisma.$transaction(async (tx) => {
-      const alreadyPaid = await tx.dividendEntry.findFirst({
-        where: {
-          dividendId: entry.dividendId,
-          memberId: entry.memberId,
-          status: "paid",
-        },
-      });
-      if (alreadyPaid) return;
+      let paid = false;
+      await prisma.$transaction(async (tx) => {
+        const alreadyPaid = await tx.dividendEntry.findFirst({
+          where: {
+            dividendId: entry.dividendId,
+            memberId: entry.memberId,
+            status: "paid",
+          },
+        });
+        if (alreadyPaid) return;
 
-      await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: share } } });
-      await tx.contribution.create({
-        data: {
-          amount: share,
-          type: "dividend",
-          note: `Dividend at ${dividend.rate}% of profit (${dividend.reference})`,
-          reference: `DIV-${dividend.id.slice(-8)}-${entry.memberId.slice(-6)}`,
-          status: "confirmed",
-          paidAt: new Date(),
-          memberId: entry.memberId,
-          cooperativeId: dividend.cooperativeId,
-        },
+        await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: share } } });
+        await tx.contribution.create({
+          data: {
+            amount: share,
+            type: "dividend",
+            note: `Dividend at ${dividend.rate}% of profit (${dividend.reference})`,
+            reference: `DIV-${dividend.id.slice(-8)}-${entry.memberId.slice(-6)}`,
+            status: "confirmed",
+            paidAt: new Date(),
+            memberId: entry.memberId,
+            cooperativeId: dividend.cooperativeId,
+          },
+        });
+        await tx.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } });
+        paid = true;
       });
-      await tx.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } });
-      paid = true;
-    });
-    if (paid) paidCount += 1;
+      if (paid) paidCount += 1;
+    }
   }
 
   return {
@@ -393,6 +396,17 @@ export async function getFundBalances(cooperativeId: string): Promise<{
     prisma.developmentFund.aggregate({ where: { cooperativeId }, _sum: { amount: true } }),
   ]);
 
+  // Reconciliation check: compare denormalized balance against actual allocation sum
+  const reserveAggregate = await prisma.reserveAllocation.aggregate({
+    where: { cooperativeId },
+    _sum: { amount: true },
+  });
+  const reported = coop?.reserveFundBalance ?? 0;
+  const actual = reserveAggregate._sum.amount ?? 0;
+  if (Math.abs(reported - actual) > 1) {
+    console.warn(`[compliance] Reserve fund divergence: reported ${reported}, actual ${actual}`);
+  }
+
   return {
     reserve: coop?.reserveFundBalance ?? reserveTotal._sum.amount ?? 0,
     education: educationTotal._sum.amount ?? 0,
@@ -408,7 +422,8 @@ export async function getReserveInfo(cooperativeId: string): Promise<{
   growthPercent: number;
 }> {
   const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
-  const balance = coop?.reserveFundBalance ?? 0;
+  const reserveAgg = await prisma.reserveAllocation.aggregate({ where: { cooperativeId }, _sum: { amount: true } });
+  const balance = reserveAgg._sum.amount ?? 0;
 
   const now = new Date();
   const thisQuarterStart = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);

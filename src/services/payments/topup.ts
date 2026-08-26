@@ -1,5 +1,5 @@
 import { prisma } from "../../lib/prisma.js";
-import { resolveProvider, markProviderDown } from "./index.js";
+import { resolveProvider, markProviderDown, markProviderUp } from "./index.js";
 import type { PaymentNotification } from "./index.js";
 import { audit } from "../audit.js";
 import { postJournal } from "../journal.js";
@@ -44,13 +44,21 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
     currency: "NGN",
   };
 
+  // Virtual account expiry: 90 days from now
+  const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+
   let lastError: unknown = null;
   let lastProviderName: string | undefined;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const provider = resolveProvider(attempt === 0 ? undefined : otherThan(lastProviderName));
+  // Try preferred provider first, then all fallbacks
+  const fallbacks = otherThan(undefined);
+  const attempts = [undefined, ...fallbacks];
+  for (const preferred of attempts) {
+    const provider = resolveProvider(preferred ?? lastProviderName);
+    if (lastProviderName && provider.name === lastProviderName) continue; // skip already-failed
     lastProviderName = provider.name;
     try {
       const va = await provider.createVirtualAccount(params);
+      markProviderUp(provider.name);
 
       await prisma.member.update({
         where: { id: member.id },
@@ -58,6 +66,7 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
           virtualAccountNumber: va.accountNumber,
           virtualAccountBank: va.bank,
           virtualAccountProvider: va.provider,
+          virtualAccountExpiresAt: expiresAt,
         },
       });
 
@@ -79,9 +88,9 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
   };
 }
 
-function otherThan(name?: string) {
+function otherThan(name?: string): string[] {
   const providers = ["monnify", "paystack", "flutterwave"];
-  return providers.find(p => p !== name) ?? "paystack";
+  return providers.filter(p => p !== name);
 }
 
 /**
@@ -94,6 +103,10 @@ function otherThan(name?: string) {
  */
 export async function handlePaymentNotification(n: PaymentNotification): Promise<void> {
   if (n.status !== "successful") return;
+  if (n.currency !== "NGN") {
+    console.warn(`[topup] rejected notification with currency ${n.currency} (expected NGN), txId=${n.transactionId}`);
+    return;
+  }
 
   // Find the member by their virtual account number.
   const member = await prisma.member.findFirst({
@@ -166,4 +179,36 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
     targetType: "contribution",
     detail: `${amount} ${n.currency} via ${n.provider} (${n.transactionId})`,
   });
+}
+
+/**
+ * Clean up expired virtual accounts. Run periodically (e.g. daily).
+ * Clears the virtual account fields so stale provider accounts are not used.
+ */
+export async function cleanupExpiredVirtualAccounts(): Promise<number> {
+  const expired = await prisma.member.findMany({
+    where: {
+      virtualAccountNumber: { not: null },
+      virtualAccountExpiresAt: { lt: new Date() },
+    },
+    select: { id: true, phone: true, virtualAccountNumber: true },
+  });
+
+  if (expired.length === 0) return 0;
+
+  await prisma.member.updateMany({
+    where: {
+      virtualAccountNumber: { not: null },
+      virtualAccountExpiresAt: { lt: new Date() },
+    },
+    data: {
+      virtualAccountNumber: null,
+      virtualAccountBank: null,
+      virtualAccountProvider: null,
+      virtualAccountExpiresAt: null,
+    },
+  });
+
+  console.log(`[topup] cleaned up ${expired.length} expired virtual accounts`);
+  return expired.length;
 }

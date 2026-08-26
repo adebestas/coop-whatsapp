@@ -8,6 +8,7 @@ export type LedgerCategory =
   | "fine"
   | "admin_charge"
   | "guarantee_recovery"
+  | "loan_repayment"
   | "salary"
   | "stipend"
   | "purchase"
@@ -36,6 +37,12 @@ export async function recordLedger(input: {
 }) {
   const amount = roundMoney(input.amount);
   if (amount <= 0) return;
+
+  // Enforce: dividend-related categories must use "appropriation" type
+  if (input.category.includes("dividend") && input.type !== "appropriation") {
+    console.error(`[ledger] category "${input.category}" contains "dividend" but type is "${input.type}" — forcing type to "appropriation"`);
+    input.type = "appropriation";
+  }
 
   const fundType = input.fundType ?? "operational";
   const client = input.tx ?? prisma;
@@ -158,9 +165,10 @@ export async function computePnl(
     if (endDate) where.createdAt.lte = endDate;
   }
 
-  const entries = await prisma.ledgerEntry.findMany({
+  const grouped = await prisma.ledgerEntry.groupBy({
+    by: ['type', 'category'],
     where,
-    select: { type: true, category: true, amount: true },
+    _sum: { amount: true },
   });
 
   const incomeByCategory: Record<string, number> = {};
@@ -168,20 +176,24 @@ export async function computePnl(
   let totalIncome = 0;
   let totalExpense = 0;
 
-  for (const e of entries) {
-    if (e.category === "journal_miss") continue; // Exclude zero-amount reconciliation entries
-    const bucket = e.type === "income" ? incomeByCategory : expenseByCategory;
-    bucket[e.category] = (bucket[e.category] ?? 0) + e.amount;
-    if (e.type === "income") totalIncome += e.amount;
-    else totalExpense += e.amount;
+  for (const g of grouped) {
+    if (g.category === "journal_miss") continue;
+    const amount = g._sum.amount ?? 0;
+    if (g.type === "income") {
+      incomeByCategory[g.category] = (incomeByCategory[g.category] ?? 0) + amount;
+      totalIncome += amount;
+    } else {
+      expenseByCategory[g.category] = (expenseByCategory[g.category] ?? 0) + amount;
+      totalExpense += amount;
+    }
   }
 
   return {
     incomeByCategory,
     expenseByCategory,
-    totalIncome: round2(totalIncome),
-    totalExpense: round2(totalExpense),
-    netProfit: round2(totalIncome - totalExpense),
+    totalIncome: roundMoney(totalIncome),
+    totalExpense: roundMoney(totalExpense),
+    netProfit: roundMoney(totalIncome - totalExpense),
     period: startDate || endDate ? { start: startDate ?? new Date(0), end: endDate ?? new Date() } : undefined,
   };
 }
@@ -191,8 +203,4 @@ export async function getMonthlySummary(cooperativeId: string, year: number, mon
   const start = new Date(year, month, 1);
   const end = new Date(year, month + 1, 0, 23, 59, 59);
   return computePnl(cooperativeId, start, end);
-}
-
-function round2(n: number) {
-  return Math.round(n * 100) / 100;
 }

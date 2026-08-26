@@ -10,6 +10,14 @@ export interface TicketResult {
 /** Roles that can work tickets. */
 const SUPPORT_ROLES = ["support", "admin", "superadmin"];
 
+/** SLA deadlines by priority (in hours). */
+const SLA_HOURS: Record<string, number> = {
+  urgent: 4,
+  high: 8,
+  normal: 24,
+  low: 48,
+};
+
 async function isSupportAgent(phone: string, cooperativeId?: string): Promise<boolean> {
   const member = await prisma.member.findFirst({
     where: { phone, role: { in: SUPPORT_ROLES }, ...(cooperativeId ? { cooperativeId } : {}) },
@@ -31,8 +39,18 @@ export async function createTicket(phone: string, message: string): Promise<Tick
     };
   }
 
+  const priority = "normal";
+  const slaHours = SLA_HOURS[priority] ?? 24;
+  const slaDeadline = new Date(Date.now() + slaHours * 60 * 60 * 1000);
+
   const ticket = await prisma.supportTicket.create({
-    data: { cooperativeId: member.cooperativeId, memberId: member.id, message: text.slice(0, 1000) },
+    data: {
+      cooperativeId: member.cooperativeId,
+      memberId: member.id,
+      message: text.slice(0, 1000),
+      priority,
+      slaDeadline,
+    },
   });
 
   // Notify customer-service agents and admins of the cooperative.
@@ -107,7 +125,13 @@ export async function resolveTicket(
 
   await prisma.supportTicket.update({
     where: { id: ticket.id },
-    data: { status: "resolved", assignedToId: agent.id, resolution: note.trim().slice(0, 500) || null },
+    data: {
+      status: "resolved",
+      assignedToId: agent.id,
+      resolution: note.trim().slice(0, 500) || null,
+      resolvedAt: new Date(),
+      firstResponseAt: ticket.firstResponseAt ?? new Date(),
+    },
   });
 
   void notifyMember(

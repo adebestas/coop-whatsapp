@@ -77,10 +77,10 @@ async function shutdown(signal: string) {
     log.info("database disconnected");
 
     log.info("graceful shutdown complete");
-    process.exit(0);
+    process.exitCode = 0;
   } catch (err) {
     log.error("shutdown error", { error: err instanceof Error ? err.message : String(err) });
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 
@@ -127,18 +127,28 @@ async function main() {
 
   // Background jobs: reminders, monthly statements + birthday greetings,
   // guarantor default notices/deductions.
+  let schedulerRunning = false;
   async function runSchedulerLoop() {
     while (true) {
       await new Promise((r) => setTimeout(r, SCHEDULER_INTERVAL_MS));
-      await runAutoSaveReminders().catch((err) => app.log.error("[scheduler] auto-save reminders failed", err));
-      await runMonthlyStatements().catch((err) => app.log.error("[scheduler] monthly statements failed", err));
-      await runBirthdayGreetings().catch((err) => app.log.error("[scheduler] birthday greetings failed", err));
-      await checkAnniversaries().catch((err) => app.log.error("[scheduler] anniversary greetings failed", err));
-      await scanGuarantorDefaults()
-        .then(async (n) => {
-          if (n > 0) await executeDueDeductions().catch(() => {});
-        })
-        .catch((err) => app.log.error("[scheduler] guarantor default scan failed", err));
+      if (schedulerRunning) {
+        log.warn("[scheduler] previous iteration still running, skipping");
+        continue;
+      }
+      schedulerRunning = true;
+      try {
+        await runAutoSaveReminders().catch((err) => app.log.error("[scheduler] auto-save reminders failed", err));
+        await runMonthlyStatements().catch((err) => app.log.error("[scheduler] monthly statements failed", err));
+        await runBirthdayGreetings().catch((err) => app.log.error("[scheduler] birthday greetings failed", err));
+        await checkAnniversaries().catch((err) => app.log.error("[scheduler] anniversary greetings failed", err));
+        await scanGuarantorDefaults()
+          .then(async (n) => {
+            if (n > 0) await executeDueDeductions().catch(() => {});
+          })
+          .catch((err) => app.log.error("[scheduler] guarantor default scan failed", err));
+      } finally {
+        schedulerRunning = false;
+      }
     }
   }
   void runSchedulerLoop();

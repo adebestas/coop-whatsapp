@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText } from "../lib/messaging.js";
+import { sendText, platformOf } from "../lib/messaging.js";
 import { getMemberByPhone } from "./cooperative.js";
 import { handleAdminCommand } from "./admin.js";
 import { checkMoneyRateLimit, checkAIRateLimit } from "./fraud.js";
@@ -11,6 +11,12 @@ import { getReserveInfo } from "./dividends.js";
 import { getAnniversaryMessage } from "./anniversary.js";
 import { formatBalance } from "./cooperative.js";
 import { validateDeviceSession, checkTenureLimit } from "../lib/security-hardening.js";
+
+/** Session TTL — how long an awaiting state stays alive before reset. */
+const SESSION_TTL_MS = 30 * 60 * 1000;
+/** Persist lastInboundAt only every N messages to reduce session upserts. */
+const SESSION_UPDATE_EVERY = 5;
+let messageCounter = 0;
 
 // ---- Tier-based transaction limits (CBN KYC requirements) ----
 const TIER_LIMITS = {
@@ -42,7 +48,7 @@ async function checkTierLimit(phone: string, amount: number): Promise<string | n
 
 import { z } from "zod"; // used by FlowDataSchema below
 
-import { buildMenu, handleAwaitingInput } from "./handlers/session.js";
+import { buildMenu, buildFullMenu, buildAdminMenu, handleAwaitingInput } from "./handlers/session.js";
 import { handleJoinStart, handleOnboardStart } from "./handlers/join.js";
 import {
   handleBalance,
@@ -101,10 +107,12 @@ export type BotState =
   | "awaiting_pin"
   | "awaiting_pin_confirm"
   | "awaiting_save_amount"
+  | "awaiting_save_confirm"
   | "awaiting_loan_amount"
   | "awaiting_loan_months"
   | "awaiting_loan_bank_account"
   | "awaiting_loan_bank_code"
+  | "awaiting_loan_bank_confirm"
   | "awaiting_guarantor_1"
   | "awaiting_guarantor_2"
   | "awaiting_withdraw_amount"
@@ -137,6 +145,7 @@ export const FlowDataSchema = z.object({
   nokPhone: z.string().optional(),
   loanAmount: z.number().positive().optional(),
   loanMonths: z.number().positive().optional(),
+  saveAmount: z.number().positive().optional(),
   loanAccount: z.string().optional(),
   loanBankCode: z.string().optional(),
   loanBankName: z.string().optional(),
@@ -184,13 +193,15 @@ export async function handleMessage(
   text: string,
   meta: MessageMeta = {},
 ): Promise<void> {
+  messageCounter++;
+  const shouldUpdateTimestamp = messageCounter % SESSION_UPDATE_EVERY === 0;
+
   const session = await prisma.session.upsert({
     where: { phone },
     create: { phone, state: "idle", lastInboundAt: new Date() },
-    update: { lastInboundAt: new Date() },
+    update: shouldUpdateTimestamp ? { lastInboundAt: new Date() } : {},
   });
 
-  const SESSION_TTL_MS = 30 * 60 * 1000;
   if (
     isAwaitingState(session.state as BotState) &&
     Date.now() - session.updatedAt.getTime() > SESSION_TTL_MS
@@ -256,7 +267,7 @@ export async function handleMessage(
   if (!member) {
     const altOwner = await prisma.member.findFirst({ where: { altChannelId: phone } });
     if (altOwner) {
-      const pref = (await import("../lib/messaging.js")).platformOf(phone);
+      const pref = platformOf(phone);
       if (altOwner.preferredChannel !== pref) {
         await prisma.member.update({
           where: { id: altOwner.id },
@@ -270,16 +281,16 @@ export async function handleMessage(
       });
       return;
     }
-  } else if (member.preferredChannel !== (await import("../lib/messaging.js")).platformOf(phone)) {
+  } else if (member.preferredChannel !== platformOf(phone)) {
     await prisma.member.update({
       where: { id: member.id },
-      data: { preferredChannel: (await import("../lib/messaging.js")).platformOf(phone) },
+      data: { preferredChannel: platformOf(phone) },
     });
   }
 
   const { cmd, args } = parseCommand(text);
 
-  const handled = await handleAdminCommand(phone, cmd, args);
+  const handled = await handleAdminCommand(phone, cmd, args, member);
   if (handled) return;
 
   switch (cmd) {
@@ -287,9 +298,21 @@ export async function handleMessage(
     case "hello":
     case "hey":
     case "menu":
-    case "help":
       await sendText({ to: phone, text: buildMenu(member) });
       break;
+
+    case "help":
+      await sendText({ to: phone, text: buildFullMenu(member) });
+      break;
+
+    case "admin": {
+      if (!member || (member.role !== "admin" && member.role !== "superadmin")) {
+        await sendText({ to: phone, text: "Only admins can use admin commands." });
+        break;
+      }
+      await sendText({ to: phone, text: buildAdminMenu() });
+      break;
+    }
 
     case "join":
       await handleJoinStart(phone, args);
@@ -482,30 +505,38 @@ export async function handleMessage(
         await sendText({ to: phone, text: "Usage: *grievance <your complaint>* — submit a grievance to the cooperative admin." });
         break;
       }
-      const grievMember = await getMemberByPhone(phone);
-      if (!grievMember) {
+      if (!member) {
         await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
         break;
       }
       await prisma.grievance.create({
         data: {
-          cooperativeId: grievMember.cooperativeId,
-          memberId: grievMember.id,
+          cooperativeId: member.cooperativeId,
+          memberId: member.id,
           message: grievanceMsg,
         },
       });
-      await sendText({ to: phone, text: "✅ Your grievance has been submitted. Admins will review it. Reply *grievances* to check status." });
+      const RESPONSE_DEADLINE_DAYS = 30;
+      const deadline = new Date();
+      deadline.setDate(deadline.getDate() + RESPONSE_DEADLINE_DAYS);
+      await sendText({
+        to: phone,
+        text:
+          `✅ Your grievance has been submitted. Admins will review it.\n\n` +
+          `📅 Response deadline: *${deadline.toLocaleDateString("en-GB")}* (${RESPONSE_DEADLINE_DAYS} days).\n` +
+          `⚠️ If no response by the deadline, the matter will be *automatically escalated* to the cooperative's dispute resolution committee.\n\n` +
+          `Reply *grievances* to check status.`,
+      });
       break;
     }
 
     case "byelaws": {
-      const byelawMember = await getMemberByPhone(phone);
-      if (!byelawMember) {
+      if (!member) {
         await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
         break;
       }
       const coopByelaws = await prisma.cooperative.findUnique({
-        where: { id: byelawMember.cooperativeId },
+        where: { id: member.cooperativeId },
         select: { description: true, name: true },
       });
       if (coopByelaws?.description) {
@@ -519,8 +550,14 @@ export async function handleMessage(
     default: {
       if (aiEnabled() && text.trim().length >= 4 && !/^[\d\s.,]+$/.test(text)) {
         if (isNaturalLanguageQuery(text)) {
-          const aiMember = await getMemberByPhone(phone);
-          if (aiMember && !await checkAIRateLimit(aiMember.id)) {
+          if (!member) {
+            await sendText({
+              to: phone,
+              text: "Please join a cooperative first to use AI features. Reply *join <code>* to get started.",
+            });
+            break;
+          }
+          if (!await checkAIRateLimit(member.id)) {
             await sendText({
               to: phone,
               text: "⏳ You've reached the limit of 10 AI queries per hour. Please try again later.",
@@ -530,9 +567,9 @@ export async function handleMessage(
           const response = await handleAIQuery(
             text,
             phone,
-            member?.role ?? "member",
-            member?.cooperativeId ?? "",
-            member?.id,
+            member.role,
+            member.cooperativeId,
+            member.id,
           );
           if (response) {
             await prisma.session.upsert({
@@ -579,18 +616,24 @@ export async function handleMessage(
         }
       }
       if (aiEnabled() && text.trim().length >= 4 && isNaturalLanguageQuery(text)) {
-        const supportMember = await getMemberByPhone(phone);
-        if (!supportMember) {
+        if (!member) {
           await sendText({
             to: phone,
             text: "You need to be a registered member to use AI support. Reply *join* to get started.",
           });
           return;
         }
+        if (!await checkAIRateLimit(member.id)) {
+          await sendText({
+            to: phone,
+            text: "⏳ You've reached the limit of 10 AI queries per hour. Please try again later.",
+          });
+          return;
+        }
         const supportResponse = await generateSupportResponse(
           text,
-          supportMember.name,
-          supportMember.role,
+          member.name,
+          member.role,
         );
         await sendText({ to: phone, text: supportResponse });
         return;

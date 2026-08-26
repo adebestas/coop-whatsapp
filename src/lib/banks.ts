@@ -1,6 +1,7 @@
 // Common Nigerian bank names -> provider bank codes.
 export const BANK_CODES: Record<string, string> = {
   access: "044",
+  accessbank: "044",
   gtb: "058",
   gtbank: "058",
   guarantee: "058",
@@ -27,6 +28,11 @@ export const BANK_CODES: Record<string, string> = {
   palmpay: "999992",
   moniepoint: "50515",
   fairmoney: "51318",
+  globus: "030",
+  tajbank: "302",
+  xpension: "090",
+  cullinan: "100",
+  paycom: "100",
 };
 
 /** Resolve a bank code from a name (or accept a raw numeric code). */

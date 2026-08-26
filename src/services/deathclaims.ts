@@ -95,7 +95,11 @@ export async function startDeathClaim(
     });
   });
 
-  // Send OTP to the family phone
+  // SECURITY NOTE: The OTP is sent in plaintext over WhatsApp/SMS. This is
+  // inherent to the channel — WhatsApp is E2E encrypted but the carrier path
+  // is not. The OTP is short-lived (10 min) and only confirms the family's
+  // phone, so the risk is acceptable. For higher security, use a signed URL
+  // or app-based TOTP instead.
   const familyDelivered = await sendText({
     to: familyPhone.trim(),
     text:
@@ -342,14 +346,20 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
 
   // --- Governance checks ---
   const approvalsRequired = claim.approvalsRequired ?? 2;
-  let approvalCount = claim.approvalCount ?? 0;
   const familyConfirmed = claim.familyConfirmed ?? false;
   const waitingPeriodEnd = claim.waitingPeriodEnd;
 
-  // Increment approval count (idempotent: don't double-count same super admin)
-  // Track by storing approval in the audit log — but for simplicity, we just
-  // increment. In production, you'd track per-superadmin approvals.
-  approvalCount += 1;
+  // Per-superadmin approval tracking
+  const existingApproval = await prisma.deathClaimApproval.findUnique({
+    where: { deathClaimId_approvedById: { deathClaimId: claim.id, approvedById: actor.id } },
+  });
+  if (existingApproval) return { ok: false, message: "You already approved this claim." };
+  await prisma.deathClaimApproval.create({
+    data: { deathClaimId: claim.id, approvedById: actor.id },
+  });
+  const approvalCount = await prisma.deathClaimApproval.count({
+    where: { deathClaimId: claim.id },
+  });
 
   await prisma.deathClaim.update({
     where: { id: claim.id },
@@ -444,10 +454,13 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     });
     if (!result.ok) {
       // Refund and hand back for retry.
+      // No status guard: the statuspoller may have already moved the row,
+      // but the wallet refund is safe (idempotent) and the status update
+      // is a no-op if already settled.
       await prisma.$transaction([
         prisma.wallet.update({ where: { id: wallet!.id }, data: { balance: { increment: balance } } }),
         prisma.deathClaim.updateMany({
-          where: { id: claim.id, status: "processing" },
+          where: { id: claim.id },
           data: { status: "validated" },
         }),
       ]);
@@ -483,7 +496,7 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     }
     await prisma.deathClaim
       .updateMany({
-        where: { id: claim.id, status: "processing" },
+        where: { id: claim.id },
         data: { status: "validated" },
       })
       .catch(() => {});
@@ -521,6 +534,11 @@ function resolveBank(input: string): { code: string; name: string } | null {
 }
 
 async function isSuperAdminOf(phone: string, cooperativeId: string): Promise<boolean> {
-  const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
-  return coop?.adminPhone === phone;
+  const member = await prisma.member.findFirst({
+    where: { phone, cooperativeId },
+    include: { cooperative: { select: { adminPhone: true } } },
+  });
+  if (!member) return false;
+  if (member.role === "superadmin") return true;
+  return member.cooperative?.adminPhone === phone;
 }

@@ -11,6 +11,7 @@ import type {
   TransferStatus,
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
+import { forProvider } from "../../lib/money.js";
 
 const API_BASE = "https://api.paystack.co";
 
@@ -61,15 +62,38 @@ export const paystackAdapter: ProviderAdapter = {
 
   async payout(params: PayoutParams): Promise<PayoutResult> {
     try {
-      // 1. Create transfer recipient first (Paystack requires recipient_code, not bank_code)
-      const recipientRes = await api<any>("/transferrecipient", "POST", {
-        type: "nuban",
-        name: params.recipientName || "Coop Member",
-        account_number: params.bankAccountNumber,
-        bank_code: params.bankCode,
-        currency: "NGN",
-      });
-      const recipientCode = recipientRes.data?.recipient_code;
+      // 1. Check for existing recipient to avoid duplicates
+      let recipientCode: string | undefined;
+      try {
+        const listRes = await api<any>(
+          `/transferrecipient?account_number=${encodeURIComponent(params.bankAccountNumber)}&bank_code=${encodeURIComponent(params.bankCode)}&currency=NGN`,
+          "GET",
+        );
+        const existing = listRes.data?.find(
+          (r: any) =>
+            r.account_number === params.bankAccountNumber &&
+            r.bank_code === params.bankCode &&
+            r.currency === "NGN" &&
+            r.active,
+        );
+        if (existing?.recipient_code) {
+          recipientCode = existing.recipient_code;
+        }
+      } catch {
+        // If listing fails, proceed to create a new one
+      }
+
+      // 2. Create transfer recipient if none found
+      if (!recipientCode) {
+        const recipientRes = await api<any>("/transferrecipient", "POST", {
+          type: "nuban",
+          name: params.recipientName || "Coop Member",
+          account_number: params.bankAccountNumber,
+          bank_code: params.bankCode,
+          currency: "NGN",
+        });
+        recipientCode = recipientRes.data?.recipient_code;
+      }
       if (!recipientCode) {
         return { ok: false, error: "Failed to create Paystack transfer recipient" };
       }
@@ -77,7 +101,7 @@ export const paystackAdapter: ProviderAdapter = {
       // 2. Initiate transfer with recipient code
       const res = await api<any>("/transfer", "POST", {
         source: process.env.PAYSTACK_TRANSFER_SOURCE ?? "balance",
-        amount: params.amount, // Already in kobo from schema
+        amount: forProvider(params.amount, "paystack"),
         reference: params.reference,
         recipient: recipientCode, // ✅ Correct: recipient_code, not bank_code
         reason: `Coop payout ${params.reference}`,
@@ -89,17 +113,29 @@ export const paystackAdapter: ProviderAdapter = {
   },
 
   async createVirtualAccount(params: CreateVirtualAccountParams): Promise<VirtualAccountData> {
-    // 1. Create a customer.
-    const cust = await api<any>("/customer", "POST", {
-      email: `${params.reference}@coop.local`,
-      phone: params.phone,
-      first_name: params.name.split(" ")[0] ?? params.name,
-      last_name: params.name.split(" ").slice(1).join(" ") || "Member",
-    });
-    const customerCode = cust.data?.customer_code;
-    if (!customerCode) throw new Error("Paystack customer creation returned no code");
+    // 1. Check if customer already exists by email reference.
+    const existingEmail = `${params.reference}@coop.local`;
+    let customerCode: string;
+    try {
+      const searchRes = await api<any>(`/customer/${encodeURIComponent(existingEmail)}`, "GET");
+      customerCode = searchRes.data?.customer_code;
+    } catch {
+      customerCode = "";
+    }
 
-    // 2. Assign a dedicated virtual account.
+    // 2. Create customer only if not found.
+    if (!customerCode) {
+      const cust = await api<any>("/customer", "POST", {
+        email: existingEmail,
+        phone: params.phone,
+        first_name: params.name.split(" ")[0] ?? params.name,
+        last_name: params.name.split(" ").slice(1).join(" ") || "Member",
+      });
+      customerCode = cust.data?.customer_code;
+      if (!customerCode) throw new Error("Paystack customer creation returned no code");
+    }
+
+    // 3. Assign a dedicated virtual account.
     const dva = await api<any>("/dedicated_account", "POST", {
       customer: customerCode,
       preferred_bank: process.env.PAYSTACK_PREFERRED_BANK,
@@ -152,8 +188,8 @@ export const paystackAdapter: ProviderAdapter = {
   async getTransferStatus(reference) {
     try {
       const res = await api<{ data?: { status?: string; id?: number | string; transfer_code?: string } }>(
-        "GET",
         `/transfer/verify/${encodeURIComponent(reference)}`,
+        "GET",
       );
       const s = String(res.data?.status ?? "").toLowerCase();
       const status: TransferStatus["status"] =

@@ -27,27 +27,101 @@ export async function checkDailyPayoutLimit(
   startOfDay.setHours(0, 0, 0, 0);
   const startOfMonth = new Date(startOfDay.getFullYear(), startOfDay.getMonth(), 1);
 
-  const [payouts, withdrawals, externals, monthPayouts] = await Promise.all([
-    prisma.payout.aggregate({
-      where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
-      _sum: { amount: true },
-    }),
-    prisma.withdrawalRequest.aggregate({
-      where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
-      _sum: { amount: true },
-    }),
-    prisma.externalPayment.aggregate({
-      where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
-      _sum: { amount: true },
-    }),
-    prisma.payout.aggregate({
-      where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
-      _sum: { amount: true },
-    }),
-  ]);
+  // Try Redis-cached running total first (aggregate once at day boundary)
+  const client = getRedis();
+  const todayKey = `payout:daily:${cooperativeId}:${startOfDay.toISOString().slice(0, 10)}`;
+  const monthKey = `payout:monthly:${cooperativeId}:${startOfDay.toISOString().slice(0, 7)}`;
 
-  const spentToday =
-    (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
+  let spentToday: number;
+  let monthTotal: number;
+
+  if (client) {
+    try {
+      const cached = await client.get(todayKey);
+      if (cached !== null) {
+        spentToday = Number(cached);
+      } else {
+        // Aggregate once at day boundary, then cache with TTL
+        const [payouts, withdrawals, externals] = await Promise.all([
+          prisma.payout.aggregate({
+            where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
+            _sum: { amount: true },
+          }),
+          prisma.withdrawalRequest.aggregate({
+            where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
+            _sum: { amount: true },
+          }),
+          prisma.externalPayment.aggregate({
+            where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
+            _sum: { amount: true },
+          }),
+        ]);
+        spentToday =
+          (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
+        // Cache until end of day (max 86400s)
+        const secondsLeft = Math.max(1, Math.ceil((new Date(startOfDay.getTime() + 86400000).getTime() - Date.now()) / 1000));
+        await client.setex(todayKey, secondsLeft, String(spentToday));
+      }
+
+      const cachedMonth = await client.get(monthKey);
+      if (cachedMonth !== null) {
+        monthTotal = Number(cachedMonth);
+      } else {
+        const monthPayouts = await prisma.payout.aggregate({
+          where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
+          _sum: { amount: true },
+        });
+        monthTotal = monthPayouts._sum.amount ?? 0;
+        const secondsLeft = Math.max(1, Math.ceil((new Date(startOfMonth.getFullYear(), startOfMonth.getMonth() + 1, 0, 23, 59, 59).getTime() - Date.now()) / 1000));
+        await client.setex(monthKey, secondsLeft, String(monthTotal));
+      }
+    } catch {
+      // Fall through to direct query
+      const [payouts, withdrawals, externals, monthPayouts] = await Promise.all([
+        prisma.payout.aggregate({
+          where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
+          _sum: { amount: true },
+        }),
+        prisma.withdrawalRequest.aggregate({
+          where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
+          _sum: { amount: true },
+        }),
+        prisma.externalPayment.aggregate({
+          where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
+          _sum: { amount: true },
+        }),
+        prisma.payout.aggregate({
+          where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
+          _sum: { amount: true },
+        }),
+      ]);
+      spentToday =
+        (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
+      monthTotal = monthPayouts._sum.amount ?? 0;
+    }
+  } else {
+    const [payouts, withdrawals, externals, monthPayouts] = await Promise.all([
+      prisma.payout.aggregate({
+        where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
+        _sum: { amount: true },
+      }),
+      prisma.withdrawalRequest.aggregate({
+        where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
+        _sum: { amount: true },
+      }),
+      prisma.externalPayment.aggregate({
+        where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
+        _sum: { amount: true },
+      }),
+      prisma.payout.aggregate({
+        where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
+        _sum: { amount: true },
+      }),
+    ]);
+    spentToday =
+      (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
+    monthTotal = monthPayouts._sum.amount ?? 0;
+  }
 
   if (spentToday + amount > limit) {
     return {
@@ -60,11 +134,11 @@ export async function checkDailyPayoutLimit(
 
   // Pilot float cap — total out this month.
   const floatCap = Number(process.env.PILOT_FLOAT_CAP ?? 0);
-  if (floatCap > 0 && (monthPayouts._sum.amount ?? 0) + amount > floatCap) {
+  if (floatCap > 0 && monthTotal + amount > floatCap) {
     return {
       ok: false,
       message:
-        `🧪 Pilot safety cap reached: ${formatBalance(monthPayouts._sum.amount ?? 0)} has gone out this month and the pilot ceiling is ${formatBalance(floatCap)}. ` +
+        `🧪 Pilot safety cap reached: ${formatBalance(monthTotal)} has gone out this month and the pilot ceiling is ${formatBalance(floatCap)}. ` +
         `Raise or remove PILOT_FLOAT_CAP once you're confident in live operations.`,
     };
   }
@@ -84,6 +158,14 @@ export async function checkDailyPayoutLimit(
 const MONEY_WINDOW_SECONDS = 60 * 60; // 1 hour
 const MONEY_MAX_PER_HOUR = 6;
 const moneyInMemory = new Map<string, { count: number; resetAt: number }>();
+
+// Sweep expired entries every 60 seconds to prevent unbounded growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of moneyInMemory) {
+    if (now > entry.resetAt) moneyInMemory.delete(key);
+  }
+}, 60_000);
 
 export async function checkMoneyRateLimit(phone: string): Promise<boolean> {
   const key = `money:${phone}`;
@@ -125,6 +207,13 @@ const VELOCITY_WINDOW_SECONDS = 10 * 60; // 10 minutes
 const VELOCITY_MAX = 5;
 const velocityInMemory = new Map<string, { count: number; resetAt: number }>();
 
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of velocityInMemory) {
+    if (now > entry.resetAt) velocityInMemory.delete(key);
+  }
+}, 60_000);
+
 export async function checkVelocity(memberId: string): Promise<boolean> {
   const key = `velocity:${memberId}`;
   const client = getRedis();
@@ -163,6 +252,13 @@ export async function resetVelocity(): Promise<void> {
 const AI_QUERY_WINDOW_SECONDS = 60 * 60; // 1 hour
 const AI_QUERY_MAX_PER_HOUR = 10;
 const aiInMemory = new Map<string, { count: number; resetAt: number }>();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of aiInMemory) {
+    if (now > entry.resetAt) aiInMemory.delete(key);
+  }
+}, 60_000);
 
 export async function checkAIRateLimit(memberId: string): Promise<boolean> {
   const key = `ai:${memberId}`;

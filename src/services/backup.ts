@@ -84,6 +84,19 @@ async function uploadToS3(filePath: string, key: string): Promise<boolean> {
  * and is much faster for large databases. Example:
  *   pg_dump $DATABASE_URL > coop-$(date +%Y%m%d).sql
  */
+const BACKUP_ROW_LIMIT = 50_000;
+const BACKUP_WARN_THRESHOLD = 10_000;
+
+async function fetchWithWarning<T>(
+  findManyFn: () => Promise<T[]>,
+  tableName: string,
+): Promise<T[]> {
+  const rows = await findManyFn();
+  if (rows.length >= BACKUP_WARN_THRESHOLD) {
+    console.warn(`[backup] WARNING: ${tableName} has ${rows.length} rows (limit: ${BACKUP_ROW_LIMIT}). Consider using pg_dump for large tables.`);
+  }
+  return rows;
+}
 export async function runBackup(): Promise<{ ok: boolean; message: string; file?: string }> {
   try {
     await mkdir(BACKUP_DIR, { recursive: true });
@@ -96,37 +109,60 @@ export async function runBackup(): Promise<{ ok: boolean; message: string; file?
       purchasePolls, pollOptions, pollBallots, guarantorDeductions,
       journalEntries, postings, beneficiaries,
     ] = await Promise.all([
-      prisma.cooperative.findMany({ take: 10000 }),
-      prisma.unit.findMany({ take: 10000 }),
-      prisma.member.findMany({ take: 10000 }),
-      prisma.wallet.findMany({ take: 10000 }),
-      prisma.contribution.findMany({ take: 10000 }),
-      prisma.loan.findMany({ take: 10000 }),
-      prisma.guarantor.findMany({ take: 10000 }),
-      prisma.loanRepayment.findMany({ take: 10000 }),
-      prisma.payout.findMany({ take: 10000 }),
-      prisma.withdrawalRequest.findMany({ take: 10000 }),
-      prisma.deathClaim.findMany({ take: 10000 }),
-      prisma.deathValidation.findMany({ take: 10000 }),
-      prisma.auditLog.findMany({ take: 10000 }),
-      prisma.supportTicket.findMany({ take: 10000 }),
-      prisma.vote.findMany({ take: 10000 }),
-      prisma.voteCandidate.findMany({ take: 10000 }),
-      prisma.voteBallot.findMany({ take: 10000 }),
-      prisma.dividend.findMany({ take: 10000 }),
-      prisma.dividendEntry.findMany({ take: 10000 }),
-      prisma.broadcast.findMany({ take: 10000 }),
-      prisma.session.findMany({ take: 10000 }),
-      prisma.ledgerEntry.findMany({ take: 10000 }),
-      prisma.externalPayment.findMany({ take: 10000 }),
-      prisma.purchasePoll.findMany({ take: 10000 }),
-      prisma.pollOption.findMany({ take: 10000 }),
-      prisma.pollBallot.findMany({ take: 10000 }),
-      prisma.guarantorDeduction.findMany({ take: 10000 }),
-      prisma.journalEntry.findMany({ take: 10000 }),
-      prisma.posting.findMany({ take: 10000 }),
-      prisma.beneficiary.findMany({ take: 10000 }),
+      fetchWithWarning(() => prisma.cooperative.findMany({ take: BACKUP_ROW_LIMIT }), "cooperatives"),
+      fetchWithWarning(() => prisma.unit.findMany({ take: BACKUP_ROW_LIMIT }), "units"),
+      fetchWithWarning(() => prisma.member.findMany({ take: BACKUP_ROW_LIMIT }), "members"),
+      fetchWithWarning(() => prisma.wallet.findMany({ take: BACKUP_ROW_LIMIT }), "wallets"),
+      fetchWithWarning(() => prisma.contribution.findMany({ take: BACKUP_ROW_LIMIT }), "contributions"),
+      fetchWithWarning(() => prisma.loan.findMany({ take: BACKUP_ROW_LIMIT }), "loans"),
+      fetchWithWarning(() => prisma.guarantor.findMany({ take: BACKUP_ROW_LIMIT }), "guarantors"),
+      fetchWithWarning(() => prisma.loanRepayment.findMany({ take: BACKUP_ROW_LIMIT }), "loanRepayments"),
+      fetchWithWarning(() => prisma.payout.findMany({ take: BACKUP_ROW_LIMIT }), "payouts"),
+      fetchWithWarning(() => prisma.withdrawalRequest.findMany({ take: BACKUP_ROW_LIMIT }), "withdrawalRequests"),
+      fetchWithWarning(() => prisma.deathClaim.findMany({ take: BACKUP_ROW_LIMIT }), "deathClaims"),
+      fetchWithWarning(() => prisma.deathValidation.findMany({ take: BACKUP_ROW_LIMIT }), "deathValidations"),
+      fetchWithWarning(() => prisma.auditLog.findMany({ take: BACKUP_ROW_LIMIT }), "auditLogs"),
+      fetchWithWarning(() => prisma.supportTicket.findMany({ take: BACKUP_ROW_LIMIT }), "supportTickets"),
+      fetchWithWarning(() => prisma.vote.findMany({ take: BACKUP_ROW_LIMIT }), "votes"),
+      fetchWithWarning(() => prisma.voteCandidate.findMany({ take: BACKUP_ROW_LIMIT }), "voteCandidates"),
+      fetchWithWarning(() => prisma.voteBallot.findMany({ take: BACKUP_ROW_LIMIT }), "voteBallots"),
+      fetchWithWarning(() => prisma.dividend.findMany({ take: BACKUP_ROW_LIMIT }), "dividends"),
+      fetchWithWarning(() => prisma.dividendEntry.findMany({ take: BACKUP_ROW_LIMIT }), "dividendEntries"),
+      fetchWithWarning(() => prisma.broadcast.findMany({ take: BACKUP_ROW_LIMIT }), "broadcasts"),
+      fetchWithWarning(() => prisma.session.findMany({ take: BACKUP_ROW_LIMIT }), "sessions"),
+      fetchWithWarning(() => prisma.ledgerEntry.findMany({ take: BACKUP_ROW_LIMIT }), "ledgerEntries"),
+      fetchWithWarning(() => prisma.externalPayment.findMany({ take: BACKUP_ROW_LIMIT }), "externalPayments"),
+      fetchWithWarning(() => prisma.purchasePoll.findMany({ take: BACKUP_ROW_LIMIT }), "purchasePolls"),
+      fetchWithWarning(() => prisma.pollOption.findMany({ take: BACKUP_ROW_LIMIT }), "pollOptions"),
+      fetchWithWarning(() => prisma.pollBallot.findMany({ take: BACKUP_ROW_LIMIT }), "pollBallots"),
+      fetchWithWarning(() => prisma.guarantorDeduction.findMany({ take: BACKUP_ROW_LIMIT }), "guarantorDeductions"),
+      fetchWithWarning(() => prisma.journalEntry.findMany({ take: BACKUP_ROW_LIMIT }), "journalEntries"),
+      fetchWithWarning(() => prisma.posting.findMany({ take: BACKUP_ROW_LIMIT }), "postings"),
+      fetchWithWarning(() => prisma.beneficiary.findMany({ take: BACKUP_ROW_LIMIT }), "beneficiaries"),
     ]);
+
+    // Warn when any table was truncated at the 10K limit
+    const tableNames = [
+      "cooperatives", "units", "members", "wallets", "contributions", "loans", "guarantors",
+      "loanRepayments", "payouts", "withdrawalRequests", "deathClaims", "deathValidations",
+      "auditLogs", "supportTickets", "votes", "voteCandidates", "voteBallots", "dividends",
+      "dividendEntries", "broadcasts", "sessions", "ledgerEntries", "externalPayments",
+      "purchasePolls", "pollOptions", "pollBallots", "guarantorDeductions",
+      "journalEntries", "postings", "beneficiaries",
+    ];
+    const allResults = [
+      cooperatives, units, members, wallets, contributions, loans, guarantors,
+      loanRepayments, payouts, withdrawalRequests, deathClaims, deathValidations,
+      auditLogs, supportTickets, votes, voteCandidates, voteBallots, dividends,
+      dividendEntries, broadcasts, sessions, ledgerEntries, externalPayments,
+      purchasePolls, pollOptions, pollBallots, guarantorDeductions,
+      journalEntries, postings, beneficiaries,
+    ];
+    for (let i = 0; i < allResults.length; i++) {
+      if (allResults[i].length >= 10000) {
+        console.warn(`[backup] WARNING: table "${tableNames[i]}" has >= 10,000 rows — backup may be truncated. Use pg_dump for full backups.`);
+      }
+    }
 
     const dump = {
       exportedAt: new Date().toISOString(),

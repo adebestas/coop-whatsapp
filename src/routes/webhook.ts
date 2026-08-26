@@ -6,6 +6,33 @@ import { extractWhatsAppMessages } from "../lib/inbound.js";
 import { sendText } from "../lib/messaging.js";
 
 /**
+ * Per-user mutex to serialize message processing per phone number.
+ * Prevents race conditions where two messages from the same user
+ * are processed concurrently and cause inconsistent state (e.g. double spend).
+ */
+const userMutexes = new Map<string, Promise<void>>();
+
+async function withUserMutex<T>(phone: string, fn: () => Promise<T>): Promise<T> {
+  // Wait for any in-flight processing for this user to finish
+  const prev = userMutexes.get(phone);
+  if (prev) await prev.catch(() => {});
+
+  let release: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  userMutexes.set(phone, current);
+
+  try {
+    return await fn();
+  } finally {
+    release!();
+    // Clean up if this is still the latest mutex
+    if (userMutexes.get(phone) === current) {
+      userMutexes.delete(phone);
+    }
+  }
+}
+
+/**
  * Verify WhatsApp webhook signature (X-Hub-Signature-256).
  * Prevents attackers from injecting fake messages.
  */
@@ -56,10 +83,13 @@ export async function webhookRoutes(app: FastifyInstance) {
           // Don't await — Meta needs a quick 200 and we don't want a
           // slow upstream to cause retries. But catch errors so the
           // user gets a fallback message instead of silent failure.
-          void handleMessage(inbound.from, inbound.text, {
-            flowToken: inbound.flowToken,
-            ip: req.ip,
-          }).catch((err) => {
+          // Per-user mutex serializes processing to prevent race conditions.
+          void withUserMutex(inbound.from, () =>
+            handleMessage(inbound.from, inbound.text, {
+              flowToken: inbound.flowToken,
+              ip: req.ip,
+            }),
+          ).catch((err) => {
             app.log.error({ err, from: inbound.from }, "handleMessage failed");
             sendText({
               to: inbound.from,
@@ -70,6 +100,7 @@ export async function webhookRoutes(app: FastifyInstance) {
       }
     }
 
+    reply.header("X-Content-Type-Options", "nosniff");
     return reply.code(200).send({ status: "received" });
   });
 }

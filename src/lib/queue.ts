@@ -99,7 +99,7 @@ export async function addJob<T>(
 
   try {
     const job = await queue.add(queueName, data, options);
-    console.log(`[Queue] Job ${job.id} added to ${queueName}`);
+    console.warn(`[Queue] Job ${job.id} added to ${queueName}`);
     return job.id!;
   } catch (err) {
     console.error(`[Queue] Failed to add job to ${queueName}:`, err);
@@ -128,10 +128,10 @@ export function processQueue<T>(
   const worker = new Worker(
     queueName,
     async (job) => {
-      console.log(`[Queue] Processing job ${job.id} in ${queueName}`);
+      console.warn(`[Queue] Processing job ${job.id} in ${queueName}`);
       try {
         await handler(job);
-        console.log(`[Queue] Job ${job.id} completed`);
+        console.warn(`[Queue] Job ${job.id} completed`);
       } catch (err) {
         console.error(`[Queue] Job ${job.id} failed:`, err);
         throw err;
@@ -148,7 +148,7 @@ export function processQueue<T>(
   });
 
   worker.on("completed", (job) => {
-    console.log(`[Queue] Job ${job.id} completed`);
+    console.warn(`[Queue] Job ${job.id} completed`);
   });
 
   workerMap.set(queueName, worker);
@@ -184,12 +184,12 @@ export async function getQueueMetrics(
 export async function closeQueues(): Promise<void> {
   for (const [name, worker] of workerMap) {
     await worker.close();
-    console.log(`[Queue] Worker ${name} closed`);
+    console.warn(`[Queue] Worker ${name} closed`);
   }
 
   for (const [name, queue] of queueMap) {
     await queue.close();
-    console.log(`[Queue] Queue ${name} closed`);
+    console.warn(`[Queue] Queue ${name} closed`);
   }
 
   queueMap.clear();
@@ -214,28 +214,28 @@ export function initQueueProcessors(): void {
   // Payments queue
   processQueue<PaymentJob>(QUEUE_NAMES.PAYMENTS, async (job) => {
     const { type, payoutId } = job.data;
-    console.log(`[Queue] Processing payment ${type} for payout ${payoutId}`);
+    console.warn(`[Queue] Processing payment ${type} for payout ${payoutId}`);
   });
 
   // Exports queue
   processQueue<ExportJob>(QUEUE_NAMES.EXPORTS, async (job) => {
     const { type, coopId, format, requestedBy } = job.data;
-    console.log(`[Queue] Generating ${type} export (${format}) for coop ${coopId}`);
+    console.warn(`[Queue] Generating ${type} export (${format}) for coop ${coopId}`);
   });
 
   // Backups queue
   processQueue<BackupJob>(QUEUE_NAMES.BACKUPS, async (job) => {
     const { type, coopId } = job.data;
-    console.log(`[Queue] Running ${type} backup for coop ${coopId}`);
+    console.warn(`[Queue] Running ${type} backup for coop ${coopId}`);
   });
 
   // Digest queue
   processQueue<DigestJob>(QUEUE_NAMES.DIGEST, async (job) => {
     const { type, coopId } = job.data;
-    console.log(`[Queue] Generating ${type} digest for coop ${coopId}`);
+    console.warn(`[Queue] Generating ${type} digest for coop ${coopId}`);
   });
 
-  console.log("[Queue] All processors initialized");
+  console.warn("[Queue] All processors initialized");
 }
 
 // ===== Convenience Functions =====

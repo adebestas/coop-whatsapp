@@ -10,7 +10,7 @@ import { paymentWebhookRoutes } from "./routes/payments.js";
 import { adminApiRoutes } from "./routes/admin.js";
 import { serveExportFile } from "./routes/exports.js";
 import { prisma } from "./lib/prisma.js";
-import { getRedis } from "./lib/cache.js";
+import { getRedis, isRedisConnected } from "./lib/cache.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -26,6 +26,7 @@ export function buildApp() {
     // Trust the reverse proxy (nginx/caddy) for correct client IPs in rate limits.
     trustProxy: true,
     bodyLimit: 256 * 1024, // 256 KB
+    requestTimeout: 30_000,
   });
 
   // Capture the RAW request body before JSON parsing — provider webhook
@@ -80,6 +81,16 @@ export function buildApp() {
     },
   });
 
+  // HTTPS enforcement in production — reject plain HTTP requests at the
+  // application layer when behind a reverse proxy that sets x-forwarded-proto.
+  if (process.env.NODE_ENV === "production") {
+    app.addHook("onRequest", async (req, reply) => {
+      if (req.headers["x-forwarded-proto"] !== "https") {
+        return reply.code(403).send({ error: "HTTPS required" });
+      }
+    });
+  }
+
   // Rate limiting — blunt-force protection on every public route.
   // Providers retry aggressively, so webhooks get a generous but bounded
   // budget; everything else is tight.
@@ -93,7 +104,13 @@ export function buildApp() {
   app.get("/health", async (req, reply) => {
     try {
       await prisma.$queryRaw`SELECT 1`;
-      return { status: "ok" };
+      const dbOk = true;
+      const redisOk = isRedisConnected();
+      return {
+        status: redisOk && dbOk ? "ok" : "degraded",
+        db: dbOk,
+        redis: redisOk,
+      };
     } catch {
       return reply.status(503).send({ status: "error", message: "Service unavailable" });
     }

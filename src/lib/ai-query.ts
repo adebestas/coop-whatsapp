@@ -22,7 +22,8 @@ import {
   type CoopSnapshot,
   type MemberSnapshot,
 } from "./ai-data.js";
-import { GROQ_URL, groqAvailable, groqModel, groqHeaders, GROQ_TIMEOUT_MS, groqFetch } from "./groq.js";
+import { GROQ_URL, groqAvailable, groqModel, groqHeaders, GROQ_TIMEOUT_MS, groqFetch, validateGroqResponse, parseTokenUsage } from "./groq.js";
+import { KNOWN_COMMANDS } from "./ai.js";
 
 /** Sleep for the given milliseconds. */
 function sleep(ms: number): Promise<void> {
@@ -124,7 +125,9 @@ If unsure, return {"type":"help","args":{}}`,
       choices?: Array<{ message?: { content?: string } }>;
     };
     const raw = body.choices?.[0]?.message?.content ?? "";
-    const jsonText = raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1);
+    const jsonMatch = raw.match(/\{[^{}]*\}/);
+    const jsonText = jsonMatch ? jsonMatch[0] : "";
+    if (!jsonText) return null;
     const parsed = JSON.parse(jsonText) as { type?: string; args?: Record<string, string> };
     if (!parsed.type) return null;
 
@@ -148,7 +151,8 @@ If unsure, return {"type":"help","args":{}}`,
       type: parsed.type as AIQueryType,
       args: safeArgs,
     };
-  } catch {
+  } catch (err) {
+    console.warn("[ai-query] classifyIntent failed:", err);
     return null;
   }
 }
@@ -179,16 +183,21 @@ Never make up data. Only use what's provided.`;
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: `Question: <user_message>${question}</user_message>\n\nData (JSON):\n${JSON.stringify(data, null, 2)}`,
+          content: `Question: <user_message>${question}</user_message>\n\n<coop_data>\n${JSON.stringify(data, null, 2)}\n</coop_data>`,
         },
       ],
     }, GROQ_TIMEOUT_MS);
     if (!res.ok) return formatFallbackResponse(intent, data);
-    const body = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    return body.choices?.[0]?.message?.content ?? formatFallbackResponse(intent, data);
-  } catch {
+    const body = (await res.json()) as Record<string, unknown>;
+    parseTokenUsage(body);
+    const validated = validateGroqResponse(body);
+    const choices = validated?.choices as Array<Record<string, unknown>> | undefined;
+    const firstChoice = choices?.[0] as Record<string, unknown> | undefined;
+    const message = firstChoice?.message as Record<string, unknown> | undefined;
+    const aiText = (typeof message?.content === "string" ? message.content : null) ?? formatFallbackResponse(intent, data);
+    return aiText + "\n\n_Disclaimer: This is an AI-generated response and may not be fully accurate. For official information, contact your cooperative admin._";
+  } catch (err) {
+    console.warn("[ai-query] generateResponse failed:", err);
     return formatFallbackResponse(intent, data);
   }
 }
@@ -373,6 +382,10 @@ export async function handleAIQuery(
     }
 
     case "member_list": {
+      // Admin-only: member names are PII and must not be exposed to regular members via AI.
+      if (role !== "admin" && role !== "superadmin") {
+        return null;
+      }
       const members = await prisma.member.findMany({
         where: { cooperativeId, status: "active" },
         select: { name: true, code: true, role: true },
@@ -398,6 +411,11 @@ export function isNaturalLanguageQuery(text: string): boolean {
   const trimmed = text.trim();
   if (trimmed.length < 4) return false;
   if (/^[\d\s.,]+$/.test(trimmed)) return false;
+
+  // Reject if the first word is a known command — prevents false positives
+  // where e.g. "balance" or "save 2000" enters the AI path.
+  const firstWord = trimmed.split(/\s+/)[0].toLowerCase();
+  if ((KNOWN_COMMANDS as readonly string[]).includes(firstWord)) return false;
 
   // Check if it looks like a question or statement (not a command)
   const questionPatterns = /^(how|what|when|where|who|why|show|tell|check|give|list|who|which)/i;

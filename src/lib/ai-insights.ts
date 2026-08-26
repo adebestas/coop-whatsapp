@@ -16,6 +16,18 @@ import { formatBalance } from "../services/cooperative.js";
 import { getCoopSnapshot, getSavingsTrend, getLoanPerformance } from "./ai-data.js";
 import { groqFetch, groqAvailable, groqModel, GROQ_TIMEOUT_MS } from "./groq.js";
 
+/** Default savings thresholds for recommendations (in kobo). Overridden per-coop if config exists. */
+const DEFAULT_LOW_SAVINGS_THRESHOLD = 100000;   // ₦1,000
+const DEFAULT_HIGH_SAVINGS_THRESHOLD = 500000;  // ₦5,000
+
+async function getSavingsThresholds(cooperativeId: string): Promise<{ low: number; high: number }> {
+  const config = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId } });
+  if (config?.minSavings) {
+    return { low: config.minSavings, high: config.minSavings * 5 };
+  }
+  return { low: DEFAULT_LOW_SAVINGS_THRESHOLD, high: DEFAULT_HIGH_SAVINGS_THRESHOLD };
+}
+
 /**
  * Generate AI-powered financial insights.
  */
@@ -164,11 +176,12 @@ export async function generateSavingsAnalysis(
   }
 
   // Recommendations
+  const thresholds = await getSavingsThresholds(cooperativeId);
   analysis += `\n*Recommendations:*\n`;
-  if (member.wallet.balance < 100000) {
+  if (member.wallet.balance < thresholds.low) {
     analysis += `• Consider increasing your monthly savings to build your emergency fund.\n`;
   }
-  if (member.wallet.totalSaved > 500000) {
+  if (member.wallet.totalSaved > thresholds.high) {
     analysis += `• Great savings! You may be eligible for a loan.\n`;
   }
 
@@ -177,10 +190,16 @@ export async function generateSavingsAnalysis(
 
 /**
  * Generate loan risk assessment for the cooperative.
+ * Admin-only: exposes overdue member names which are PII.
  */
 export async function generateLoanRiskAssessment(
   cooperativeId: string,
+  role?: string,
 ): Promise<string> {
+  if (role !== "admin" && role !== "superadmin") {
+    return "⚠️ Loan risk assessment is only available to cooperative admins.";
+  }
+
   const [performance, overdueLoans] = await Promise.all([
     getLoanPerformance(cooperativeId),
     prisma.loan.findMany({

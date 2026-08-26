@@ -6,6 +6,31 @@ import { recordLedger } from "./ledger.js";
 import { sendToBank } from "./disbursements.js";
 import { checkDailyPayoutLimit } from "./fraud.js";
 
+/**
+ * Nigeria PAYE tax calculation per Finance Act 2023 rates.
+ * First ₦300k/month exempt; then progressive brackets.
+ */
+function calculatePaye(grossKobo: number): number {
+  const exemptKobo = 30_000_00; // ₦300,000
+  let taxable = Math.max(0, grossKobo - exemptKobo);
+  let tax = 0;
+  const brackets = [
+    { limit: 20_000_00, rate: 0.07 },   // ₦200k @ 7%
+    { limit: 66_000_00, rate: 0.11 },   // ₦660k @ 11%
+    { limit: 46_000_00, rate: 0.15 },   // ₦460k @ 15%
+    { limit: 160_000_00, rate: 0.19 },  // ₦1.6M @ 19%
+    { limit: 320_000_00, rate: 0.21 },  // ₦3.2M @ 21%
+    { limit: Infinity, rate: 0.24 },    // above @ 24%
+  ];
+  for (const b of brackets) {
+    if (taxable <= 0) break;
+    const chunk = Math.min(taxable, b.limit);
+    tax += Math.round(chunk * b.rate);
+    taxable -= chunk;
+  }
+  return tax;
+}
+
 export interface PayrollResult {
   ok: boolean;
   message: string;
@@ -143,14 +168,18 @@ export async function runPayroll(
       break;
     }
 
+    // PAYE auto-calculation: deduct tax at source before disbursement
+    const paye = calculatePaye(amount);
+    const netSalary = amount - paye;
+
     const result = await sendToBank({
       memberId: r.id,
-      amount,
+      amount: netSalary,
       bankAccountNumber: r.bankAccountNumber,
       bankCode: r.bankCode,
       bankName: r.bankName ?? undefined,
-      note: `${r.salaryKind ?? "stipend"} — ${narration.trim()}`,
-      successMessage: `💰 ${r.salaryKind === "salary" ? "Salary" : "Stipend"} paid: *${formatBalance(amount)}* to your bank account. Narration: "${narration.trim()}".`,
+      note: `${r.salaryKind ?? "stipend"} — ${narration.trim()}${paye > 0 ? ` (PAYE: ${formatBalance(paye)})` : ""}`,
+      successMessage: `💰 ${r.salaryKind === "salary" ? "Salary" : "Stipend"} paid: *${formatBalance(netSalary)}* to your bank account (PAYE: *${formatBalance(paye)}*). Narration: "${narration.trim()}".`,
       idempotencyKey: `TFR-PAYROLL-${r.id}-${period}`,
       onFailure: async () => {},
     });
@@ -164,13 +193,26 @@ export async function runPayroll(
       cooperativeId,
       type: "expense",
       category: r.salaryKind === "salary" ? "salary" : "stipend",
-      amount,
-      note: `${r.salaryKind ?? "stipend"} to ${r.name} — ${narration.trim()}`,
+      amount: netSalary,
+      note: `${r.salaryKind ?? "stipend"} to ${r.name} — ${narration.trim()} (net of PAYE ${formatBalance(paye)})`,
       reference: r.id,
       fundType: "operational",
     });
+
+    // Record PAYE as a tax liability (to be remitted to state IRS)
+    if (paye > 0) {
+      await recordLedger({
+        cooperativeId,
+        type: "expense",
+        category: "other",
+        amount: paye,
+        note: `PAYE deduction for ${r.name} — ${narration.trim()} (remittance liability)`,
+        reference: `PAYE-${r.id}-${period}`,
+        fundType: "operational",
+      });
+    }
     paid += 1;
-    total += amount;
+    total += netSalary;
 
     if (limit.warning) await notifyMember(triggeredBy, limit.warning).catch(() => {});
   }

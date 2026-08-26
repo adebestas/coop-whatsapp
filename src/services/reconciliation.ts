@@ -75,25 +75,27 @@ export async function runWalletReconciliation(
     where: { cooperativeId, status: "active" },
   });
 
-  const activeLoans = await prisma.loan.findMany({
-    where: {
-      cooperativeId,
-      status: { in: ["approved", "disbursed"] },
-    },
-    select: { amount: true },
-  });
-  const activeLoanCount = activeLoans.length;
-  const activeLoanTotal = activeLoans.reduce((sum, l) => sum + l.amount, 0);
-
-  const pendingWithdrawals = await prisma.withdrawalRequest.findMany({
-    where: {
-      cooperativeId,
-      status: { in: ["pending", "admin_approved"] },
-    },
-    select: { amount: true },
-  });
-  const pendingWithdrawalCount = pendingWithdrawals.length;
-  const pendingWithdrawalTotal = pendingWithdrawals.reduce((sum, w) => sum + w.amount, 0);
+  // Use aggregate + count instead of loading all rows into memory
+  const [activeLoanCountAgg, activeLoanSumAgg, pendingWithdrawalCountAgg, pendingWithdrawalSumAgg] = await Promise.all([
+    prisma.loan.count({
+      where: { cooperativeId, status: { in: ["approved", "disbursed"] } },
+    }),
+    prisma.loan.aggregate({
+      where: { cooperativeId, status: { in: ["approved", "disbursed"] } },
+      _sum: { amount: true },
+    }),
+    prisma.withdrawalRequest.count({
+      where: { cooperativeId, status: { in: ["pending", "admin_approved"] } },
+    }),
+    prisma.withdrawalRequest.aggregate({
+      where: { cooperativeId, status: { in: ["pending", "admin_approved"] } },
+      _sum: { amount: true },
+    }),
+  ]);
+  const activeLoanCount = activeLoanCountAgg;
+  const activeLoanTotal = activeLoanSumAgg._sum.amount ?? 0;
+  const pendingWithdrawalCount = pendingWithdrawalCountAgg;
+  const pendingWithdrawalTotal = pendingWithdrawalSumAgg._sum.amount ?? 0;
 
   // 6. Find last reconciliation
   const lastLog = await prisma.reconciliationLog.findFirst({

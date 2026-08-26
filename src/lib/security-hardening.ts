@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { prisma } from "./prisma.js";
 import { sendText, notifyMember } from "./messaging.js";
 import { cacheDel } from "./cache.js";
@@ -128,7 +129,52 @@ export async function recordSuspiciousEvent(params: {
   try {
     const { getRedis } = await import("./cache.js");
     const redis = getRedis();
-    if (!redis) return { frozen: false };
+    if (!redis) {
+      // Database fallback: count recent suspicious events in the last hour
+      const oneHourAgo = new Date(Date.now() - SUSPICIOUS_WINDOW_MS);
+      const recentCount = await prisma.auditLog.count({
+        where: {
+          targetId: memberId,
+          action: { startsWith: "security.suspicious." },
+          createdAt: { gte: oneHourAgo },
+        },
+      });
+      const count = recentCount + 1;
+
+      await audit({
+        cooperativeId,
+        actorPhone: memberPhone,
+        actorId: memberId,
+        actorRole: "member",
+        action: `security.suspicious.${event}`,
+        targetType: "member",
+        targetId: memberId,
+        detail,
+      });
+
+      if (count >= SUSPICIOUS_THRESHOLD) {
+        await prisma.member.update({
+          where: { id: memberId },
+          data: { status: "suspended" },
+        });
+        const superadmins = await prisma.member.findMany({
+          where: { cooperativeId, role: "superadmin" },
+          select: { phone: true, name: true },
+        });
+        const member = await prisma.member.findUnique({
+          where: { id: memberId },
+          select: { name: true, phone: true },
+        });
+        for (const sa of superadmins) {
+          await sendText({
+            to: sa.phone,
+            text: `🚨 AUTO-FREEZE ACTIVATED 🚨\n\nMember: ${member?.name ?? memberId}\nPhone: ${member?.phone ?? "unknown"}\nReason: ${SUSPICIOUS_THRESHOLD}+ suspicious events in 1 hour\n\nAccount has been suspended. Use "unsuspend ${memberId.slice(0, 8)}" to review and restore.`,
+          });
+        }
+        return { frozen: true, reason: "Account auto-frozen due to suspicious activity" };
+      }
+      return { frozen: false };
+    }
 
     // Increment suspicious event counter
     const count = await redis.incr(cacheKey);
@@ -200,7 +246,7 @@ export async function checkMultiSigRequirement(params: {
   amount: number;
   initiatorPhone: string;
   targetId: string;
-}): Promise<{ needsApproval: false } | { needsApproval: true; pendingId: string }> {
+}): Promise<{ needsApproval: false; warning?: string } | { needsApproval: true; pendingId: string }> {
   const { cooperativeId, amount, initiatorPhone, targetId } = params;
 
   if (amount < PAYOUT_MULTI_SIG_THRESHOLD) {
@@ -216,7 +262,17 @@ export async function checkMultiSigRequirement(params: {
   if (superadmins.length < 2) {
     // Only 1 superadmin — can't enforce multi-sig, but log warning
     console.warn(`[security] Payout ${amount}kobo needs multi-sig but only ${superadmins.length} superadmin(s) exist`);
-    return { needsApproval: false };
+    await audit({
+      cooperativeId,
+      actorPhone: initiatorPhone,
+      actorId: initiatorPhone,
+      actorRole: "superadmin",
+      action: "security.multisig_bypass",
+      targetType: "cooperative",
+      targetId: cooperativeId,
+      detail: `Payout ${amount}kobo needs multi-sig but only ${superadmins.length} superadmin(s) exist`,
+    });
+    return { needsApproval: false, warning: `Only ${superadmins.length} superadmin(s) — multi-sig unavailable. Add more superadmins.` };
   }
 
   // Create a pending approval request
@@ -226,7 +282,7 @@ export async function checkMultiSigRequirement(params: {
     const redis = getRedis();
     if (!redis) return { needsApproval: false };
 
-    const pendingId = `msig_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const pendingId = `msig_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
     await redis.setex(cacheKey, 3600, JSON.stringify({
       pendingId,
       amount,
@@ -384,7 +440,7 @@ export async function checkTenureLimit(params: {
     where: { id: memberId },
     select: { createdAt: true },
   });
-  if (!member) return { allowed: true };
+  if (!member) return { allowed: false, message: "Member not found." };
 
   const tenureMonths = (Date.now() - member.createdAt.getTime()) / (30 * 24 * 60 * 60 * 1000);
   const limit = TENURE_LIMITS.find(l => tenureMonths >= l.minMonths && tenureMonths < l.maxMonths);

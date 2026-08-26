@@ -98,8 +98,8 @@ interface AdminContext {
 }
 
 /** Resolve an admin's access scope: coop-level or a single unit. */
-async function adminContext(phone: string): Promise<AdminContext | null> {
-  const admin = await prisma.member.findFirst({
+async function adminContext(phone: string, preloadedAdmin?: { id: string; phone: string; name: string; email: string | null; role: string; cooperativeId: string; cooperative: { id: string; name: string; adminPhone: string | null } } | null): Promise<AdminContext | null> {
+  const admin = preloadedAdmin ?? await prisma.member.findFirst({
     where: { phone, role: { in: ["admin", "superadmin"] } },
     include: { cooperative: true },
   });
@@ -121,9 +121,10 @@ export async function handleAdminCommand(
   phone: string,
   cmd: string,
   args: string[],
+  preloadedMember?: { id: string; phone: string; name: string; email: string | null; role: string; cooperativeId: string; cooperative: { id: string; name: string; adminPhone: string | null } } | null,
 ): Promise<boolean> {
   try {
-  const ctx = await adminContext(phone);
+  const ctx = await adminContext(phone, preloadedMember);
   if (!ctx) return false;
   const { admin, coop, unitAdmin, isSuper } = ctx;
   const coopId = admin.cooperativeId;
@@ -158,11 +159,8 @@ export async function handleAdminCommand(
 
   switch (cmd) {
     case "pending": {
-      const loans = await listPendingLoans(coopId);
-      const scoped = unitAdmin
-        ? loans.filter((l) => l.member.unitId === unitAdmin.unit.id)
-        : loans;
-      await sendPendingLoans(phone, scoped, unitAdmin !== null);
+      const loans = await listPendingLoans(coopId, 20, unitAdmin?.unit?.id);
+      await sendPendingLoans(phone, loans, unitAdmin !== null);
       return true;
     }
 
@@ -578,6 +576,7 @@ export async function handleAdminCommand(
           wallet: { select: { balance: true } },
         },
         orderBy: { name: "asc" },
+        take: 100,
       });
       if (members.length === 0) {
         await sendText({ to: phone, text: "No members in this cooperative." });
@@ -600,6 +599,101 @@ export async function handleAdminCommand(
         .map((e) => `• ${e.createdAt.toISOString().slice(5, 16).replace("T", " ")} — ${e.actorPhone.slice(-4)} (${e.actorRole ?? "?"}) ${e.action}${e.targetId ? ` ${e.targetId.slice(-6)}` : ""}`)
         .join("\n");
       await sendText({ to: phone, text: `*Recent activity*\n\n${body}` });
+      return true;
+    }
+
+    case "internalaudit": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can run internal audits." });
+        return true;
+      }
+
+      const coopFull = await prisma.cooperative.findUnique({ where: { id: coopId } });
+      if (!coopFull) {
+        await sendText({ to: phone, text: "Cooperative not found." });
+        return true;
+      }
+
+      const [
+        totalMembers,
+        activeMembers,
+        totalContributions,
+        totalLoanDisbursed,
+        loanBalance,
+        pendingWithdrawals,
+        recentAuditEntries,
+        walletAgg,
+      ] = await Promise.all([
+        prisma.member.count({ where: { cooperativeId: coopId } }),
+        prisma.member.count({ where: { cooperativeId: coopId, status: "active" } }),
+        prisma.contribution.aggregate({ where: { cooperativeId: coopId, status: "confirmed" }, _sum: { amount: true }, _count: true }),
+        prisma.loan.aggregate({ where: { cooperativeId: coopId, status: { in: ["approved", "disbursed", "paid"] } }, _sum: { amount: true }, _count: true }),
+        prisma.loan.aggregate({ where: { cooperativeId: coopId, status: { in: ["approved", "disbursed"] } }, _sum: { balance: true }, _count: true }),
+        prisma.withdrawalRequest.count({ where: { cooperativeId: coopId, status: { in: ["pending", "admin_approved"] } } }),
+        recentAudit(coopId, 50),
+        prisma.wallet.aggregate({ where: { member: { cooperativeId: coopId } }, _sum: { balance: true, totalSaved: true } }),
+      ]);
+
+      const totalSaved = walletAgg._sum.totalSaved ?? 0;
+      const walletBalance = walletAgg._sum.balance ?? 0;
+      const disbursed = totalLoanDisbursed._sum.amount ?? 0;
+      const outstanding = loanBalance._sum.balance ?? 0;
+      const repayments = disbursed - outstanding;
+
+      // Check for anomalies
+      const anomalies: string[] = [];
+      if (activeMembers < 20) anomalies.push(`Low active membership: ${activeMembers} (minimum 20 required for loans)`);
+      if (outstanding > 0 && totalContributions._count > 0) {
+        const ratio = outstanding / (totalSaved || 1);
+        if (ratio > 2) anomalies.push(`High loan-to-savings ratio: ${(ratio * 100).toFixed(0)}%`);
+      }
+      if (pendingWithdrawals > 10) anomalies.push(`High pending withdrawals: ${pendingWithdrawals}`);
+
+      // Check for unusual audit activity
+      const superAdminActions = recentAuditEntries.filter(e => e.actorRole === "superadmin").length;
+      const totalActions = recentAuditEntries.length;
+      if (totalActions > 0 && superAdminActions / totalActions > 0.8) {
+        anomalies.push(`High super admin activity: ${superAdminActions}/${totalActions} recent actions`);
+      }
+
+      const report = [
+        `*🔍 Internal Audit Report — ${coopFull.name}*`,
+        `_Generated: ${new Date().toLocaleDateString("en-GB")}_`,
+        "",
+        `*Membership:*`,
+        `• Total members: *${totalMembers}*`,
+        `• Active: *${activeMembers}*`,
+        "",
+        `*Finances:*`,
+        `• Total savings mobilized: *${formatBalance(totalSaved)}*`,
+        `• Current wallet balance: *${formatBalance(walletBalance)}*`,
+        `• Total loans disbursed: *${formatBalance(disbursed)}* (${totalLoanDisbursed._count} loans)`,
+        `• Outstanding loan balance: *${formatBalance(outstanding)}* (${loanBalance._count} active)`,
+        `• Total repayments: *${formatBalance(repayments)}*`,
+        `• Pending withdrawals: *${pendingWithdrawals}*`,
+        "",
+        `*Compliance:*`,
+        anomalies.length === 0 ? "• ✅ No anomalies detected" : anomalies.map(a => `• ⚠️ ${a}`).join("\n"),
+        "",
+        `*Recent Activity (last 50 entries):*`,
+        recentAuditEntries.length === 0
+          ? "• No recent activity"
+          : recentAuditEntries.slice(0, 10).map(e =>
+            `• ${e.createdAt.toISOString().slice(5, 16).replace("T", " ")} — ${e.action} — ${e.detail ?? ""}`
+          ).join("\n"),
+        "",
+        `_This is an independent internal audit report for cooperative governance._`,
+      ];
+
+      await sendText({ to: phone, text: report.join("\n") });
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorId: admin.id,
+        actorRole: "superadmin",
+        action: "internal_audit.run",
+        detail: `Internal audit report generated — ${anomalies.length} anomalies found`,
+      });
       return true;
     }
 
@@ -957,6 +1051,7 @@ export async function handleAdminCommand(
         "",
         `_Generated: ${new Date().toLocaleDateString("en-GB")}_`,
         `_This report is suitable for filing with the State Cooperative Registrar._`,
+        `_NOTE: For official filing, export this report as PDF/DOCX via the export command or system admin._`,
       ];
       await sendText({ to: phone, text: report.join("\n") });
       return true;

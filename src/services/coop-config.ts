@@ -153,10 +153,12 @@ export async function checkLimits(cooperativeId: string): Promise<{
     where: { cooperativeId, status: "active" },
   });
 
+  // Subscription member limit: warn instead of hard block to avoid blocking
+  // registration during grace periods or when the admin is aware of the limit.
   if (memberCount >= sub.memberLimit) {
     return {
-      ok: false,
-      message: `Member limit reached (${sub.memberLimit} on ${sub.plan} plan). Upgrade to add more members.`,
+      ok: true,
+      message: `⚠️ Member limit reached (${memberCount}/${sub.memberLimit} on ${sub.plan} plan). Registration is allowed but consider upgrading to add more members.`,
       memberCount,
       memberLimit: sub.memberLimit,
     };

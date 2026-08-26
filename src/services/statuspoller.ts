@@ -64,6 +64,26 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
           data: { lastWithdrawalAt: now, withdrawalOverride: false },
         }),
       ]);
+      // Audit trail: record the poller-confirmed transfer
+      await audit({
+        cooperativeId: w.cooperativeId,
+        actorPhone: "system-poller",
+        actorRole: "system",
+        action: "withdrawal.poller_confirmed",
+        targetType: "withdrawal",
+        targetId: w.id,
+        amount: w.amount,
+        detail: `Withdrawal ${w.id.slice(-6)} confirmed by provider polling`,
+      });
+      await recordLedger({
+        cooperativeId: w.cooperativeId,
+        type: "expense",
+        category: "withdrawal",
+        amount: w.amount,
+        note: `Withdrawal ${w.id.slice(-6)} confirmed by poller`,
+        reference: w.id,
+        fundType: "member",
+      });
       actions.push(`Withdrawal ${w.id.slice(-6)} (${formatBalance(w.amount)}) confirmed by provider — marked paid.`);
       await notifySupers(w.cooperativeId, `✅ Poller: withdrawal *${w.id.slice(-6)}* for ${w.member.name} was confirmed ${"successful"} at the provider and is now marked paid.`);
     } else if (st.status === "failed") {

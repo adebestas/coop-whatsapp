@@ -163,6 +163,7 @@ model Member {
   virtualAccountNumber    String? // provider-issued account number for top-ups
   virtualAccountBank      String?
   virtualAccountProvider  String?
+  virtualAccountExpiresAt DateTime? // when the virtual account expires (for cleanup)
   unitId                  String?
   unit                    Unit?               @relation("UnitMembership", fields: [unitId], references: [id], onDelete: SetNull)
   adminOf                 Unit[]              @relation("UnitAdmin")
@@ -690,6 +691,10 @@ model SupportTicket {
   status        String   @default("open") // open | in_progress | resolved
   assignedToId  String? // customer-service/admin handling it
   resolution    String?
+  priority      String   @default("normal") // low | normal | high | urgent
+  slaDeadline   DateTime? // when the ticket must be resolved by
+  firstResponseAt DateTime? // when the first response was sent
+  resolvedAt    DateTime? // when the ticket was resolved
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 

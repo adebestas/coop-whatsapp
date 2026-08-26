@@ -48,52 +48,116 @@ export function parseNaira(raw?: string): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-export function buildMenu(member: { name: string; cooperative: { name: string }; wallet: { balance: number } | null } | null): string {
+export function buildMenu(member: { name: string; cooperative: { name: string }; wallet: { balance: number } | null; createdAt?: Date } | null): string {
   if (!member) {
     return (
-      `Welcome to *Coop WhatsApp Bank*! 🏦\n\n` +
-      `Run your cooperative savings, loans, and payments right here on WhatsApp.\n\n` +
-      `Commands:\n` +
-      `• *join <code>* — join a cooperative\n` +
-      `• *menu* — see this menu`
+      `Welcome to your cooperative's WhatsApp bot! 🤝\n\n` +
+      `Save, borrow, and manage your cooperative funds right here.\n\n` +
+      `To get started, reply *join <code>* with your cooperative's code.`
     );
   }
   return (
+    `💰 *Your Cooperative*\n\n` +
+    `Reply:\n` +
+    `• *balance* — check wallet\n` +
+    `• *save <amount>* — contribute savings\n` +
+    `• *withdraw <amount>* — withdraw funds\n` +
+    `• *loan <amount>* — apply for loan\n` +
+    `• *help* — see all commands`
+  );
+}
+
+export function buildFullMenu(member: { name: string; cooperative: { name: string }; wallet: { balance: number } | null; role?: string; createdAt?: Date } | null): string {
+  if (!member) {
+    return (
+      `Welcome to your cooperative's WhatsApp bot! 🤝\n\n` +
+      `Save, borrow, and manage your cooperative funds right here.\n\n` +
+      `To get started, reply *join <code>* with your cooperative's code.`
+    );
+  }
+  const isNewMember = member.createdAt && (Date.now() - member.createdAt.getTime()) < 3 * 24 * 60 * 60 * 1000;
+  if (isNewMember) {
+    return (
+      `Hi *${member.name}* from *${member.cooperative.name}* 🏦\n\n` +
+      `Here's what you can do:\n` +
+      `• *save <amount>* — contribute savings\n` +
+      `• *balance* — check your wallet\n` +
+      `• *withdraw <amount>* — withdraw funds\n` +
+      `• *loan <amount>* — apply for loan\n` +
+      `• *help* — see all commands\n\n` +
+      `_You're new here — try *save 1000* to make your first contribution!_`
+    );
+  }
+  let menu =
     `Hi *${member.name}* from *${member.cooperative.name}* 🏦\n\n` +
-      `Commands:\n` +
-      `• *balance* — check your savings balance\n` +
-      `• *save <amount>* — make a contribution (e.g. *save 2000*)\n` +
-      `• *withdraw <amount>* — request a withdrawal (up to 45% of savings; once per 6 months)\n` +
-      `• *plan <amount> <weekly|monthly>* — set a recurring contribution\n` +
-      `• *fund* — get your personal top-up account number\n` +
-      `• *loan <amount> <months>* — apply for a loan (e.g. *loan 50000 3*)\n` +
-      `• *repay* — repay your loan monthly installment\n` +
-      `• *validate <claim id>* — validate a death claim (guarantors)\n` +
-      `• *history* — your transaction statement\n` +
-      `• *ledger* — cooperative ledger (transparency)\n` +
-      `• *dividend <rate>* — dividend calculator (real-time)\n` +
-      `• *joinunit <code>* — join your workplace/unit\n` +
-      `• *code* — see your member code (share it for guarantor requests)\n` +
-      `• *confirm <code>* — accept a guarantor request\n` +
-      `• *phone <number>* — add/update your real phone number (needed for funding)\n` +
-      `• *support <issue>* — open a support ticket with customer service\n` +
-      `• *vote <election id> <member code>* — vote in an election (nominees can vote too)\n` +
-      `• *pollresults <election id>* — see live election results\n` +
-      `• *buypolls* — see what the coop is voting to buy\n` +
-      `• *votebuy <poll id> <option #>* — vote for what the coop should buy\n` +
-      `• *contexthelp* — get personalized help based on your account\n` +
-      `• *class* — start/resume financial literacy (5 lessons)\n` +
-      `• *next* — complete current lesson and get next one\n` +
-      `• *class progress* — see your lesson progress\n` +
-      `• *reserveinfo* — view Reserve Fund dashboard\n` +
-      `• *mydata* — view all personal data we hold about you (NDPR right of access)\n` +
-      `• *deleteaccount* — delete your account and erase personal data\n` +
-      `• *grievance <msg>* — submit a complaint to admin\n` +
-      `• *byelaws* — view cooperative byelaws\n` +
-      `• *menu* — show this menu\n\n` +
-      `Admins: try *members*, *pending*, *approve <id>*, *reject <id>*, *broadcast <msg>*, *units*, *addunit*, *approvewdraw <id>*, *overridewithdrawal <phone>*, *deathclaim*, *claimbank*, *tickets*, *grievances*, *resolve*, *startvote unit|exec ...*, *candidate*, *closevote*, *startbuyvote <title>*, *addoption <id> <item> <cost> <acct> <bank>*, *closebuyvote <id>*, *enable2fa* (protect your account), *verifypin <pin>* (unlock big payouts for 10 min), *insights* (AI financial analysis)\n` +
-      `Election types: *startvote unit <unitcode> <title>* (🏢 workplace — only that unit votes), *startvote exec <position> <title>* (🏛️ executive — all members vote)\n` +
-      `Super admin: *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *paydividend <rate% of profit>*, *pnl* (all time), *pnl today|month|last month|2026-08|2026-08-01 2026-08-31*, *monthly [2026-08]*, *expense <amount> <category> <desc>*, *payout <amt> <phone> <narration>*, *payanyone <amt> <account> <bank> <narration>* (3 supers), *approvepay <id>*, *setsalary*, *runpayroll <narration>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*, *risk* (AI loan risk assessment)`
+    `Commands:\n` +
+    `• *balance* — check your savings balance\n` +
+    `• *save <amount>* — make a contribution (e.g. *save 2000*)\n` +
+    `• *withdraw <amount>* — request a withdrawal (up to 45% of savings)\n` +
+    `• *plan <amount> <weekly|monthly>* — set a recurring contribution\n` +
+    `• *fund* — get your personal top-up account number\n` +
+    `• *loan <amount> <months>* — apply for a loan (e.g. *loan 50000 3*)\n` +
+    `• *repay* — repay your loan monthly installment\n` +
+    `• *validate <claim id>* — validate a death claim (guarantors)\n` +
+    `• *history* — your transaction statement\n` +
+    `• *ledger* — cooperative ledger (transparency)\n` +
+    `• *dividend <rate>* — dividend calculator (real-time)\n` +
+    `• *joinunit <code>* — join your workplace/unit\n` +
+    `• *code* — see your member code (share it for guarantor requests)\n` +
+    `• *confirm <code>* — accept a guarantor request\n` +
+    `• *phone <number>* — add/update your real phone number\n` +
+    `• *support <issue>* — open a support ticket\n` +
+    `• *vote <election id> <member code>* — vote in an election\n` +
+    `• *pollresults <election id>* — see live election results\n` +
+    `• *buypolls* — see what the coop is voting to buy\n` +
+    `• *votebuy <poll id> <option #>* — vote for what the coop should buy\n` +
+    `• *contexthelp* — personalized help based on your account\n` +
+    `• *class* — start/resume financial literacy (5 lessons)\n` +
+    `• *next* — complete current lesson and get next one\n` +
+    `• *class progress* — see your lesson progress\n` +
+    `• *reserveinfo* — view Reserve Fund dashboard\n` +
+    `• *mydata* — view personal data (NDPR right of access)\n` +
+    `• *deleteaccount* — delete your account\n` +
+    `• *grievance <msg>* — submit a complaint to admin\n` +
+    `• *byelaws* — view cooperative byelaws\n` +
+    `• *menu* — show this menu\n`;
+
+  if (member.role === "admin" || member.role === "superadmin") {
+    menu +=
+      `\n*Admin commands:* *admin*\n`;
+  }
+
+  return menu;
+}
+
+export function buildAdminMenu(): string {
+  return (
+    `🔧 *Admin Commands*\n\n` +
+    `• *members* — list all members\n` +
+    `• *pending* — list pending loans\n` +
+    `• *approve <id>* — approve a loan\n` +
+    `• *reject <id>* — reject a loan\n` +
+    `• *broadcast <msg>* — send message to all members\n` +
+    `• *units* — list workplace units\n` +
+    `• *addunit* — add a new unit\n` +
+    `• *approvewdraw <id>* — approve withdrawal\n` +
+    `• *overridewithdrawal <phone>* — override withdrawal\n` +
+    `• *deathclaim* — process death claim\n` +
+    `• *claimbank* — set claim bank\n` +
+    `• *tickets* — list support tickets\n` +
+    `• *grievances* — list grievances\n` +
+    `• *resolve <id> <response>* — resolve ticket/grievance\n` +
+    `• *startvote unit|exec ...* — start an election\n` +
+    `• *candidate* — add election candidate\n` +
+    `• *closevote* — close an election\n` +
+    `• *startbuyvote <title>* — start a buy vote\n` +
+    `• *addoption <id> <item> <cost> <acct> <bank>* — add buy option\n` +
+    `• *closebuyvote <id>* — close a buy vote\n` +
+    `• *enable2fa* — protect your account\n` +
+    `• *verifypin <pin>* — unlock big payouts (10 min)\n` +
+    `• *insights* — AI financial analysis\n` +
+    `• *risk* — AI loan risk assessment\n\n` +
+    `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *paydividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
 }
 
@@ -138,6 +202,13 @@ export async function handleAwaitingInput(
   meta: MessageMeta = {},
 ): Promise<void> {
   const data = safeParse(dataJson);
+
+  const escapeWords = ["menu", "cancel", "quit", "exit", "back"];
+  if (escapeWords.includes(text.trim().toLowerCase())) {
+    await prisma.session.update({ where: { phone }, data: { state: "idle", data: "{}" } });
+    await sendText({ to: phone, text: "Flow cancelled. Reply *menu* to see options." });
+    return;
+  }
 
   if (SECRET_STATES.includes(state)) {
     if (meta.telegramMessageId) {
@@ -309,7 +380,7 @@ export async function handleAwaitingInput(
       }
       const dob = parseBirthday(raw);
       if (!dob) {
-        await sendText({ to: phone, text: "Please use the format *DD/MM*, e.g. *15/08*, or reply *skip* to skip." });
+        await sendText({ to: phone, text: "That doesn't look like a valid birthday. Use *DD/MM* format, e.g. *15/08*, or reply *skip*." });
         return;
       }
       await prisma.session.upsert({
@@ -361,12 +432,12 @@ export async function handleAwaitingInput(
     }
 
     case "awaiting_pin": {
-      if (!/^\d{4}$/.test(text.trim())) {
+      if (!/^\d{4,6}$/.test(text.trim())) {
         await issueSecretChallenge(
           phone,
           "awaiting_pin",
           data,
-          "Your PIN must be exactly 4 digits (e.g. *1234*).",
+          "Your PIN must be 4-6 digits (e.g. *1234*).",
         );
         return;
       }
@@ -457,12 +528,37 @@ export async function handleAwaitingInput(
     case "awaiting_save_amount": {
       const amount = parseNaira(text);
       if (amount === null) {
-        await sendText({ to: phone, text: "Please enter a valid amount, e.g. *5000*." });
+        await sendText({ to: phone, text: "That doesn't look like a valid amount. Try *save 5000* or *save 10000*." });
         return;
       }
-      const result = await createContribution(phone, amount);
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
-      await sendText({ to: phone, text: result.message });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_save_confirm", data: JSON.stringify({ ...data, saveAmount: amount }) },
+        update: { state: "awaiting_save_confirm", data: JSON.stringify({ ...data, saveAmount: amount }) },
+      });
+      await sendText({
+        to: phone,
+        text: `You're about to save ₦${amount.toLocaleString()}. Reply *yes* to confirm or *menu* to cancel.`,
+      });
+      break;
+    }
+
+    case "awaiting_save_confirm": {
+      const answer = text.trim().toLowerCase();
+      if (answer === "yes" || answer === "y") {
+        const saveAmount = data.saveAmount;
+        if (!saveAmount) {
+          await sendText({ to: phone, text: "Something went wrong. Reply *save <amount>* to try again." });
+          await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+          return;
+        }
+        const result = await createContribution(phone, saveAmount);
+        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+        await sendText({ to: phone, text: result.message });
+      } else {
+        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+        await sendText({ to: phone, text: "Save cancelled. Reply *menu* to see options." });
+      }
       break;
     }
 
@@ -504,7 +600,7 @@ export async function handleAwaitingInput(
     case "awaiting_loan_bank_account": {
       const account = text.trim().replace(/[^0-9]/g, "");
       if (!/^\d{10}$/.test(account)) {
-        await sendText({ to: phone, text: "Account numbers are 10 digits. Please re-enter, e.g. *0123456789*." });
+        await sendText({ to: phone, text: "Account numbers are 10 digits. Try *0123456789*." });
         return;
       }
       await prisma.session.upsert({
@@ -514,7 +610,7 @@ export async function handleAwaitingInput(
       });
       await sendText({
         to: phone,
-        text: `Which bank? (e.g. *Access*, *GTB*, *Zenith*, *UBA*, *First Bank*, *Kuda*, *Opay*)`,
+        text: `Which bank?\n\n• *Access* • *GTB* • *Zenith* • *UBA* • *First Bank*\n• *Kuda* • *Opay* • *PalmPay* • *Moniepoint* • *Wema*\n• *Fidelity* • *FCMB* • *Stanbic* • *Sterling* • *Union*\n\nReply with bank name or 5-digit bank code.`,
       });
       break;
     }
@@ -524,14 +620,37 @@ export async function handleAwaitingInput(
       if (!bank) {
         await sendText({
           to: phone,
-          text: `We don't recognise that bank. Try e.g. *Access*, *GTB*, *Zenith*, *UBA*, *First Bank*, *Kuda*, or reply with the 5-digit bank code directly.`,
+          text: `We don't recognise that bank. Try *Access*, *GTB*, *Zenith*, *UBA*, *First Bank*, *Kuda*, or reply with the 5-digit bank code.`,
+        });
+        return;
+      }
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_loan_bank_confirm", data: JSON.stringify({ ...data, loanBankCode: bank.code, loanBankName: bank.name }) },
+        update: { state: "awaiting_loan_bank_confirm", data: JSON.stringify({ ...data, loanBankCode: bank.code, loanBankName: bank.name }) },
+      });
+      await sendText({ to: phone, text: `You selected *${bank.name}*. Is this correct? Reply *yes* or *no*.` });
+      break;
+    }
+
+    case "awaiting_loan_bank_confirm": {
+      const answer = text.trim().toLowerCase();
+      if (answer !== "yes" && answer !== "y") {
+        await sendText({
+          to: phone,
+          text: `Which bank?\n\n• *Access* • *GTB* • *Zenith* • *UBA* • *First Bank*\n• *Kuda* • *Opay* • *PalmPay* • *Moniepoint* • *Wema*\n• *Fidelity* • *FCMB* • *Stanbic* • *Sterling* • *Union*\n\nReply with bank name or 5-digit bank code.`,
+        });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "awaiting_loan_bank_code", data: JSON.stringify(data) },
+          update: { state: "awaiting_loan_bank_code", data: JSON.stringify(data) },
         });
         return;
       }
       const result = await applyForLoan(phone, data.loanAmount ?? 0, data.loanMonths ?? 1, {
         accountNumber: data.loanAccount ?? "",
-        bankCode: bank.code,
-        bankName: bank.name,
+        bankCode: data.loanBankCode ?? "",
+        bankName: data.loanBankName ?? "",
       });
       if (!result.ok || !result.loanId) {
         await sendText({ to: phone, text: result.message });
@@ -578,7 +697,7 @@ export async function handleAwaitingInput(
     case "awaiting_withdraw_amount": {
       const amount = parseNaira(text);
       if (amount === null) {
-        await sendText({ to: phone, text: "Please enter a valid amount, e.g. *withdraw 5000*." });
+        await sendText({ to: phone, text: "That doesn't look like a valid amount. Try *withdraw 5000* or *withdraw 10000*." });
         return;
       }
       const member = await getMemberByPhone(phone);

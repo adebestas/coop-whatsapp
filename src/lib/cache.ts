@@ -31,7 +31,7 @@ export function initRedis(): Redis | null {
 
     redis.on("connect", () => {
       isConnected = true;
-      console.log("[Redis] Connected");
+      console.warn("[Redis] Connected");
     });
 
     redis.on("error", (err) => {
@@ -192,6 +192,14 @@ export const CACHE_TTL = {
 
 const inMemoryRateLimits = new Map<string, { count: number; resetAt: number }>();
 
+// Sweep expired entries every 60 seconds to prevent unbounded growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of inMemoryRateLimits) {
+    if (now > entry.resetAt) inMemoryRateLimits.delete(key);
+  }
+}, 60_000);
+
 /**
  * Sliding window rate limit. Returns { allowed, retryAfter? }.
  * Uses Redis INCR + EXPIRE when connected, falls back to in-memory.
@@ -207,8 +215,11 @@ export async function checkRateLimit(
   if (client) {
     try {
       const redisKey = `rl:${key}`;
-      const current = await client.incr(redisKey);
-      await client.expire(redisKey, windowSeconds); // Always set — idempotent
+      const current = await client.eval(`
+        local current = redis.call('INCR', KEYS[1])
+        if current == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+        return current
+      `, 1, redisKey, windowSeconds.toString()) as number;
       if (current > maxAttempts) {
         const ttl = await client.ttl(redisKey);
         return { allowed: false, retryAfter: ttl > 0 ? ttl : windowSeconds };

@@ -3,6 +3,8 @@ import { prisma } from "../lib/prisma.js";
 import { verifyPin } from "../lib/security.js";
 import { checkRateLimit, getRedis } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
+import { approveLoan } from "../services/loans.js";
+import { assertMoneyAuthorized } from "../services/auth2fa.js";
 
 /**
  * Minimal admin auth for the dashboard: members log in with their WhatsApp
@@ -169,6 +171,17 @@ export async function adminApiRoutes(app: FastifyInstance) {
   // ---- Authenticated routes below ----
   app.addHook("preHandler", async (req, reply) => {
     if (req.url === "/api/admin/login") return;
+
+    // CSRF protection: non-GET requests must include X-Requested-With header
+    const method = req.method.toUpperCase();
+    if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+      const requestedWith = req.headers["x-requested-with"];
+      const rw = Array.isArray(requestedWith) ? requestedWith[0] : requestedWith;
+      if (!rw || rw.toLowerCase() !== "xmlhttprequest") {
+        return reply.code(403).send({ error: "Missing X-Requested-With header" });
+      }
+    }
+
     const auth = req.headers.authorization;
     const rawToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
     const payload = rawToken ? verify(rawToken) : null;
@@ -221,7 +234,12 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const coopId = req.adminCoopId!;
     return prisma.member.findMany({
       where: { cooperativeId: coopId },
-      include: { wallet: true },
+      select: {
+        id: true, name: true, phone: true, email: true, code: true,
+        role: true, status: true, cooperativeId: true, createdAt: true,
+        nextOfKinName: true, nextOfKinPhone: true, dateOfBirth: true,
+        wallet: true,
+      },
       orderBy: { createdAt: "desc" },
       take: 200,
     });
@@ -244,30 +262,29 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.post("/api/admin/loans/:id/approve", async (req, reply) => {
     const coopId = req.adminCoopId!;
+    const phone = req.adminPhone!;
     const { id } = req.params as { id: string };
-    const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
-    if (!loan) return reply.code(404).send({ error: "loan not found" });
-    if (loan.status !== "guaranteed") {
-      return reply.code(400).send({ error: `loan must have 2 confirmed guarantors first (current: ${loan.status})` });
+
+    // Look up the admin member to get actorId and determine superadmin status
+    const actor = await prisma.member.findFirst({
+      where: { phone, cooperativeId: coopId },
+      include: { cooperative: { select: { adminPhone: true } } },
+    });
+    if (!actor) return reply.code(401).send({ error: "actor not found" });
+
+    const isSuper = actor.role === "superadmin" || actor.cooperative?.adminPhone === phone;
+
+    // 2FA gate for money-out commands (dashboard must also pass TOTP)
+    const auth2fa = await assertMoneyAuthorized(actor.id, []);
+    if (!auth2fa.ok) {
+      return reply.code(403).send({ error: auth2fa.message });
     }
 
-    const rate = loan.interestRate;
-    const total = loan.amount * (1 + (rate / 100) * loan.tenureMonths);
-    const monthly = total / loan.tenureMonths;
-    const due = new Date();
-    due.setMonth(due.getMonth() + 1);
-
-    const updated = await prisma.loan.update({
-      where: { id },
-      data: {
-        status: "approved",
-        monthlyPayment: Math.round(monthly * 100) / 100,
-        balance: Math.round(total * 100) / 100,
-        approvedAt: new Date(),
-        dueDate: due,
-      },
-    });
-    return updated;
+    const result = await approveLoan(id, { superAdmin: isSuper, actorId: actor.id });
+    if (!result.ok) {
+      return reply.code(400).send({ error: result.message });
+    }
+    return { ok: true, message: result.message };
   });
 
   app.post("/api/admin/loans/:id/reject", async (req, reply) => {

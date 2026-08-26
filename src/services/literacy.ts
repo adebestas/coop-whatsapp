@@ -70,11 +70,25 @@ A few habits that keep you (and your guarantor) safe:
 • Never borrow the full 2x limit "just because you can" — borrow what you actually need
 • Keep contributing even while repaying a loan — it keeps your account healthy
 
-✅ *Congratulations! You've completed the financial literacy class.*
+Reply *next* for Lesson 6.`,
+  },
+  {
+    id: 6,
+    title: "Cooperative Insurance & Member Protection",
+    content: `📘 *Lesson 6: Cooperative Insurance & Member Protection*
 
-Your understanding of how this cooperative works puts you ahead. Save consistently, borrow wisely, and support your fellow members.
+Many cooperatives provide insurance coverage to protect members. Here's what you should know:
 
-Reply *class progress* to review any lesson anytime.`,
+• *Death Benefit Insurance*: If a member passes away, their outstanding loans may be covered by the cooperative's insurance, and their family may receive a death benefit from the cooperative's reserve fund.
+• *Loan Protection Insurance*: Some cooperatives insure active loans so that if a member becomes incapacitated, the loan balance is covered.
+• *Contributions Protection*: Your accumulated savings are protected by the cooperative's reserve fund, which acts as a safety net for all members.
+
+*Important disclosures:*
+• Insurance coverage is subject to the cooperative's byelaws and available funds
+• Claims must be filed within the stipulated time (usually 30 days of the event)
+• The cooperative reserve fund (20% of dividends) partially funds member protections
+
+Reply *class progress* to review all lessons anytime.`,
   },
 ];
 

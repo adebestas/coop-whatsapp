@@ -127,6 +127,11 @@ export function markProviderDown(name: string): void {
   providerDownUntil.set(name.toLowerCase(), Date.now() + PROVIDER_COOLDOWN_MS);
 }
 
+/** Mark a provider as available again after a successful operation. */
+export function markProviderUp(name: string): void {
+  providerDownUntil.delete(name.toLowerCase());
+}
+
 export function isProviderAvailable(name: string): boolean {
   const until = providerDownUntil.get(name.toLowerCase());
   return !until || until < Date.now();

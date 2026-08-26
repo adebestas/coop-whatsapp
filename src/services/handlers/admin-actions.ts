@@ -78,6 +78,10 @@ export async function handlePhone(phone: string, args: string[]): Promise<void> 
 
 export async function handleSupport(phone: string, text: string): Promise<void> {
   const message = text.trim().replace(/^\s*support\s*/i, "");
+  if (message.length < 10) {
+    await sendText({ to: phone, text: "Please describe your issue in at least 10 characters. Try *support <your message>*." });
+    return;
+  }
   const result = await createTicket(phone, message);
   await sendText({ to: phone, text: result.message });
 }

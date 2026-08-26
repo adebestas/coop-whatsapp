@@ -180,6 +180,15 @@ export async function createContribution(phone: string, amount: number): Promise
   };
 }
 
-export async function createCooperative(data: { name: string; code: string; adminPhone?: string; state?: string }) {
+export async function createCooperative(data: {
+  name: string;
+  code: string;
+  adminPhone?: string;
+  state?: string;
+  registrationNumber?: string;
+}) {
+  if (!data.registrationNumber) {
+    console.warn(`[compliance] Cooperative "${data.name}" created without a registration number. Registration number is required under CAMA for legal recognition.`);
+  }
   return prisma.cooperative.create({ data });
 }

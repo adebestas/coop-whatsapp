@@ -38,16 +38,25 @@ export interface ApplyLoanResult {
 export const LOAN_TO_SAVINGS_RATIO = 2;
 /** Flat admin charge deducted from every loan at disbursement (₦2,000 in kobo). */
 export const LOAN_ADMIN_CHARGE = 200000;
+/** Maximum allowed interest rate per CBN guidance on cooperative lending. */
+const MAX_ALLOWED_RATE = 15; // 15% max per CBN guidance
 
 /**
  * Tiered flat interest on the principal (not per month):
  * up to 3 months → 5%, up to 6 → 8%, up to 9 → 9%, longer → 10%.
  */
 export function interestRateFor(tenureMonths: number): number {
-  if (tenureMonths <= 3) return 5;
-  if (tenureMonths <= 6) return 8;
-  if (tenureMonths <= 9) return 9;
-  return 10;
+  let rate: number;
+  if (tenureMonths <= 3) rate = 5;
+  else if (tenureMonths <= 6) rate = 8;
+  else if (tenureMonths <= 9) rate = 9;
+  else rate = 10;
+
+  if (rate > MAX_ALLOWED_RATE) {
+    console.error(`[loans] computed rate ${rate}% exceeds MAX_ALLOWED_RATE ${MAX_ALLOWED_RATE}% — capping`);
+    return MAX_ALLOWED_RATE;
+  }
+  return rate;
 }
 
 /** Total repayable for a flat-rate loan: principal + flat interest (kobo integers). */
@@ -167,11 +176,12 @@ export async function applyForLoan(
   };
 }
 
-export async function listPendingLoans(cooperativeId: string, limit = 20) {
+export async function listPendingLoans(cooperativeId: string, limit = 20, unitId?: string) {
   return prisma.loan.findMany({
     where: {
       cooperativeId,
       status: { in: ["pending", "guaranteed", "admin_approved", "super_approved_1"] },
+      ...(unitId ? { member: { unitId } } : {}),
     },
     include: {
       member: { select: { name: true, phone: true, unitId: true } },
@@ -330,6 +340,11 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
     return { ok: false, message: "Cooperative must have at least 20 active members before disbursing loans (Cooperative Societies Act)." };
   }
 
+  // Regulatory compliance: reject if interest rate exceeds CBN guidance ceiling.
+  if (loan.interestRate > MAX_ALLOWED_RATE) {
+    return { ok: false, message: `Loan *${loan.id.slice(-6)}* has an interest rate of ${loan.interestRate}% which exceeds the regulatory maximum of ${MAX_ALLOWED_RATE}%. Contact your cooperative registrar.` };
+  }
+
   const total = totalRepayable(loan.amount, loan.interestRate);
   const monthly = Math.floor(total / loan.tenureMonths);
   const due = new Date();
@@ -341,7 +356,7 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
     data: {
       status: "approved",
       monthlyPayment: monthly,
-      balance: loan.amount,
+      balance: total,
       superApproved2ById: actorId,
       approvedAt: new Date(),
       dueDate: due,
@@ -450,11 +465,18 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
     return { ok: false, message: "Your wallet balance changed — please try again." };
   }
 
+  // NOTE: Interest is flat (not declining balance) for simplicity.
+  // For fair member treatment, consider implementing pro-rated interest.
+  // P&L: the interest slice of this installment is cooperative income; fines too.
+  const totalInterest = totalRepayable(loan.amount, loan.interestRate) - loan.amount;
+  const interestPortion = Math.floor(totalInterest / loan.tenureMonths);
+  const principalPortion = amount - interestPortion;
+
   // All operations in one transaction for atomicity
   await prisma.$transaction([
     prisma.loan.update({
       where: { id: loan.id },
-      data: { balance: { decrement: amount } },
+      data: { balance: { decrement: principalPortion } },
     }),
     prisma.loanRepayment.create({
       data: { loanId: loan.id, amount },
@@ -477,11 +499,6 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
       : []),
   ]);
 
-  // NOTE: Interest is flat (not declining balance) for simplicity.
-  // For fair member treatment, consider implementing pro-rated interest.
-  // P&L: the interest slice of this installment is cooperative income; fines too.
-  const totalInterest = totalRepayable(loan.amount, loan.interestRate) - loan.amount;
-  const interestPortion = Math.floor(totalInterest / loan.tenureMonths);
   await recordLedger({
     cooperativeId: member.cooperativeId,
     type: "income",
@@ -491,6 +508,18 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
     reference: loan.id,
     fundType: "operational",
   });
+  // Principal repayment: credits the bank account (the loan principal is returned to the cooperative)
+  if (principalPortion > 0) {
+    await recordLedger({
+      cooperativeId: member.cooperativeId,
+      type: "income",
+      category: "loan_repayment",
+      amount: principalPortion,
+      note: `Principal repayment on loan ${loan.id.slice(-6)}`,
+      reference: loan.id,
+      fundType: "member",
+    });
+  }
   if (fine > 0) {
     await recordLedger({
       cooperativeId: member.cooperativeId,

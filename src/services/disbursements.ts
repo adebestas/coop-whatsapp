@@ -1,6 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
-import { resolveProvider } from "./payments/index.js";
+import { resolveProvider, markProviderUp } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
 import { recordLedger } from "./ledger.js";
 import { postJournal } from "./journal.js";
@@ -117,6 +117,7 @@ async function payOut(
         return { ok: false, status: "failed", message: msg };
       }
       providerRef = result.providerRef;
+      markProviderUp(provider.name);
     }
 
     try {
@@ -295,8 +296,9 @@ export function namesMatch(accountName: string, registeredName: string): boolean
   for (const word of b) {
     if (!a.has(word)) return false;
   }
-  // Account name must not have more than 2 extra words beyond the registered name
-  if (a.size > b.size + 2) return false;
+  // Account name must not have more than 1 extra word beyond the registered name.
+  // Tightened from 2 to 1 to reduce false positives on partial name matches.
+  if (a.size > b.size + 1) return false;
   return a.size > 0;
 }
 

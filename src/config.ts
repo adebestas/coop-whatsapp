@@ -1,3 +1,11 @@
+// NOTE: Cross-border data transfer provisions — per Nigeria Data Protection
+// Regulation (NDPR) and Nigeria Data Protection Act 2023, personal data of
+// Nigerian citizens must not be transferred outside Nigeria without adequate
+// safeguards. All database hosting, backups, and processing should remain
+// within Nigeria or in jurisdictions with equivalent data protection standards.
+// Ensure any third-party services (Redis, AI providers, payment gateways)
+// comply with NDPR cross-border transfer requirements.
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   host: process.env.HOST ?? "0.0.0.0",

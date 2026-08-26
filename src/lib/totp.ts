@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 /**
  * Minimal RFC 6238 TOTP (30s steps, SHA-1, 6 digits) — the same algorithm as
@@ -75,7 +75,10 @@ export function verifyTotp(secretBase32: string, code: string, timeMs = Date.now
   const secret = base32Decode(secretBase32);
   const counter = Math.floor(timeMs / 30_000);
   for (const drift of [-1, 0]) { // 60-second window instead of 90
-    if (hotp(secret, counter + drift) === cleaned) return true;
+    const expected = hotp(secret, counter + drift);
+    const a = Buffer.from(expected);
+    const b = Buffer.from(cleaned);
+    if (a.length === b.length && timingSafeEqual(a, b)) return true;
   }
   return false;
 }

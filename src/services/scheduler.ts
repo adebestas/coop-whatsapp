@@ -108,17 +108,22 @@ export async function runMonthlyStatements(now = new Date()): Promise<number> {
   });
 
   let sent = 0;
-  for (const m of members) {
-    if (!m.phone) continue;
-    const stmt = await showHistory(m.phone);
-    if (!stmt.ok) continue;
-    const text = `${stmt.message}\n\n_Generated ${now.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })} — reply *menu* for options._`;
-    await notifyMember(
-      m,
-      `${stmt.message}\n\n_Generated ${now.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })} — reply *menu* for options._`,
-    ).catch(() => {});
-    await prisma.member.update({ where: { id: m.id }, data: { lastStatementSentAt: now } });
-    sent++;
+  // Process members in batches of 10 to avoid flooding the messaging provider
+  for (let i = 0; i < members.length; i += 10) {
+    const batch = members.slice(i, i + 10);
+    const results = await Promise.allSettled(
+      batch.map(async (m) => {
+        if (!m.phone) return;
+        const stmt = await showHistory(m.phone);
+        if (!stmt.ok) return;
+        await notifyMember(
+          m,
+          `${stmt.message}\n\n_Generated ${now.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })} — reply *menu* for options._`,
+        ).catch(() => {});
+        await prisma.member.update({ where: { id: m.id }, data: { lastStatementSentAt: now } });
+      }),
+    );
+    sent += results.filter((r) => r.status === "fulfilled").length;
   }
   return sent;
 }
@@ -135,20 +140,73 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
   });
 
   let sent = 0;
-  for (const m of members) {
-    if (!m.dateOfBirth) continue;
-    if (m.dateOfBirth.getMonth() !== now.getMonth() || m.dateOfBirth.getDate() !== now.getDate()) continue;
-    await notifyMember(
-      m,
-      `🎂 *Happy Birthday, ${m.name}!* 🎉\n\nMay your new year be full of blessings and growth. Your cooperative family celebrates you today. 🥳`,
-    ).catch(() => {});
-    await prisma.member.update({
-      where: { id: m.id },
-      data: { lastBirthdayGreetedYear: now.getFullYear() },
-    });
-    sent++;
+  // Process in batches of 10 with concurrency
+  for (let i = 0; i < members.length; i += 10) {
+    const batch = members.slice(i, i + 10);
+    const results = await Promise.allSettled(
+      batch.map(async (m) => {
+        if (!m.dateOfBirth) return;
+        if (m.dateOfBirth.getMonth() !== now.getMonth() || m.dateOfBirth.getDate() !== now.getDate()) return;
+        await notifyMember(
+          m,
+          `🎂 *Happy Birthday, ${m.name}!* 🎉\n\nMay your new year be full of blessings and growth. Your cooperative family celebrates you today. 🥳`,
+        ).catch(() => {});
+        await prisma.member.update({
+          where: { id: m.id },
+          data: { lastBirthdayGreetedYear: now.getFullYear() },
+        });
+      }),
+    );
+    sent += results.filter((r) => r.status === "fulfilled").length;
   }
   return sent;
+}
+
+// ---- Data retention & deletion (CAMA compliance) ----
+// Monthly job: anonymize financial records older than 7 years, delete stale
+// session data older than 30 days. Per the Companies and Allied Matters Act
+// (CAMA), cooperative financial records must be retained for at least 6 years;
+// we use 7 for safety margin.
+
+export async function runDataRetention(now = new Date()): Promise<{ anonymized: number; deleted: number }> {
+  const sevenYearsAgo = new Date(now);
+  sevenYearsAgo.setFullYear(sevenYearsAgo.getFullYear() - 7);
+
+  const thirtyDaysAgo = new Date(now);
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  // Anonymize member PII on records older than 7 years (keep amounts for audit)
+  const staleMembers = await prisma.member.findMany({
+    where: { createdAt: { lt: sevenYearsAgo }, status: "inactive" },
+    select: { id: true },
+  });
+  let anonymized = 0;
+  for (const m of staleMembers) {
+    await prisma.member.update({
+      where: { id: m.id },
+      data: {
+        name: `Redacted_${m.id.slice(-6)}`,
+        phone: `redacted_${m.id.slice(-6)}`,
+        contactPhone: null,
+        email: null,
+        nextOfKinName: null,
+        nextOfKinPhone: null,
+        dateOfBirth: null,
+      },
+    });
+    anonymized++;
+  }
+
+  // Delete session data older than 30 days
+  const { count: deleted } = await prisma.session.deleteMany({
+    where: { updatedAt: { lt: thirtyDaysAgo } },
+  });
+
+  if (anonymized > 0 || deleted > 0) {
+    console.log(`[compliance] Data retention: anonymized ${anonymized} members (7yr), deleted ${deleted} sessions (30d)`);
+  }
+
+  return { anonymized, deleted };
 }
 
 // ---- Daily movement digest to super admins ----

@@ -70,6 +70,8 @@ services:
         value: "20"
       - key: TRANSFER_POLL_MINUTES
         value: "10"
+      - key: DASHBOARD_ORIGIN
+        sync: false          # set to your dashboard URL, e.g. https://admin.yourdomain.com
       # ---- Backup storage (S3 recommended — local disk is EPHEMERAL on Render) ----
       # Backups on Render's ephemeral disk are lost on redeploy/sleep.
       # Set these to use an S3-compatible bucket for persistent backups.

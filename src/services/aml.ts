@@ -65,7 +65,7 @@ function checkLargeTransaction(amount: number, largeTxThreshold: number): string
 /**
  * Rule 2: Rapid sequence — 3+ money-out transactions within 10 minutes from the same member.
  */
-async function checkRapidSequence(memberId: string, direction: "in" | "out", excludeId?: string): Promise<string | null> {
+async function checkRapidSequence(memberId: string, direction: "in" | "out"): Promise<string | null> {
   if (direction !== "out") return null;
 
   const since = new Date(Date.now() - RAPID_SEQUENCE_WINDOW_MS);
@@ -74,9 +74,6 @@ async function checkRapidSequence(memberId: string, direction: "in" | "out", exc
     createdAt: { gte: since },
     status: { in: ["paid", "successful", "approved", "processing"] },
   };
-  if (excludeId) {
-    where.id = { not: excludeId };
-  }
 
   const [withdrawals, payouts] = await Promise.all([
     prisma.withdrawalRequest.aggregate({
@@ -215,7 +212,7 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
   const large = checkLargeTransaction(tx.amount, largeTxThreshold);
   if (large) reasons.push(large);
 
-  const rapid = await checkRapidSequence(tx.memberId, tx.direction, tx.id);
+  const rapid = await checkRapidSequence(tx.memberId, tx.direction);
   if (rapid) reasons.push(rapid);
 
   // Only check pattern rules for money-out transactions

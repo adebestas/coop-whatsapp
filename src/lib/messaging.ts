@@ -5,6 +5,10 @@ import { prisma } from "./prisma.js";
 
 const WHATSAPP_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /**
  * Channel-aware message sender.
  *
@@ -23,7 +27,7 @@ export async function sendText(params: { to: string; text: string }): Promise<bo
     if (session?.lastInboundAt) {
       const elapsed = Date.now() - session.lastInboundAt.getTime();
       if (elapsed > WHATSAPP_SESSION_WINDOW_MS) {
-        console.warn(`[messaging] session window expired for ${to} — skipping outbound`);
+        await sendWhatsApp({ to, text: "Hi! To receive messages from your cooperative, please send any message to re-activate." });
         return false;
       }
     }
@@ -32,6 +36,7 @@ export async function sendText(params: { to: string; text: string }): Promise<bo
   if (to.startsWith("tg:")) {
     return sendTelegramMessage(to.slice(3), text);
   }
+  await sleep(1500);
   return sendWhatsApp({ to, text });
 }
 
@@ -103,4 +108,21 @@ export async function sendTemplate(
 ): Promise<boolean> {
   if (to.startsWith("tg:")) return false;
   return sendWhatsAppTemplate(to, templateName, langCode, params);
+}
+
+export async function sendLongText(params: { to: string; text: string }): Promise<boolean> {
+  const MAX_LEN = 3500;
+  if (params.text.length <= MAX_LEN) return sendText(params);
+  const parts = params.text.split('\n\n');
+  let current = '';
+  for (const part of parts) {
+    if ((current + '\n\n' + part).length > MAX_LEN) {
+      await sendText({ to: params.to, text: current.trim() });
+      current = part;
+    } else {
+      current += (current ? '\n\n' : '') + part;
+    }
+  }
+  if (current.trim()) await sendText({ to: params.to, text: current.trim() });
+  return true;
 }

@@ -67,7 +67,7 @@ export async function askBirthday(phone: string, data: FlowData): Promise<void> 
   });
   await sendText({
     to: phone,
-    text: `Almost done — when's your birthday? *(optional, e.g. *15/08*)* We'll send you a special message. Reply *skip* to skip.`,
+    text: `Almost done — when's your birthday? *(optional, e.g. *15/08* — just day and month, no year needed)* Reply *skip* to skip.`,
   });
 }
 

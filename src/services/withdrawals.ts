@@ -21,10 +21,10 @@ export interface WithdrawResult {
 }
 
 /** Resolve short ID to full withdrawal request ID, ensuring uniqueness. */
-async function resolveRequestId(shortId: string): Promise<string | null> {
+async function resolveRequestId(shortId: string): Promise<{ id: string } | { error: string }> {
   // Try exact match first
   const exact = await prisma.withdrawalRequest.findUnique({ where: { id: shortId }, select: { id: true } });
-  if (exact) return exact.id;
+  if (exact) return exact;
 
   // Try suffix match — require exactly one result
   const matches = await prisma.withdrawalRequest.findMany({
@@ -32,8 +32,9 @@ async function resolveRequestId(shortId: string): Promise<string | null> {
     select: { id: true },
     take: 2,
   });
-  if (matches.length === 1) return matches[0].id;
-  return null; // Not found or ambiguous
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) return { error: `Multiple requests match "${shortId}" — use a longer ID to disambiguate.` };
+  return { error: "Withdrawal request not found. Check the id." };
 }
 
 /** The maximum a member can withdraw right now (45% of current balance). */
@@ -208,9 +209,9 @@ export async function approveWithdrawal(
   actor: { id: string; role: string; phone: string },
 ): Promise<WithdrawResult> {
   const fullId = await resolveRequestId(requestId);
-  if (!fullId) return { ok: false, message: "Withdrawal request not found. Check the id." };
+  if ("error" in fullId) return { ok: false, message: fullId.error };
   const request = await prisma.withdrawalRequest.findFirst({
-    where: { id: fullId },
+    where: { id: fullId.id },
     include: { member: true },
   });
   if (!request) return { ok: false, message: "Withdrawal request not found. Check the id." };
@@ -267,9 +268,9 @@ export async function finalizeWithdrawal(
   actor: { id: string; role: string; phone: string },
 ): Promise<WithdrawResult> {
   const fullId = await resolveRequestId(requestId);
-  if (!fullId) return { ok: false, message: "Withdrawal request not found." };
+  if ("error" in fullId) return { ok: false, message: fullId.error };
   const request = await prisma.withdrawalRequest.findFirst({
-    where: { id: fullId },
+    where: { id: fullId.id },
     include: { member: true },
   });
   if (!request) return { ok: false, message: "Withdrawal request not found." };
@@ -347,10 +348,13 @@ export async function finalizeWithdrawal(
 
     if (!result.ok) {
       // STEP 4b — refund and hand back for retry/rejection by humans.
+      // No status guard: the statuspoller may have already moved the row,
+      // but the wallet refund is safe (idempotent) and the status update
+      // is a no-op if already settled.
       await prisma.$transaction([
         prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: request.amount } } }),
         prisma.withdrawalRequest.updateMany({
-          where: { id: request.id, status: "processing" },
+          where: { id: request.id },
           data: { status: "admin_approved" },
         }),
       ]);
@@ -412,7 +416,7 @@ export async function finalizeWithdrawal(
     }
     await prisma.withdrawalRequest
       .updateMany({
-        where: { id: request.id, status: "processing" },
+        where: { id: request.id },
         data: { status: "admin_approved" },
       })
       .catch(() => {});
@@ -423,9 +427,9 @@ export async function finalizeWithdrawal(
 
 export async function rejectWithdrawal(requestId: string): Promise<WithdrawResult> {
   const fullId = await resolveRequestId(requestId);
-  if (!fullId) return { ok: false, message: "Withdrawal request not found." };
+  if ("error" in fullId) return { ok: false, message: fullId.error };
   const request = await prisma.withdrawalRequest.findFirst({
-    where: { id: fullId },
+    where: { id: fullId.id },
     include: { member: true },
   });
   if (!request) return { ok: false, message: "Withdrawal request not found." };
