@@ -29,6 +29,8 @@ export function initRedis(): Redis | null {
       lazyConnect: true,
     });
 
+    redis.connect().catch(() => {});
+
     redis.on("connect", () => {
       isConnected = true;
       console.warn("[Redis] Connected");

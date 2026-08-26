@@ -4,6 +4,7 @@ import helmet from "@fastify/helmet";
 import fastifyStatic from "@fastify/static";
 import rateLimit from "@fastify/rate-limit";
 import path from "node:path";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { webhookRoutes } from "./routes/webhook.js";
 import { paymentWebhookRoutes } from "./routes/payments.js";
@@ -114,6 +115,10 @@ export function buildApp() {
     }
   });
 
+  app.get("/", async (_req, reply) => {
+    return reply.code(200).send({ name: "coop-whatsapp", status: "running", health: "/health" });
+  });
+
   void app.register(webhookRoutes);
   void app.register(paymentWebhookRoutes);
   void app.register(adminApiRoutes);
@@ -122,7 +127,11 @@ export function buildApp() {
   // Serve static files — admin dashboard
   const baseDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const dashboardDir = path.join(baseDir, "dashboard");
-  void app.register(fastifyStatic, { root: dashboardDir, prefix: "/dashboard/" });
+  if (fs.existsSync(dashboardDir)) {
+    void app.register(fastifyStatic, { root: dashboardDir, prefix: "/dashboard/" });
+  } else {
+    console.warn(`[app] Dashboard directory not found at ${dashboardDir} — static files disabled`);
+  }
 
   return app;
 }
