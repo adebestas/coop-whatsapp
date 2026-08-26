@@ -19,7 +19,8 @@ services:
     plan: starter        # free plan SLEEPS after 15 min idle — breaks WhatsApp bot; starter stays on
     region: frankfurt    # closest region to Nigeria on Render (also: oregon, ohio, singapore)
     branch: main
-    buildCommand: npm ci && npx prisma generate && npx prisma db push --skip-generate && npm run build
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: npx prisma db push --skip-generate && npm start
     # preDeployCommand removed — migrations now run during build
     startCommand: npm start
     healthCheckPath: /health
