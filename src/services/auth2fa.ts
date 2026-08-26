@@ -158,7 +158,8 @@ export async function assertFreshPin(phone: string, amount: number): Promise<{ o
     try {
       const parsed = JSON.parse(session?.data ?? "{}");
       if (!parsed.d || !parsed.s) return Number(parsed.pinVerifiedAt ?? 0); // legacy plaintext
-      const expectedSig = crypto.createHmac("sha256", process.env.SESSION_SECRET || "fallback").update(parsed.d).digest("hex");
+      const secret = process.env.SESSION_SECRET || (process.env.NODE_ENV === 'production' ? (() => { throw new Error('SESSION_SECRET required') })() : "dev-fallback-only");
+      const expectedSig = crypto.createHmac("sha256", secret).update(parsed.d).digest("hex");
       if (expectedSig !== parsed.s) return 0; // signature mismatch — tampered
       return Number(JSON.parse(parsed.d).pinVerifiedAt ?? 0);
     } catch {

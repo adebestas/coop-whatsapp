@@ -4,7 +4,7 @@ export interface Lesson {
   content: string;
 }
 
-export const FIVE_LESSONS: Lesson[] = [
+export const LESSONS: Lesson[] = [
   {
     id: 1,
     title: "Why Save Regularly",
@@ -93,9 +93,9 @@ Reply *class progress* to review all lessons anytime.`,
 ];
 
 export function getLesson(id: number): Lesson | undefined {
-  return FIVE_LESSONS.find((l) => l.id === id);
+  return LESSONS.find((l) => l.id === id);
 }
 
 export function getTotalLessons(): number {
-  return FIVE_LESSONS.length;
+  return LESSONS.length;
 }

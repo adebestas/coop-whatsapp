@@ -1,5 +1,5 @@
 /**
- * Payment provider abstraction. Both Flutterwave and Paystack implement this
+ * Payment provider abstraction. Both Monnify and Paystack implement this
  * so the rest of the app never depends on a specific vendor.
  */
 
@@ -36,7 +36,7 @@ export interface PaymentNotification {
   amount: number;
   currency: string;
   status: "successful" | "failed" | "pending";
-  /** Provider name, e.g. flutterwave */
+  /** Provider name, e.g. paystack */
   provider: string;
   raw: unknown;
 }

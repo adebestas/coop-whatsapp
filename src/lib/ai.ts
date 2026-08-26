@@ -74,7 +74,7 @@ export async function suggestCommand(text: string): Promise<Suggestion | null> {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      const jsonMatch = raw.match(/\{[^{}]*\}/);
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
       if (!jsonMatch) return null;
       parsed = JSON.parse(jsonMatch[0]);
     }

@@ -89,7 +89,7 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
 }
 
 function otherThan(name?: string): string[] {
-  const providers = ["monnify", "paystack", "flutterwave"];
+  const providers = ["monnify", "paystack"];
   return providers.filter(p => p !== name);
 }
 

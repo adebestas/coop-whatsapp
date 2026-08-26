@@ -167,7 +167,7 @@ describe("coop whatsapp bot", () => {
       amount: 10000,
       currency: "NGN",
       status: "successful",
-      provider: "flutterwave",
+      provider: "paystack",
       raw: {},
     });
 
@@ -186,7 +186,7 @@ describe("coop whatsapp bot", () => {
       amount: 10000,
       currency: "NGN",
       status: "successful",
-      provider: "flutterwave",
+      provider: "paystack",
       raw: {},
     });
     const after = await prisma.member.findFirst({

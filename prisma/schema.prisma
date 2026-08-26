@@ -517,6 +517,7 @@ model DeathClaim {
   approvalCount       Int               @default(0) // current number of approvals received
   waitingPeriodEnd    DateTime? // earliest time the claim can be finalized (72h after initiation)
   payoutReference     String?
+  debitedAmount       Int? // actual amount debited from wallet for refund safety
   createdById         String?
   approvedAt          DateTime?
   finalizedAt         DateTime?

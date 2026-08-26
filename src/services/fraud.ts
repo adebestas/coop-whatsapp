@@ -165,7 +165,7 @@ setInterval(() => {
   for (const [key, entry] of moneyInMemory) {
     if (now > entry.resetAt) moneyInMemory.delete(key);
   }
-}, 60_000);
+}, 60_000).unref();
 
 export async function checkMoneyRateLimit(phone: string): Promise<boolean> {
   const key = `money:${phone}`;
@@ -212,7 +212,7 @@ setInterval(() => {
   for (const [key, entry] of velocityInMemory) {
     if (now > entry.resetAt) velocityInMemory.delete(key);
   }
-}, 60_000);
+}, 60_000).unref();
 
 export async function checkVelocity(memberId: string): Promise<boolean> {
   const key = `velocity:${memberId}`;
@@ -258,7 +258,7 @@ setInterval(() => {
   for (const [key, entry] of aiInMemory) {
     if (now > entry.resetAt) aiInMemory.delete(key);
   }
-}, 60_000);
+}, 60_000).unref();
 
 export async function checkAIRateLimit(memberId: string): Promise<boolean> {
   const key = `ai:${memberId}`;

@@ -6,7 +6,7 @@ import { checkMoneyRateLimit, checkAIRateLimit } from "./fraud.js";
 import { aiEnabled, suggestCommand } from "../lib/ai.js";
 import { handleAIQuery, isNaturalLanguageQuery } from "../lib/ai-query.js";
 import { generateSupportResponse } from "../lib/ai-support.js";
-import { FIVE_LESSONS, getLesson, getTotalLessons } from "./literacy.js";
+import { LESSONS, getLesson, getTotalLessons } from "./literacy.js";
 import { getReserveInfo } from "./dividends.js";
 import { getAnniversaryMessage } from "./anniversary.js";
 import { formatBalance } from "./cooperative.js";
@@ -16,6 +16,7 @@ import { validateDeviceSession, checkTenureLimit } from "../lib/security-hardeni
 const SESSION_TTL_MS = 30 * 60 * 1000;
 /** Persist lastInboundAt only every N messages to reduce session upserts. */
 const SESSION_UPDATE_EVERY = 5;
+// NOTE: Module-level counter is fine for single-process mode; would need Redis/shared state in cluster mode.
 let messageCounter = 0;
 
 // ---- Tier-based transaction limits (CBN KYC requirements) ----
@@ -24,9 +25,7 @@ const TIER_LIMITS = {
   tier2: { maxSingle: 500_000_00, dailyMax: 5_000_000_00 }, // ₦500k single, ₦5M daily (in kobo)
 } as const;
 
-async function checkTierLimit(phone: string, amount: number): Promise<string | null> {
-  const member = await prisma.member.findFirst({ where: { phone }, select: { id: true } });
-  if (!member) return null;
+async function checkTierLimit(phone: string, amount: number, memberId: string): Promise<string | null> {
   const tier = "tier1"; // Default tier — upgrade via BVN verification
   const limits = TIER_LIMITS[tier];
   if (amount > limits.maxSingle) {
@@ -36,7 +35,7 @@ async function checkTierLimit(phone: string, amount: number): Promise<string | n
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const dailyTotal = await prisma.contribution.aggregate({
-    where: { memberId: member.id, createdAt: { gte: startOfDay }, status: "confirmed" },
+    where: { memberId, createdAt: { gte: startOfDay }, status: "confirmed" },
     _sum: { amount: true },
   });
   const total = (dailyTotal._sum.amount ?? 0) + amount;
@@ -180,7 +179,7 @@ export interface MessageMeta {
 }
 
 function isAwaitingState(state: BotState): boolean {
-  return !["idle"].includes(state);
+  return state !== "idle";
 }
 
 function parseCommand(text: string): { cmd: string; args: string[] } {
@@ -339,8 +338,8 @@ export async function handleMessage(
       }
       // Tier-based transaction limit check
       const amt = Number(args[0]);
-      if (Number.isFinite(amt) && amt > 0) {
-        const tierError = await checkTierLimit(phone, amt);
+      if (Number.isFinite(amt) && amt > 0 && member) {
+        const tierError = await checkTierLimit(phone, amt, member.id);
         if (tierError) {
           await sendText({ to: phone, text: `⛔ ${tierError}` });
           break;
@@ -592,27 +591,29 @@ export async function handleMessage(
           }
         }
 
-        const suggestion = await suggestCommand(text);
-        if (suggestion) {
-          await prisma.session.upsert({
-            where: { phone },
-            create: {
-              phone,
-              state: "awaiting_ai_confirm",
-              data: JSON.stringify({ aiCommand: suggestion.command, aiArgs: suggestion.args }),
-            },
-            update: {
-              state: "awaiting_ai_confirm",
-              data: JSON.stringify({ aiCommand: suggestion.command, aiArgs: suggestion.args }),
-            },
-          });
-          await sendText({
-            to: phone,
-            text:
-              `🤖 Did you mean *${[suggestion.command, ...suggestion.args].join(" ")}*?\n\n` +
-              `Reply *yes* to run it or *no* to cancel.`,
-          });
-          return;
+        if (member && await checkAIRateLimit(member.id)) {
+          const suggestion = await suggestCommand(text);
+          if (suggestion) {
+            await prisma.session.upsert({
+              where: { phone },
+              create: {
+                phone,
+                state: "awaiting_ai_confirm",
+                data: JSON.stringify({ aiCommand: suggestion.command, aiArgs: suggestion.args }),
+              },
+              update: {
+                state: "awaiting_ai_confirm",
+                data: JSON.stringify({ aiCommand: suggestion.command, aiArgs: suggestion.args }),
+              },
+            });
+            await sendText({
+              to: phone,
+              text:
+                `🤖 Did you mean *${[suggestion.command, ...suggestion.args].join(" ")}*?\n\n` +
+                `Reply *yes* to run it or *no* to cancel.`,
+            });
+            return;
+          }
         }
       }
       if (aiEnabled() && text.trim().length >= 4 && isNaturalLanguageQuery(text)) {

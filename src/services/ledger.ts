@@ -157,7 +157,10 @@ export async function computePnl(
   startDate?: Date,
   endDate?: Date,
 ): Promise<PnlSummary> {
-  const where: any = { cooperativeId, type: { in: ["income", "expense"] } };
+  const where: { cooperativeId: string; type: { in: ("income" | "expense")[] }; createdAt?: { gte?: Date; lte?: Date } } = {
+    cooperativeId,
+    type: { in: ["income", "expense"] },
+  };
   
   if (startDate || endDate) {
     where.createdAt = {};

@@ -1,9 +1,10 @@
 import { prisma } from "../lib/prisma.js";
 import { generateMemberCode, hashPin } from "../lib/security.js";
 import { audit } from "./audit.js";
-import { LIMITS } from "../lib/money.js";
-import { formatBalance as formatKobo } from "../lib/money.js";
+import { LIMITS, formatBalance } from "../lib/money.js";
 import { getCoopConfig } from "./coop-config.js";
+
+export { formatBalance } from "../lib/money.js";
 
 export interface JoinResult {
   ok: boolean;
@@ -101,21 +102,23 @@ export async function findOrCreateMember(
   };
 }
 
+const memberCache = new Map<string, { data: any; expires: number }>();
+const CACHE_TTL = 30_000;
+
 export async function getMemberByPhone(phone: string) {
-  return prisma.member.findFirst({
+  const cached = memberCache.get(phone);
+  if (cached && Date.now() < cached.expires) return cached.data;
+  const member = await prisma.member.findFirst({
     where: { phone },
     include: { cooperative: true, wallet: true },
     orderBy: { createdAt: "asc" },
   });
+  if (member) memberCache.set(phone, { data: member, expires: Date.now() + CACHE_TTL });
+  return member;
 }
 
 export async function getCoopByCode(code: string) {
   return prisma.cooperative.findUnique({ where: { code } });
-}
-
-export function formatBalance(balance: number, currency = "NGN"): string {
-  const naira = balance / 100;
-  return `${currency} ${naira.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 export async function createContribution(phone: string, amount: number): Promise<{ ok: boolean; message: string }> {
@@ -131,10 +134,10 @@ export async function createContribution(phone: string, amount: number): Promise
   }
   const coopConfig = await getCoopConfig(member.cooperativeId);
   if (amount < coopConfig.minContribution) {
-    return { ok: false, message: `Minimum save amount is *${formatKobo(coopConfig.minContribution)}*.` };
+    return { ok: false, message: `Minimum save amount is *${formatBalance(coopConfig.minContribution)}*.` };
   }
   if (amount > LIMITS.MAX_SAVE) {
-    return { ok: false, message: `Maximum save amount is *${formatKobo(LIMITS.MAX_SAVE)}*.` };
+    return { ok: false, message: `Maximum save amount is *${formatBalance(LIMITS.MAX_SAVE)}*.` };
   }
 
   const reference = `CON-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;

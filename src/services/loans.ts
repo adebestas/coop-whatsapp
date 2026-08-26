@@ -470,7 +470,7 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
   // P&L: the interest slice of this installment is cooperative income; fines too.
   const totalInterest = totalRepayable(loan.amount, loan.interestRate) - loan.amount;
   const interestPortion = Math.floor(totalInterest / loan.tenureMonths);
-  const principalPortion = amount - interestPortion;
+  const principalPortion = Math.max(0, amount - interestPortion);
 
   // All operations in one transaction for atomicity
   await prisma.$transaction([

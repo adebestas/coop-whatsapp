@@ -2,14 +2,13 @@ import { createHash } from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { monnifyAdapter } from "./payments/monnify.js";
 import { paystackAdapter } from "./payments/paystack.js";
-import { flutterwaveAdapter } from "./payments/flutterwave.js";
 import { handlePaymentNotification } from "./payments/topup.js";
 import type { PaymentNotification, ProviderAdapter } from "./payments/index.js";
 
 /**
  * Combined payment webhook listener.
  *
- * Every provider (Monnify / Paystack / Flutterwave) posts to ONE endpoint.
+ * Every provider (Monnify / Paystack) posts to ONE endpoint.
  * Processing pipeline, in order:
  *   1. Identify the provider by its signature header.
  *   2. Verify the cryptographic signature over the RAW request body
@@ -26,13 +25,11 @@ import type { PaymentNotification, ProviderAdapter } from "./payments/index.js";
 const adapters: Record<string, ProviderAdapter> = {
   monnify: monnifyAdapter,
   paystack: paystackAdapter,
-  flutterwave: flutterwaveAdapter,
 };
 
 const SIGNATURE_HEADERS: Record<string, string> = {
   "monnify-signature": "monnify",
   "x-paystack-signature": "paystack",
-  "verif-hash": "flutterwave",
 };
 
 export function detectProvider(headers: Record<string, string | string[] | undefined>): string | null {

@@ -32,7 +32,7 @@ const state = {
 
 vi.mock("../src/services/payments/index.js", () => ({
   resolveProvider: () => ({
-    name: "flutterwave",
+    name: "paystack",
     createVirtualAccount: vi.fn(),
     payout: vi.fn(async () =>
       state.payoutFails ? { ok: false, error: "insufficient balance" } : { ok: true, providerRef: "trx-1" },

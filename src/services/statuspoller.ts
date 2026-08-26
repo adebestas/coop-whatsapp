@@ -109,21 +109,29 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
   });
   for (const c of stuckClaims) {
     const st = await statusFor(`TFR-CLAIM-${c.id}`);
-    const wallet = await prisma.wallet.findUnique({ where: { memberId: c.memberId } });
-    const amount = Math.max(0, wallet?.balance ?? 0);
+    const amount = c.debitedAmount ?? 0;
     if (st.status === "successful") {
       await prisma.deathClaim.updateMany({
         where: { id: c.id, status: "processing" },
         data: { status: "paid", approvedAt: now, finalizedAt: now },
       });
+      await audit({
+        cooperativeId: c.cooperativeId,
+        actorPhone: "system-poller",
+        actorRole: "system",
+        action: "deathclaim.poller_confirmed",
+        targetType: "deathclaim",
+        targetId: c.id,
+        amount,
+        detail: `Death claim ${c.id.slice(-6)} confirmed by provider polling`,
+      });
       actions.push(`Death claim ${c.id.slice(-6)} confirmed by provider — closed as paid.`);
       await notifySupers(c.cooperativeId, `🕊️ Poller: death claim *${c.id.slice(-6)}* (${c.member.name}) confirmed paid by the provider.`);
     } else if (st.status === "failed") {
-      // The saga debited the full pre-payout balance; refund that amount.
-      const debited = amount > 0 ? amount : null;
-      if (debited && wallet) {
+      const wallet = await prisma.wallet.findUnique({ where: { memberId: c.memberId } });
+      if (amount > 0 && wallet) {
         await prisma.$transaction([
-          prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: debited } } }),
+          prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: amount } } }),
           prisma.deathClaim.updateMany({
             where: { id: c.id, status: "processing" },
             data: { status: "validated" },
@@ -135,8 +143,18 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
           data: { status: "validated" },
         });
       }
-      actions.push(`Death claim ${c.id.slice(-6)} FAILED at provider — reverted${debited ? ", wallet refunded" : ""}.`);
-      await notifySupers(c.cooperativeId, `↩️ Poller: death claim *${c.id.slice(-6)}* failed at the provider — reverted${debited ? " and wallet refunded" : ""}.`);
+      await audit({
+        cooperativeId: c.cooperativeId,
+        actorPhone: "system-poller",
+        actorRole: "system",
+        action: "deathclaim.poller_refunded",
+        targetType: "deathclaim",
+        targetId: c.id,
+        amount,
+        detail: `Death claim ${c.id.slice(-6)} failed at provider — refunded ${amount} kobo`,
+      });
+      actions.push(`Death claim ${c.id.slice(-6)} FAILED at provider — reverted${amount > 0 ? ", wallet refunded" : ""}.`);
+      await notifySupers(c.cooperativeId, `↩️ Poller: death claim *${c.id.slice(-6)}* failed at the provider — reverted${amount > 0 ? " and wallet refunded" : ""}.`);
     }
   }
 
@@ -168,6 +186,16 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
         note: `Admin charge on loan ${loan.id.slice(-6)} (confirmed by poller)`,
         reference: loan.id,
         fundType: "operational",
+      });
+      await audit({
+        cooperativeId: loan.cooperativeId,
+        actorPhone: "system-poller",
+        actorRole: "system",
+        action: "loan.poller_disbursed",
+        targetType: "loan",
+        targetId: loan.id,
+        amount: disbursable,
+        detail: `Loan ${loan.id.slice(-6)} disbursement confirmed by provider polling`,
       });
       actions.push(`Loan ${loan.id.slice(-6)} disbursement confirmed by provider — marked disbursed.`);
       await notifySupers(loan.cooperativeId, `🎉 Poller: loan *${loan.id.slice(-6)}* (${loan.member.name}) disbursement confirmed by the provider.`);

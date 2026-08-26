@@ -554,7 +554,7 @@ export async function handleAwaitingInput(
         }
         const result = await createContribution(phone, saveAmount);
         await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
-        await sendText({ to: phone, text: result.message });
+        await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
       } else {
         await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
         await sendText({ to: phone, text: "Save cancelled. Reply *menu* to see options." });
@@ -761,7 +761,7 @@ export async function handleAwaitingInput(
       }
       const member = await getMemberByPhone(phone);
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first." });
+        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
         return;
       }
       const pinCheck = await verifyMemberPin(member, input);
@@ -777,7 +777,7 @@ export async function handleAwaitingInput(
           : undefined;
       const result = await requestWithdrawal(phone, data.withdrawAmount ?? 0, bank);
       await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
-      await sendText({ to: phone, text: result.message });
+      await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
       break;
     }
 

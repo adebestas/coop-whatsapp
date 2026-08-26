@@ -72,16 +72,21 @@
       headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(opts.body);
     }
-    const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
-    if (res.status === 401) {
-      localStorage.removeItem(STORAGE_TOKEN);
-      localStorage.removeItem(STORAGE_MEMBER);
-      window.location.href = 'login.html';
-      throw new Error('Unauthorized');
+    showLoader();
+    try {
+      const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+      if (res.status === 401) {
+        localStorage.removeItem(STORAGE_TOKEN);
+        localStorage.removeItem(STORAGE_MEMBER);
+        window.location.href = 'login.html';
+        throw new Error('Unauthorized');
+      }
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+      return data;
+    } finally {
+      hideLoader();
     }
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Request failed');
-    return data;
   }
 
   // ---- Theme ----

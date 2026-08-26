@@ -99,10 +99,11 @@ export async function requestWithdrawal(
       return { ok: false, message: `Maximum withdrawal amount is *${formatBalance(coopConfig.maxWithdrawal)}*.` };
     }
   } else {
-    if (amount < LIMITS.MIN_WITHDRAW) {
+    const amountKobo = Math.round(amount * 100); // convert naira to kobo
+    if (amountKobo < LIMITS.MIN_WITHDRAW) {
       return { ok: false, message: `Minimum withdrawal amount is *${formatBalance(LIMITS.MIN_WITHDRAW)}*.` };
     }
-    if (amount > LIMITS.MAX_WITHDRAW) {
+    if (amountKobo > LIMITS.MAX_WITHDRAW) {
       return { ok: false, message: `Maximum withdrawal amount is *${formatBalance(LIMITS.MAX_WITHDRAW)}*.` };
     }
   }

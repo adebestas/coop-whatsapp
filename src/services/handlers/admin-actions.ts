@@ -46,7 +46,7 @@ export async function handleConfirm(phone: string, args: string[]): Promise<void
 export async function handleCode(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
     return;
   }
   await sendText({
@@ -58,7 +58,7 @@ export async function handleCode(phone: string): Promise<void> {
 export async function handlePhone(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
     return;
   }
   const contactPhone = normalizePhone(args.join(""));
@@ -214,7 +214,7 @@ export async function handleRisk(phone: string, member: { role: string; cooperat
 export async function handleDeleteAccount(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
     return;
   }
   if (!member.pin) {
@@ -223,7 +223,7 @@ export async function handleDeleteAccount(phone: string): Promise<void> {
   }
   await issueSecretChallenge(
     phone,
-    "awaiting_delete_account_pin" as any,
+    "awaiting_delete_account_pin",
     {},
     "Enter your 4-digit PIN to confirm account deletion. This action cannot be undone.",
   );
@@ -279,7 +279,7 @@ export async function handleDeleteAccountPin(phone: string, pin: string): Promis
 export async function handleMyData(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
     return;
   }
 

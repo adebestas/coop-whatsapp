@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { processPaymentWebhook } from "../services/webhooks.js";
 
 /**
- * Combined provider payment webhook (Monnify + Paystack + Flutterwave).
+ * Combined provider payment webhook (Monnify + Paystack).
  * The provider is detected by its signature header and verified against the
  * RAW request body; deliveries are deduplicated in WebhookEvent before any
  * processing. Legacy per-provider paths are aliased onto the same handler.

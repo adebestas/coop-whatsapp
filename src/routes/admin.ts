@@ -237,8 +237,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
       select: {
         id: true, name: true, phone: true, email: true, code: true,
         role: true, status: true, cooperativeId: true, createdAt: true,
-        nextOfKinName: true, nextOfKinPhone: true, dateOfBirth: true,
         wallet: true,
+        // NOK/DOB removed - sensitive, superadmin-only via chat
       },
       orderBy: { createdAt: "desc" },
       take: 200,
@@ -280,6 +280,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       return reply.code(403).send({ error: auth2fa.message });
     }
 
+    const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
+    if (!loan) return reply.code(404).send({ error: "loan not found in your cooperative" });
+
     const result = await approveLoan(id, { superAdmin: isSuper, actorId: actor.id });
     if (!result.ok) {
       return reply.code(400).send({ error: result.message });
@@ -315,12 +318,4 @@ export async function adminApiRoutes(app: FastifyInstance) {
       take: 200,
     });
   });
-}
-
-// NOTE: Dead code — requireAdminCoop is not called anywhere in the codebase.
-// Auth is now handled via the preHandler hook (JWT token verification).
-async function requireAdminCoop(phone: string): Promise<string> {
-  const member = await prisma.member.findFirst({ where: { phone, role: "admin" } });
-  if (!member) throw new Error("not an admin");
-  return member.cooperativeId;
 }

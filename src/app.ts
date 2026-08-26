@@ -106,11 +106,9 @@ export function buildApp() {
       await prisma.$queryRaw`SELECT 1`;
       const dbOk = true;
       const redisOk = isRedisConnected();
-      return {
-        status: redisOk && dbOk ? "ok" : "degraded",
-        db: dbOk,
-        redis: redisOk,
-      };
+      const status = redisOk && dbOk ? "ok" : "degraded";
+      const statusCode = status === "ok" ? 200 : 503;
+      return reply.code(statusCode).send({ status, db: dbOk, redis: redisOk });
     } catch {
       return reply.status(503).send({ status: "error", message: "Service unavailable" });
     }

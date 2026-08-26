@@ -159,8 +159,8 @@ export async function runBackup(): Promise<{ ok: boolean; message: string; file?
       journalEntries, postings, beneficiaries,
     ];
     for (let i = 0; i < allResults.length; i++) {
-      if (allResults[i].length >= 10000) {
-        console.warn(`[backup] WARNING: table "${tableNames[i]}" has >= 10,000 rows — backup may be truncated. Use pg_dump for full backups.`);
+      if (allResults[i].length >= BACKUP_WARN_THRESHOLD) {
+        console.warn(`[backup] WARNING: table "${tableNames[i]}" has >= ${BACKUP_WARN_THRESHOLD} rows — backup may be truncated. Use pg_dump for full backups.`);
       }
     }
 

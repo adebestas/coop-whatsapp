@@ -230,7 +230,11 @@ export async function checkRateLimit(
     }
   }
 
-  // In-memory fallback — fail closed for money operations
+  // Fail-closed for security-sensitive rate limits (login, money)
+  if (key.startsWith("login:") || key.startsWith("pin:")) {
+    return { allowed: false, retryAfter: windowSeconds };
+  }
+  // In-memory fallback for non-critical limits
   console.warn(`[RateLimit] Redis unavailable, using in-memory fallback for key: ${key}`);
   const isMoneyOperation = key.includes("money");
   if (isMoneyOperation) {

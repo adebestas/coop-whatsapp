@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export { LIMITS } from "./money.js";
+
 // ===== Common schemas =====
 
 export const PhoneSchema = z
@@ -100,18 +102,3 @@ export function validate<T>(schema: z.ZodSchema<T>, data: unknown): ValidationRe
   const errorMessage = result.error.errors.map((e) => e.message).join("; ");
   return { success: false, error: errorMessage };
 }
-
-// ===== Amount limits =====
-
-export const LIMITS = {
-  MIN_SAVE: 100, // ₦100
-  MAX_SAVE: 10_000_000, // ₦10M
-  MIN_LOAN: 1_000, // ₦1,000
-  MAX_LOAN: 50_000_000, // ₦50M
-  MIN_WITHDRAW: 100, // ₦100
-  MAX_WITHDRAW: 20_000_000, // ₦20M
-  MAX_LOAN_TENURE: 24, // months
-  MIN_LOAN_TENURE: 1, // month
-  MAX_PAYANYONE: 50_000_000, // ₦50M per transaction
-  DAILY_PAYANYONE_LIMIT: 100_000_000, // ₦100M per day
-} as const;

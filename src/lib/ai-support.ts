@@ -191,7 +191,7 @@ If unsure, direct them to reply *help* for the full command list.`,
       }
       response = response.replace(/\s{2,}/g, ' ').trim();
     }
-    return response;
+    return response + "\n\n_Disclaimer: This is an AI-generated response and may not be fully accurate. Contact your cooperative admin for official information._";
   } catch (err) {
     console.warn("[ai-support] generateSupportResponse failed:", err);
     return generateFallbackSupport(truncated, memberName);

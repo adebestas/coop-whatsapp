@@ -442,6 +442,12 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
       return { ok: false, message: "Balance changed during payout — claim NOT closed. Investigate immediately." };
     }
 
+    // Store the debited amount for accurate refund if provider fails
+    await prisma.deathClaim.updateMany({
+      where: { id: claim.id, status: "processing" },
+      data: { debitedAmount: balance },
+    });
+
     const result = await sendToBank({
       memberId: claim.memberId,
       amount: balance,

@@ -68,8 +68,12 @@ services:
         sync: false
       - key: DIGEST_HOUR
         value: "20"
+      - key: PAYMENT_PROVIDER
+        sync: false          # set to paystack if not using monnify as primary
       - key: TRANSFER_POLL_MINUTES
         value: "10"
+      - key: BACKUP_DIR
+        value: "/app/backups" # local backup directory (use S3 for persistence on Render)
       - key: DASHBOARD_ORIGIN
         sync: false          # set to your dashboard URL, e.g. https://admin.yourdomain.com
       # ---- Backup storage (S3 recommended — local disk is EPHEMERAL on Render) ----

@@ -25,7 +25,7 @@ export async function handleBalance(
   const balance = member.wallet?.balance ?? 0;
   await sendText({
     to: phone,
-    text: `Hi *${member.name}*, your savings balance is *${formatBalance(balance)}*.\n\nReply *save <amount>* to contribute more.`,
+    text: `Hi *${member.name}*, your savings balance is *${formatBalance(balance)}*.\n\nReply *save <amount>* to contribute more.\nReply *menu* to see other options.`,
   });
 }
 
@@ -54,7 +54,7 @@ export async function handleSave(phone: string, args: string[]): Promise<void> {
 export async function handleFund(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
     return;
   }
   const result = await provisionVirtualAccount(member.id);
@@ -77,7 +77,7 @@ export async function handleWithdraw(phone: string, args: string[]): Promise<voi
   }
   const limit = await withdrawLimit(phone);
   if (!limit) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
     return;
   }
   const eligibility = await canWithdraw(phone);
@@ -193,7 +193,7 @@ export async function handleJoinUnit(phone: string, args: string[]): Promise<voi
 export async function handleLoanQueue(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
     return;
   }
 

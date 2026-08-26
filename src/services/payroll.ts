@@ -210,6 +210,21 @@ export async function runPayroll(
         reference: `PAYE-${r.id}-${period}`,
         fundType: "operational",
       });
+
+      // Create PAYERecord for SIRS remittance tracking
+      const [payYear, payMonth] = period.split("-").map(Number);
+      await prisma.pAYERecord.create({
+        data: {
+          cooperativeId,
+          memberId: r.id,
+          month: payMonth,
+          year: payYear,
+          grossAmount: amount,
+          taxAmount: paye,
+          netAmount: netSalary,
+          status: "pending",
+        },
+      });
     }
     paid += 1;
     total += netSalary;

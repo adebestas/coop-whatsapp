@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText, notifyMember } from "../lib/messaging.js";
+import { sendText, sendLongText, notifyMember } from "../lib/messaging.js";
 import { cacheDel } from "../lib/cache.js";
 import { listPosts, normalizeTitle, displayTitle } from "./posts.js";
 import { buildBatch, submitBatch, approveBatch, rejectBatch, setCommitment, waiveMonth } from "./deductions.js";
@@ -62,6 +62,7 @@ const MONEY_OUT_COMMANDS = new Set([
   "approveclaim",
   "approvepay",
   "runpayroll",
+  "disable2fa",
 ]);
 
 /** Send the guard failure text and return true (command handled). */
@@ -548,6 +549,16 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "You can't change your own role." });
         return true;
       }
+      // Before demoting, check if target is superadmin and would leave < 1 superadmin
+      if (target.role === "superadmin" && role !== "superadmin") {
+        const superCount = await prisma.member.count({
+          where: { cooperativeId: coopId, role: "superadmin", status: "active", id: { not: target.id } }
+        });
+        if (superCount < 1) {
+          await sendText({ to: phone, text: "Cannot demote: this would leave the cooperative with no superadmins." });
+          return true;
+        }
+      }
       await prisma.member.update({ where: { id: target.id }, data: { role } });
       await sendText({ to: phone, text: `✅ ${target.name} is now *${role}*.`, });
       await audit({
@@ -685,7 +696,7 @@ export async function handleAdminCommand(
         `_This is an independent internal audit report for cooperative governance._`,
       ];
 
-      await sendText({ to: phone, text: report.join("\n") });
+      await sendLongText({ to: phone, text: report.join("\n") });
       await audit({
         cooperativeId: coopId,
         actorPhone: phone,
@@ -819,7 +830,7 @@ export async function handleAdminCommand(
         "",
         "_Dividends are paid from this profit: *paydividend <rate%>*_",
       ];
-      await sendText({ to: phone, text: body.join("\n") });
+      await sendLongText({ to: phone, text: body.join("\n") });
       return true;
     }
 
@@ -905,7 +916,7 @@ export async function handleAdminCommand(
         `Total expenses: *${formatBalance(pnl.totalExpense)}*`,
         `NET ${pnl.netProfit >= 0 ? "PROFIT" : "LOSS"}: *${formatBalance(Math.abs(pnl.netProfit))}*`,
       ];
-      await sendText({ to: phone, text: body.join("\n") });
+      await sendLongText({ to: phone, text: body.join("\n") });
       return true;
     }
 
@@ -1053,7 +1064,7 @@ export async function handleAdminCommand(
         `_This report is suitable for filing with the State Cooperative Registrar._`,
         `_NOTE: For official filing, export this report as PDF/DOCX via the export command or system admin._`,
       ];
-      await sendText({ to: phone, text: report.join("\n") });
+      await sendLongText({ to: phone, text: report.join("\n") });
       return true;
     }
 

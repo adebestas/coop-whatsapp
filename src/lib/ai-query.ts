@@ -125,7 +125,7 @@ If unsure, return {"type":"help","args":{}}`,
       choices?: Array<{ message?: { content?: string } }>;
     };
     const raw = body.choices?.[0]?.message?.content ?? "";
-    const jsonMatch = raw.match(/\{[^{}]*\}/);
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
     const jsonText = jsonMatch ? jsonMatch[0] : "";
     if (!jsonText) return null;
     const parsed = JSON.parse(jsonText) as { type?: string; args?: Record<string, string> };

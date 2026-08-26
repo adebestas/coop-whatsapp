@@ -246,7 +246,7 @@ export async function checkMultiSigRequirement(params: {
   amount: number;
   initiatorPhone: string;
   targetId: string;
-}): Promise<{ needsApproval: false; warning?: string } | { needsApproval: true; pendingId: string }> {
+}): Promise<{ needsApproval: false; warning?: string; error?: string } | { needsApproval: true; pendingId: string }> {
   const { cooperativeId, amount, initiatorPhone, targetId } = params;
 
   if (amount < PAYOUT_MULTI_SIG_THRESHOLD) {
@@ -280,7 +280,13 @@ export async function checkMultiSigRequirement(params: {
   try {
     const { getRedis } = await import("./cache.js");
     const redis = getRedis();
-    if (!redis) return { needsApproval: false };
+    if (!redis) {
+      // If Redis fails and there are enough supers, block instead of allowing
+      if (superadmins.length >= 2) {
+        return { needsApproval: false, error: "Multi-sig service temporarily unavailable. Please try again." };
+      }
+      return { needsApproval: false };
+    }
 
     const pendingId = `msig_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
     await redis.setex(cacheKey, 3600, JSON.stringify({

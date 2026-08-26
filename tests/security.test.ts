@@ -3,7 +3,6 @@ import { createHmac } from "node:crypto";
 import { prisma } from "../src/lib/prisma.js";
 import { sendText } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
-import { flutterwaveAdapter } from "../src/services/payments/flutterwave.js";
 import { paystackAdapter } from "../src/services/payments/paystack.js";
 import { processPaymentWebhook } from "../src/services/webhooks.js";
 import { sendToBank } from "../src/services/disbursements.js";
@@ -35,7 +34,7 @@ vi.mock("../src/services/payments/index.js", async (importOriginal) => {
   };
 });
 
-const ENV_KEYS = ["FLUTTERWAVE_WEBHOOK_HASH", "PAYSTACK_SECRET_KEY", "MONNIFY_SECRET_KEY"] as const;
+const ENV_KEYS = ["PAYSTACK_SECRET_KEY", "MONNIFY_SECRET_KEY"] as const;
 let savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -141,16 +140,7 @@ beforeEach(async () => {
 
 describe("cryptographic webhook verification", () => {
   it("fails closed when the provider secret is not configured", () => {
-    expect(flutterwaveAdapter.verifyWebhook("{}", {})).toBe(false);
     expect(paystackAdapter.verifyWebhook("{}", {})).toBe(false);
-  });
-
-  it("accepts genuine Flutterwave signatures and rejects tampered ones", () => {
-    process.env.FLUTTERWAVE_WEBHOOK_HASH = "whsec_test123";
-    expect(flutterwaveAdapter.verifyWebhook('{"a":1}', { "verif-hash": "whsec_test123" })).toBe(true);
-    expect(flutterwaveAdapter.verifyWebhook('{"a":1}', { "verif-hash": "wrong" })).toBe(false);
-    // No header at all -> fail closed.
-    expect(flutterwaveAdapter.verifyWebhook('{"a":1}', {})).toBe(false);
   });
 
   it("verifies Paystack HMAC over the RAW body (not re-serialized JSON)", () => {
@@ -166,24 +156,26 @@ describe("cryptographic webhook verification", () => {
 
 describe("webhook replay protection", () => {
   it("credits once and marks the second identical delivery as duplicate", async () => {
-    process.env.FLUTTERWAVE_WEBHOOK_HASH = "whsec_test123";
+    process.env.PAYSTACK_SECRET_KEY = "sk_test_key";
     const coop = await makeCoop();
     const member = await makeMember("2348010000042", coop.id, { virtual: "VA-SEC-001", balance: 0 });
 
     const rawBody = JSON.stringify({
-      event: "charge.completed",
-      data: { id: "SECTX-777", status: "successful", amount: 500, account_number: "VA-SEC-001", currency: "NGN" },
+      event: "charge.success",
+      data: { id: "SECTX-777", status: "success", amount: 500, account: { number: "VA-SEC-001" }, currency: "NGN" },
     });
-    const headers = { "verif-hash": "whsec_test123" };
+    const rawBodyStr = JSON.stringify(JSON.parse(rawBody));
+    const sig = createHmac("sha512", "sk_test_key").update(rawBodyStr).digest("hex");
+    const headers = { "x-paystack-signature": sig };
 
-    const first = await processPaymentWebhook(rawBody, headers);
+    const first = await processPaymentWebhook(rawBodyStr, headers);
     expect(first.httpStatus).toBe(200);
 
     let wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
     expect(wallet!.balance).toBe(500);
 
     // Replay — same signed payload again.
-    const second = await processPaymentWebhook(rawBody, headers);
+    const second = await processPaymentWebhook(rawBodyStr, headers);
     expect(second.body.status).toBe("duplicate");
     wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
     expect(wallet!.balance).toBe(500);
@@ -196,16 +188,16 @@ describe("webhook replay protection", () => {
   });
 
   it("rejects forged deliveries with 401 before touching any state", async () => {
-    process.env.FLUTTERWAVE_WEBHOOK_HASH = "whsec_test123";
+    process.env.PAYSTACK_SECRET_KEY = "sk_test_key";
     const coop = await makeCoop();
     const member = await makeMember("2348010000043", coop.id, { virtual: "VA-SEC-002", balance: 0 });
 
     const rawBody = JSON.stringify({
-      event: "charge.completed",
-      data: { id: "EVIL-TX", status: "successful", amount: 999999, account_number: "VA-SEC-002", currency: "NGN" },
+      event: "charge.success",
+      data: { id: "EVIL-TX", status: "success", amount: 999999, account: { number: "VA-SEC-002" }, currency: "NGN" },
     });
 
-    const result = await processPaymentWebhook(rawBody, { "verif-hash": "forged" });
+    const result = await processPaymentWebhook(rawBody, { "x-paystack-signature": "forged" });
     expect(result.httpStatus).toBe(401);
 
     const wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });

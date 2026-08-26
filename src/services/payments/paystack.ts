@@ -177,7 +177,7 @@ export const paystackAdapter: ProviderAdapter = {
       transactionId: String(d.id ?? d.transaction_id ?? Date.now()),
       reference: d.reference,
       accountNumber: String(d.account?.number ?? ""),
-      amount: amountKobo / 100, // Paystack amounts are in kobo/cents
+      amount: amountKobo, // Keep in kobo — wallet stores kobo
       currency: d.currency ?? "NGN",
       status: "successful",
       provider: "paystack",

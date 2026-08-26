@@ -24,7 +24,6 @@ const RECOMMENDED: EnvSpec[] = [
   { key: "MONNIFY_SECRET_KEY", fatal: false },
   { key: "MONNIFY_CONTRACT_CODE", fatal: false },
   { key: "PAYSTACK_SECRET_KEY", fatal: false, hint: "Paystack fallback provider" },
-  { key: "FLUTTERWAVE_WEBHOOK_HASH", fatal: false, hint: "Flutterwave webhook signature secret" },
   { key: "SESSION_SECRET", fatal: false, hint: "random 32+ char string for signing" },
   { key: "TELEGRAM_BOT_TOKEN", fatal: false, hint: "Telegram bot token (optional — WhatsApp-only if missing)" },
 ];
@@ -70,7 +69,7 @@ export function validateEnvironment(env: NodeJS.ProcessEnv = process.env): EnvRe
 
   const twoFaRequired = env.TWO_FA_REQUIRED === "1";
   const anyProvider =
-    Boolean(env.MONNIFY_API_KEY) || Boolean(env.PAYSTACK_SECRET_KEY) || Boolean(process.env.FLUTTERWAVE_SECRET_KEY);
+    Boolean(env.MONNIFY_API_KEY) || Boolean(env.PAYSTACK_SECRET_KEY);
   if (!anyProvider && process.env.NODE_ENV !== "test") {
     problems.push("⚠️  No payment provider is configured — money IN/OUT will fail. Set MONNIFY_* first.");
   }

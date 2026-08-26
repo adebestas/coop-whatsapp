@@ -78,7 +78,8 @@ Keep it under 300 words. Be professional but warm.`,
     const body = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
-    return body.choices?.[0]?.message?.content ?? generateFallbackInsights(cooperativeId);
+    const raw = body.choices?.[0]?.message?.content ?? generateFallbackInsights(cooperativeId);
+    return raw + "\n\n_Disclaimer: This is an AI-generated analysis and may not be fully accurate. Contact your cooperative admin for official information._";
   } catch {
     return generateFallbackInsights(cooperativeId);
   }

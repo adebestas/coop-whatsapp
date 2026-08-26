@@ -4,9 +4,7 @@
  * Returns the full ID if unique, null if not found or ambiguous.
  */
 
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "./prisma.js";
 
 type ModelName = "withdrawalRequest" | "loan" | "externalPayment" | "deathClaim" | "purchasePoll";
 

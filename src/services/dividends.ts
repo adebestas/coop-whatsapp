@@ -28,6 +28,9 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
     where: { cooperativeId: member.cooperativeId },
     select: { id: true, name: true, wallet: { select: { totalSaved: true, balance: true } } },
   });
+  // NOTE: totalSaved is computed here independently from distributeDividend.
+  // This is intentional — savings can change between preview and distribution,
+  // so each call must reflect the current state at invocation time.
   const totalSaved = entries.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
   // pnl.netProfit is kobo; pool stays in kobo
   const pool = Math.max(0, Math.round(pnl.netProfit * (rate / 100)));
@@ -260,10 +263,13 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
     const entriesWithShares = rawShares.filter((s) => s.kobo > 0);
     for (let i = 0; i < entriesWithShares.length; i += 100) {
       const batch = entriesWithShares.slice(i, i + 100);
+      // Batch wallet credits via raw SQL to reduce lock duration
+      for (const s of batch) {
+        await tx.$executeRaw`UPDATE "Wallet" SET balance = balance + ${s.kobo} WHERE "id" = ${s.member.wallet!.id}`;
+      }
       for (const s of batch) {
         paidCount += 1;
         const entry = dividend.entries.find((e) => e.memberId === s.member.id);
-        await tx.wallet.update({ where: { id: s.member.wallet!.id }, data: { balance: { increment: s.kobo } } });
         await tx.contribution.create({
           data: {
             amount: s.kobo,
@@ -388,27 +394,27 @@ export async function getFundBalances(cooperativeId: string): Promise<{
   education: number;
   development: number;
 }> {
-  const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
-  
   const [reserveTotal, educationTotal, developmentTotal] = await Promise.all([
     prisma.reserveAllocation.aggregate({ where: { cooperativeId }, _sum: { amount: true } }),
     prisma.educationFund.aggregate({ where: { cooperativeId }, _sum: { amount: true } }),
     prisma.developmentFund.aggregate({ where: { cooperativeId }, _sum: { amount: true } }),
   ]);
 
-  // Reconciliation check: compare denormalized balance against actual allocation sum
-  const reserveAggregate = await prisma.reserveAllocation.aggregate({
-    where: { cooperativeId },
-    _sum: { amount: true },
-  });
+  const reserveBalance = reserveTotal._sum.amount ?? 0;
+
+  // Reconciliation: update denormalized field if it diverges
+  const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
   const reported = coop?.reserveFundBalance ?? 0;
-  const actual = reserveAggregate._sum.amount ?? 0;
-  if (Math.abs(reported - actual) > 1) {
-    console.warn(`[compliance] Reserve fund divergence: reported ${reported}, actual ${actual}`);
+  if (Math.abs(reported - reserveBalance) > 1) {
+    console.warn(`[compliance] Reserve fund divergence: reported ${reported}, actual ${reserveBalance}`);
+    await prisma.cooperative.update({
+      where: { id: cooperativeId },
+      data: { reserveFundBalance: reserveBalance },
+    });
   }
 
   return {
-    reserve: coop?.reserveFundBalance ?? reserveTotal._sum.amount ?? 0,
+    reserve: reserveBalance,
     education: educationTotal._sum.amount ?? 0,
     development: developmentTotal._sum.amount ?? 0,
   };
