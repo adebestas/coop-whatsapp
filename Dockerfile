@@ -41,10 +41,9 @@ RUN npm ci --omit=dev
 COPY prisma ./prisma/
 RUN npx prisma generate
 
-# Copy built application + static assets
+# Copy built application + dashboard
 COPY --from=builder /app/dist ./dist
 COPY dashboard ./dashboard/
-COPY web/dist ./web/dist/
 
 # Create necessary directories
 RUN mkdir -p exports backups && \

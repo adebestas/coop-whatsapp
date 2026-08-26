@@ -119,12 +119,10 @@ export function buildApp() {
   void app.register(adminApiRoutes);
   void app.register(serveExportFile);
 
-  // Serve static files — dashboard + web/dist
+  // Serve static files — admin dashboard
   const baseDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const dashboardDir = path.join(baseDir, "dashboard");
-  const webDist = path.join(baseDir, "web/dist");
   void app.register(fastifyStatic, { root: dashboardDir, prefix: "/dashboard/" });
-  void app.register(fastifyStatic, { root: webDist, decorateReply: false });
 
   return app;
 }
