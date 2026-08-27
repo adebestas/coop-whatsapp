@@ -121,6 +121,15 @@ export async function getCoopByCode(code: string) {
   return prisma.cooperative.findUnique({ where: { code } });
 }
 
+/**
+ * TEST-ONLY helper — DO NOT call from any production/flux path.
+ *
+ * This fabricates a wallet credit with NO real payment (no Monnify/Paystack).
+ * The only legitimate money-in path is topup.ts handlePaymentNotification via a
+ * provider webhook. Kept only so tests can pre-fund wallets when setting up
+ * unrelated scenarios. Any production code that wants to credit a wallet must
+ * go through a verified payment — never through this function.
+ */
 export async function createContribution(phone: string, amount: number): Promise<{ ok: boolean; message: string }> {
   const member = await getMemberByPhone(phone);
   if (!member) {

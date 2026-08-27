@@ -5,12 +5,12 @@ import { randomBytes, randomInt } from "node:crypto";
 import { hashOtp, verifyOtp } from "../../lib/security.js";
 import { normalizePhone } from "../../lib/phones.js";
 import {
-  createContribution,
   findOrCreateMember,
   formatBalance,
   getMemberByPhone,
 } from "../cooperative.js";
 import { toKobo } from "../../lib/money.js";
+import { provisionVirtualAccount } from "../payments/topup.js";
 import { verifyMemberPin } from "../pin.js";
 import { resolveBankCode } from "../../lib/banks.js";
 import { applyForLoan } from "../loans.js";
@@ -552,21 +552,26 @@ export async function handleAwaitingInput(
     }
 
     case "awaiting_save_confirm": {
+      // Legacy/stale sessions may reach here, but we NEVER fabricate a wallet
+      // credit — savings only land after a REAL provider payment (topup.ts via
+      // the Monnify/Paystack webhook). Route the member to their funding account.
       const answer = text.trim().toLowerCase();
+      const member = await getMemberByPhone(phone);
       if (answer === "yes" || answer === "y") {
-        const saveAmount = data.saveAmount;
-        if (!saveAmount) {
-          await sendText({ to: phone, text: "Something went wrong. Reply *save <amount>* to try again." });
-          await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
-          return;
-        }
-        const result = await createContribution(phone, saveAmount);
-        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
-        await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
+        const saveAmount = data.saveAmount ?? null;
+        const amountLine = saveAmount
+          ? `To save *${formatBalance(saveAmount)}*, transfer that exact amount to your funding account below — your wallet is credited automatically once the transfer is confirmed.`
+          : `Transfer any amount to your funding account below — your wallet is credited automatically once the transfer is confirmed.`;
+        const fund = member ? await provisionVirtualAccount(member.id) : null;
+        const accountLine =
+          fund?.ok
+            ? fund.message
+            : "We couldn't set up your funding account right now. Please try *fund* again.";
+        await sendText({ to: phone, text: `${amountLine}\n\n${accountLine}` });
       } else {
-        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
         await sendText({ to: phone, text: "Save cancelled. Reply *menu* to see options." });
       }
+      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
       break;
     }
 

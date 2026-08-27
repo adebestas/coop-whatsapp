@@ -1002,7 +1002,7 @@
     }
   }
 
-  async function exportCompliance(kind) {
+  window.exportCompliance = async function (kind) {
     try {
       toast('Generating ' + kind.toUpperCase() + ' export...', 'info');
       const result = await api(`/compliance/export/${kind}`, { method: 'POST' });

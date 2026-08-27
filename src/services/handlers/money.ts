@@ -1,7 +1,6 @@
 import { prisma } from "../../lib/prisma.js";
 import { sendText } from "../../lib/messaging.js";
 import {
-  createContribution,
   formatBalance,
   getMemberByPhone,
 } from "../cooperative.js";
@@ -30,24 +29,37 @@ export async function handleBalance(
 }
 
 export async function handleSave(phone: string, args: string[]): Promise<void> {
-  const amount = parseNaira(args[0]);
-  if (amount === null) {
-    await prisma.session.upsert({
-      where: { phone },
-      create: { phone, state: "awaiting_save_amount" },
-      update: { state: "awaiting_save_amount" },
-    });
-    await sendText({ to: phone, text: "How much would you like to save? (e.g. *2000*)" });
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
     return;
   }
-  await prisma.session.upsert({
-    where: { phone },
-    create: { phone, state: "awaiting_save_confirm", data: JSON.stringify({ saveAmount: amount }) },
-    update: { state: "awaiting_save_confirm", data: JSON.stringify({ saveAmount: amount }) },
-  });
+
+  let amount: number | null = null;
+  if (args[0]) {
+    amount = parseNaira(args[0]);
+    if (amount === null) {
+      await sendText({ to: phone, text: "Please enter a valid amount, e.g. *save 2000*." });
+      return;
+    }
+  }
+
+  // Savings are only credited after a REAL payment arrives via the provider
+  // webhook (Monnify/Paystack). We never fabricate a wallet credit here —
+  // instead we hand the member their personal funding account and let the
+  // confirmed transfer credit the wallet automatically (see topup.ts).
+  const fund = await provisionVirtualAccount(member.id);
+  const amountLine = amount
+    ? `To save *${formatBalance(amount)}*, transfer that exact amount to your funding account below — your wallet is credited automatically once the transfer is confirmed.`
+    : `Transfer any amount to your funding account below — your wallet is credited automatically once the transfer is confirmed.`;
+
+  const accountLine = fund.ok
+    ? fund.message
+    : "We couldn't set up your funding account right now. Please try *fund* again later.";
+
   await sendText({
     to: phone,
-    text: `You're about to save ${formatBalance(amount)}. Reply *yes* to confirm or *menu* to cancel.`,
+    text: `${amountLine}\n\n${accountLine}\n\nReply *menu* to see other options.`,
   });
 }
 
