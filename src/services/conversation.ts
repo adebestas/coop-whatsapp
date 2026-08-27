@@ -183,7 +183,11 @@ function isAwaitingState(state: BotState): boolean {
 }
 
 function parseCommand(text: string): { cmd: string; args: string[] } {
-  const parts = text.trim().toLowerCase().split(/\s+/);
+  // Lowercase, collapse whitespace, and strip a leading Telegram slash so
+  // "/vote 123 ABC" routes identically to the bare "vote 123 ABC" command.
+  const raw = text.trim().toLowerCase();
+  const normalized = raw.startsWith("/") ? raw.slice(1) : raw;
+  const parts = normalized.split(/\s+/);
   return { cmd: parts[0] ?? "", args: parts.slice(1) };
 }
 

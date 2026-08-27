@@ -264,7 +264,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     }
 
     // Resolve the intended recipients within this cooperative only.
-    let targets: { id: string; code: string; phone: string; optedOut: boolean; altChannelId: string | null; preferredChannel: string | null }[] = [];
+    let targets: { id: string; code: string; phone: string; optedOut: boolean; altChannelId: string | null; preferredChannel: string | null }[];
     if (toAll) {
       targets = await prisma.member.findMany({
         where: { cooperativeId: coopId, status: "active" },
