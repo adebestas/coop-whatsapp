@@ -10,6 +10,7 @@ const REDIS_URL = process.env.REDIS_URL;
 let redis: Redis | null = null;
 let isConnected = false;
 let lastErrorLog = 0;
+let connectionFailed = false;
 
 /**
  * Initialize Redis connection
@@ -20,10 +21,20 @@ export function initRedis(): Redis | null {
     return null;
   }
 
+  if (connectionFailed) {
+    console.warn("[Redis] Previous connection failed — caching disabled");
+    return null;
+  }
+
   try {
     redis = new Redis(REDIS_URL, {
       maxRetriesPerRequest: 3,
       retryStrategy(times) {
+        if (times > 3) {
+          connectionFailed = true;
+          console.warn("[Redis] Connection failed after 3 retries — caching disabled");
+          return null;
+        }
         const delay = Math.min(times * 50, 2000);
         return delay;
       },
