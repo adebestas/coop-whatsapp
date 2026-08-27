@@ -385,12 +385,14 @@
           <span class="card-title">All Members</span>
           <div class="flex gap-2">
             <input type="search" id="memberSearch" placeholder="Search members..." style="padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.8125rem; background:var(--bg-card); color:var(--text); width:200px;">
+            <button class="btn btn-primary" onclick="openMessageModal()">Send Message</button>
           </div>
         </div>
         <div class="card-body flush" id="membersTable">
           <div class="empty-state"><p class="text-muted">Loading members...</p></div>
         </div>
-      </div>`;
+      </div>
+      <div id="messageModalHost"></div>`;
 
     try {
       membersData = await api('/members');
@@ -418,26 +420,135 @@
       <div class="table-wrapper">
         <table>
           <thead><tr>
+            <th style="width:36px;"></th>
             <th>Name</th>
+            <th>File No / Code</th>
             <th>Phone</th>
             <th>Role</th>
             <th>Balance</th>
             <th>Total Saved</th>
             <th>Joined</th>
+            <th></th>
           </tr></thead>
           <tbody>
             ${members.map(m => `<tr>
+              <td><input type="checkbox" class="member-select" value="${esc(m.id)}" data-name="${esc(m.name || '')}"></td>
               <td class="font-bold">${esc(m.name || '—')}</td>
+              <td class="font-mono text-sm">${esc(m.code || '—')}</td>
               <td class="font-mono text-sm">${esc(formatPhone(m.phone))}</td>
               <td>${roleBadge(m.role)}</td>
               <td class="font-mono">${currency(m.wallet?.balance || 0)}</td>
               <td class="font-mono">${currency(m.wallet?.totalSaved || 0)}</td>
               <td class="text-muted text-sm">${date(m.createdAt)}</td>
+              <td><button class="btn btn-outline btn-xs" onclick="openMessageModal('${esc(m.id)}')">Message</button></td>
             </tr>`).join('')}
           </tbody>
         </table>
       </div>`;
   }
+
+  // ---- Message Members ----
+  window.openMessageModal = function (preselectId) {
+    const host = document.getElementById('messageModalHost');
+    if (!host) return;
+    const members = Array.isArray(membersData) ? membersData : [];
+    const checkboxes = members.map(m => `
+      <label class="msg-member">
+        <input type="checkbox" value="${esc(m.id)}" ${m.id === preselectId ? 'checked' : ''}>
+        <span class="msg-member-name">${esc(m.name || '—')}</span>
+        <span class="msg-member-code">${esc(m.code || '')}</span>
+      </label>`).join('');
+
+    host.innerHTML = `
+      <div class="modal-overlay" onclick="if(event.target===this)closeMessageModal()">
+        <div class="modal modal-lg" role="dialog" aria-modal="true">
+          <div class="modal-header">
+            <span class="card-title">Message Members</span>
+            <button class="btn btn-ghost btn-xs" onclick="closeMessageModal()">&times;</button>
+          </div>
+          <div class="modal-body">
+            <label class="msg-broadcast"><input type="checkbox" id="msgToAll" onchange="toggleMsgAll()"> <strong>Broadcast to all active members</strong></label>
+            <div id="msgMemberList" class="msg-member-list">
+              <div class="msg-select-all"><label><input type="checkbox" id="msgCheckAll" onchange="toggleMsgCheckAll()"> Select all</label></div>
+              ${checkboxes}
+            </div>
+            <div class="form-group" style="margin-top:14px;">
+              <label for="msgSubject">Subject (optional)</label>
+              <input type="text" id="msgSubject" placeholder="e.g. Annual General Meeting" style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
+            </div>
+            <div class="form-group">
+              <label for="msgBody">Message *</label>
+              <textarea id="msgBody" rows="5" maxlength="3500" placeholder="Type your message here..." style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text); resize:vertical;"><\/textarea>
+            </div>
+            <div id="msgResult" class="text-muted text-sm" style="margin-top:8px;"></div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="closeMessageModal()">Cancel</button>
+            <button class="btn btn-primary" id="msgSendBtn" onclick="sendMessage()">Send</button>
+          </div>
+        </div>
+      </div>`;
+    if (preselectId) {
+      const all = document.getElementById('msgToAll');
+      if (all) all.checked = false;
+      toggleMsgAll();
+    }
+  };
+
+  window.toggleMsgAll = function () {
+    const all = document.getElementById('msgToAll');
+    const list = document.getElementById('msgMemberList');
+    if (list) list.style.display = all && all.checked ? 'none' : '';
+    const checkAll = document.getElementById('msgCheckAll');
+    if (checkAll) checkAll.checked = false;
+    document.querySelectorAll('#msgMemberList .msg-member input[type=checkbox]').forEach(b => b.checked = false);
+  };
+
+  window.toggleMsgCheckAll = function () {
+    const c = document.getElementById('msgCheckAll');
+    document.querySelectorAll('#msgMemberList .msg-member input[type=checkbox]').forEach(b => b.checked = c.checked);
+  };
+
+  window.closeMessageModal = function () {
+    const host = document.getElementById('messageModalHost');
+    if (host) host.innerHTML = '';
+  };
+
+  window.sendMessage = async function () {
+    const toAll = document.getElementById('msgToAll').checked;
+    const subject = document.getElementById('msgSubject').value.trim();
+    const body = document.getElementById('msgBody').value.trim();
+    const result = document.getElementById('msgResult');
+
+    let memberIds = [];
+    if (!toAll) {
+      memberIds = Array.from(document.querySelectorAll('#msgMemberList .msg-member input[type=checkbox]:checked')).map(c => c.value);
+    }
+    if (!body) { result.textContent = 'Please enter a message body.'; result.style.color = 'var(--danger)'; return; }
+    if (!toAll && memberIds.length === 0) { result.textContent = 'Select at least one member or enable broadcast.'; result.style.color = 'var(--danger)'; return; }
+
+    const btn = document.getElementById('msgSendBtn');
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+    result.textContent = '';
+    try {
+      const res = await api('/messages/send', {
+        method: 'POST',
+        body: { memberIds, toAll, subject, body },
+      });
+      result.style.color = '';
+      result.innerHTML = `Sent to <strong>${res.sent}</strong> of ${res.targeted} targeted member(s). ` +
+        (res.skipped ? `${res.skipped} skipped (opted out). ` : '') +
+        (res.failed ? `<span style="color:var(--danger)">${res.failed} failed${res.failures && res.failures.length ? ': ' + esc(res.failures.join(', ')) : ''}.</span>` : '');
+      if (res.sent > 0) toast(`Message sent to ${res.sent} member(s)`, 'success');
+    } catch (err) {
+      result.textContent = err.message;
+      result.style.color = 'var(--danger)';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Send';
+    }
+  };
 
   // ---- Loans ----
   async function renderLoans(el) {

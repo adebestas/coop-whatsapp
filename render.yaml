@@ -74,7 +74,7 @@ services:
       - key: DIGEST_HOUR
         value: "20"
       - key: PAYMENT_PROVIDER
-        value: paystack        # primary provider is Paystack (Monnify is sandbox) — do not move live money on sandbox
+        value: monnify        # primary provider is Monnify (prod API); Paystack is fallback
       - key: TRANSFER_POLL_MINUTES
         value: "10"
       - key: BACKUP_DIR

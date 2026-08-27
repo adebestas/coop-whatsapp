@@ -4,6 +4,7 @@ import { verifyPin } from "../lib/security.js";
 import { checkRateLimit, getRedis } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 import { approveLoan } from "../services/loans.js";
+import { notifyMember } from "../lib/messaging.js";
 
 /**
  * Minimal admin auth for the dashboard: members log in with their WhatsApp
@@ -243,6 +244,86 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 200,
     });
+  });
+
+  // Send a broadcast / individual message to members via their messaging channel.
+  app.post("/api/admin/messages/send", async (req, reply) => {
+    const coopId = req.adminCoopId!;
+    const actorPhone = req.adminPhone!;
+    const actorRole = req.adminRole ?? "admin";
+    const { memberIds = [], toAll = false, subject = "", body } = (req.body || {}) as {
+      memberIds?: string[];
+      toAll?: boolean;
+      subject?: string;
+      body?: string;
+    };
+
+    const text = String(body ?? "").trim();
+    if (!text) {
+      return reply.code(400).send({ error: "message body is required" });
+    }
+
+    // Resolve the intended recipients within this cooperative only.
+    let targets: { id: string; code: string; phone: string; optedOut: boolean; altChannelId: string | null; preferredChannel: string | null }[] = [];
+    if (toAll) {
+      targets = await prisma.member.findMany({
+        where: { cooperativeId: coopId, status: "active" },
+        select: { id: true, code: true, phone: true, optedOut: true, altChannelId: true, preferredChannel: true },
+      });
+    } else if (Array.isArray(memberIds) && memberIds.length > 0) {
+      targets = await prisma.member.findMany({
+        where: { id: { in: memberIds }, cooperativeId: coopId },
+        select: { id: true, code: true, phone: true, optedOut: true, altChannelId: true, preferredChannel: true },
+      });
+    } else {
+      return reply.code(400).send({ error: "select at least one member or broadcast to all" });
+    }
+
+    const full = subject?.trim() ? `*${subject.trim()}*\n\n${text}` : text;
+
+    let sent = 0;
+    let skipped = 0;
+    let failed = 0;
+    const failures: string[] = [];
+    for (const member of targets) {
+      if (member.optedOut) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const ok = await notifyMember(member, full);
+        if (ok) {
+          sent += 1;
+        } else {
+          failed += 1;
+          failures.push(member.code);
+        }
+      } catch {
+        failed += 1;
+        failures.push(member.code);
+      }
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        cooperativeId: coopId,
+        actorId: "system",
+        actorPhone,
+        actorRole,
+        action: "broadcast.send",
+        targetType: toAll ? "all-members" : "members",
+        detail: `Broadcast sent: ${sent} delivered, ${skipped} opted-out, ${failed} failed (${targets.length} targeted)`,
+      },
+    });
+
+    return {
+      ok: true,
+      targeted: targets.length,
+      sent,
+      skipped,
+      failed,
+      failures,
+    };
   });
 
   app.get("/api/admin/loans", async (req) => {
