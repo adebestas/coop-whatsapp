@@ -47,7 +47,7 @@ export async function handleSave(phone: string, args: string[]): Promise<void> {
   });
   await sendText({
     to: phone,
-    text: `You're about to save ₦${amount.toLocaleString()}. Reply *yes* to confirm or *menu* to cancel.`,
+    text: `You're about to save ${formatBalance(amount)}. Reply *yes* to confirm or *menu* to cancel.`,
   });
 }
 
@@ -98,7 +98,7 @@ export async function handleWithdraw(phone: string, args: string[]): Promise<voi
       phone,
       "awaiting_withdraw_pin",
       { withdrawAmount: amount },
-      `Withdraw ${amount.toLocaleString()} to ${member.bankName ?? member.bankCode} ****${member.bankAccountNumber.slice(-4)}? Enter your 4-digit PIN to confirm.`,
+      `Withdraw ${formatBalance(amount)} to ${member.bankName ?? member.bankCode} ****${member.bankAccountNumber.slice(-4)}? Enter your 4-digit PIN to confirm.`,
     );
     return;
   }
@@ -172,8 +172,11 @@ export async function handlePlan(phone: string, args: string[]): Promise<void> {
 }
 
 export async function handleDividend(phone: string, args: string[]): Promise<void> {
-  const rate = parseNaira(args[0]);
-  if (rate === null) {
+  // rate is a PERCENTAGE (0-100), NOT a kobo amount — parse it raw, do not
+  // route through parseNaira (which converts naira -> kobo).
+  const raw = args[0] ? args[0].replace(/[,₦\s]/g, "") : "";
+  const rate = /^\d+(\.\d{1,2})?$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
     await sendText({ to: phone, text: "Usage: *dividend <rate>*, e.g. *dividend 5* for a 5% dividend calculation." });
     return;
   }

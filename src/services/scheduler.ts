@@ -56,7 +56,7 @@ export async function runAutoSaveReminders(now = new Date()): Promise<number> {
     const interval = m.autoSaveInterval === "weekly" ? "week" : "month";
     await notifyMember(
       m,
-      `⏰ Time to save! Your *${interval}ly* contribution of *${formatBalance(m.autoSaveAmount ?? 0)}* is due.\n\nReply *save ${m.autoSaveAmount}* to pay now.`,
+      `⏰ Time to save! Your *${interval}ly* contribution of *${formatBalance(m.autoSaveAmount ?? 0)}* is due.\n\nReply *save ${Math.round((m.autoSaveAmount ?? 0) / 100)}* to pay now.`,
     );
     // Schedule the next one so we don't nag every few minutes.
     const next = new Date(m.autoSaveNextDue!);

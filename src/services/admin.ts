@@ -5,6 +5,7 @@ import { listPosts, normalizeTitle, displayTitle } from "./posts.js";
 import { buildBatch, submitBatch, approveBatch, rejectBatch, setCommitment, waiveMonth } from "./deductions.js";
 import { approveLoan, listPendingLoans, rejectLoan } from "./loans.js";
 import { formatBalance } from "./cooperative.js";
+import { toKobo } from "../lib/money.js";
 import { sendToBank } from "./disbursements.js";
 import { broadcastToScope, createUnit, listUnits, setUnitAdmin, unitAdminOf } from "./units.js";
 import { distributeDividend, getFundBalances } from "./dividends.js";
@@ -220,7 +221,7 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Only the *super admin* can make payouts." });
         return true;
       }
-      const amount = Number(args[0]);
+      const amount = toKobo(Number(args[0]));
       const targetPhone = args[1]?.replace(/[^0-9]/g, "");
       const narration = args.slice(2).join(" ").trim();
       if (!Number.isFinite(amount) || amount <= 0 || !targetPhone || narration.length < 3) {
@@ -849,7 +850,7 @@ export async function handleAdminCommand(
         return true;
       }
       
-      const amount = parseInt(match[1]);
+      const amount = toKobo(parseInt(match[1], 10));
       const category = match[2];
       const description = match[3];
       
@@ -1104,7 +1105,7 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Unit admins can't initiate organization payments." });
         return true;
       }
-      const amount = Number(args[0]);
+      const amount = toKobo(Number(args[0]));
       const accountNumber = args[1] ?? "";
       const bankCode = args[2]?.toUpperCase() ?? "";
       const narration = args.slice(3).join(" ").trim();

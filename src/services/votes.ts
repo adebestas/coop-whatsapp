@@ -345,7 +345,7 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
   }
 
   let extra = "";
-  if (!tied && (vote.kind === "unit" || vote.electionType === "workplace") && vote.unitId) {
+  if (!tied && quorumMet && (vote.kind === "unit" || vote.electionType === "workplace") && vote.unitId) {
     const unit = await prisma.unit.findUnique({ where: { id: vote.unitId } });
     if (unit) {
       await prisma.$transaction([
@@ -354,6 +354,8 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
       ]);
       extra = `\n\n🎉 ${winner.member.name} is now the elected admin of *${unit.name}* (${unit.code}).`;
     }
+  } else if (!tied && !quorumMet && (vote.kind === "unit" || vote.electionType === "workplace") && vote.unitId) {
+    extra = `\n\n⚠️ Quorum was not met, so *${winner.member.name}* is NOT installed as ${vote.unitId ? "admin" : "executive"}. Per cooperative rules, the election must reach quorum to be binding — please conduct a fresh election.`;
   } else if (!tied && (vote.kind === "exec" || vote.electionType === "executive")) {
     extra = `\n\n🎉 ${winner.member.name} is elected *${vote.position ?? "executive"}*.`;
   }

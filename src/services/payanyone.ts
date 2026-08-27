@@ -7,6 +7,7 @@ import { recordLedger } from "./ledger.js";
 import { approvalCooldownMs, checkDailyPayoutLimit, checkVelocity } from "./fraud.js";
 import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
 import { LIMITS } from "../lib/money.js";
+import { flagTransaction } from "./aml.js";
 
 export interface PayAnyoneResult {
   ok: boolean;
@@ -309,6 +310,20 @@ async function payExternal(
         return { ok: false, message: "Duplicate payout blocked — this exact transfer was already recorded." };
       }
       throw err;
+    }
+
+    // AML/CFT: flag + auto-file STR for large/suspicious external payouts.
+    try {
+      await flagTransaction({
+        memberId: payment.initiatedById,
+        cooperativeId: payment.cooperativeId,
+        amount: payment.amount,
+        type: "external_payment",
+        direction: "out",
+        createdAt: payment.createdAt,
+      });
+    } catch (err) {
+      console.error("[payanyone] AML flag failed:", err);
     }
 
     await recordLedger({

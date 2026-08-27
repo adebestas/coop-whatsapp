@@ -195,6 +195,23 @@ export async function adminApiRoutes(app: FastifyInstance) {
     req.adminPhone = payload.phone;
     req.adminCoopId = payload.cooperativeId;
     req.adminRole = payload.role;
+
+    // Re-check the member's CURRENT role/status from the DB on every request
+    // so a demoted, suspended, or deceased admin loses dashboard access
+    // immediately (not at token expiry). The token's role is self-contained
+    // and can go stale.
+    const live = await prisma.member.findFirst({
+      where: { phone: payload.phone, cooperativeId: payload.cooperativeId },
+      select: { role: true, status: true },
+    });
+    if (
+      !live ||
+      !["admin", "superadmin"].includes(live.role) ||
+      (live.status === "suspended" || live.status === "deceased")
+    ) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    req.adminRole = live.role;
   });
 
   app.post("/api/admin/logout", async (req, reply) => {

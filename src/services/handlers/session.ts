@@ -7,8 +7,10 @@ import { normalizePhone } from "../../lib/phones.js";
 import {
   createContribution,
   findOrCreateMember,
+  formatBalance,
   getMemberByPhone,
 } from "../cooperative.js";
+import { toKobo } from "../../lib/money.js";
 import { verifyMemberPin } from "../pin.js";
 import { resolveBankCode } from "../../lib/banks.js";
 import { applyForLoan } from "../loans.js";
@@ -40,12 +42,18 @@ export function safeParse(json: string): FlowData {
   }
 }
 
+/**
+ * Parse a member-typed monetary amount (in NAIRA, e.g. "5,000", "2000.50") and
+ * return it as KOBO (the canonical storage unit). Returns null if invalid.
+ * Caveat: do NOT use this for non-money rates (see handleDividend, which parses
+ * a percentage rate and must not be multiplied by 100).
+ */
 export function parseNaira(raw?: string): number | null {
   if (!raw) return null;
   const cleaned = raw.replace(/[,₦\s]/g, "");
   if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
   const n = Number(cleaned);
-  return Number.isFinite(n) && n > 0 ? n : null;
+  return Number.isFinite(n) && n > 0 ? toKobo(n) : null;
 }
 
 export function buildMenu(member: { name: string; cooperative: { name: string }; wallet: { balance: number } | null; createdAt?: Date } | null): string {
@@ -538,7 +546,7 @@ export async function handleAwaitingInput(
       });
       await sendText({
         to: phone,
-        text: `You're about to save ₦${amount.toLocaleString()}. Reply *yes* to confirm or *menu* to cancel.`,
+        text: `You're about to save ${formatBalance(amount)}. Reply *yes* to confirm or *menu* to cancel.`,
       });
       break;
     }

@@ -9,6 +9,7 @@ import { checkVelocity } from "./fraud.js";
 import { getCoopConfig } from "./coop-config.js";
 import { recordLedger } from "./ledger.js";
 import { checkTenureLimit } from "../lib/security-hardening.js";
+import { flagTransaction } from "./aml.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
@@ -99,11 +100,11 @@ export async function requestWithdrawal(
       return { ok: false, message: `Maximum withdrawal amount is *${formatBalance(coopConfig.maxWithdrawal)}*.` };
     }
   } else {
-    const amountKobo = Math.round(amount * 100); // convert naira to kobo
-    if (amountKobo < LIMITS.MIN_WITHDRAW) {
+    // amount is in kobo
+    if (amount < LIMITS.MIN_WITHDRAW) {
       return { ok: false, message: `Minimum withdrawal amount is *${formatBalance(LIMITS.MIN_WITHDRAW)}*.` };
     }
-    if (amountKobo > LIMITS.MAX_WITHDRAW) {
+    if (amount > LIMITS.MAX_WITHDRAW) {
       return { ok: false, message: `Maximum withdrawal amount is *${formatBalance(LIMITS.MAX_WITHDRAW)}*.` };
     }
   }
@@ -374,6 +375,20 @@ export async function finalizeWithdrawal(
         data: { lastWithdrawalAt: new Date(), withdrawalOverride: false },
       }),
     ]);
+
+    // AML/CFT: flag + auto-file STR for large/suspicious withdrawals.
+    try {
+      await flagTransaction({
+        memberId: member.id,
+        cooperativeId: request.cooperativeId,
+        amount: request.amount,
+        type: "withdrawal",
+        direction: "out",
+        createdAt: request.createdAt,
+      });
+    } catch (err) {
+      console.error("[withdrawal] AML flag failed:", err);
+    }
 
     // Record ledger entry for the withdrawal
     await recordLedger({

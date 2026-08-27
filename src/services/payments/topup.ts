@@ -4,6 +4,7 @@ import type { PaymentNotification } from "./index.js";
 import { audit } from "../audit.js";
 import { postJournal } from "../journal.js";
 import { roundMoney } from "../money.js";
+import { flagTransaction } from "../aml.js";
 
 /**
  * Create a virtual account for a member so they can receive transfers.
@@ -167,6 +168,20 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
       },
     });
   });
+
+  // AML/CFT: flag + auto-file STR for large/suspicious deposits (money-in).
+  try {
+    await flagTransaction({
+      memberId: member.id,
+      cooperativeId: member.cooperativeId,
+      amount,
+      type: "deposit",
+      direction: "in",
+      createdAt: new Date(),
+    });
+  } catch (err) {
+    console.error("[topup] AML flag failed:", err);
+  }
 
   console.log(`[topup] credited ${member.phone} with ${amount} ${n.currency} (${n.transactionId})`);
 

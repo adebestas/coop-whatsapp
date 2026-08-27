@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { generateTotpSecret, otpauthUri, verifyTotp } from "../lib/totp.js";
 import { verifyMemberPin } from "./pin.js";
+import { toNaira } from "../lib/money.js";
 import { audit } from "./audit.js";
 
 /**
@@ -151,7 +152,8 @@ export async function refreshPin(phone: string, pin: string): Promise<{ ok: bool
 /** True when amount is small enough (or feature off) that no fresh PIN is needed. */
 export async function assertFreshPin(phone: string, amount: number): Promise<{ ok: boolean; message?: string }> {
   const threshold = repinThresholdNgn();
-  if (threshold === 0 || !Number.isFinite(amount) || amount < threshold) return { ok: true };
+  // threshold is naira (REPIN_THRESHOLD_NGN); amount is kobo — compare in naira.
+  if (threshold === 0 || !Number.isFinite(amount) || toNaira(amount) < threshold) return { ok: true };
 
   const session = await prisma.session.findUnique({ where: { phone } });
   const verifiedAt = (() => {
