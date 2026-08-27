@@ -21,7 +21,7 @@ import { askEmail, askBirthday, askNokName, parseBirthday } from "./join.js";
 import { getActiveElectionsForNewMember } from "../votes.js";
 import { createCooperative } from "../cooperative.js";
 import { prisma as prismaClient } from "../../lib/prisma.js";
-import { hashPin } from "../../lib/security.js";
+import { hashPin, verifyPin } from "../../lib/security.js";
 import { generateMemberCode } from "../../lib/security.js";
 import { checkLimits, getCoopConfig } from "../coop-config.js";
 
@@ -451,7 +451,7 @@ export async function handleAwaitingInput(
     }
 
     case "awaiting_pin_confirm": {
-      if (hashPin(text.trim()) !== data.pin) {
+      if (!verifyPin(text.trim(), data.pin)) {
         await sendText({ to: phone, text: "PINs didn't match. Let's start again — choose a 4-digit PIN." });
         await prisma.session.upsert({
           where: { phone },
