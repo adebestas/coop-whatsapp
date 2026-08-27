@@ -451,7 +451,7 @@ export async function handleAwaitingInput(
     }
 
     case "awaiting_pin_confirm": {
-      if (!verifyPin(text.trim(), data.pin)) {
+      if (!data.pin || !verifyPin(text.trim(), data.pin)) {
         await sendText({ to: phone, text: "PINs didn't match. Let's start again — choose a 4-digit PIN." });
         await prisma.session.upsert({
           where: { phone },
