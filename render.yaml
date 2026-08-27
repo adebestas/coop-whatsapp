@@ -58,7 +58,9 @@ services:
       - key: MONNIFY_CONTRACT_CODE
         sync: false
       - key: MONNIFY_BASE_URL
-        value: https://sandbox.monnify.com
+        # PRODUCTION Monnify API. Do NOT use sandbox for live movement of money;
+        # the app refuses to start with the sandbox URL when NODE_ENV=production.
+        value: https://api.monnify.com
       - key: PAYSTACK_SECRET_KEY
         sync: false
       - key: TWO_FA_REQUIRED
