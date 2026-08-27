@@ -5,7 +5,6 @@ import fastifyStatic from "@fastify/static";
 import rateLimit from "@fastify/rate-limit";
 import path from "node:path";
 import fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import { webhookRoutes } from "./routes/webhook.js";
 import { paymentWebhookRoutes } from "./routes/payments.js";
 import { adminApiRoutes } from "./routes/admin.js";
@@ -125,8 +124,7 @@ export function buildApp() {
   void app.register(serveExportFile);
 
   // Serve static files — admin dashboard
-  const baseDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-  const dashboardDir = path.join(baseDir, "dashboard");
+  const dashboardDir = path.join(process.cwd(), "dashboard");
   if (fs.existsSync(dashboardDir)) {
     void app.register(fastifyStatic, { root: dashboardDir, prefix: "/dashboard/" });
   } else {
