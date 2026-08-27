@@ -61,7 +61,7 @@ export async function revokeToken(token: string): Promise<void> {
  */
 async function isTokenRevoked(token: string): Promise<boolean> {
   const client = getRedis();
-  if (!client) return true;
+  if (!client) return false; // Allow token when Redis is unavailable
   const hash = crypto.createHash("sha256").update(token).digest("hex");
   try {
     const exists = await client.exists(`${TOKEN_BLACKLIST_PREFIX}${hash}`);
