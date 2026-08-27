@@ -124,11 +124,14 @@ export function buildApp() {
   void app.register(serveExportFile);
 
   // Serve static files — admin dashboard
-  const dashboardDir = path.join(process.cwd(), "dashboard");
-  if (fs.existsSync(dashboardDir)) {
-    void app.register(fastifyStatic, { root: dashboardDir, prefix: "/dashboard/" });
-  } else {
+  const dashboardDir = path.resolve("/app/dashboard");
+  if (!fs.existsSync(dashboardDir)) {
     console.warn(`[app] Dashboard directory not found at ${dashboardDir} — static files disabled`);
+  } else {
+    console.log(`[app] Serving dashboard from ${dashboardDir}`);
+    void app.register(fastifyStatic, { root: dashboardDir, prefix: "/dashboard/" });
+    // Redirect /dashboard to /dashboard/ so index.html is served
+    app.get("/dashboard", async (_, reply) => reply.redirect("/dashboard/"));
   }
 
   return app;
