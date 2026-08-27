@@ -132,7 +132,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "phone and pin required" });
     }
     const member = await prisma.member.findFirst({
-      where: { phone, role: "admin" },
+      where: { phone, role: { in: ["admin", "superadmin"] } },
       include: { cooperative: true },
     });
     if (!member || !member.pin || !verifyPin(pin, member.pin)) {
