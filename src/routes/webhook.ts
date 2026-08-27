@@ -38,9 +38,12 @@ async function withUserMutex<T>(phone: string, fn: () => Promise<T>): Promise<T>
  */
 function verifyWhatsAppSignature(rawBody: string, signature: string | undefined): boolean {
   if (!signature || !process.env.WHATSAPP_TOKEN) return false;
+  // Meta sends "sha256=<hex>"; strip the scheme prefix before comparing the
+  // raw hex digest (otherwise timingSafeEqual throws on a length mismatch).
+  const hex = signature.startsWith("sha256=") ? signature.slice("sha256=".length) : signature;
   const expected = createHmac("sha256", process.env.WHATSAPP_TOKEN).update(rawBody).digest("hex");
   try {
-    return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+    return timingSafeEqual(Buffer.from(expected), Buffer.from(hex));
   } catch {
     return false;
   }

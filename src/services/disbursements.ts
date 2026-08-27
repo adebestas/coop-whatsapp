@@ -7,7 +7,7 @@ import { postJournal } from "./journal.js";
 
 export interface DisbursementResult {
   ok: boolean;
-  status: "successful" | "failed" | "name_mismatch";
+  status: "successful" | "failed" | "name_mismatch" | "unsure";
   message: string;
 }
 
@@ -100,6 +100,11 @@ async function payOut(
     };
   }
 
+  // Tracks whether the payment provider has accepted/submitted this transfer.
+  // If true, we can NOT safely claim "no money moved" on a later failure — the
+  // transfer may already have been sent, so callers must not auto-refund.
+  let submitted = false;
+
   try {
     let providerRef: string | undefined;
     if (provider.payout) {
@@ -111,11 +116,14 @@ async function payOut(
         reference,
       });
       if (!result.ok) {
+        // Provider explicitly declined — transfer not accepted. Safe to refund.
         const msg = `Not paid out: provider error (${result.error ?? "unknown"}). No money moved.`;
         await opts.onFailure?.("failed", result.error ?? "payout failed");
         await notify(member, msg);
         return { ok: false, status: "failed", message: msg };
       }
+      // Provider accepted/submitted the transfer.
+      submitted = true;
       providerRef = result.providerRef;
       markProviderUp(provider.name);
     }
@@ -162,6 +170,15 @@ async function payOut(
     await notify(member, msg);
     return { ok: true, status: "successful", message: msg };
   } catch (err: any) {
+    if (submitted) {
+      // The provider accepted the transfer but a later bookkeeping step failed.
+      // We do not know whether the money actually left, so the caller must NOT
+      // auto-refund — flag for manual reconciliation instead.
+      const msg = `⚠️ The payout may have been submitted but could not be confirmed (${err?.message ?? "error"}). Check with the payment provider before retrying.`;
+      await opts.onFailure?.("failed", err?.message ?? "payout threw (possible submission)");
+      await notify(member, msg);
+      return { ok: false, status: "unsure", message: msg };
+    }
     const msg = `Could not pay out right now (${err?.message ?? "provider error"}). No money moved.`;
     await opts.onFailure?.("failed", err?.message ?? "payout threw");
     await notify(member, msg);

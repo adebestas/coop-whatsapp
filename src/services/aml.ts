@@ -406,12 +406,13 @@ export async function autoFileSTR(
       },
     });
 
-    // Notify super admin(s)
+    // Notify super admin(s). This creates a PENDING report for MANUAL filing
+    // with the CBN (within the 72-hour deadline) — it is not auto-submitted.
     const members = await prisma.member.findMany({
       where: { cooperativeId: tx.cooperativeId, role: "superadmin", status: "active" },
     });
     for (const admin of members) {
-      await notifyMember(admin, `🚨 *STR Filed (Pending)*\n\nMember: ${tx.memberId}\nAmount: ${formatBalance(tx.amount)}\nReason: ${reason}\n\nThis report must be filed with the CBN.`);
+      await notifyMember(admin, `🚨 *STR Created (Pending CBN Filing)*\n\nMember: ${tx.memberId}\nAmount: ${formatBalance(tx.amount)}\nReason: ${reason}\n\nThis report must be *manually filed with the CBN within 72 hours*.`);
     }
 
     return { filed: true, strId: str.id };

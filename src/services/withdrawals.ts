@@ -315,6 +315,10 @@ export async function finalizeWithdrawal(
   const member = request.member;
   const wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
 
+  // Tracks whether the bank transfer actually succeeded. The outer catch must
+  // NOT refund the wallet once money has been sent (that would double-pay).
+  let paid = false;
+
   try {
     // STEP 2 — debit BEFORE paying. If the balance can't cover it the whole
     // thing stops here; no money ever leaves the cooperative's bank.
@@ -348,11 +352,27 @@ export async function finalizeWithdrawal(
       idempotencyKey: `TFR-WDR-${request.id}`,
     });
 
+    if (result.status === "unsure") {
+      // The provider may have submitted the transfer. NEVER auto-refund here or
+      // the member keeps their money AND the payout lands → double payment.
+      // Flag for manual reconciliation.
+      await prisma.$transaction([
+        prisma.withdrawalRequest.updateMany({
+          where: { id: request.id },
+          data: { status: "investigating" },
+        }),
+      ]);
+      await notifySuperAdmins(
+        request.cooperativeId,
+        `🔍 Withdrawal *${request.id.slice(-6)}* has an *unconfirmed payout outcome*. The bank transfer may have been sent but could not be confirmed in-app. Please reconcile with the payment provider before retrying or refunding.`,
+      );
+      return { ok: false, message: `⚠️ The payout could not be confirmed. Do NOT retry or refund until an admin reconciles with the provider: ${result.message}` };
+    }
+
     if (!result.ok) {
       // STEP 4b — refund and hand back for retry/rejection by humans.
-      // No status guard: the statuspoller may have already moved the row,
-      // but the wallet refund is safe (idempotent) and the status update
-      // is a no-op if already settled.
+      // Only reached when the provider CONFIRMED the transfer did not go out,
+      // so the refund is safe.
       await prisma.$transaction([
         prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: request.amount } } }),
         prisma.withdrawalRequest.updateMany({
@@ -375,6 +395,8 @@ export async function finalizeWithdrawal(
         data: { lastWithdrawalAt: new Date(), withdrawalOverride: false },
       }),
     ]);
+    // Money HAS left the bank from here on — the outer catch must not refund.
+    paid = true;
 
     // AML/CFT: flag + auto-file STR for large/suspicious withdrawals.
     try {
@@ -390,54 +412,72 @@ export async function finalizeWithdrawal(
       console.error("[withdrawal] AML flag failed:", err);
     }
 
-    // Record ledger entry for the withdrawal
-    await recordLedger({
-      cooperativeId: request.cooperativeId,
-      type: "expense",
-      category: "withdrawal",
-      amount: request.amount,
-      note: `Member withdrawal by ${member.name}`,
-      reference: request.id,
-      fundType: "member",
-    });
+    // Post-success bookkeeping is best-effort — a failure here must NOT roll
+    // back the debit/refund (the bank transfer already happened).
+    try {
+      // Record ledger entry for the withdrawal
+      await recordLedger({
+        cooperativeId: request.cooperativeId,
+        type: "expense",
+        category: "withdrawal",
+        amount: request.amount,
+        note: `Member withdrawal by ${member.name}`,
+        reference: request.id,
+        fundType: "member",
+      });
 
-    const balanceAfter = (wallet.balance ?? 0) - request.amount;
-    await audit({
-      cooperativeId: request.cooperativeId,
-      actorPhone: actor.phone,
-      actorId: actor.id,
-      actorRole: actor.role,
-      action: "withdrawal.finalize",
-      targetType: "withdrawal",
-      targetId: request.id,
-      amount: request.amount,
-      balanceBefore: wallet.balance ?? 0,
-      balanceAfter,
-      detail: `${formatBalance(request.amount)} to ${member.name}`,
-    });
+      const balanceAfter = (wallet.balance ?? 0) - request.amount;
+      await audit({
+        cooperativeId: request.cooperativeId,
+        actorPhone: actor.phone,
+        actorId: actor.id,
+        actorRole: actor.role,
+        action: "withdrawal.finalize",
+        targetType: "withdrawal",
+        targetId: request.id,
+        amount: request.amount,
+        balanceBefore: wallet.balance ?? 0,
+        balanceAfter,
+        detail: `${formatBalance(request.amount)} to ${member.name}`,
+      });
+    } catch (err) {
+      console.error("[withdrawal] post-payout bookkeeping failed:", err);
+    }
 
     return {
       ok: true,
       message: `✅ *${formatBalance(request.amount)}* sent to ${request.member.name} (${request.bankName ?? request.bankCode} ****${request.bankAccountNumber.slice(-4)}). Wallet debited.`,
     };
   } catch (err: any) {
-    // Crash safety — anything thrown after the debit must restore funds.
-    if (wallet) {
-      await prisma.wallet
+    // Crash safety — any throw after the debit must be handled WITHOUT
+    // double-paying. Once money has been sent (paid), never auto-refund:
+    // flag for manual reconciliation instead.
+    if (paid) {
+      await prisma.withdrawalRequest
         .updateMany({
-          where: { id: wallet.id },
-          data: { balance: { increment: request.amount } },
+          where: { id: request.id },
+          data: { status: "investigating" },
         })
         .catch(() => {});
+      await notifySuperAdmins(
+        request.cooperativeId,
+        `🔍 Withdrawal *${request.id.slice(-6)}* sent money but later bookkeeping threw. Reconcile with the payment provider.`,
+      ).catch(() => {});
+      console.error(`[withdrawal] post-payout error for paid withdrawal: ${request.id}`, err);
+      return { ok: false, message: `⚠️ The payout was sent but in-app bookkeeping failed. It was flagged for manual reconciliation.` };
     }
     await prisma.withdrawalRequest
       .updateMany({
         where: { id: request.id },
-        data: { status: "admin_approved" },
+        data: { status: "investigating" },
       })
       .catch(() => {});
-    console.error(`[withdrawal] finalized threw, refunded: ${request.id}`, err);
-    return { ok: false, message: `Withdrawal failed and the wallet was refunded (${String(err?.message ?? err).slice(0, 120)}).` };
+    await notifySuperAdmins(
+      request.cooperativeId,
+      `🔍 Withdrawal *${request.id.slice(-6)}* hit an unexpected error with an unconfirmed outcome. Reconcile with the payment provider before retrying.`,
+    ).catch(() => {});
+    console.error(`[withdrawal] finalized threw (unconfirmed outcome): ${request.id}`, err);
+    return { ok: false, message: `Withdrawal hit an unexpected error with an *unconfirmed* outcome and was flagged for reconciliation (${String(err?.message ?? err).slice(0, 120)}).` };
   }
 }
 

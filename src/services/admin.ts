@@ -74,7 +74,9 @@ async function guardFailed(phone: string, message?: string): Promise<boolean> {
 
 /** Is this phone an admin or super admin of some cooperative? */
 export async function isAdmin(phone: string): Promise<boolean> {
-  const member = await prisma.member.findFirst({ where: { phone, role: { in: ["admin", "superadmin"] } } });
+  const member = await prisma.member.findFirst({
+    where: { phone, role: { in: ["admin", "superadmin"] }, status: "active" },
+  });
   return member !== null;
 }
 
@@ -85,7 +87,7 @@ export async function makeAdmin(phone: string): Promise<void> {
 /** Super admin = explicit role OR the cooperative's registered adminPhone. */
 export async function isSuperAdmin(phone: string, cooperativeId?: string): Promise<boolean> {
   const member = await prisma.member.findFirst({
-    where: { phone, ...(cooperativeId ? { cooperativeId } : {}) },
+    where: { phone, status: "active", ...(cooperativeId ? { cooperativeId } : {}) },
     include: { cooperative: true },
   });
   if (!member) return false;
@@ -100,9 +102,11 @@ interface AdminContext {
 }
 
 /** Resolve an admin's access scope: coop-level or a single unit. */
-async function adminContext(phone: string, preloadedAdmin?: { id: string; phone: string; name: string; email: string | null; role: string; cooperativeId: string; cooperative: { id: string; name: string; adminPhone: string | null } } | null): Promise<AdminContext | null> {
-  const admin = preloadedAdmin ?? await prisma.member.findFirst({
-    where: { phone, role: { in: ["admin", "superadmin"] } },
+async function adminContext(phone: string): Promise<AdminContext | null> {
+  // ALWAYS re-check live role + status from the DB per command, so a
+  // suspended/demoted/deceased admin loses chat admin powers immediately.
+  const admin = await prisma.member.findFirst({
+    where: { phone, role: { in: ["admin", "superadmin"] }, status: "active" },
     include: { cooperative: true },
   });
   if (!admin) return null;
@@ -123,10 +127,9 @@ export async function handleAdminCommand(
   phone: string,
   cmd: string,
   args: string[],
-  preloadedMember?: { id: string; phone: string; name: string; email: string | null; role: string; cooperativeId: string; cooperative: { id: string; name: string; adminPhone: string | null } } | null,
 ): Promise<boolean> {
   try {
-  const ctx = await adminContext(phone, preloadedMember);
+  const ctx = await adminContext(phone);
   if (!ctx) return false;
   const { admin, coop, unitAdmin, isSuper } = ctx;
   const coopId = admin.cooperativeId;
@@ -2274,6 +2277,10 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
     return;
   }
 
+  // Whether money has actually been sent. Once true, the outer catch must NOT
+  // refund (that would double-pay).
+  let paid = false;
+
   try {
     // STEP 2 — send to bank (outside the transaction so the provider call
     // doesn't hold a DB lock).
@@ -2288,8 +2295,27 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
       successMessage: `✅ ${formatBalance(amount)} sent to your bank account. Narration: "${narration}".`,
     });
 
+    if (result.status === "unsure") {
+      // The provider may have submitted the transfer. NEVER auto-refund here.
+      await prisma.withdrawalRequest.updateMany({
+        where: { id: claimed.request.id },
+        data: { status: "investigating" },
+      });
+      await auditSuperadminCommand({
+        cooperativeId: coop.id,
+        actorPhone: admin.phone,
+        actorId: admin.id,
+        command: "payout.ambiguous",
+        target: target.name,
+        detail: `${formatBalance(amount)} — payout outcome unconfirmed. Reconcile with the payment provider before retrying or refunding.`,
+        isHighRisk: true,
+      }).catch(() => {});
+      await sendText({ to: admin.phone, text: `⚠️ Payout could not be confirmed and was flagged for reconciliation. Do NOT retry or refund until the provider is checked: ${result.message}` });
+      return;
+    }
+
     if (!result.ok) {
-      // STEP 3b — refund on failure and hand back for retry.
+      // STEP 3b — refund on CONFIRMED failure and hand back for retry.
       await prisma.$transaction([
         prisma.wallet.update({ where: { id: claimed.wallet.id }, data: { balance: { increment: amount } } }),
         prisma.withdrawalRequest.updateMany({
@@ -2303,6 +2329,7 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
     }
 
     // STEP 3a — success: mark paid.
+    paid = true;
     await prisma.withdrawalRequest.updateMany({
       where: { id: claimed.request.id, status: "processing" },
       data: { status: "paid", finalizedAt: new Date() },
@@ -2339,15 +2366,32 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
       text: `Payout of ${formatBalance(amount)} to *${target.name}* was sent ✅ and their wallet debited.`,
     });
   } catch (err: any) {
-    // Crash safety — anything thrown after the debit must restore funds.
-    await prisma.$transaction([
-      prisma.wallet.update({ where: { id: claimed.wallet.id }, data: { balance: { increment: amount } } }),
-      prisma.withdrawalRequest.updateMany({
-        where: { id: claimed.request.id, status: "processing" },
-        data: { status: "admin_approved" },
-      }),
-    ]).catch(() => {});
-    console.error(`[payout] threw, refunded: ${claimed.request.id}`, err);
-    await sendText({ to: admin.phone, text: `Payout failed and the wallet was refunded (${String(err?.message ?? err).slice(0, 120)}).` });
+    // Crash safety — any throw after the debit must be handled WITHOUT
+    // double-paying. Once money has been sent (paid), never auto-refund:
+    // flag for manual reconciliation instead.
+    if (paid) {
+      await prisma.withdrawalRequest.updateMany({
+        where: { id: claimed.request.id },
+        data: { status: "investigating" },
+      }).catch(() => {});
+      await auditSuperadminCommand({
+        cooperativeId: coop.id,
+        actorPhone: admin.phone,
+        actorId: admin.id,
+        command: "payout.ambiguous",
+        target: target.name,
+        detail: `${formatBalance(amount)} — sent but later bookkeeping threw. Reconcile with the payment provider.`,
+        isHighRisk: true,
+      }).catch(() => {});
+      console.error(`[payout] post-payout error for paid payout: ${claimed.request.id}`, err);
+      await sendText({ to: admin.phone, text: `⚠️ The payout was sent but in-app bookkeeping failed. It was flagged for manual reconciliation.` });
+      return;
+    }
+    await prisma.withdrawalRequest.updateMany({
+      where: { id: claimed.request.id },
+      data: { status: "investigating" },
+    }).catch(() => {});
+    console.error(`[payout] threw (unconfirmed outcome): ${claimed.request.id}`, err);
+    await sendText({ to: admin.phone, text: `⚠️ Payout hit an unexpected error with an *unconfirmed* outcome and was flagged for reconciliation (${String(err?.message ?? err).slice(0, 120)}). Do NOT retry or refund until the provider is checked.` });
   }
 }

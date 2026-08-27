@@ -47,7 +47,7 @@ async function checkTierLimit(phone: string, amount: number, memberId: string): 
 
 import { z } from "zod"; // used by FlowDataSchema below
 
-import { buildMenu, buildFullMenu, buildAdminMenu, handleAwaitingInput } from "./handlers/session.js";
+import { buildMenu, buildFullMenu, buildAdminMenu, handleAwaitingInput, parseNaira } from "./handlers/session.js";
 import { handleJoinStart, handleOnboardStart } from "./handlers/join.js";
 import {
   handleBalance,
@@ -293,7 +293,7 @@ export async function handleMessage(
 
   const { cmd, args } = parseCommand(text);
 
-  const handled = await handleAdminCommand(phone, cmd, args, member);
+  const handled = await handleAdminCommand(phone, cmd, args);
   if (handled) return;
 
   switch (cmd) {
@@ -340,9 +340,11 @@ export async function handleMessage(
         });
         break;
       }
-      // Tier-based transaction limit check
-      const amt = Number(args[0]);
-      if (Number.isFinite(amt) && amt > 0 && member) {
+      // Tier-based transaction limit check. TIER_LIMITS and contribution
+      // amounts are stored in KOBO, so parse the user's naira into kobo before
+      // comparing (otherwise a naira-vs-kobo mismatch silently disables the cap).
+      const amt = parseNaira(args[0]);
+      if (amt !== null && member) {
         const tierError = await checkTierLimit(phone, amt, member.id);
         if (tierError) {
           await sendText({ to: phone, text: `⛔ ${tierError}` });

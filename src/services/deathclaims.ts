@@ -428,6 +428,10 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     return { ok: false, message: "This claim was just picked up by another approval — check its state." };
   }
 
+  // Whether money has actually been sent. Once true, the outer catch must NOT
+  // refund (that would double-pay).
+  let paid = false;
+
   try {
     // Debit BEFORE paying — no balance, no transfer.
     const debited = await prisma.wallet.updateMany({
@@ -458,11 +462,22 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
       skipNameCheck: true, // the money goes to the family, not the account holder
       idempotencyKey: `TFR-CLAIM-${claim.id}`,
     });
+    if (result.status === "unsure") {
+      // The provider may have submitted the transfer. NEVER auto-refund here.
+      // Block the claim from re-driving while humans reconcile with the provider.
+      await prisma.deathClaim.updateMany({
+        where: { id: claim.id },
+        data: { status: "investigating" },
+      });
+      console.error(`[claim] payout outcome unconfirmed, flagged for reconciliation: ${claim.id}`);
+      return {
+        ok: false,
+        message: `⚠️ The payout could not be confirmed. It was flagged for reconciliation. Do NOT retry or refund until the provider is checked: ${result.message}`,
+      };
+    }
     if (!result.ok) {
-      // Refund and hand back for retry.
-      // No status guard: the statuspoller may have already moved the row,
-      // but the wallet refund is safe (idempotent) and the status update
-      // is a no-op if already settled.
+      // Refund and hand back for retry — only reached when the provider
+      // CONFIRMED the transfer did not go out.
       await prisma.$transaction([
         prisma.wallet.update({ where: { id: wallet!.id }, data: { balance: { increment: balance } } }),
         prisma.deathClaim.updateMany({
@@ -473,6 +488,8 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
       return { ok: false, message: `Payout failed (wallet refunded): ${result.message}` };
     }
 
+    // Money has left the bank from here on — the outer catch must not refund.
+    paid = true;
     await prisma.deathClaim.updateMany({
       where: { id: claim.id, status: "processing" },
       data: { status: "paid", approvedAt: new Date(), finalizedAt: new Date() },
@@ -494,12 +511,27 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
       message: `🕊️ *${formatBalance(balance)}* paid to the family of ${claim.member.name} (${claim.familyBankName ?? claim.familyBankCode} ****${claim.familyAccountNumber.slice(-4)}). Claim *${claim.id.slice(-6)}* closed.`,
     };
   } catch (err: any) {
-    // Crash safety — restore funds and hand the claim back for retry.
-    if (wallet) {
-      await prisma.wallet
-        .updateMany({ where: { id: wallet.id }, data: { balance: { increment: balance } } })
+    // Crash safety — any throw after the debit must be handled WITHOUT
+    // double-paying. Once money has been sent (paid), never auto-refund:
+    // flag for manual reconciliation instead.
+    if (paid) {
+      await prisma.deathClaim
+        .updateMany({
+          where: { id: claim.id },
+          data: { status: "investigating" },
+        })
         .catch(() => {});
+      console.error(`[claim] post-payout error for paid claim: ${claim.id}`, err);
+      return { ok: false, message: `⚠️ The claim payout was sent but in-app bookkeeping failed. It was flagged for manual reconciliation.` };
     }
+    // Money definitely did not go out (sendToBank returns, it does not throw,
+    // for provider/DB failures before submit) — safe to restore funds.
+    await prisma.wallet
+      .updateMany({
+        where: { id: wallet!.id },
+        data: { balance: { increment: balance } },
+      })
+      .catch(() => {});
     await prisma.deathClaim
       .updateMany({
         where: { id: claim.id },

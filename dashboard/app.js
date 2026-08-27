@@ -1002,6 +1002,27 @@
     }
   }
 
+  // Download an export file with the Authorization header (top-level window.open
+  // sends no headers, so the Bearer-protected endpoint would 401). Fetch the
+  // bytes as a blob and trigger a save instead.
+  async function downloadExport(url, fallbackName) {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || 'Download failed');
+    }
+    const blob = await res.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = fallbackName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }
+
   window.exportCompliance = async function (kind) {
     try {
       toast('Generating ' + kind.toUpperCase() + ' export...', 'info');
@@ -1009,9 +1030,13 @@
       const excel = (result.files || []).find(f => f.endsWith('.xlsx'));
       const pdf = (result.files || []).find(f => f.endsWith('.pdf'));
       toast('Export ready', 'success');
-      setTimeout(() => {
-        if (excel) window.open('/api/export/' + encodeURIComponent(excel), '_blank');
-        if (pdf) window.open('/api/export/' + encodeURIComponent(pdf), '_blank');
+      setTimeout(async () => {
+        try {
+          if (excel) await downloadExport('/api/export/' + encodeURIComponent(excel), excel);
+          if (pdf) await downloadExport('/api/export/' + encodeURIComponent(pdf), pdf);
+        } catch (err) {
+          toast(err.message || 'Download failed', 'error');
+        }
       }, 300);
     } catch (err) {
       toast(err.message || 'Export failed', 'error');
