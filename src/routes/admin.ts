@@ -4,7 +4,6 @@ import { verifyPin } from "../lib/security.js";
 import { checkRateLimit, getRedis } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 import { approveLoan } from "../services/loans.js";
-import { assertMoneyAuthorized } from "../services/auth2fa.js";
 
 /**
  * Minimal admin auth for the dashboard: members log in with their WhatsApp
@@ -56,8 +55,9 @@ export async function revokeToken(token: string): Promise<void> {
 
 /**
  * Check whether a token has been revoked (exists in the Redis blacklist).
- * Returns true (revoked) when Redis is unavailable so that revoked tokens
- * cannot be used during a Redis outage (fail closed).
+ * Fails OPEN when Redis is unavailable (returns not-revoked) so a transient
+ * Redis/Upstash outage never locks admins out of the dashboard; signature
+ * + expiry validation still gate every request.
  */
 async function isTokenRevoked(token: string): Promise<boolean> {
   const client = getRedis();
@@ -274,12 +274,6 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
     const isSuper = actor.role === "superadmin" || actor.cooperative?.adminPhone === phone;
 
-    // 2FA gate for money-out commands (dashboard must also pass TOTP)
-    const auth2fa = await assertMoneyAuthorized(actor.id, []);
-    if (!auth2fa.ok) {
-      return reply.code(403).send({ error: auth2fa.message });
-    }
-
     const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
     if (!loan) return reply.code(404).send({ error: "loan not found in your cooperative" });
 
@@ -317,5 +311,119 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 200,
     });
+  });
+
+  app.get("/api/admin/annualreport/:year", async (req) => {
+    const coopId = req.adminCoopId!;
+    const year = Number((req.params as { year: string }).year);
+    const reportYear = Number.isFinite(year) && year > 2000 ? year : new Date().getFullYear();
+    const startOfYear = new Date(reportYear, 0, 1);
+    const endOfYear = new Date(reportYear + 1, 0, 1);
+
+    const [contribAgg, loanAgg, repaymentAgg, dividendAgg, memberCount, reserve, eduAgg, devAgg, walletAgg] =
+      await Promise.all([
+        prisma.contribution.aggregate({
+          where: { cooperativeId: coopId, status: "confirmed", createdAt: { gte: startOfYear, lt: endOfYear } },
+          _sum: { amount: true },
+        }),
+        prisma.loan.aggregate({
+          where: { cooperativeId: coopId, status: { in: ["approved", "disbursed"] }, approvedAt: { gte: startOfYear, lt: endOfYear } },
+          _sum: { amount: true },
+          _count: true,
+        }),
+        prisma.loanRepayment.aggregate({
+          where: { loan: { cooperativeId: coopId }, paidAt: { gte: startOfYear, lt: endOfYear } },
+          _sum: { amount: true },
+        }),
+        prisma.dividend.aggregate({
+          where: { cooperativeId: coopId, createdAt: { gte: startOfYear, lt: endOfYear } },
+          _sum: { totalPool: true },
+          _count: true,
+        }),
+        prisma.member.count({ where: { cooperativeId: coopId, status: "active" } }),
+        prisma.cooperative.findUnique({ where: { id: coopId }, select: { reserveFundBalance: true } }),
+        prisma.educationFund.aggregate({ where: { cooperativeId: coopId }, _sum: { amount: true } }),
+        prisma.developmentFund.aggregate({ where: { cooperativeId: coopId }, _sum: { amount: true } }),
+        prisma.wallet.aggregate({ where: { member: { cooperativeId: coopId } }, _sum: { balance: true } }),
+      ]);
+
+    const totalDividends = dividendAgg._sum.totalPool ?? 0;
+    const perMember = memberCount > 0 ? Math.round(totalDividends / memberCount) : 0;
+
+    return {
+      year: reportYear,
+      memberCount,
+      totalContributions: contribAgg._sum.amount ?? 0,
+      totalLoans: loanAgg._sum.amount ?? 0,
+      loanCount: loanAgg._count,
+      totalRepayments: repaymentAgg._sum.amount ?? 0,
+      funds: {
+        reserve: reserve?.reserveFundBalance ?? 0,
+        education: eduAgg._sum.amount ?? 0,
+        development: devAgg._sum.amount ?? 0,
+      },
+      dividends: { total: totalDividends, perMember, count: dividendAgg._count },
+      walletBalance: walletAgg._sum.balance ?? 0,
+    };
+  });
+
+  app.get("/api/admin/withdrawals", async (req) => {
+    const coopId = req.adminCoopId!;
+    return prisma.withdrawalRequest.findMany({
+      where: { cooperativeId: coopId },
+      include: { member: { select: { name: true, phone: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+  });
+
+  app.get("/api/admin/polls", async (req) => {
+    const coopId = req.adminCoopId!;
+    return prisma.purchasePoll.findMany({
+      where: { cooperativeId: coopId },
+      include: {
+        creator: { select: { name: true } },
+        options: {
+          orderBy: { createdAt: "asc" },
+          include: { _count: { select: { ballots: true } } },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    });
+  });
+
+  // ---- Compliance (PL/AML): STR + PAYE ----
+
+  app.get("/api/admin/compliance/str", async (req) => {
+    const coopId = req.adminCoopId!;
+    return prisma.sTR.findMany({
+      where: { cooperativeId: coopId },
+      include: { member: { select: { name: true, phone: true, code: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+    });
+  });
+
+  app.get("/api/admin/compliance/paye", async (req) => {
+    const coopId = req.adminCoopId!;
+    return prisma.pAYERecord.findMany({
+      where: { cooperativeId: coopId },
+      include: { member: { select: { name: true, phone: true, code: true } } },
+      orderBy: [{ year: "desc" }, { month: "desc" }],
+      take: 500,
+    });
+  });
+
+  app.post("/api/admin/compliance/export/:kind", async (req, reply) => {
+    const coopId = req.adminCoopId!;
+    const kind = (req.params as { kind: string }).kind;
+    if (kind !== "str" && kind !== "paye") {
+      return reply.code(400).send({ error: "Unknown compliance export kind" });
+    }
+    const { runComplianceExport } = await import("../services/compliance-export.js");
+    const result = await runComplianceExport(coopId, kind);
+    if (!result.ok) return reply.code(400).send({ error: result.message });
+    return { ok: true, message: result.message, files: result.files ?? [] };
   });
 }

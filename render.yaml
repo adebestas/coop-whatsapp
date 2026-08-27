@@ -20,9 +20,11 @@ services:
     region: frankfurt    # closest region to Nigeria on Render (also: oregon, ohio, singapore)
     branch: main
     buildCommand: npm ci && npx prisma generate && npm run build
-    startCommand: npx prisma db push --skip-generate && npm start
-    # preDeployCommand removed — migrations now run during build
     startCommand: npm start
+    # NOTE: This service actually deploys via Docker (Dockerfile), so these
+    # build/start commands are informational. The Dockerfile CMD runs
+    # `npx prisma db push && node dist/index.js`. Keep in sync with the Dockerfile.
+    # preDeployCommand removed — migrations now run during build
     healthCheckPath: /health
     autoDeploy: true     # every push to main deploys automatically
     envVars:

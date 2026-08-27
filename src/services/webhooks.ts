@@ -72,9 +72,14 @@ export async function processPaymentWebhook(
     return { httpStatus: 400, body: { error: "invalid json" } };
   }
   const notification = adapter.parseNotification(parsedBody);
-  if (!notification?.transactionId) {
-    return { httpStatus: 400, body: { error: "Missing transaction ID" } };
+  if (!notification) {
+    // Recognised event, but not a credit we act on (e.g. charge.failed,
+    // transfer.success for a coop-initiated payout, or a provider health
+    // ping). Acknowledge with 200 so the provider stops retrying — never
+    // 4xx, which would make them hammer us.
+    return { httpStatus: 200, body: { status: "ignored" } };
   }
+
   const eventId = `${providerName}:${notification.transactionId}`;
 
   // 3. INSERT-first idempotency gate.
@@ -100,9 +105,7 @@ export async function processPaymentWebhook(
   // operator can replay it; the provider's own retry will hit the dedupe
   // only after it succeeded end-to-end.
   try {
-    if (notification) {
-      await handlePaymentNotification(notification as PaymentNotification);
-    }
+    await handlePaymentNotification(notification as PaymentNotification);
     await prisma.webhookEvent.update({
       where: { id: eventId },
       data: { status: "processed", processedAt: new Date() },

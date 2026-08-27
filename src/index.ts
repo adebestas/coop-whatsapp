@@ -14,7 +14,7 @@ import { runReconciliation } from "./services/reconcile.js";
 import { runTransferPolling, transferPollIntervalMs } from "./services/statuspoller.js";
 import { validateEnvironment } from "./lib/envcheck.js";
 import { prisma } from "./lib/prisma.js";
-import { closeQueues } from "./lib/queue.js";
+import { closeQueues, initQueueProcessors } from "./lib/queue.js";
 import { initRedis, closeRedis, isRedisConnected } from "./lib/cache.js";
 
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
@@ -124,6 +124,10 @@ async function main() {
 
   // Telegram runs independently via long-polling — no webhook needed.
   void startTelegramBot();
+
+  // Start BullMQ workers so async jobs (notifications, payments, exports,
+  // backups, digests) are actually processed. No-op when Redis is down.
+  initQueueProcessors();
 
   // Background jobs: reminders, monthly statements + birthday greetings,
   // guarantor default notices/deductions.

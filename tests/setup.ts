@@ -6,9 +6,9 @@
  *   import { createTestApp, createTestMember, cleanupDatabase } from "./setup";
  */
 import { FastifyInstance } from "fastify";
-import { buildApp } from "../app.js";
-import { prisma } from "../lib/prisma.js";
-import { generateMemberCode, hashPin } from "../lib/security.js";
+import { buildApp } from "../src/app.js";
+import { prisma } from "../src/lib/prisma.js";
+import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
 // ===== Test App =====
 

@@ -147,7 +147,11 @@
       loans: 'Loans',
       contributions: 'Contributions',
       payouts: 'Payouts',
-      reports: 'Annual Report'
+      withdrawals: 'Withdrawals',
+      polls: 'Buy Polls',
+      reports: 'Annual Report',
+      str: 'STR / AML',
+      paye: 'PAYE'
     };
     document.getElementById('pageTitle').textContent = titles[page] || 'Dashboard';
 
@@ -161,7 +165,11 @@
       case 'loans': renderLoans(content); break;
       case 'contributions': renderContributions(content); break;
       case 'payouts': renderPayouts(content); break;
+      case 'withdrawals': renderWithdrawals(content); break;
+      case 'polls': renderPolls(content); break;
       case 'reports': renderReports(content); break;
+      case 'str': renderSTR(content); break;
+      case 'paye': renderPAYE(content); break;
       default: renderDashboard(content);
     }
   }
@@ -295,7 +303,7 @@
         maintainAspectRatio: false,
         plugins: { legend: { display: false } },
         scales: {
-          y: { beginAtZero: true, ticks: { callback: v => '₦' + fmtNum(v) } },
+          y: { beginAtZero: true, ticks: { callback: v => '₦' + fmtNum(v / 100) } },
           x: { grid: { display: false } }
         }
       }
@@ -715,6 +723,190 @@
     }
   }
 
+  // ---- Withdrawals ----
+  async function renderWithdrawals(el) {
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Withdrawal Requests</span>
+        </div>
+        <div class="card-body flush" id="withdrawalsTable">
+          <div class="empty-state"><p class="text-muted">Loading withdrawals...</p></div>
+        </div>
+      </div>`;
+
+    try {
+      const items = await api('/withdrawals');
+      const table = document.getElementById('withdrawalsTable');
+      if (!items.length) {
+        table.innerHTML = '<div class="empty-state"><h3>No withdrawal requests</h3></div>';
+        return;
+      }
+      table.innerHTML = `
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Member</th><th>Amount</th><th>Status</th><th>Requested</th></tr></thead>
+            <tbody>
+              ${items.map(w => `<tr>
+                <td class="font-bold">${esc(w.member?.name || '—')}<div class="text-muted text-sm">${esc(formatPhone(w.member?.phone))}</div></td>
+                <td class="font-mono">${currency(w.amount)}</td>
+                <td>${statusBadge(w.status)}</td>
+                <td class="text-muted text-sm">${date(w.createdAt)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load withdrawals</h3><p>${err.message}</p></div>`;
+    }
+  }
+
+  // ---- Buy Polls ----
+  async function renderPolls(el) {
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Buy Polls</span>
+          <div class="flex gap-2">
+            <button class="btn btn-secondary btn-sm" onclick="exportCompliance('str')">Export STR</button>
+            <button class="btn btn-secondary btn-sm" onclick="exportCompliance('paye')">Export PAYE</button>
+          </div>
+        </div>
+        <div class="card-body" id="pollsContent">
+          <div class="empty-state"><p class="text-muted">Loading polls...</p></div>
+        </div>
+      </div>`;
+
+    try {
+      const polls = await api('/polls');
+      const content = document.getElementById('pollsContent');
+      if (!polls.length) {
+        content.innerHTML = '<div class="empty-state"><h3>No buy polls yet</h3><p class="text-muted">Admins create polls via WhatsApp: <code>startbuyvote &lt;title&gt;</code></p></div>';
+        return;
+      }
+      content.innerHTML = polls.map(p => `
+        <div class="card" style="margin-bottom:16px;">
+          <div class="card-header">
+            <span class="card-title">${esc(p.title)}</span>
+            ${statusBadge(p.status)}
+          </div>
+          <div class="card-body">
+            <p class="text-muted text-sm" style="margin-bottom:12px;">Created ${date(p.createdAt)} by ${esc(p.creator?.name || '—')}</p>
+            <table>
+              <thead><tr><th>#</th><th>Item</th><th>Est. Cost</th><th>Votes</th></tr></thead>
+              <tbody>
+                ${(p.options || []).map((o, i) => `<tr>
+                  <td>${i + 1}</td>
+                  <td>${esc(o.name)}</td>
+                  <td class="font-mono">${currency(o.estimatedCost)}</td>
+                  <td>${o._count?.ballots ?? 0}</td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>`).join('');
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load polls</h3><p>${err.message}</p></div>`;
+    }
+  }
+
+  // ---- STR / AML ----
+  async function renderSTR(el) {
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Suspicious Transaction Reports (STR / AML)</span>
+          <button class="btn btn-primary btn-sm" onclick="exportCompliance('str')">Export STR</button>
+        </div>
+        <div class="card-body flush" id="strTable">
+          <div class="empty-state"><p class="text-muted">Loading STRs...</p></div>
+        </div>
+      </div>`;
+
+    try {
+      const rows = await api('/compliance/str');
+      const table = document.getElementById('strTable');
+      if (!rows.length) {
+        table.innerHTML = '<div class="empty-state"><h3>No STRs filed</h3><p class="text-muted">No transactions broke the CBN ₦5,000,000 threshold.</p></div>';
+        return;
+      }
+      table.innerHTML = `
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Date</th><th>Member</th><th>Amount</th><th>Reason</th><th>Status</th></tr></thead>
+            <tbody>
+              ${rows.map(s => `<tr>
+                <td class="text-muted text-sm">${date(s.createdAt)}</td>
+                <td class="font-bold">${esc(s.member?.name || '—')}<div class="text-muted text-sm">${esc(formatPhone(s.member?.phone))}</div></td>
+                <td class="font-mono">${currency(s.amount)}</td>
+                <td class="text-sm">${esc(s.reason)}</td>
+                <td>${statusBadge(s.status)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load STRs</h3><p>${err.message}</p></div>`;
+    }
+  }
+
+  // ---- PAYE ----
+  async function renderPAYE(el) {
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">PAYE (State IRS) Records</span>
+          <button class="btn btn-primary btn-sm" onclick="exportCompliance('paye')">Export PAYE</button>
+        </div>
+        <div class="card-body flush" id="payeTable">
+          <div class="empty-state"><p class="text-muted">Loading PAYE records...</p></div>
+        </div>
+      </div>`;
+
+    try {
+      const rows = await api('/compliance/paye');
+      const table = document.getElementById('payeTable');
+      if (!rows.length) {
+        table.innerHTML = '<div class="empty-state"><h3>No PAYE records</h3><p class="text-muted">PAYE is recorded when salaries are paid, or via <code>paye add</code> on WhatsApp.</p></div>';
+        return;
+      }
+      table.innerHTML = `
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Member</th><th>Period</th><th>Gross</th><th>Tax</th><th>Net</th><th>Status</th></tr></thead>
+            <tbody>
+              ${rows.map(r => `<tr>
+                <td class="font-bold">${esc(r.member?.name || '—')}<div class="text-muted text-sm">${esc(r.member?.code || '')}</div></td>
+                <td>${String(r.month).padStart(2, '0')}/${r.year}</td>
+                <td class="font-mono">${currency(r.grossAmount)}</td>
+                <td class="font-mono">${currency(r.taxAmount)}</td>
+                <td class="font-mono">${currency(r.netAmount)}</td>
+                <td>${statusBadge(r.status)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load PAYE</h3><p>${err.message}</p></div>`;
+    }
+  }
+
+  async function exportCompliance(kind) {
+    try {
+      toast('Generating ' + kind.toUpperCase() + ' export...', 'info');
+      const result = await api(`/compliance/export/${kind}`, { method: 'POST' });
+      const excel = (result.files || []).find(f => f.endsWith('.xlsx'));
+      const pdf = (result.files || []).find(f => f.endsWith('.pdf'));
+      toast('Export ready', 'success');
+      setTimeout(() => {
+        if (excel) window.open('/api/export/' + encodeURIComponent(excel), '_blank');
+        if (pdf) window.open('/api/export/' + encodeURIComponent(pdf), '_blank');
+      }, 300);
+    } catch (err) {
+      toast(err.message || 'Export failed', 'error');
+    }
+  }
+
   // ---- Helpers ----
   function fmt(n) {
     return Number(n).toLocaleString('en-NG');
@@ -726,8 +918,12 @@
     return n.toString();
   }
 
+  // Amounts come from the API in KOB0 (integer). Display as naira with 2 dp
+  // so values are always round/consistent (e.g. 150000 kobo -> ₦1,500.00).
   function currency(n) {
-    return '₦' + Number(n).toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+    const kobo = Number(n) || 0;
+    const naira = kobo / 100;
+    return '₦' + naira.toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
   function date(str) {

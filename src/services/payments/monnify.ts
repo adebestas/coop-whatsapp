@@ -91,7 +91,9 @@ export const monnifyAdapter: ProviderAdapter = {
       transactionId: String(payload.transactionReference ?? payload.transactionId ?? ""),
       reference: payload.product?.reference ?? payload.paymentReference,
       accountNumber: String(account),
-      amount: Number(payload.amountPaid ?? payload.amount ?? 0),
+      // Monnify reports amounts in NAIRA; the wallet stores kobo — convert here so
+      // every PaymentNotification.amount is uniformly in kobo (mirrors Paystack).
+      amount: Math.round(Number(payload.amountPaid ?? payload.amount ?? 0) * 100),
       currency: String(payload.currencyCode ?? "NGN"),
       status: "successful",
       provider: "monnify",

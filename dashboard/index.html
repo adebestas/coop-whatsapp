@@ -59,6 +59,14 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg>
             Payouts
           </button>
+          <button class="nav-item" data-page="withdrawals" onclick="navigateTo('withdrawals')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14v-7"/><path d="M8 10l4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+            Withdrawals
+          </button>
+          <button class="nav-item" data-page="polls" onclick="navigateTo('polls')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="9" cy="3" r="1"/><circle cx="9" cy="12" r="1"/><path d="M4 21v-4a4 4 0 0 1 4-4h6a2 2 0 0 0 2-2V9"/></svg>
+            Buy Polls
+          </button>
         </div>
 
         <div class="nav-section">
@@ -66,6 +74,18 @@
           <button class="nav-item" data-page="reports" onclick="navigateTo('reports')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
             Annual Report
+          </button>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-label">Compliance</div>
+          <button class="nav-item" data-page="str" onclick="navigateTo('str')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="11" x2="12" y2="17"/><circle cx="12" cy="8.5" r="0.5" fill="currentColor"/></svg>
+            STR / AML
+          </button>
+          <button class="nav-item" data-page="paye" onclick="navigateTo('paye')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12H4"/><path d="M12 4v16"/><path d="M8 8l-4 4 4 4"/><path d="M16 8l4 4-4 4"/></svg>
+            PAYE
           </button>
         </div>
       </nav>
@@ -123,6 +143,10 @@
         <button class="bottom-nav-item" data-page="reports" onclick="navigateTo('reports')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           Reports
+        </button>
+        <button class="bottom-nav-item" data-page="polls" onclick="navigateTo('polls')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="9" cy="3" r="1"/><circle cx="9" cy="12" r="1"/><path d="M4 21v-4a4 4 0 0 1 4-4h6a2 2 0 0 0 2-2V9"/></svg>
+          Polls
         </button>
       </div>
     </nav>

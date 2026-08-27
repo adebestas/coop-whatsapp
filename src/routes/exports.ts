@@ -17,21 +17,30 @@ function getSecret(): string {
 /**
  * Verify admin dashboard token (shared with admin.ts).
  * Returns the phone number if valid, null otherwise.
+ *
+ * NOTE: Must match the token format produced by admin.ts `sign()`:
+ * `<base64url(JSON payload + iat)>.` + HMAC hex digest (2 parts). The iat
+ * lives inside the JSON payload, not as a separate part.
  */
 function verifyToken(token: string): string | null {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
+  const dotIdx = token.lastIndexOf(".");
+  if (dotIdx === -1) return null;
+  const payload = token.slice(0, dotIdx);
+  const sig = token.slice(dotIdx + 1);
   const secret = getSecret();
-  const payload = `${parts[0]}.${parts[1]}`;
-  const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
+  const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   try {
-    if (!timingSafeEqual(Buffer.from(sig), Buffer.from(parts[2]))) return null;
+    if (!timingSafeEqual(Buffer.from(expected), Buffer.from(sig))) return null;
   } catch {
     return null;
   }
-  const issuedAt = Number(parts[1]);
-  if (Date.now() - issuedAt > TOKEN_TTL_MS) return null;
-  return parts[0];
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+    if (!data.phone || Date.now() - data.iat > TOKEN_TTL_MS) return null;
+    return data.phone;
+  } catch {
+    return null;
+  }
 }
 
 /**
