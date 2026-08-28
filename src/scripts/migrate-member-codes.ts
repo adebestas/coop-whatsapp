@@ -1,6 +1,6 @@
 /**
  * One-time migration: rewrite every member's code to the new file-number
- * format `{COOP}/{YYY}/{MM}/{SEQ}` (e.g. SC/026/08/081).
+ * format `{COOP}/{YYY}/{MM}{SEQ}` (e.g. SC/026/08081 — no slash before SEQ).
  *
  *   - COOP = cooperative join code, uppercased
  *   - YYY  = last 3 digits of the member's join year (2026 -> 026)
@@ -31,7 +31,7 @@ async function main() {
       seq += 1;
       const yy = String(m.createdAt.getUTCFullYear() % 1000).padStart(3, "0");
       const mm = String(m.createdAt.getUTCMonth() + 1).padStart(2, "0");
-      const code = `${prefix}/${yy}/${mm}/${String(seq).padStart(3, "0")}`;
+      const code = `${prefix}/${yy}/${mm}${String(seq).padStart(3, "0")}`;
       if (m.code !== code) {
         await prisma.member.update({ where: { id: m.id }, data: { code } });
         updated += 1;

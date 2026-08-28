@@ -15,7 +15,7 @@ export interface JoinResult {
 /**
  * Generate a human-friendly, globally-unique member file number.
  *
- * Format: `{COOP}/{YYY}/{MM}/{SEQ}` — e.g. `SC/026/08/081`
+ * Format: `{COOP}/{YYY}/{MM}{SEQ}` — e.g. `SC/026/08081` (no slash before SEQ)
  *   - COOP = cooperative join code, uppercased (e.g. SC)
  *   - YYY  = last 3 digits of the join year, zero-padded (2026 -> 026)
  *   - MM   = join month, zero-padded (August -> 08)
@@ -37,7 +37,7 @@ export async function generateMemberFileNumber(
     data: { memberSeq: { increment: 1 } },
     select: { memberSeq: true },
   });
-  return `${prefix}/${yy}/${mm}/${String(memberSeq).padStart(3, "0")}`;
+  return `${prefix}/${yy}/${mm}${String(memberSeq).padStart(3, "0")}`;
 }
 
 /**
