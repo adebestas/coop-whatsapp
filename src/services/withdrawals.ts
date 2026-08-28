@@ -119,6 +119,9 @@ export async function requestWithdrawal(
     if (!member || !member.wallet) {
       return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." } as const;
     }
+    if (member.frozenAt) {
+      return { ok: false, message: "🔒 Your wallet is frozen, so you can't withdraw right now. Reply *unfreeze* to lift the freeze." } as const;
+    }
     if (member.status === "deceased") {
       return { ok: false, message: "This account is under a death claim." } as const;
     }

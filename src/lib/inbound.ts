@@ -3,6 +3,8 @@ export interface InboundMessage {
   text: string;
   /** Present when the message is a completed WhatsApp Flow (nfm_reply). */
   flowToken?: string;
+  /** Present for voice-note audio messages (transcribed downstream). */
+  audio?: { mediaId: string };
 }
 
 /**
@@ -26,6 +28,7 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
         type?: string;
         nfm_reply?: { response_json?: string };
       };
+      audio?: { id?: string };
     };
     const from = message.from;
     if (!from) continue;
@@ -52,6 +55,13 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
         text,
         flowToken: typeof fields.flow_token === "string" ? fields.flow_token : undefined,
       });
+      continue;
+    }
+
+    // Voice notes: carry the media id so the route can transcribe downstream.
+    if (message.type === "audio" && message.audio?.id) {
+      out.push({ from, text: "", audio: { mediaId: message.audio.id } });
+      continue;
     }
     // Anything else (reactions, images, buttons…) is intentionally dropped.
   }

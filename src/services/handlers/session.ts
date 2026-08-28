@@ -128,6 +128,10 @@ export function buildFullMenu(member: { name: string; cooperative: { name: strin
     `• *deleteaccount* — delete your account\n` +
     `• *grievance <msg>* — submit a complaint to admin\n` +
     `• *byelaws* — view cooperative byelaws\n` +
+    `• *statement <month|year>* — monthly/yearly statement\n` +
+    `• *payees* — your saved payout accounts\n` +
+    `• *analytics* — personal savings analytics\n` +
+    `• *freeze* — freeze your account (money can't leave)\n` +
     `• *menu* — show this menu\n`;
 
   if (member.role === "admin" || member.role === "superadmin") {

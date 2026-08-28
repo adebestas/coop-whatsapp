@@ -155,6 +155,7 @@ model Member {
   bankName                String?
   lastWithdrawalAt        DateTime? // when the member last withdrew (6-month rule)
   withdrawalOverride      Boolean @default(false) // admin granted an early-withdrawal override
+  frozenAt                DateTime? // when the member self-froze their wallet (money-out blocked); null = not frozen
   altChannelId            String? // linked second chat identity (other platform) — alerts only
   preferredChannel        String? // whatsapp | telegram — most-used platform, auto-learned
   lastStatementSentAt     DateTime? // month marker for monthly statements

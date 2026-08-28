@@ -11,6 +11,8 @@ import { getReserveInfo } from "./dividends.js";
 import { getAnniversaryMessage } from "./anniversary.js";
 import { formatBalance } from "./cooperative.js";
 import { validateDeviceSession, checkTenureLimit } from "../lib/security-hardening.js";
+import { isFrozen, freezeMessage, unfreezeMessage } from "../lib/freeze.js";
+import { savePayee, listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js";
 
 /** Session TTL — how long an awaiting state stays alive before reset. */
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -60,6 +62,7 @@ import {
   handleDividend,
   handleJoinUnit,
   handleLoanQueue,
+  handleAnalytics,
 } from "./handlers/money.js";
 import {
   handleValidateClaim,
@@ -336,6 +339,13 @@ export async function handleMessage(
     case "loan":
     case "repay":
     case "withdraw": {
+      if (cmd !== "save" && member) {
+        const frozen = await isFrozen(member.id);
+        if (frozen.frozen) {
+          await sendText({ to: phone, text: frozen.message });
+          break;
+        }
+      }
       if (!await checkMoneyRateLimit(phone)) {
         await sendText({
           to: phone,
@@ -363,6 +373,81 @@ export async function handleMessage(
 
     case "fund":
       await handleFund(phone);
+      break;
+
+    case "freeze":
+    case "unfreeze": {
+      if (!member) {
+        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        break;
+      }
+      const freezing = cmd === "freeze";
+      await prisma.member.update({
+        where: { id: member.id },
+        data: { frozenAt: freezing ? new Date() : null },
+      });
+      await sendText({
+        to: phone,
+        text: freezing ? freezeMessage(member.name) : unfreezeMessage(member.name),
+      });
+      break;
+    }
+
+    case "payees": {
+      if (!member) {
+        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        break;
+      }
+      const payees = await listPayees(member.id);
+      await sendText({ to: phone, text: getPayeesText(payees) });
+      break;
+    }
+
+    case "addpayee": {
+      if (!member) {
+        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        break;
+      }
+      const name = args[0];
+      const acct = args[1];
+      const bank = args[2];
+      if (!name || !acct || !bank) {
+        await sendText({
+          to: phone,
+          text: "Usage: *addpayee <name> <account> <bank>*, e.g. *addpayee mama-ngozi 0123456789 gtb*.",
+        });
+        break;
+      }
+      const result = await savePayee(member.id, name, acct, bank);
+      await sendText({ to: phone, text: result.ok ? `✅ Payee *${result.payee.name}* saved. Reply *payees* to see your list.` : result.message });
+      break;
+    }
+
+    case "delpayee": {
+      if (!member) {
+        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        break;
+      }
+      const target = args[0];
+      if (!target) {
+        await sendText({ to: phone, text: "Usage: *delpayee <name or number>* — choose from your *payees* list." });
+        break;
+      }
+      const payees = await listPayees(member.id);
+      const picked = /^\d+$/.test(target)
+        ? payees[parseInt(target, 10) - 1]
+        : payees.find((p) => p.name.includes(target.toLowerCase()));
+      if (!picked) {
+        await sendText({ to: phone, text: "Couldn't find that payee. Reply *payees* to see your saved list." });
+        break;
+      }
+      await deletePayee(member.id, picked.id);
+      await sendText({ to: phone, text: `🗑️ Payee *${picked.name}* deleted.` });
+      break;
+    }
+
+    case "analytics":
+      await handleAnalytics(phone, member);
       break;
 
     case "confirm":
@@ -459,6 +544,20 @@ export async function handleMessage(
       await handleReserveInfo(phone, member);
       break;
 
+    case "interest": {
+      await sendText({
+        to: phone,
+        text:
+          "*Loan interest (automatic tiers)*\n\n" +
+          "• Up to 3 months: *5% flat*\n" +
+          "• 4–6 months: *8% flat*\n" +
+          "• 7–9 months: *9% flat*\n" +
+          "• 10–12 months: *10% flat*\n\n" +
+          `Admin charge per loan: ${formatBalance(2000)} (deducted at disbursement).`,
+      });
+      break;
+    }
+
     case "anniversary":
       await handleAnniversary(phone, member);
       break;
@@ -543,15 +642,27 @@ export async function handleMessage(
         await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
         break;
       }
-      const coopByelaws = await prisma.cooperative.findUnique({
+      const coop = await prisma.cooperative.findUnique({
         where: { id: member.cooperativeId },
-        select: { description: true, name: true },
+        select: { name: true },
       });
-      if (coopByelaws?.description) {
-        await sendText({ to: phone, text: `*📜 Byelaws — ${coopByelaws.name}*\n\n${coopByelaws.description}` });
-      } else {
-        await sendText({ to: phone, text: "No byelaws have been posted for your cooperative yet. The admin can set them with *setconfig description <text>*." });
+      const byelaws = await prisma.byelaw.findMany({
+        where: { cooperativeId: member.cooperativeId },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+      });
+      if (byelaws.length === 0) {
+        await sendText({
+          to: phone,
+          text: "No byelaws have been posted for your cooperative yet. The admin can add them with *byelaws add <title> <content>*.",
+        });
+        break;
       }
+      const lines = [`*📜 Byelaws — ${coop?.name ?? "your cooperative"}*`, ""];
+      for (const b of byelaws) {
+        lines.push(`*${b.title}*`, b.content, "");
+      }
+      await sendText({ to: phone, text: lines.join("\n") });
       break;
     }
 

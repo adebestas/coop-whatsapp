@@ -4,6 +4,7 @@ import { config, isAllowed } from "../config.js";
 import { handleMessage } from "../services/conversation.js";
 import { extractWhatsAppMessages } from "../lib/inbound.js";
 import { sendText } from "../lib/messaging.js";
+import { transcribeAudioMessage, transcriptionEnabled } from "../lib/transcribe.js";
 
 /**
  * Per-user mutex to serialize message processing per phone number.
@@ -82,6 +83,21 @@ export async function webhookRoutes(app: FastifyInstance) {
       for (const change of changes) {
         for (const inbound of extractWhatsAppMessages(change?.value)) {
           if (!isAllowed(inbound.from)) continue;
+
+          // Voice notes are transcribed first (fail-closed: if transcription
+          // is unavailable, the audio is dropped rather than crashing ingest).
+          if (inbound.audio) {
+            if (!transcriptionEnabled()) continue;
+            const transcript = await transcribeAudioMessage(inbound.audio.mediaId);
+            if (!transcript) {
+              sendText({
+                to: inbound.from,
+                text: "I couldn't read that voice note. Please type your message instead.",
+              }).catch(() => {});
+              continue;
+            }
+            inbound.text = transcript;
+          }
 
           // Don't await — Meta needs a quick 200 and we don't want a
           // slow upstream to cause retries. But catch errors so the

@@ -51,7 +51,7 @@ tests/                   # vitest smoke tests
 | `menu` / `help` | Show available commands |
 | `join <code>` | Join a cooperative by its code |
 | `balance` | Check savings balance |
-| `save <amount>` | Make a contribution (e.g. `save 2000`) |
+| `save <amount>` | Get your personal funding account, then transfer that amount — your wallet is credited when the transfer confirms (e.g. `save 2000`) |
 | `withdraw <amount>` | Withdraw up to 45% of savings to your bank account |
 | `plan <amount> <weekly\|monthly>` | Set a recurring contribution plan |
 | `fund` | Get your personal virtual account number for top-ups |
@@ -68,6 +68,16 @@ tests/                   # vitest smoke tests
 | `phone <number>` | Add/update your real phone number (needed for funding) |
 | `support <issue>` | Open a support ticket with customer service |
 | `vote <election id> <member code>` | Vote in an open election |
+| `freeze` / `unfreeze` | Freeze your account so no money can leave, then lift it yourself |
+| `payees` / `addpayee <name> <account> <bank>` / `delpayee <name\|#>` | Save / list / remove favorite payout accounts (beneficiary memory) |
+| `analytics` | Personal savings analytics (balance, totals, monthly rate, withdrawals, loans) |
+| `statement <month\|year>` | Monthly or yearly statement |
+| `class` / `next` | Financial literacy lessons |
+| `reserveinfo` | Statutory reserve fund info |
+| `grievance <complaint>` | Submit a grievance to the cooperative |
+| `byelaws` | View the cooperative's registered byelaws |
+
+> **Voice notes:** on WhatsApp you can send a voice note instead of typing a command — it is transcribed and processed as text (requires `GROQ_API_KEY` + `WHATSAPP_TOKEN`).
 
 Multi-turn onboarding: `join TEST01` → name → (Telegram: phone → OTP if the
 number is already on WhatsApp) → email *(optional)* → birthday *(optional)* →
@@ -96,12 +106,13 @@ an append-only **audit log** (`audit` command shows the latest entries).
 | `pending` | all admins | List loan applications (workplace admins see their unit only) |
 | `approve <id>` / `reject <id>` | admin + super | Loan approval needs **3 signatures**: admin → super #1 → a *different* super #2. The second super approval auto-disburses |
 | `payanyone <amount> <account> <bank> <name>` | admin + super | Queue an external payment (needs narration/purpose). Paid only after **3 distinct super approvals** |
+| `approvepay <id>` | super only | Approve a pay-anyone request (needs 3 distinct super approvals) |
 | `pendingpay` / `rejectpay <id>` | admin + super | List / reject pay-anyone requests |
 | `startbuyvote <title>`, `addoption <poll id> <name> <cost> [account] [bank]`, `closebuyvote <poll id>` | all admins | Buy-votes: members vote on what the coop should buy; closing the winning option auto-creates the 3-super payment request |
-| `export members\|ledger` | super only | Generate Excel + PDF exports and get download links by email |
-| `setpay <phone> <amount>` | super only | Configure a super admin's salary/stipend amount |
+| `export members\|transactions\|pnl` | super only | Generate Excel + PDF exports and get download links by email |
+| `setsalary <phone> <amount>` | super only | Configure an admin's salary/stipend amount |
 | `runpayroll <narration>` | super only | Pay all configured salaries — straight to **bank accounts** (never wallets); narration is mandatory |
-| `payroll` | super only | See configured salaries and last payroll run |
+| `salarylist` / `runpayrollprep` | super only | See configured salaries and last payroll run |
 | `pnl` | admin + super | Profit & loss: income vs expense categories and net profit from the ledger |
 | `approvewdraw <id>` | admin + super | Approve a withdrawal request (super approval pays immediately) |
 | `finalize <id>` | super only | Final approval that sends a withdrawal |
@@ -122,7 +133,7 @@ an append-only **audit log** (`audit` command shows the latest entries).
 | `results <election id>` | everyone | Live tallies |
 | `broadcast <msg>` | all admins | Message all members (`broadcast unit <msg>` for your workplace) |
 | `addunit <name> <code>` / `unitadmin <unit> <member>` / `units` | all admins | Manage workplaces |
-| `interest` | everyone | Shows the fixed tiered flat rates: 5% (≤3 months), 8% (≤6), 9% (≤9), 10% (10–12) |
+| `interest` | admin + super | Shows the fixed tiered flat rates: 5% (≤3 months), 8% (≤6), 9% (≤9), 10% (10–12) |
 | `paydividend <rate%>` | super only | Distribute a percentage of **net profit** to members by savings share |
 | `audit` | admin + super | Recent audit-trail entries |
 
@@ -267,7 +278,7 @@ salaries/stipends, pay-anyone and other expenses out.
 
 An admin can queue a payment to **any bank account** with
 `payanyone <amount> <account> <bank> <name>`. The money only moves after
-**three distinct super admins** approve (`approve <id>` on the `pendingpay`
+**three distinct super admins** approve (`approvepay <id>` on the `pendingpay`
 list). Every step is audited; the payout is name-checked and booked as a
 ledger expense. Self-approval is blocked and repeat approvals are rejected.
 
@@ -282,11 +293,12 @@ for the winning option's vendor account — so purchases follow the same
 
 ## Payroll
 
-Super admins configure their own salary/stipend with
-`setpay <phone> <amount>`. `runpayroll <narration>` pays everyone configured —
+Super admins configure salaries with
+`setsalary <phone> <amount>`. `runpayroll <narration>` pays everyone configured —
 **to their registered bank accounts, never wallets** — with a mandatory
 narration recorded in the ledger and audit log. Members without bank details
-are skipped and reported.
+are skipped and reported. `salarylist` (alias `runpayrollprep`) shows the
+configured salaries and last payroll run.
 
 ## Exports
 

@@ -15,16 +15,23 @@ import { safeParse } from "./session.js";
 
 export async function handleBalance(
   phone: string,
-  member: { name: string; cooperative: { name: string }; wallet: { balance: number } | null } | null,
+  member: { id: string; name: string; cooperative: { name: string }; wallet: { balance: number } | null } | null,
 ): Promise<void> {
   if (!member) {
     await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
     return;
   }
   const balance = member.wallet?.balance ?? 0;
+  const [loan] = await prisma.loan.findMany({
+    where: { memberId: member.id, status: { in: ["disbursed", "partial"] } },
+    select: { amount: true, balance: true },
+    orderBy: { createdAt: "desc" },
+    take: 1,
+  });
+  const loanText = loan && loan.balance > 0 ? `\n\n📚 Outstanding loan balance: *${formatBalance(loan.balance)}*.` : "";
   await sendText({
     to: phone,
-    text: `Hi *${member.name}*, your savings balance is *${formatBalance(balance)}*.\n\nReply *save <amount>* to contribute more.\nReply *menu* to see other options.`,
+    text: `Hi *${member.name}*, your savings balance is *${formatBalance(balance)}*.\n\nReply *save <amount>* to contribute more.\nReply *menu* to see other options.${loanText}`,
   });
 }
 
@@ -232,4 +239,62 @@ export async function handleLoanQueue(phone: string): Promise<void> {
       `Total in queue: *${queue.total}*\n` +
       `Based on current disbursement rate, estimated wait: *${queue.estimatedWait}*.`,
   });
+}
+
+export async function handleAnalytics(
+  phone: string,
+  member: { id: string; name: string; cooperativeId: string; wallet: { balance: number; totalSaved: number } | null } | null,
+): Promise<void> {
+  const m = member ?? (await getMemberByPhone(phone));
+  if (!m) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    return;
+  }
+
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const yearStart = new Date(now.getFullYear(), 0, 1);
+
+  const [contribs, withdrawalsYtd, loans, daysMember] = await Promise.all([
+    prisma.contribution.aggregate({
+      where: { memberId: m.id, status: "confirmed", paidAt: { gte: monthStart } },
+      _count: true,
+      _sum: { amount: true },
+    }),
+    prisma.withdrawalRequest.count({
+      where: { memberId: m.id, status: { in: ["approved", "paid", "disbursed"] }, createdAt: { gte: yearStart } },
+    }),
+    prisma.loan.aggregate({
+      where: { memberId: m.id, status: { in: ["disbursed", "partial"] } },
+      _sum: { balance: true },
+      _count: true,
+    }),
+    prisma.member.findUnique({ where: { id: m.id }, select: { createdAt: true } }),
+  ]);
+
+  const balance = m.wallet?.balance ?? 0;
+  const totalSaved = m.wallet?.totalSaved ?? 0;
+  const savedThisMonth = contribs._sum.amount ?? 0;
+  const savedThisMonthCount = contribs._count;
+  const loanBalance = loans._sum.balance ?? 0;
+  const activeLoans = loans._count;
+  const tenorDays = daysMember?.createdAt
+    ? Math.max(1, Math.floor((Date.now() - daysMember.createdAt.getTime()) / (24 * 60 * 60 * 1000)))
+    : 1;
+  const monthlyRate = (totalSaved / tenorDays) * (365 / 12);
+
+  const lines: string[] = [
+    `📊 *Savings analytics* for *${m.name}*`,
+    ``,
+    `💰 Current balance: *${formatBalance(balance)}*`,
+    `🏦 Total saved (all-time): *${formatBalance(totalSaved)}*`,
+    `📅 Saved this month: *${formatBalance(savedThisMonth)}* (${savedThisMonthCount}×)`,
+    `📈 Avg monthly save: *${formatBalance(monthlyRate)}*`,
+    `📤 Withdrawals this year: *${withdrawalsYtd}*`,
+    `📚 Active loans: *${activeLoans}* (balance *${formatBalance(loanBalance)}*)`,
+    ``,
+    `Reply *history* for your full transaction log, or *menu* for more options.`,
+  ];
+
+  await sendText({ to: phone, text: lines.join("\n") });
 }
