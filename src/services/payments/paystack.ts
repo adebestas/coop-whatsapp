@@ -202,7 +202,7 @@ export const paystackAdapter: ProviderAdapter = {
               : "unknown";
       return {
         status,
-        providerRef: res.data?.transfer_code ?? (res.data?.id != null ? String(res.data.id) : undefined),
+        providerRef: res.data?.transfer_code ?? (res.data?.id !== undefined ? String(res.data.id) : undefined),
       };
     } catch (err: any) {
       // Unconfigured or HTTP error — treat as unknown, never guess.
