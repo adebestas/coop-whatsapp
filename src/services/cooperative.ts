@@ -15,10 +15,9 @@ export interface JoinResult {
 /**
  * Generate a human-friendly, globally-unique member file number.
  *
- * Format: `{COOP}/{YYY}/{MM}{SEQ}` — e.g. `SC/026/08081` (no slash before SEQ)
+ * Format: `{COOP}/{YYY}/{SEQ}` — e.g. `SC/026/081`
  *   - COOP = cooperative join code, uppercased (e.g. SC)
  *   - YYY  = last 3 digits of the join year, zero-padded (2026 -> 026)
- *   - MM   = join month, zero-padded (August -> 08)
  *   - SEQ  = atomic running per-coop sequence (081 = 81st member of this coop)
  *
  * The sequence is incremented atomically on the Cooperative row
@@ -31,13 +30,12 @@ export async function generateMemberFileNumber(
 ): Promise<string> {
   const prefix = coopCode.trim().toUpperCase();
   const yy = String(joinedAt.getUTCFullYear() % 1000).padStart(3, "0");
-  const mm = String(joinedAt.getUTCMonth() + 1).padStart(2, "0");
   const { memberSeq } = await prisma.cooperative.update({
     where: { id: cooperativeId },
     data: { memberSeq: { increment: 1 } },
     select: { memberSeq: true },
   });
-  return `${prefix}/${yy}/${mm}${String(memberSeq).padStart(3, "0")}`;
+  return `${prefix}/${yy}/${String(memberSeq).padStart(3, "0")}`;
 }
 
 /**
