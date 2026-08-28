@@ -16,6 +16,7 @@ export const KNOWN_COMMANDS = [
   "skipmonth", "vote", "votebuy", "buypolls", "results", "pollresults", "contexthelp",
   "grievance", "grievances", "byelaws", "members",
   "freeze", "unfreeze", "payees", "addpayee", "delpayee", "analytics",
+  "votediv", "votedivstatus", "startvotediv", "closedivid",
   // admin
   "pending", "approve", "reject", "finalize", "payout", "overridewithdrawal",
   "broadcast", "createunit", "units", "setunitadmin", "paydividend", "recordfine",

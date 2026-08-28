@@ -58,6 +58,7 @@ model Cooperative {
   config             CooperativeConfig?
   branding            BrandingConfig?
   subscription       Subscription?
+  dividendVotes       DividendVote[]
 
   @@index([status])
   @@index([code])
@@ -213,6 +214,8 @@ model Member {
   batchesCreated          DeductionBatch[]    @relation("DeductionBatchCreator")
   batchesApproved         DeductionBatch[]    @relation("DeductionBatchApprover")
   favoritePayees          FavoritePayee[]
+  dividendVotesOpened     DividendVote[]      @relation("DividendVoteOpener")
+  dividendVoteBallots     DividendVoteBallot[] @relation("DividendVoteVoter")
   dataConsents            DataConsent[]
   dataConsentGiven        Boolean             @default(false)
   payeRecords             PAYERecord[]
@@ -747,6 +750,44 @@ model VoteBallot {
   voter     Member        @relation("VoteBallots", fields: [voterId], references: [id])
 
   @@unique([voteId, voterId]) // one person, one vote per election
+}
+
+// ---- Dividend-rate member vote ----
+// Cooperative governance: a proposed dividend rate that differs by more than
+// the allowed threshold from last time must be approved by a member vote before
+// the super admin may distribute it.
+model DividendVote {
+  id            String    @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  proposedRate  Int       // proposed dividend rate (%)
+  status        String    @default("open") // open | approved | rejected | closed
+  openedById    String
+  openedBy      Member    @relation("DividendVoteOpener", fields: [openedById], references: [id])
+  yesVotes      Int       @default(0)
+  noVotes       Int       @default(0)
+  requiredYesPct Int      @default(40) // % of active members that must vote YES to pass
+  expiresAt     DateTime
+  closedById    String?
+  closedAt      DateTime?
+  createdAt     DateTime  @default(now())
+
+  ballots DividendVoteBallot[]
+
+  @@index([cooperativeId, status])
+}
+
+model DividendVoteBallot {
+  id        String       @id @default(cuid())
+  voteId    String
+  vote      DividendVote @relation(fields: [voteId], references: [id], onDelete: Cascade)
+  memberId  String
+  member    Member       @relation("DividendVoteVoter", fields: [memberId], references: [id])
+  choice    Boolean      // true = yes, false = no
+  createdAt DateTime     @default(now())
+
+  @@unique([voteId, memberId]) // one person, one vote per dividend-rate ballot
+  @@index([memberId])
 }
 
 // ---- Dividends ----

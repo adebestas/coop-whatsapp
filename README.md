@@ -71,6 +71,7 @@ tests/                   # vitest smoke tests
 | `freeze` / `unfreeze` | Freeze your account so no money can leave, then lift it yourself |
 | `payees` / `addpayee <name> <account> <bank>` / `delpayee <name\|#>` | Save / list / remove favorite payout accounts (beneficiary memory) |
 | `analytics` | Personal savings analytics (balance, totals, monthly rate, withdrawals, loans) |
+| `votediv <yes\|no>` | Vote on an open dividend-rate change ballot |
 | `statement <month\|year>` | Monthly or yearly statement |
 | `class` / `next` | Financial literacy lessons |
 | `reserveinfo` | Statutory reserve fund info |
@@ -135,6 +136,9 @@ an append-only **audit log** (`audit` command shows the latest entries).
 | `addunit <name> <code>` / `unitadmin <unit> <member>` / `units` | all admins | Manage workplaces |
 | `interest` | admin + super | Shows the fixed tiered flat rates: 5% (≤3 months), 8% (≤6), 9% (≤9), 10% (10–12) |
 | `paydividend <rate%>` | super only | Distribute a percentage of **net profit** to members by savings share |
+| `startvotediv <rate%>` | super only | Open a member ballot when a dividend rate change is >5% |
+| `closedivid [approve\|reject]` | super only | Close a dividend-rate vote (auto-tally, or force approve/reject) |
+| `votedivstatus` | super + member | Live tally and status of the dividend-rate vote |
 | `audit` | admin + super | Recent audit-trail entries |
 
 ## Channels: WhatsApp + Telegram
@@ -237,6 +241,12 @@ salaries/stipends, pay-anyone and other expenses out.
   (`rate`% of profit) and each member's share by savings proportion.
 - `paydividend <rate>` (super admin only) distributes it — wallets are
   credited and the appropriation is recorded in the ledger.
+- Rate changes **more than 5%** from the last dividend require **member
+  approval**: `paydividend` will ask the super admin to open a member vote
+  (`startvotediv <rate>`), members reply `votediv yes|no`, the super admin
+  closes it (`closedivid [approve|reject]`, or `closedivid` auto-tallies).
+  `votedivstatus` shows the live tally. A passed vote unlocks the rate for
+  `paydividend <rate>`.
 
 ## Withdrawals
 

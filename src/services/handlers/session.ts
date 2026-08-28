@@ -131,6 +131,7 @@ export function buildFullMenu(member: { name: string; cooperative: { name: strin
     `• *statement <month|year>* — monthly/yearly statement\n` +
     `• *payees* — your saved payout accounts\n` +
     `• *analytics* — personal savings analytics\n` +
+    `• *votediv <yes|no>* — vote on a dividend-rate change\n` +
     `• *freeze* — freeze your account (money can't leave)\n` +
     `• *menu* — show this menu\n`;
 
@@ -165,6 +166,9 @@ export function buildAdminMenu(): string {
     `• *startbuyvote <title>* — start a buy vote\n` +
     `• *addoption <id> <item> <cost> <acct> <bank>* — add buy option\n` +
     `• *closebuyvote <id>* — close a buy vote\n` +
+    `• *startvotediv <rate%>* — open a dividend-rate member vote\n` +
+    `• *closedivid [approve|reject]* — close a dividend-rate vote\n` +
+    `• *votedivstatus* — dividend-rate vote tally\n` +
     `• *enable2fa* — protect your account\n` +
     `• *verifypin <pin>* — unlock big payouts (10 min)\n` +
     `• *insights* — AI financial analysis\n` +

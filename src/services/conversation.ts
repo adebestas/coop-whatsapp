@@ -13,6 +13,7 @@ import { formatBalance } from "./cooperative.js";
 import { validateDeviceSession, checkTenureLimit } from "../lib/security-hardening.js";
 import { isFrozen, freezeMessage, unfreezeMessage } from "../lib/freeze.js";
 import { savePayee, listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js";
+import { castDividendVote } from "./dividendvote.js";
 
 /** Session TTL — how long an awaiting state stays alive before reset. */
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -597,6 +598,19 @@ export async function handleMessage(
     case "pollresults":
       await handlePollResults(phone, args);
       break;
+
+    case "votediv": {
+      if (!member) {
+        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        break;
+      }
+      const voteResult = await castDividendVote(
+        { id: member.id, name: member.name, phone, cooperativeId: member.cooperativeId },
+        args[0] ?? "",
+      );
+      await sendText({ to: phone, text: voteResult.message });
+      break;
+    }
 
     case "deleteaccount":
       await handleDeleteAccount(phone);

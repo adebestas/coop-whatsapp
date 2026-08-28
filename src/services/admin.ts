@@ -46,6 +46,7 @@ import { getSegregationReport, getReserveReport } from "./reconciliation.js";
 import { resolveProvider } from "./payments/index.js";
 import { assertMoneyAuthorized, assertFreshPin, disable2fa, enable2fa, refreshPin } from "./auth2fa.js";
 import { getCoopConfig, updateCoopConfig, getBranding, getSubscription } from "./coop-config.js";
+import { startDividendVote, closeDividendVote, dividendVoteStatus } from "./dividendvote.js";
 import { checkMultiSigRequirement, processMultiSigResponse, auditSuperadminCommand } from "../lib/security-hardening.js";
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
@@ -1451,16 +1452,42 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Dividend rate cannot exceed 25% per the Nigerian Cooperative Societies Act." });
         return true;
       }
-      const lastDiv = await prisma.dividend.findFirst({ where: { cooperativeId: coopId }, orderBy: { createdAt: "desc" } });
-      if (lastDiv) {
-        const diff = Math.abs(rate - lastDiv.rate);
-        if (diff > 5) {
-          await sendText({ to: phone, text: `Rate change of ${diff}% exceeds 5% threshold. Requires member vote.` });
-          return true;
-        }
+      const coopConfig = await getCoopConfig(coopId);
+      const lastRate = coopConfig.lastDividendRate;
+      const approvedVote = await prisma.dividendVote.findFirst({
+        where: { cooperativeId: coopId, proposedRate: rate, status: "approved" },
+        orderBy: { closedAt: "desc" },
+      });
+      if (lastRate !== null && Math.abs(rate - lastRate) > 5 && !approvedVote) {
+        await updateCoopConfig(coopId, { pendingDividendRate: rate } as any);
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: phone,
+          actorId: admin.id,
+          actorRole: "superadmin",
+          action: "dividend.vote_required",
+          detail: `proposed ${rate}% differs ${Math.abs(rate - lastRate)}% from last ${lastRate}% — member vote needed`,
+        });
+        await sendText({
+          to: phone,
+          text:
+            `⚠️ The proposed rate *${rate}%* differs by *${Math.abs(rate - lastRate)}%* from the last dividend rate (${lastRate}%).\n\n` +
+            `Cooperative governance requires member approval for rate changes above 5%.\n\n` +
+            `Reply *startvotediv ${rate}* to open a member vote on this rate.`,
+        });
+        return true;
       }
       const result = await distributeDividend(phone, rate);
       await sendText({ to: phone, text: result.message });
+      if (result.ok) {
+        await updateCoopConfig(coopId, { lastDividendRate: rate, pendingDividendRate: null } as any);
+        if (approvedVote) {
+          await prisma.dividendVote.updateMany({
+            where: { id: approvedVote.id },
+            data: { status: "closed", closedById: admin.id, closedAt: new Date() },
+          });
+        }
+      }
       await audit({
         cooperativeId: coopId,
         actorPhone: phone,
@@ -1469,6 +1496,38 @@ export async function handleAdminCommand(
         action: "dividend.distribute",
         detail: result.message,
       });
+      return true;
+    }
+
+    case "startvotediv": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can open a dividend-rate vote." });
+        return true;
+      }
+      const voteResult = await startDividendVote(
+        { id: admin.id, name: admin.name, phone, role: admin.role, cooperativeId: coopId },
+        args[0] ?? "",
+      );
+      await sendText({ to: phone, text: voteResult.message });
+      return true;
+    }
+
+    case "closedivid": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can close a dividend-rate vote." });
+        return true;
+      }
+      const voteResult = await closeDividendVote(
+        { id: admin.id, name: admin.name, phone, role: admin.role, cooperativeId: coopId },
+        args[0],
+      );
+      await sendText({ to: phone, text: voteResult.message });
+      return true;
+    }
+
+    case "votedivstatus": {
+      const voteResult = await dividendVoteStatus(coopId);
+      await sendText({ to: phone, text: voteResult.message });
       return true;
     }
 

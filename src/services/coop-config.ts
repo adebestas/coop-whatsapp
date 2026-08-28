@@ -18,6 +18,9 @@ export interface CoopConfig {
   minGuarantors: number;
   largeTxThreshold: number;
   reportingThreshold: number;
+  pendingDividendRate: number | null;
+  lastDividendRate: number | null;
+  nextAGMDate: Date | null;
 }
 
 export interface BrandingConfig {
@@ -50,6 +53,9 @@ const DEFAULT_CONFIG: CoopConfig = {
   minGuarantors: 2,
   largeTxThreshold: 500_000_000,
   reportingThreshold: 500_000_000,
+  pendingDividendRate: null,
+  lastDividendRate: null,
+  nextAGMDate: null,
 };
 
 export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> {
@@ -80,6 +86,9 @@ export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> 
     minGuarantors: config.minGuarantors,
     largeTxThreshold: (config as any).largeTxThreshold ?? DEFAULT_CONFIG.largeTxThreshold,
     reportingThreshold: (config as any).reportingThreshold ?? DEFAULT_CONFIG.reportingThreshold,
+    pendingDividendRate: (config as any).pendingDividendRate ?? null,
+    lastDividendRate: (config as any).lastDividendRate ?? null,
+    nextAGMDate: (config as any).nextAGMDate ?? null,
   };
 
   await cacheSet(cacheKey, result, CACHE_TTL);
