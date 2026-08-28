@@ -350,6 +350,10 @@ export async function finalizeWithdrawal(
       bankName: request.bankName ?? undefined,
       note: `Member withdrawal (finalized by super admin)`,
       idempotencyKey: `TFR-WDR-${request.id}`,
+      // The withdrawal books its own category ledger (expense:withdrawal) with
+      // its own assets:bank CREDIT below; suppress payOut's generic journal so
+      // the bank account is credited exactly once.
+      suppressJournal: true,
     });
 
     if (result.status === "unsure") {

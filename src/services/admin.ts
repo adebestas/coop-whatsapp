@@ -1234,7 +1234,7 @@ export async function handleAdminCommand(
         return true;
       }
       const name = args.slice(1, costIdx).join(" ");
-      const cost = Number(args[costIdx]);
+      const cost = toKobo(Number(args[costIdx]));
       const account = args[costIdx + 1];
       const bank = args[costIdx + 2]?.toUpperCase();
       const result = await addPollOption(
@@ -1381,7 +1381,7 @@ export async function handleAdminCommand(
       }
       await prisma.cooperative.update({
         where: { id: coopId },
-        data: { dailyPayoutLimit: amount },
+        data: { dailyPayoutLimit: toKobo(amount) },
       });
       await audit({
         cooperativeId: coopId,
@@ -1975,7 +1975,9 @@ export async function handleAdminCommand(
           return true;
         }
         // Nigeria PAYE: first ₦300k/month exempt, then 7% up to ₦500k, 11% up to ₦1.16M, 15% up to ₦1.62M, 19% up to ₦3.22M, 21% up to ₦6.42M, 24% above
-        const grossKobo = gross;
+        // `gross` is entered in NAIRA (e.g. `paye add A1B2C3 500000`); convert to
+        // kobo before comparing against the kobo-denominated exemption/brackets.
+        const grossKobo = toKobo(gross);
         const exemptKobo = 30_000_00; // ₦300,000
         let taxable = Math.max(0, grossKobo - exemptKobo);
         let tax = 0;

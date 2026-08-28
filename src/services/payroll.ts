@@ -182,6 +182,10 @@ export async function runPayroll(
       successMessage: `💰 ${r.salaryKind === "salary" ? "Salary" : "Stipend"} paid: *${formatBalance(netSalary)}* to your bank account (PAYE: *${formatBalance(paye)}*). Narration: "${narration.trim()}".`,
       idempotencyKey: `TFR-PAYROLL-${r.id}-${period}`,
       onFailure: async () => {},
+      // Payroll books its own category ledger (salary/stipend) below, which
+      // already credits assets:bank once; suppress payOut's generic journal so
+      // the bank account isn't credited twice for the same outflow.
+      suppressJournal: true,
     });
 
     if (!result.ok) {

@@ -28,6 +28,14 @@ interface SendToBankOpts {
   successMessage?: string;
   /** Skip account-name verification (death-claim payouts to family members). */
   skipNameCheck?: boolean;
+  /**
+   * Suppress the generic `expense:payout / assets:bank` journal that payOut
+   * would post. Set this when the CALLER records its own category-specific
+   * ledger entry for the same outflow (e.g. member withdrawals). Without it
+   * the bank account would be credited twice — once here, once by the caller's
+   * recordLedger — understating the bank balance for reconciliation.
+   */
+  suppressJournal?: boolean;
   /** Extra error context to store on the loan (if any) when it fails */
   onFailure?: (status: string, error: string) => Promise<void>;
 }
@@ -155,16 +163,20 @@ async function payOut(
       throw err;
     }
 
-    // Double-entry: expense leaves the cooperative bank account.
-    await postJournal({
-      cooperativeId: member.cooperativeId,
-      txRef: `PAYOUT-${reference}`,
-      description: opts.note,
-      postings: [
-        { account: "expense:payout", direction: "DEBIT", amount: opts.amount },
-        { account: "assets:bank", direction: "CREDIT", amount: opts.amount },
-      ],
-    }).catch((err) => console.error("[payout] journal failed", err));
+    // Double-entry: expense leaves the cooperative bank account. Withdrawn by
+    // the caller's own category ledger (suppressJournal) to avoid a double
+    // credit to assets:bank.
+    if (!opts.suppressJournal) {
+      await postJournal({
+        cooperativeId: member.cooperativeId,
+        txRef: `PAYOUT-${reference}`,
+        description: opts.note,
+        postings: [
+          { account: "expense:payout", direction: "DEBIT", amount: opts.amount },
+          { account: "assets:bank", direction: "CREDIT", amount: opts.amount },
+        ],
+      }).catch((err) => console.error("[payout] journal failed", err));
+    }
 
     const msg = opts.successMessage ?? `✅ ${formatBalance(opts.amount)} sent to your bank account (${opts.bankName ?? opts.bankCode} ****${opts.bankAccountNumber.slice(-4)}). Ref: ${reference.slice(-6)}.`;
     await notify(member, msg);

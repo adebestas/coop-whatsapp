@@ -94,16 +94,26 @@ export async function processPaymentWebhook(
       },
     });
   } catch (err: any) {
-    if (err?.code === "P2002") {
-      console.log(`[webhook] duplicate delivery ignored: ${eventId}`);
+    if (err?.code !== "P2002") throw err;
+    // Already seen this delivery. Only ack as "duplicate" when it fully
+    // succeeded end-to-end; otherwise a previously FAILED (or still
+    // "received") event must be reprocessed on the provider's retry —
+    // otherwise we'd acknowledge-and-lose real funds that never credited.
+    const existing = await prisma.webhookEvent.findUnique({
+      where: { id: eventId },
+      select: { status: true },
+    });
+    if (existing?.status === "processed") {
+      console.log(`[webhook] duplicate delivery acked (already processed): ${eventId}`);
       return { httpStatus: 200, body: { status: "duplicate", event: eventId } };
     }
-    throw err;
+    // Reprocess failed/received deliveries instead of acknowledging them.
+    console.log(`[webhook] re-processing previously ${existing?.status ?? "?"} delivery: ${eventId}`);
   }
 
   // 4. Process synchronously — a crash here marks the event failed and the
-  // operator can replay it; the provider's own retry will hit the dedupe
-  // only after it succeeded end-to-end.
+  // provider's own retry (or a manual re-delivery) reprocesses it below; only
+  // fully-processed events are acked as "duplicate".
   try {
     await handlePaymentNotification(notification as PaymentNotification);
     await prisma.webhookEvent.update({

@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHmac } from "node:crypto";
 import type {
   ProviderAdapter,
   CreateVirtualAccountParams,
@@ -72,11 +72,12 @@ export const monnifyAdapter: ProviderAdapter = {
   name: "monnify",
 
   verifyWebhook(rawBody, headers): boolean {
-    // Monnify signs webhooks with a SHA512 digest of (raw body + secret).
+    // Monnify signs webhooks with HMAC-SHA512 of the raw request body keyed by
+    // the client secret, sent in the `monnify-signature` header (production only).
     const secret = process.env.MONNIFY_SECRET_KEY ?? "";
     const signature = String(headers["monnify-signature"] ?? "");
     if (!signature || !secret || typeof rawBody !== "string") return false;
-    const expected = createHash("sha512").update(rawBody + secret).digest("hex");
+    const expected = createHmac("sha512", secret).update(rawBody).digest("hex");
     return signaturesMatch(expected, signature);
   },
 

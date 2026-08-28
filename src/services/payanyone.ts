@@ -231,18 +231,25 @@ async function payExternal(
 
   // Velocity check: max 5 money-out per 10 minutes.
   if (!await checkVelocity(actor.id)) {
+    // Revert only the third approval, NOT the whole chain: approved1/2 are still
+    // valid, so the request stays at "2 of 3" and any super (or re-approval) can
+    // retry once the window clears. Setting status back to "pending" while
+    // approved1ById/approved2ById are already set would dead-lock the request —
+    // the first-step claim (status "pending" && approved1ById: null) could never
+    // match again.
     await prisma.externalPayment.updateMany({
       where: { id: payment.id, status: "approved2" },
-      data: { status: "pending", approved3ById: null },
+      data: { approved3ById: null },
     });
     return { ok: false, message: "🛑 Too many transactions in a short period. Please wait a few minutes and try again." };
   }
 
   const limit = await checkDailyPayoutLimit(actor.cooperativeId, payment.amount);
   if (!limit.ok) {
+    // Same as above — keep the existing approvals so the request isn't dead-locked.
     await prisma.externalPayment.updateMany({
       where: { id: payment.id, status: "approved2" },
-      data: { status: "pending", approved3ById: null },
+      data: { approved3ById: null },
     });
     return { ok: false, message: limit.message! };
   }
