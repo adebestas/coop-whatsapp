@@ -14,7 +14,7 @@ import { provisionVirtualAccount } from "../payments/topup.js";
 import { verifyMemberPin } from "../pin.js";
 import { resolveBankCode } from "../../lib/banks.js";
 import { applyForLoan } from "../loans.js";
-import { addGuarantor } from "../guarantors.js";
+import { addGuarantor, requiredGuarantors } from "../guarantors.js";
 import { requestWithdrawal } from "../withdrawals.js";
 import { submitCertificate } from "../deathclaims.js";
 import type { BotState, FlowData, MessageMeta } from "../conversation.js";
@@ -684,10 +684,12 @@ export async function handleAwaitingInput(
         update: { state: "awaiting_guarantor_1", data: JSON.stringify({ loanId: result.loanId }) },
       });
       await sendText({ to: phone, text: result.message });
+      const borrower = await getMemberByPhone(phone);
+      const needed = requiredGuarantors(borrower?.role);
       await sendText({
         to: phone,
         text:
-          `To complete your application, you need *2 guarantors* who are members of the cooperative.\n\n` +
+          `To complete your application, you need *${needed} guarantor${needed === 1 ? "" : "s"}* who ${needed === 1 ? "is" : "are"} member${needed === 1 ? "" : "s"} of the cooperative.\n\n` +
           `Send the *member code* of your first guarantor (e.g. *ABC123-DEFG*).`,
       });
       break;

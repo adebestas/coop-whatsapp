@@ -30,7 +30,7 @@ src/
   config.ts              # env config + phone allowlist
   seed.ts                # create a coop + admin via CLI
   routes/webhook.ts      # Meta webhook verify + receive
-  routes/payments.ts     # payment provider webhooks (flutterwave/paystack)
+  routes/payments.ts     # payment provider webhooks (monnify/paystack)
   routes/admin.ts        # REST API for the admin dashboard
   lib/prisma.ts          # Prisma client
   lib/whatsapp.ts        # Meta Cloud API message sender
@@ -38,7 +38,7 @@ src/
   services/cooperative.ts   # members, wallets, contributions
   services/loans.ts         # loan applications, approval, repayments
   services/admin.ts         # admin auth + WhatsApp admin commands
-  services/payments/        # provider adapter + flutterwave + paystack + topup
+  services/payments/        # provider adapter + monnify + paystack + topup
 prisma/schema.prisma     # data model
 web/                     # React + Vite admin dashboard
 tests/                   # vitest smoke tests
@@ -80,9 +80,10 @@ tests/                   # vitest smoke tests
 
 > **Voice notes:** on WhatsApp you can send a voice note instead of typing a command — it is transcribed and processed as text (requires `GROQ_API_KEY` + `WHATSAPP_TOKEN`).
 
-Multi-turn onboarding: `join TEST01` → name → (Telegram: phone → OTP if the
-number is already on WhatsApp) → email *(optional)* → birthday *(optional)* →
-**next of kin (name + phone)** → set 4-digit PIN → confirm → done.
+Multi-turn onboarding: `join TEST01` → name → **NDPR data-consent** → (Telegram:
+phone → OTP if the number is already on WhatsApp) → email *(optional)* →
+birthday *(optional)* → **next of kin (name + phone)** → set 4-digit PIN →
+confirm → done.
 You receive a short **member code** on joining. Email + birthday can be skipped
 with `skip` and only power monthly statements and birthday greetings. The next
 of kin is required — death claims are settled with them.
@@ -106,21 +107,21 @@ an append-only **audit log** (`audit` command shows the latest entries).
 | --- | --- | --- |
 | `pending` | all admins | List loan applications (workplace admins see their unit only) |
 | `approve <id>` / `reject <id>` | admin + super | Loan approval needs **3 signatures**: admin → super #1 → a *different* super #2. The second super approval auto-disburses |
-| `payanyone <amount> <account> <bank> <name>` | admin + super | Queue an external payment (needs narration/purpose). Paid only after **3 distinct super approvals** |
+| `payanyone <amount> <account> <bank code> <narration>` | admin + super | Queue an external payment (beneficiary name is verified from the account; narration required). Paid only after **3 distinct super approvals** |
 | `approvepay <id>` | super only | Approve a pay-anyone request (needs 3 distinct super approvals) |
 | `pendingpay` / `rejectpay <id>` | admin + super | List / reject pay-anyone requests |
 | `startbuyvote <title>`, `addoption <poll id> <name> <cost> [account] [bank]`, `closebuyvote <poll id>` | all admins | Buy-votes: members vote on what the coop should buy; closing the winning option auto-creates the 3-super payment request |
 | `export members\|transactions\|pnl` | super only | Generate Excel + PDF exports and get download links by email |
 | `setsalary <phone> <amount>` | super only | Configure an admin's salary/stipend amount |
 | `runpayroll <narration>` | super only | Pay all configured salaries — straight to **bank accounts** (never wallets); narration is mandatory |
-| `salarylist` / `runpayrollprep` | super only | See configured salaries and last payroll run |
+| `salarylist` / `runpayrollprep` | super only | List configured salaries (alias for the same report) |
 | `pnl` | admin + super | Profit & loss: income vs expense categories and net profit from the ledger |
 | `approvewdraw <id>` | admin + super | Approve a withdrawal request (super approval pays immediately) |
 | `finalize <id>` | super only | Final approval that sends a withdrawal |
 | `rejectwithdraw <id>` | admin + super | Reject a withdrawal request |
 | `overridewithdrawal <phone>` | admin + super | Let a member withdraw before the 6-month window |
 | `pendingwithdraw` | admin + super | List pending withdrawal requests |
-| `deathclaim <membercode>` | admin + super | Open a death claim (then send the certificate) |
+| `deathclaim <member code> <family phone>` | admin + super | Open a death claim (then send the certificate) |
 | `claimbank <claim id> <account> <bank>` | admin + super | Set the family's payout account |
 | `approveclaim <id>` | super only | Pay the validated claim to the family |
 | `rejectclaim <id>` | admin + super | Reject a death claim |
@@ -182,13 +183,14 @@ Rules enforced:
 - A member can stand guarantor for at most **2 active loans** at a time.
 - Once the cooperative passes **100 members**, guarantors are additionally
   liable up to **2x their own lifetime savings** (`GUARANTOR_EXPOSURE_RATIO`),
-  and borrowers need **100 days of membership** before taking a loan.
+  and must have been members for **3+ months** before they can stand as
+  guarantor.
 - A loan can't exceed **2x the borrower's lifetime savings**
   (`LOAN_TO_SAVINGS_RATIO`).
 - Members with an overdue loan (**defaulters**) can't borrow again until they
   repay.
-- Late instalments attract a fine: `LATE_FINE_RATE`% (default 2%) of the
-  installment per month overdue, deducted together with the repayment and
+- Late instalments attract a fine (per-coop `lateFinePercent`, default **5%**)
+  of the installment per month overdue, deducted together with the repayment and
   recorded as a `fine` entry in the ledger.
 
 ## Loan disbursement
@@ -287,10 +289,11 @@ salaries/stipends, pay-anyone and other expenses out.
 ## Pay anyone (3-super approval)
 
 An admin can queue a payment to **any bank account** with
-`payanyone <amount> <account> <bank> <name>`. The money only moves after
+`payanyone <amount> <account> <bank code> <narration>`. The beneficiary's name
+is verified from their bank account and stored. The money only moves after
 **three distinct super admins** approve (`approvepay <id>` on the `pendingpay`
-list). Every step is audited; the payout is name-checked and booked as a
-ledger expense. Self-approval is blocked and repeat approvals are rejected.
+list). Every step is audited; the payout is booked as a ledger expense.
+Self-approval is blocked and repeat approvals are rejected.
 
 ## Buy-votes (what should the coop buy?)
 
@@ -307,13 +310,13 @@ Super admins configure salaries with
 `setsalary <phone> <amount>`. `runpayroll <narration>` pays everyone configured —
 **to their registered bank accounts, never wallets** — with a mandatory
 narration recorded in the ledger and audit log. Members without bank details
-are skipped and reported. `salarylist` (alias `runpayrollprep`) shows the
-configured salaries and last payroll run.
+are skipped and reported. `salarylist` (alias `runpayrollprep`) lists the
+configured salaries.
 
 ## Exports
 
-`export members` / `export ledger` generates **Excel (.xlsx) and PDF** files,
-saves them under `exports/`, emails download links to the requesting super
+`export members` / `export transactions|pnl` generates **Excel (.xlsx) and PDF**
+files, saves them under `exports/`, emails download links to the requesting super
 admin (SMTP config), and returns dashboard links. Exports are audited.
 
 ## Guarantor default deductions
@@ -327,8 +330,9 @@ notified). Clearing the arrears during the window cancels it.
 
 ## Backups
 
-A daily scheduler job snapshots the SQLite database file into
-`backups/backup-YYYY-MM-DD.db.gz`, keeping the newest 30.
+A daily scheduler job dumps the database state to `backups/coop-backup-<timestamp>.json`
+(kept for the newest `BACKUP_KEEP` — default 14), and optionally uploads each
+snapshot to S3-compatible object storage when `BACKUP_*` credentials are set.
 
 ## Support tickets
 
@@ -348,10 +352,9 @@ a unit election is automatically installed as that unit's admin.
 ## Payment provider failover
 
 Top-ups and payouts run through **Monnify** (primary) with **Paystack** as the
-automatic fallback (Flutterwave support remains in the adapter layer). If the
-active provider errors repeatedly it is circuit-broken (5-minute cooldown) and
-the next provider takes over until it recovers. Set credentials via
-`MONNIFY_*` / `PAYSTACK_*` / `FLUTTERWAVE_*` env vars.
+automatic fallback. If the active provider errors repeatedly it is circuit-broken
+(5-minute cooldown) and the next provider takes over until it recovers. Set
+credentials via `MONNIFY_*` / `PAYSTACK_*` env vars.
 
 ## Monthly statements & birthdays
 
@@ -411,7 +414,7 @@ tunnel --url http://localhost:3000`.
 ## Roadmap
 
 - [x] Phase 1: onboarding, balance, savings (this repo)
-- [x] Phase 2: payment adapter (Flutterwave + Paystack), virtual-account top-ups,
+- [x] Phase 2: payment adapter (Monnify + Paystack), virtual-account top-ups,
   loans + approvals, admin dashboard, admin WhatsApp commands, payouts
 - [x] Phase 3: guarantors, auto-disbursement + name verification, units,
   dividends, interest, broadcasts, recurring plans, withdrawals, statements,

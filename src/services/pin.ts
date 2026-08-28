@@ -2,8 +2,9 @@ import { verifyPin } from "../lib/security.js";
 import { checkRateLimit, resetRateLimit } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 
-export const PIN_MAX_ATTEMPTS = 3;
-export const PIN_LOCK_SECONDS = 15 * 60; // 15 minutes
+export const PIN_MAX_ATTEMPTS = Number(process.env.PIN_MAX_ATTEMPTS ?? "3");
+export const PIN_LOCK_MINUTES = Number(process.env.PIN_LOCK_MINUTES ?? "15");
+export const PIN_LOCK_SECONDS = PIN_LOCK_MINUTES * 60;
 
 export interface PinResult {
   ok: boolean;

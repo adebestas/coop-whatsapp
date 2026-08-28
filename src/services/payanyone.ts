@@ -1,6 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
-import { resolveProvider } from "./payments/index.js";
+import { resolveProvider, markProviderDown } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
@@ -284,6 +284,7 @@ async function payExternal(
     });
     if (!result.ok) {
       // Provider refused — nothing moved. Revert for a clean retry.
+      markProviderDown(provider.name);
       await prisma.externalPayment.updateMany({
         where: { id: payment.id, status: "processing" },
         data: { status: "approved2", payoutReference: result.error ?? "payout failed" },

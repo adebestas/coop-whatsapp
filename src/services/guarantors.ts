@@ -12,7 +12,7 @@ export function requiredGuarantors(borrowerRole?: string): number {
 export const GUARANTOR_TENURE_THRESHOLD = 100;
 const GUARANTOR_MIN_TENURE_MS = 3 * 30 * 24 * 60 * 60 * 1000;
 /** A guarantor can't be on the hook for more than this multiple of their savings. */
-export const GUARANTOR_EXPOSURE_RATIO = 2;
+export const GUARANTOR_EXPOSURE_RATIO = Number(process.env.GUARANTOR_EXPOSURE_RATIO ?? "2");
 /** A member can only stand guarantor for this many active loans at once. */
 export const GUARANTOR_MAX_ACTIVE = 2;
 

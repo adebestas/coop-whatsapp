@@ -1,6 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
-import { resolveProvider, markProviderUp } from "./payments/index.js";
+import { resolveProvider, markProviderDown, markProviderUp } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
 import { recordLedger } from "./ledger.js";
 import { postJournal } from "./journal.js";
@@ -125,6 +125,7 @@ async function payOut(
       });
       if (!result.ok) {
         // Provider explicitly declined — transfer not accepted. Safe to refund.
+        markProviderDown(provider.name);
         const msg = `Not paid out: provider error (${result.error ?? "unknown"}). No money moved.`;
         await opts.onFailure?.("failed", result.error ?? "payout failed");
         await notify(member, msg);

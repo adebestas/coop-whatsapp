@@ -98,17 +98,21 @@ export async function handleHistory(phone: string): Promise<void> {
 
 export async function handleStatement(phone: string, args: string[]): Promise<void> {
   const text = args.join(" ").trim().toLowerCase();
-  if (text.startsWith("yearly")) {
-    const yearStr = text.replace("yearly", "").trim();
-    const year = yearStr ? parseInt(yearStr, 10) : new Date().getFullYear();
-    if (isNaN(year) || year < 2000 || year > 2100) {
-      await sendText({ to: phone, text: "Usage: *statement yearly 2026*" });
-      return;
+  const bareYear = /^\d{4}$/.test(text) ? parseInt(text, 10) : NaN;
+
+  if (text.startsWith("yearly") || (!Number.isNaN(bareYear) && bareYear >= 2000 && bareYear <= 2100)) {
+    let year: number;
+    if (!Number.isNaN(bareYear)) {
+      year = bareYear;
+    } else {
+      const yearStr = text.replace("yearly", "").trim();
+      year = yearStr ? parseInt(yearStr, 10) : new Date().getFullYear();
     }
     const result = await getYearlyStatement(phone, year);
     await sendText({ to: phone, text: result.message });
     return;
   }
+
   if (!text) {
     const now = new Date();
     const monthName = now.toLocaleString("en-GB", { month: "long" });
@@ -116,6 +120,7 @@ export async function handleStatement(phone: string, args: string[]): Promise<vo
     await sendText({ to: phone, text: result.message });
     return;
   }
+
   const result = await getMonthlyStatement(phone, text);
   await sendText({ to: phone, text: result.message });
 }

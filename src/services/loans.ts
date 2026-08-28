@@ -35,9 +35,9 @@ export interface ApplyLoanResult {
 }
 
 /** A loan can never exceed this multiple of the borrower's total savings. */
-export const LOAN_TO_SAVINGS_RATIO = 2;
+export const LOAN_TO_SAVINGS_RATIO = Number(process.env.LOAN_TO_SAVINGS_RATIO ?? "2");
 /** Flat admin charge deducted from every loan at disbursement (₦2,000 in kobo). */
-export const LOAN_ADMIN_CHARGE = 200000;
+export const LOAN_ADMIN_CHARGE = Number(process.env.LOAN_ADMIN_CHARGE ?? "200000");
 /** Maximum allowed interest rate per CBN guidance on cooperative lending. */
 const MAX_ALLOWED_RATE = 15; // 15% max per CBN guidance
 
@@ -93,8 +93,7 @@ export async function applyForLoan(
 
   // Rule: a loan can't exceed 2x the member's total savings.
   const savings = member.wallet?.totalSaved ?? 0;
-  const coopConfig = await getCoopConfig(member.cooperativeId);
-  const loanMultiplier = coopConfig.maxLoanMultiplier;
+  const loanMultiplier = LOAN_TO_SAVINGS_RATIO;
   const maxLoan = Math.floor(savings * loanMultiplier);
   if (maxLoan <= 0) {
     return {
