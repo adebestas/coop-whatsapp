@@ -13,9 +13,6 @@ export const REQUIRED_DEATH_VALIDATIONS = 2;
 /** Waiting period before a claim can be finalized (72 hours). */
 const WAITING_PERIOD_MS = 72 * 60 * 60 * 1000;
 
-/** Family confirmation OTP code TTL (10 minutes). */
-const FAMILY_OTP_TTL_MS = 10 * 60 * 1000;
-
 export interface ClaimResult {
   ok: boolean;
   message: string;

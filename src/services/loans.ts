@@ -224,7 +224,7 @@ export async function approveLoan(
   const shortId = loan.id.slice(-6);
 
   // AML check: flag if member has suspicious recent transactions
-  const amlResult = await flagTransaction({
+  await flagTransaction({
     memberId: loan.memberId,
     cooperativeId: loan.cooperativeId,
     amount: loan.amount,

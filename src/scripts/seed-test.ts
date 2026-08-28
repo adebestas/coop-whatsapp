@@ -10,7 +10,8 @@
  * - Sample contributions, loans, and withdrawals
  */
 import { prisma } from "../lib/prisma.js";
-import { generateMemberCode, hashPin } from "../lib/security.js";
+import { hashPin } from "../lib/security.js";
+import { generateMemberFileNumber } from "../services/cooperative.js";
 
 const COOP_CODE = "TEST01";
 const ADMIN_PHONE = "2348012345678";
@@ -98,10 +99,7 @@ async function createMember(
   coopId: string,
   data: { name: string; phone: string; role: "member" | "admin" | "superadmin" },
 ) {
-  let code = generateMemberCode();
-  while (await prisma.member.findUnique({ where: { code } })) {
-    code = generateMemberCode();
-  }
+  const code = await generateMemberFileNumber(coopId, COOP_CODE);
 
   return prisma.member.upsert({
     where: { cooperativeId_phone: { cooperativeId: coopId, phone: data.phone } },

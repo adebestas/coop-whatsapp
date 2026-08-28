@@ -10,7 +10,7 @@ import { paymentWebhookRoutes } from "./routes/payments.js";
 import { adminApiRoutes } from "./routes/admin.js";
 import { serveExportFile } from "./routes/exports.js";
 import { prisma } from "./lib/prisma.js";
-import { getRedis, isRedisConnected } from "./lib/cache.js";
+import { isRedisConnected } from "./lib/cache.js";
 
 declare module "fastify" {
   interface FastifyRequest {

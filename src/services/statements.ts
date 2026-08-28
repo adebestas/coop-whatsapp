@@ -182,7 +182,6 @@ export async function getMonthlyStatement(phone: string, args: string): Promise<
   ];
 
   if (activeLoan) {
-    const totalLoanRepaid = loanRepayments.reduce((s, r) => s + r.amount, 0);
     lines.push(
       ``,
       `🏦 *Loan*`,

@@ -1,10 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { verifyPin } from "../lib/security.js";
-import { checkRateLimit, getRedis } from "../lib/cache.js";
+import { checkRateLimit } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 import { approveLoan } from "../services/loans.js";
 import { notifyMember } from "../lib/messaging.js";
+import { sign, revokeToken, isTokenRevoked, verifyAdminToken, requireLiveAdmin } from "../lib/admin-auth.js";
 
 /**
  * Minimal admin auth for the dashboard: members log in with their WhatsApp
@@ -12,12 +13,6 @@ import { notifyMember } from "../lib/messaging.js";
  * short-lived token (phone signed with the server secret). All other routes
  * require `Authorization: Bearer <token>`.
  */
-import crypto from "node:crypto";
-import { timingSafeEqual } from "node:crypto";
-
-const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
-const TOKEN_BLACKLIST_PREFIX = "admin:token:blacklist:";
-const TOKEN_BLACKLIST_TTL_SECONDS = Math.ceil(TOKEN_TTL_MS / 1000);
 
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_WINDOW_SECONDS = 60; // 1 minute
@@ -36,81 +31,6 @@ async function checkLoginRateLimit(ip: string, phone?: string): Promise<{ allowe
   }
 
   return { allowed: true };
-}
-
-/**
- * Revoke an admin token by storing its hash in Redis with a TTL matching
- * the token's remaining lifetime. After expiry, the token is no longer
- * valid even if its HMAC signature is correct.
- */
-export async function revokeToken(token: string): Promise<void> {
-  const client = getRedis();
-  if (!client) return;
-  const hash = crypto.createHash("sha256").update(token).digest("hex");
-  try {
-    await client.setex(`${TOKEN_BLACKLIST_PREFIX}${hash}`, TOKEN_BLACKLIST_TTL_SECONDS, "1");
-  } catch (err) {
-    console.error("[admin] failed to revoke token:", err);
-  }
-}
-
-/**
- * Check whether a token has been revoked (exists in the Redis blacklist).
- * Fails OPEN when Redis is unavailable (returns not-revoked) so a transient
- * Redis/Upstash outage never locks admins out of the dashboard; signature
- * + expiry validation still gate every request.
- */
-async function isTokenRevoked(token: string): Promise<boolean> {
-  const client = getRedis();
-  if (!client) return false; // Allow token when Redis is unavailable
-  const hash = crypto.createHash("sha256").update(token).digest("hex");
-  try {
-    const exists = await client.exists(`${TOKEN_BLACKLIST_PREFIX}${hash}`);
-    return exists === 1;
-  } catch {
-    return true;
-  }
-}
-
-function getSecret(): string {
-  const secret = process.env.ADMIN_JWT_SECRET;
-  if (!secret) throw new Error("ADMIN_JWT_SECRET is not configured");
-  return secret;
-}
-
-interface AdminTokenPayload {
-  phone: string;
-  cooperativeId: string;
-  role: string;
-}
-
-// NOTE: Token includes cooperativeId for cooperative isolation — becomes critical for multi-tenant deployments.
-function sign(phone: string, cooperativeId: string, role: string): string {
-  const secret = getSecret();
-  const payload = Buffer.from(JSON.stringify({ phone, cooperativeId, role, iat: Date.now() })).toString("base64url");
-  const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-  return `${payload}.${sig}`;
-}
-
-function verify(token: string): AdminTokenPayload | null {
-  const dotIdx = token.lastIndexOf(".");
-  if (dotIdx === -1) return null;
-  const payload = token.slice(0, dotIdx);
-  const sig = token.slice(dotIdx + 1);
-  const secret = getSecret();
-  const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-  try {
-    if (!timingSafeEqual(Buffer.from(expected), Buffer.from(sig))) return null;
-  } catch {
-    return null;
-  }
-  try {
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (Date.now() - data.iat > TOKEN_TTL_MS) return null;
-    return { phone: data.phone, cooperativeId: data.cooperativeId, role: data.role };
-  } catch {
-    return null;
-  }
 }
 
 export async function adminApiRoutes(app: FastifyInstance) {
@@ -150,6 +70,21 @@ export async function adminApiRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: "invalid credentials" });
     }
 
+    // Reject suspended/deceased admins outright — they must not be able to
+    // mint a token (defense against the export route and any future surface
+    // that trusts the token alone). The preHandler's live re-check is the
+    // authoritative gate; this closes the token-issuance path too.
+    if (member.status === "suspended" || member.status === "deceased") {
+      await recordSuspiciousEvent({
+        memberId: member.id,
+        cooperativeId: member.cooperativeId,
+        memberPhone: phone,
+        event: "admin_login_inactive",
+        detail: `Inactive admin (${member.status}) login attempt from IP ${ip}`,
+      });
+      return reply.code(403).send({ error: "Account is not active" });
+    }
+
     const token = sign(phone, member.cooperative.id, member.role);
     return {
       token,
@@ -185,32 +120,25 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
     const auth = req.headers.authorization;
     const rawToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-    const payload = rawToken ? verify(rawToken) : null;
+    const payload = rawToken ? verifyAdminToken(rawToken) : null;
     if (!payload) {
       return reply.code(401).send({ error: "unauthorized" });
     }
     if (rawToken && await isTokenRevoked(rawToken)) {
       return reply.code(401).send({ error: "token revoked" });
     }
-    req.adminPhone = payload.phone;
-    req.adminCoopId = payload.cooperativeId;
-    req.adminRole = payload.role;
 
-    // Re-check the member's CURRENT role/status from the DB on every request
-    // so a demoted, suspended, or deceased admin loses dashboard access
-    // immediately (not at token expiry). The token's role is self-contained
-    // and can go stale.
-    const live = await prisma.member.findFirst({
-      where: { phone: payload.phone, cooperativeId: payload.cooperativeId },
-      select: { role: true, status: true },
-    });
-    if (
-      !live ||
-      !["admin", "superadmin"].includes(live.role) ||
-      (live.status === "suspended" || live.status === "deceased")
-    ) {
+    // Re-check the member's CURRENT role/status from the DB (fail-closed) so
+    // a demoted, suspended, or deceased admin loses dashboard access
+    // immediately (not at token expiry). The live read re-derives the phone,
+    // role, AND cooperativeId from the DB row rather than trusting the
+    // self-contained, possibly-stale token claims.
+    const live = await requireLiveAdmin(payload);
+    if (!live) {
       return reply.code(401).send({ error: "unauthorized" });
     }
+    req.adminPhone = live.phone;
+    req.adminCoopId = live.cooperativeId;
     req.adminRole = live.role;
   });
 

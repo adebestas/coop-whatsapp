@@ -394,8 +394,10 @@ export async function autoFileSTR(
     });
     if (existing) return { filed: false };
 
-    // TODO: Implement CBN API integration for automated STR filing
-    // CBN requires filing within 72 hours of detection
+    // Attempt automated STR filing with the CBN via an optional webhook.
+    // CBN requires filing within 72 hours of detection. If CBN_STR_WEBHOOK is
+    // not configured, the report is created as PENDING and super admins are
+    // notified to file manually within the 72-hour deadline.
     const str = await prisma.sTR.create({
       data: {
         cooperativeId: tx.cooperativeId,
@@ -406,13 +408,56 @@ export async function autoFileSTR(
       },
     });
 
-    // Notify super admin(s). This creates a PENDING report for MANUAL filing
-    // with the CBN (within the 72-hour deadline) — it is not auto-submitted.
+    const payload = {
+      strId: str.id,
+      cooperativeId: tx.cooperativeId,
+      memberId: tx.memberId,
+      amount: tx.amount,
+      currency: "NGN",
+      reason,
+      detectedAt: new Date().toISOString(),
+      reportingEntity: process.env.COOP_NAME ?? "Cooperative",
+    };
+
+    let autoFiled = false;
+    const cbnWebhook = process.env.CBN_STR_WEBHOOK;
+    if (cbnWebhook) {
+      try {
+        const resp = await fetch(cbnWebhook, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(process.env.CBN_STR_TOKEN ? { Authorization: `Bearer ${process.env.CBN_STR_TOKEN}` } : {}),
+          },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (resp.ok) {
+          await prisma.sTR.update({
+            where: { id: str.id },
+            data: { status: "filed", filedAt: new Date() },
+          });
+          autoFiled = true;
+        } else {
+          console.error(`[aml] CBN STR webhook rejected with ${resp.status}: ${await resp.text()}`);
+        }
+      } catch (err) {
+        console.error("[aml] CBN STR webhook submission failed:", err);
+      }
+    }
+
+    // Notify super admin(s). If auto-filed, confirm; otherwise create a PENDING
+    // report requiring MANUAL filing with the CBN within the 72-hour deadline.
     const members = await prisma.member.findMany({
       where: { cooperativeId: tx.cooperativeId, role: "superadmin", status: "active" },
     });
     for (const admin of members) {
-      await notifyMember(admin, `🚨 *STR Created (Pending CBN Filing)*\n\nMember: ${tx.memberId}\nAmount: ${formatBalance(tx.amount)}\nReason: ${reason}\n\nThis report must be *manually filed with the CBN within 72 hours*.`);
+      await notifyMember(
+        admin,
+        autoFiled
+          ? `🚨 *STR Auto-Filed with CBN*\n\nMember: ${tx.memberId}\nAmount: ${formatBalance(tx.amount)}\nReason: ${reason}\nReference: ${str.id}`
+          : `🚨 *STR Created (Pending CBN Filing)*\n\nMember: ${tx.memberId}\nAmount: ${formatBalance(tx.amount)}\nReason: ${reason}\n\nSet \`CBN_STR_WEBHOOK\` to auto-file. Until then, this report must be *manually filed with the CBN within 72 hours*.`,
+      );
     }
 
     return { filed: true, strId: str.id };

@@ -126,25 +126,6 @@ export async function cacheDel(key: string): Promise<void> {
 }
 
 /**
- * Delete all keys matching a pattern
- */
-export async function cacheDelPattern(pattern: string): Promise<void> {
-  const client = getRedis();
-  if (!client) return;
-
-  try {
-    let cursor = '0';
-    do {
-      const [nextCursor, keys] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-      cursor = nextCursor;
-      if (keys.length > 0) await client.del(...keys);
-    } while (cursor !== '0');
-  } catch (err) {
-    console.error("[Redis] cacheDelPattern error:", err);
-  }
-}
-
-/**
  * Check if Redis is connected
  */
 export function isRedisConnected(): boolean {

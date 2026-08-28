@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { sendText, notifyMember } from "../lib/messaging.js";
+import { notifyMember } from "../lib/messaging.js";
 import { audit } from "./audit.js";
 
 const BROADCAST_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between broadcasts
@@ -145,9 +145,9 @@ export async function startVote(
   }
 
   let unitId: string | null = null;
-  let position: string | null = null;
-  let electionType: string = "general";
-  let voteTitle = "";
+  let position: string | null;
+  let electionType: string;
+  let voteTitle: string;
 
   if (kind === "unit") {
     electionType = "workplace";
@@ -337,7 +337,7 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
     data: { status: "closed", closedAt: new Date(), winnerId: tied ? null : winner.memberId },
   });
 
-  let quorumMessage = "";
+  let quorumMessage: string;
   if (quorumMet) {
     quorumMessage = `✅ Quorum met (${totalVotes} of ${quorumRequired} votes needed). Results are binding.`;
   } else {

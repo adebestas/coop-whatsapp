@@ -184,68 +184,6 @@ export async function runWalletReconciliation(
 
 // ---- Fund segregation ----
 
-/** Sum of all "member" fundType ledger entries (member trust fund). */
-export async function getMemberFundBalance(cooperativeId: string): Promise<number> {
-  const result = await prisma.ledgerEntry.aggregate({
-    where: { cooperativeId, fundType: "member" },
-    _sum: { amount: true },
-  });
-  return result._sum.amount ?? 0;
-}
-
-/** Sum of all "operational" fundType ledger entries (cooperative operating funds). */
-export async function getOperationalFundBalance(cooperativeId: string): Promise<number> {
-  const result = await prisma.ledgerEntry.aggregate({
-    where: { cooperativeId, fundType: "operational" },
-    _sum: { amount: true },
-  });
-  return result._sum.amount ?? 0;
-}
-
-/** Sum of all "reserve" fundType ledger entries (statutory reserve). */
-export async function getReserveFundBalance(cooperativeId: string): Promise<number> {
-  const result = await prisma.ledgerEntry.aggregate({
-    where: { cooperativeId, fundType: "reserve" },
-    _sum: { amount: true },
-  });
-  return result._sum.amount ?? 0;
-}
-
-/** Threshold: alert if operational fund exceeds 15% of total. */
-const OPERATIONAL_THRESHOLD_PCT = 15;
-
-/**
- * Formatted fund segregation report showing the breakdown of member trust,
- * operational, and reserve funds with percentage allocation and alerts.
- */
-export async function getSegregationReport(cooperativeId: string): Promise<string> {
-  const [memberFund, operationalFund, reserveFund] = await Promise.all([
-    getMemberFundBalance(cooperativeId),
-    getOperationalFundBalance(cooperativeId),
-    getReserveFundBalance(cooperativeId),
-  ]);
-
-  const total = memberFund + operationalFund + reserveFund;
-
-  const pct = (n: number) => (total > 0 ? Math.round((n / total) * 100) : 0);
-
-  const lines: string[] = [];
-  lines.push(`📊 *Fund Segregation Report*`);
-  lines.push(``);
-  lines.push(`Member Trust Fund:    ${formatBalance(memberFund)} (${pct(memberFund)}%)`);
-  lines.push(`Operational Fund:     ${formatBalance(operationalFund)} (${pct(operationalFund)}%)`);
-  lines.push(`Reserve Fund:         ${formatBalance(reserveFund)} (${pct(reserveFund)}%)`);
-  lines.push(`Total:                ${formatBalance(total)}`);
-
-  // Alert if operational fund exceeds threshold
-  if (total > 0 && pct(operationalFund) > OPERATIONAL_THRESHOLD_PCT) {
-    lines.push(``);
-    lines.push(`⚠️ *Alert*: Operational fund exceeds ${OPERATIONAL_THRESHOLD_PCT}% threshold (${pct(operationalFund)}%). Consider transferring excess to reserve or distributing as dividend.`);
-  }
-
-  return lines.join("\n");
-}
-
 /** List of all reserve fund allocations for a cooperative, newest first. */
 export async function getReserveHistory(cooperativeId: string) {
   return prisma.reserveAllocation.findMany({

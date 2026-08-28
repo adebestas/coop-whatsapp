@@ -107,7 +107,3 @@ export async function getStatusPosts(cooperativeId: string): Promise<string[]> {
 
   return posts.map((p) => p.content);
 }
-
-export function startStatusScheduler(): void {
-  setInterval(postAutoStatus, 60 * 60 * 1000); // Check every hour
-}

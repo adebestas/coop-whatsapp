@@ -3,7 +3,8 @@
  * Usage: npx tsx src/seed.ts --name "Oyo Farmers Coop" --code OYOF1 --state Oyo --admin-name "Ade Ade" --admin-phone 2348012345678 --admin-pin 1234
  */
 import { prisma } from "./lib/prisma.js";
-import { generateMemberCode, hashPin } from "./lib/security.js";
+import { hashPin } from "./lib/security.js";
+import { generateMemberFileNumber } from "./services/cooperative.js";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -36,12 +37,7 @@ async function main() {
   const existing = await prisma.member.findUnique({
     where: { cooperativeId_phone: { cooperativeId: coop.id, phone: adminPhone } },
   });
-  let memberCode = existing?.code ?? generateMemberCode();
-  if (!existing) {
-    while (await prisma.member.findUnique({ where: { code: memberCode } })) {
-      memberCode = generateMemberCode();
-    }
-  }
+  const memberCode = existing?.code ?? (await generateMemberFileNumber(coop.id, coop.code));
 
   await prisma.member.upsert({
     where: { cooperativeId_phone: { cooperativeId: coop.id, phone: adminPhone } },

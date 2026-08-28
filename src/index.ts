@@ -6,9 +6,13 @@ import {
   runDailyDigest,
   runMonthlyStatements,
   runBirthdayGreetings,
+  runDataRetention,
+  runProactiveAlerts,
 } from "./services/scheduler.js";
 import { checkAnniversaries } from "./services/anniversary.js";
 import { scanGuarantorDefaults, executeDueDeductions } from "./services/guarantordeduction.js";
+import { postAutoStatus } from "./services/status-scheduler.js";
+import { cleanupExpiredVirtualAccounts } from "./services/payments/topup.js";
 import { runBackup } from "./services/backup.js";
 import { runReconciliation } from "./services/reconcile.js";
 import { runTransferPolling, transferPollIntervalMs } from "./services/statuspoller.js";
@@ -150,6 +154,10 @@ async function main() {
             if (n > 0) await executeDueDeductions().catch(() => {});
           })
           .catch((err) => app.log.error("[scheduler] guarantor default scan failed", err));
+        await postAutoStatus().catch((err) => app.log.error("[scheduler] status auto-post failed", err));
+        await cleanupExpiredVirtualAccounts().catch((err) => app.log.error("[scheduler] virtual account cleanup failed", err));
+        await runDataRetention().catch((err) => app.log.error("[scheduler] data retention failed", err));
+        await runProactiveAlerts().catch((err) => app.log.error("[scheduler] proactive alerts failed", err));
       } finally {
         schedulerRunning = false;
       }

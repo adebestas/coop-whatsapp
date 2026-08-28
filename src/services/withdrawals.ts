@@ -2,7 +2,6 @@ import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { sendText, notifyMember } from "../lib/messaging.js";
 import { sendToBank } from "./disbursements.js";
-import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
 import { LIMITS } from "../lib/money.js";
 import { audit } from "./audit.js";
 import { checkVelocity } from "./fraud.js";

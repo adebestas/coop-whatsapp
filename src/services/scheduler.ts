@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
 import { showHistory } from "./statements.js";
+import { runAllAlerts } from "../lib/ai-alerts.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -169,6 +170,9 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
 // we use 7 for safety margin.
 
 export async function runDataRetention(now = new Date()): Promise<{ anonymized: number; deleted: number }> {
+  // Monthly job — runs on the 1st of the month.
+  if (now.getDate() !== 1) return { anonymized: 0, deleted: 0 };
+
   const sevenYearsAgo = new Date(now);
   sevenYearsAgo.setFullYear(sevenYearsAgo.getFullYear() - 7);
 
@@ -281,4 +285,26 @@ async function notifySuperAdminsDigest(cooperativeId: string, text: string): Pro
   for (const s of supers) {
     await notifyMember(s, text).catch(() => {});
   }
+}
+
+// ---- Proactive intelligence alerts (opt-in) ----
+// Savings reminders, loan/overdue reminders, low-balance warnings, trend
+// alerts and monthly summaries. Runs monthly (on the 1st) so members are
+// not nagged repeatedly; deduped per cooperative per month.
+
+const aiAlertsLastRun = new Map<string, string>();
+
+export async function runProactiveAlerts(now = new Date()): Promise<number> {
+  if (now.getDate() !== 1) return 0;
+
+  const coops = await prisma.cooperative.findMany({ select: { id: true } });
+  let ran = 0;
+  for (const coop of coops) {
+    const key = `${coop.id}:${now.getFullYear()}-${now.getMonth()}`;
+    if (aiAlertsLastRun.get(coop.id) === key) continue;
+    await runAllAlerts(coop.id).catch((err) => console.error("[scheduler] proactive alerts failed", err));
+    aiAlertsLastRun.set(coop.id, key);
+    ran++;
+  }
+  return ran;
 }

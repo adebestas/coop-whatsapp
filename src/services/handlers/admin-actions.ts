@@ -8,7 +8,7 @@ import { createTicket, listTickets, resolveTicket } from "../support.js";
 import { listPosts } from "../posts.js";
 import { myDeduction, requestMonthWaiver } from "../deductions.js";
 import { validateClaim, confirmFamily } from "../deathclaims.js";
-import { generateSupportResponse, generateContextualHelp } from "../../lib/ai-support.js";
+import { generateContextualHelp } from "../../lib/ai-support.js";
 import { verifyMemberPin } from "../pin.js";
 import { issueSecretChallenge } from "./session.js";
 

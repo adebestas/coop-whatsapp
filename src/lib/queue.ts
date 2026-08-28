@@ -52,8 +52,8 @@ export interface DigestJob {
 
 // ===== Queue Singleton =====
 
-let queueMap: Map<string, Queue> = new Map();
-let workerMap: Map<string, Worker> = new Map();
+const queueMap: Map<string, Queue> = new Map();
+const workerMap: Map<string, Worker> = new Map();
 
 /**
  * Get or create a queue
@@ -204,66 +204,16 @@ export async function closeQueues(): Promise<void> {
 export function initQueueProcessors(): void {
   // Notifications queue
   processQueue<NotificationJob>(QUEUE_NAMES.NOTIFICATIONS, async (job) => {
-    const { type, to, message } = job.data;
+    const { to, message } = job.data;
     // Import dynamically to avoid circular deps
     const { sendText } = await import("./messaging.js");
     await sendText({ to, text: message });
   });
 
-  // TODO: Implement these processors
-  // Payments queue
-  processQueue<PaymentJob>(QUEUE_NAMES.PAYMENTS, async (job) => {
-    const { type, payoutId } = job.data;
-    console.warn(`[Queue] Processing payment ${type} for payout ${payoutId}`);
-  });
-
-  // Exports queue
-  processQueue<ExportJob>(QUEUE_NAMES.EXPORTS, async (job) => {
-    const { type, coopId, format, requestedBy } = job.data;
-    console.warn(`[Queue] Generating ${type} export (${format}) for coop ${coopId}`);
-  });
-
-  // Backups queue
-  processQueue<BackupJob>(QUEUE_NAMES.BACKUPS, async (job) => {
-    const { type, coopId } = job.data;
-    console.warn(`[Queue] Running ${type} backup for coop ${coopId}`);
-  });
-
-  // Digest queue
-  processQueue<DigestJob>(QUEUE_NAMES.DIGEST, async (job) => {
-    const { type, coopId } = job.data;
-    console.warn(`[Queue] Generating ${type} digest for coop ${coopId}`);
-  });
+  // NOTE: Payments, exports, backups and digests are executed synchronously by
+  // their own services (disbursement/status-poller, export routes, backup
+  // scheduler, digest scheduler). No code enqueues to those queues, so they
+  // have no processors.
 
   console.warn("[Queue] All processors initialized");
 }
-
-// ===== Convenience Functions =====
-
-export const queues = {
-  /**
-   * Send a notification
-   */
-  sendNotification: (data: NotificationJob) => addJob(QUEUE_NAMES.NOTIFICATIONS, data),
-
-  /**
-   * Process a payment
-   */
-  processPayment: (data: PaymentJob) =>
-    addJob(QUEUE_NAMES.PAYMENTS, data, { priority: data.type === "refund" ? 1 : 0 }),
-
-  /**
-   * Generate an export
-   */
-  generateExport: (data: ExportJob) => addJob(QUEUE_NAMES.EXPORTS, data),
-
-  /**
-   * Run a backup
-   */
-  runBackup: (data: BackupJob) => addJob(QUEUE_NAMES.BACKUPS, data),
-
-  /**
-   * Generate a digest
-   */
-  generateDigest: (data: DigestJob) => addJob(QUEUE_NAMES.DIGEST, data),
-};

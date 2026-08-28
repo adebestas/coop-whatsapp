@@ -108,28 +108,6 @@ export async function updateCoopConfig(
   return getCoopConfig(cooperativeId);
 }
 
-export async function getBranding(cooperativeId: string): Promise<BrandingConfig> {
-  const cacheKey = `branding:${cooperativeId}`;
-  const cached = await cacheGet<BrandingConfig>(cacheKey);
-  if (cached) return cached;
-
-  const branding = await prisma.brandingConfig.findUnique({
-    where: { cooperativeId },
-  });
-
-  const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
-
-  const result: BrandingConfig = {
-    displayName: branding?.displayName ?? coop?.name ?? "Coop Bank",
-    welcomeMessage: branding?.welcomeMessage ?? null,
-    footerText: branding?.footerText ?? null,
-    logoUrl: branding?.logoUrl ?? null,
-  };
-
-  await cacheSet(cacheKey, result, CACHE_TTL);
-  return result;
-}
-
 export async function getSubscription(cooperativeId: string): Promise<SubscriptionConfig> {
   const cacheKey = `subscription:${cooperativeId}`;
   const cached = await cacheGet<SubscriptionConfig>(cacheKey);
@@ -149,29 +127,4 @@ export async function getSubscription(cooperativeId: string): Promise<Subscripti
 
   await cacheSet(cacheKey, result, CACHE_TTL);
   return result;
-}
-
-export async function checkLimits(cooperativeId: string): Promise<{
-  ok: boolean;
-  message?: string;
-  memberCount: number;
-  memberLimit: number;
-}> {
-  const sub = await getSubscription(cooperativeId);
-  const memberCount = await prisma.member.count({
-    where: { cooperativeId, status: "active" },
-  });
-
-  // Subscription member limit: warn instead of hard block to avoid blocking
-  // registration during grace periods or when the admin is aware of the limit.
-  if (memberCount >= sub.memberLimit) {
-    return {
-      ok: true,
-      message: `⚠️ Member limit reached (${memberCount}/${sub.memberLimit} on ${sub.plan} plan). Registration is allowed but consider upgrading to add more members.`,
-      memberCount,
-      memberLimit: sub.memberLimit,
-    };
-  }
-
-  return { ok: true, memberCount, memberLimit: sub.memberLimit };
 }

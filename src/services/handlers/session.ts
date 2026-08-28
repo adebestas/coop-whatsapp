@@ -21,14 +21,10 @@ import type { BotState, FlowData, MessageMeta } from "../conversation.js";
 import { FlowDataSchema, SECRET_STATES } from "../conversation.js";
 import { askEmail, askBirthday, askNokName, parseBirthday } from "./join.js";
 import { getActiveElectionsForNewMember } from "../votes.js";
-import { createCooperative } from "../cooperative.js";
-import { prisma as prismaClient } from "../../lib/prisma.js";
+import { createCooperative, generateMemberFileNumber } from "../cooperative.js";
 import { hashPin, verifyPin } from "../../lib/security.js";
-import { generateMemberCode } from "../../lib/security.js";
-import { checkLimits, getCoopConfig } from "../coop-config.js";
 
 /** A half-finished flow expires after this long. */
-const SESSION_TTL_MS = 30 * 60 * 1000;
 /** OTP codes expire after this long. */
 const OTP_TTL_MS = 10 * 60 * 1000;
 
@@ -973,16 +969,13 @@ export async function handleAwaitingInput(
       });
 
       // Create the admin member
-      let memberCode = generateMemberCode();
-      while (await prisma.member.findUnique({ where: { code: memberCode } })) {
-        memberCode = generateMemberCode();
-      }
+      const memberCode = await generateMemberFileNumber(coop.id, coop.code);
 
       // NOTE: Admin PIN is sent in plaintext over WhatsApp.
       // This is acceptable due to WhatsApp's end-to-end encryption, but the admin
       // should change their PIN immediately after onboarding (setpin command).
       const adminPin = String(randomInt(1000, 9000));
-      const member = await prisma.member.create({
+      await prisma.member.create({
         data: {
           phone,
           contactPhone: adminPhone,
@@ -997,10 +990,6 @@ export async function handleAwaitingInput(
 
       // Link the admin phone to this member if different
       if (phone !== adminPhone) {
-        const adminMemberCode = generateMemberCode();
-        while (await prisma.member.findUnique({ where: { code: adminMemberCode } })) {
-          // regenerate
-        }
         // No second member needed — adminPhone is just a contact number on the Cooperative model
       }
 

@@ -7,7 +7,3 @@ export function roundMoney(n: number): number {
   if (!Number.isFinite(n)) return 0;
   return Math.round(n);
 }
-
-export function assertPositiveAmount(n: number): boolean {
-  return Number.isFinite(n) && roundMoney(n) > 0;
-}

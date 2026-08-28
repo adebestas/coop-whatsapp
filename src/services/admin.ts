@@ -1,7 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { sendText, sendLongText, notifyMember } from "../lib/messaging.js";
 import { cacheDel } from "../lib/cache.js";
-import { listPosts, normalizeTitle, displayTitle } from "./posts.js";
+import { normalizeTitle, displayTitle } from "./posts.js";
 import { buildBatch, submitBatch, approveBatch, rejectBatch, setCommitment, waiveMonth } from "./deductions.js";
 import { approveLoan, listPendingLoans, rejectLoan } from "./loans.js";
 import { formatBalance } from "./cooperative.js";
@@ -20,7 +20,6 @@ import {
   setClaimBank,
   approveClaim,
   rejectClaim,
-  confirmFamily,
 } from "./deathclaims.js";
 import { audit, recentAudit } from "./audit.js";
 import { computePnl, getMonthlySummary, recordLedger } from "./ledger.js";
@@ -42,10 +41,10 @@ import { checkDailyPayoutLimit, checkVelocity } from "./fraud.js";
 import { runBackup } from "./backup.js";
 import { runReconciliation } from "./reconcile.js";
 import { runWalletReconciliation } from "./reconciliation.js";
-import { getSegregationReport, getReserveReport } from "./reconciliation.js";
+import { getReserveReport } from "./reconciliation.js";
 import { resolveProvider } from "./payments/index.js";
 import { assertMoneyAuthorized, assertFreshPin, disable2fa, enable2fa, refreshPin } from "./auth2fa.js";
-import { getCoopConfig, updateCoopConfig, getBranding, getSubscription } from "./coop-config.js";
+import { getCoopConfig, updateCoopConfig, getSubscription } from "./coop-config.js";
 import { startDividendVote, closeDividendVote, dividendVoteStatus } from "./dividendvote.js";
 import { checkMultiSigRequirement, processMultiSigResponse, auditSuperadminCommand } from "../lib/security-hardening.js";
 
@@ -71,28 +70,6 @@ const MONEY_OUT_COMMANDS = new Set([
 async function guardFailed(phone: string, message?: string): Promise<boolean> {
   await sendText({ to: phone, text: message ?? "⛔ Not allowed." });
   return true;
-}
-
-/** Is this phone an admin or super admin of some cooperative? */
-export async function isAdmin(phone: string): Promise<boolean> {
-  const member = await prisma.member.findFirst({
-    where: { phone, role: { in: ["admin", "superadmin"] }, status: "active" },
-  });
-  return member !== null;
-}
-
-export async function makeAdmin(phone: string): Promise<void> {
-  await prisma.member.updateMany({ where: { phone }, data: { role: "admin" } });
-}
-
-/** Super admin = explicit role OR the cooperative's registered adminPhone. */
-export async function isSuperAdmin(phone: string, cooperativeId?: string): Promise<boolean> {
-  const member = await prisma.member.findFirst({
-    where: { phone, status: "active", ...(cooperativeId ? { cooperativeId } : {}) },
-    include: { cooperative: true },
-  });
-  if (!member) return false;
-  return member.role === "superadmin" || member.cooperative.adminPhone === member.phone;
 }
 
 interface AdminContext {
@@ -132,7 +109,7 @@ export async function handleAdminCommand(
   try {
   const ctx = await adminContext(phone);
   if (!ctx) return false;
-  const { admin, coop, unitAdmin, isSuper } = ctx;
+  const { admin, unitAdmin, isSuper } = ctx;
   const coopId = admin.cooperativeId;
 
   // Security gates for account management.
@@ -941,7 +918,6 @@ export async function handleAdminCommand(
       }
 
       const [
-        totalContributions,
         totalLoansDisbursed,
         totalLoansRepaid,
         totalDividends,
@@ -958,10 +934,6 @@ export async function handleAdminCommand(
         officers,
         pnl,
       ] = await Promise.all([
-        prisma.contribution.aggregate({
-          where: { cooperativeId: coopId, status: "confirmed", createdAt: { gte: startOfYear, lt: endOfYear } },
-          _sum: { amount: true },
-        }),
         prisma.loan.aggregate({
           where: { cooperativeId: coopId, status: { in: ["approved", "disbursed", "paid"] }, approvedAt: { gte: startOfYear, lt: endOfYear } },
           _sum: { amount: true },

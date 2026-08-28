@@ -12,21 +12,8 @@
  */
 
 import { prisma } from "./prisma.js";
-import { formatBalance } from "../services/cooperative.js";
 import { getCoopSnapshot, getSavingsTrend, getLoanPerformance } from "./ai-data.js";
 import { groqFetch, groqAvailable, groqModel, GROQ_TIMEOUT_MS } from "./groq.js";
-
-/** Default savings thresholds for recommendations (in kobo). Overridden per-coop if config exists. */
-const DEFAULT_LOW_SAVINGS_THRESHOLD = 100000;   // ₦1,000
-const DEFAULT_HIGH_SAVINGS_THRESHOLD = 500000;  // ₦5,000
-
-async function getSavingsThresholds(cooperativeId: string): Promise<{ low: number; high: number }> {
-  const config = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId } });
-  if (config?.minSavings) {
-    return { low: config.minSavings, high: config.minSavings * 5 };
-  }
-  return { low: DEFAULT_LOW_SAVINGS_THRESHOLD, high: DEFAULT_HIGH_SAVINGS_THRESHOLD };
-}
 
 /**
  * Generate AI-powered financial insights.
@@ -130,63 +117,6 @@ async function generateFallbackInsights(cooperativeId: string): Promise<string> 
   insights += `• Daily payout limit: ${fmt(snapshot.finances.dailyPayoutLimit)}\n`;
 
   return insights;
-}
-
-/**
- * Generate savings analysis for a member.
- */
-export async function generateSavingsAnalysis(
-  memberId: string,
-  cooperativeId: string,
-): Promise<string> {
-  const [member, trends] = await Promise.all([
-    prisma.member.findUnique({
-      where: { id: memberId },
-      include: { wallet: true },
-    }),
-    getSavingsTrend(cooperativeId, 6),
-  ]);
-
-  if (!member?.wallet) return "Could not load your savings data.";
-
-  const fmt = (n: number) => `₦${(n / 100).toLocaleString()}`;
-
-  let analysis = `📊 *Your Savings Analysis*\n\n`;
-  analysis += `Current balance: ${fmt(member.wallet.balance)}\n`;
-  analysis += `Total saved: ${fmt(member.wallet.totalSaved)}\n\n`;
-
-  // Personal trend
-  const memberTrends = await prisma.contribution.groupBy({
-    by: ["createdAt"],
-    where: {
-      memberId,
-      status: "confirmed",
-    },
-    _sum: { amount: true },
-    orderBy: { createdAt: "desc" },
-    take: 6,
-  });
-
-  if (memberTrends.length > 1) {
-    const first = memberTrends[memberTrends.length - 1]?._sum.amount ?? 0;
-    const last = memberTrends[0]?._sum.amount ?? 0;
-    if (first > 0) {
-      const growth = ((last - first) / first) * 100;
-      analysis += `Growth: ${growth > 0 ? "+" : ""}${growth.toFixed(1)}%\n`;
-    }
-  }
-
-  // Recommendations
-  const thresholds = await getSavingsThresholds(cooperativeId);
-  analysis += `\n*Recommendations:*\n`;
-  if (member.wallet.balance < thresholds.low) {
-    analysis += `• Consider increasing your monthly savings to build your emergency fund.\n`;
-  }
-  if (member.wallet.totalSaved > thresholds.high) {
-    analysis += `• Great savings! You may be eligible for a loan.\n`;
-  }
-
-  return analysis;
 }
 
 /**

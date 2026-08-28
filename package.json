@@ -21,7 +21,8 @@
     "format:check": "prettier --check \"src/**/*.ts\"",
     "db:seed": "npx tsx src/scripts/seed-test.ts",
     "db:reset": "npx tsx src/scripts/db-reset.ts --confirm",
-    "db:reset:seed": "npm run db:reset && npm run db:seed"
+    "db:reset:seed": "npm run db:reset && npm run db:seed",
+    "db:migrate-codes": "npx tsx src/scripts/migrate-member-codes.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

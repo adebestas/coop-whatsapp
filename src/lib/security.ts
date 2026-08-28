@@ -36,17 +36,6 @@ export function verifyOtp(otp: string, stored: string): boolean {
   return timingSafeEqual(candidate, expected);
 }
 
-export function generateMemberCode(): string {
-  // Human-friendly, unambiguous: no 0/O/1/I.
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const parts = [6, 4].map((len) => {
-    let s = "";
-    for (let i = 0; i < len; i++) s += chars[randomInt(chars.length)]; // ✅ Cryptographically secure
-    return s;
-  });
-  return parts.join("-");
-}
-
 export function generateGuarantorCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let s = "";

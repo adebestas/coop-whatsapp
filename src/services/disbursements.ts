@@ -91,7 +91,7 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
 async function payOut(
   opts: SendToBankOpts,
   member: { id: string; name: string; cooperativeId: string; phone: string },
-  verifiedName: string | null,
+  _verifiedName: string | null,
 ): Promise<DisbursementResult> {
   const provider = resolveProvider();
   // Deterministic reference: retries reuse the SAME key, so the provider and

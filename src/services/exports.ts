@@ -1,13 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir, unlink } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
 import nodemailer from "nodemailer";
 import { prisma } from "../lib/prisma.js";
 import { computePnl } from "./ledger.js";
-import { formatBalance } from "./cooperative.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
 

@@ -10,7 +10,7 @@
  */
 
 import { prisma } from "./prisma.js";
-import { GROQ_URL, groqAvailable, groqModel, groqHeaders, GROQ_TIMEOUT_MS, groqFetch } from "./groq.js";
+import { groqAvailable, groqModel, GROQ_TIMEOUT_MS, groqFetch } from "./groq.js";
 
 const KNOWN_COMMANDS = [
   "save", "withdraw", "loan", "repay", "balance", "history", "ledger",
@@ -100,7 +100,6 @@ const FAQ_DATABASE: FAQItem[] = [
  */
 function searchFAQ(query: string): FAQItem[] {
   const lowerQuery = query.toLowerCase();
-  const words = lowerQuery.split(/\s+/);
 
   return FAQ_DATABASE.filter((faq) => {
     const score = faq.keywords.reduce((sum, keyword) => {

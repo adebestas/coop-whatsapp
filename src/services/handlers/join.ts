@@ -1,8 +1,6 @@
 import { prisma } from "../../lib/prisma.js";
 import { sendText } from "../../lib/messaging.js";
 import type { FlowData } from "../conversation.js";
-import { issueSecretChallenge } from "./session.js";
-import { formatBalance } from "../cooperative.js";
 
 /**
  * Start the onboarding flow for a NEW cooperative (SaaS self-serve).
@@ -85,18 +83,9 @@ export async function askNokName(phone: string, data: FlowData): Promise<void> {
   });
 }
 
-export async function askPin(phone: string, data: FlowData): Promise<void> {
-  await issueSecretChallenge(
-    phone,
-    "awaiting_pin",
-    data,
-    "Now choose a 4-digit PIN. You'll use it to approve transactions.",
-  );
-}
-
 /** Parse DD/MM (or DD-MM) into a date. Year is arbitrary — only month/day matter. */
 export function parseBirthday(raw: string): Date | null {
-  const m = raw.trim().match(/^(\d{1,2})[\/\-](\d{1,2})$/);
+  const m = raw.trim().match(/^(\d{1,2})[/-](\d{1,2})$/);
   if (!m) return null;
   const day = Number(m[1]);
   const month = Number(m[2]);

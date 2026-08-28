@@ -7,11 +7,10 @@ import {
 import { provisionVirtualAccount } from "../payments/topup.js";
 import { setAutoSave } from "../scheduler.js";
 import { joinUnit } from "../units.js";
-import { withdrawLimit, requestWithdrawal, canWithdraw } from "../withdrawals.js";
+import { withdrawLimit, canWithdraw } from "../withdrawals.js";
 import { computeDividendPreview } from "../dividends.js";
-import { applyForLoan, repayLoan, getQueuePosition } from "../loans.js";
+import { repayLoan, getQueuePosition } from "../loans.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
-import { safeParse } from "./session.js";
 
 export async function handleBalance(
   phone: string,

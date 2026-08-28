@@ -22,45 +22,8 @@ import {
   type CoopSnapshot,
   type MemberSnapshot,
 } from "./ai-data.js";
-import { GROQ_URL, groqAvailable, groqModel, groqHeaders, GROQ_TIMEOUT_MS, groqFetch, validateGroqResponse, parseTokenUsage } from "./groq.js";
+import { groqAvailable, groqModel, GROQ_TIMEOUT_MS, groqFetch, validateGroqResponse, parseTokenUsage } from "./groq.js";
 import { KNOWN_COMMANDS } from "./ai.js";
-
-/** Sleep for the given milliseconds. */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-// NOTE: Duplicate of sleep() in groq.ts — both kept for module isolation.
-
-/**
- * Fetch with exponential backoff retry. Only retries on 5xx errors.
- * Max 3 retries with delays of 1s, 2s, 4s.
- */
-async function fetchWithRetry(
-  url: string,
-  init: RequestInit,
-  maxRetries = 3,
-): Promise<Response> {
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const res = await fetch(url, init);
-      // Only retry on 5xx server errors, not 4xx client errors
-      if (res.ok || res.status < 500) return res;
-      lastError = new Error(`HTTP ${res.status}`);
-      if (attempt < maxRetries) {
-        const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
-        await sleep(delay);
-      }
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < maxRetries) {
-        const delay = Math.pow(2, attempt) * 1000;
-        await sleep(delay);
-      }
-    }
-  }
-  throw lastError;
-}
 
 export type AIQueryType =
   | "member_balance"

@@ -173,11 +173,6 @@ export async function checkVelocity(memberId: string): Promise<boolean> {
   return true;
 }
 
-/** Test hook: clear velocity state. */
-export async function resetVelocity(): Promise<void> {
-  velocityInMemory.clear();
-}
-
 // ---- AI query rate limiting (per member, per hour) ----
 // Uses Redis when available; falls back to per-key in-memory tracking.
 const AI_QUERY_WINDOW_SECONDS = 60 * 60; // 1 hour
@@ -217,9 +212,4 @@ export async function checkAIRateLimit(memberId: string): Promise<boolean> {
     }
   }
   return true;
-}
-
-/** Test hook: clear AI query rate limit state. */
-export async function resetAIRateLimit(): Promise<void> {
-  aiInMemory.clear();
 }

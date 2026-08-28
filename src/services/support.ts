@@ -18,13 +18,6 @@ const SLA_HOURS: Record<string, number> = {
   low: 48,
 };
 
-async function isSupportAgent(phone: string, cooperativeId?: string): Promise<boolean> {
-  const member = await prisma.member.findFirst({
-    where: { phone, role: { in: SUPPORT_ROLES }, ...(cooperativeId ? { cooperativeId } : {}) },
-  });
-  return member !== null;
-}
-
 /** Member opens a support ticket describing their issue. */
 export async function createTicket(phone: string, message: string): Promise<TicketResult> {
   const member = await prisma.member.findFirst({ where: { phone } });

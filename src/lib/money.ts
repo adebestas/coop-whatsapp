@@ -40,22 +40,6 @@ export function forProvider(amount: number, provider: "paystack" | "monnify"): n
   }
 }
 
-// ===== Validation =====
-
-/**
- * Validate amount is a positive integer in kobo
- */
-export function isValidAmount(kobo: number): boolean {
-  return Number.isInteger(kobo) && kobo > 0;
-}
-
-/**
- * Validate amount is within limits
- */
-export function isWithinLimits(kobo: number, min: number, max: number): boolean {
-  return kobo >= min && kobo <= max;
-}
-
 // ===== Limits (in kobo) =====
 
 export const LIMITS = {

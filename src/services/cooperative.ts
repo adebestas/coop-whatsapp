@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { generateMemberCode, hashPin } from "../lib/security.js";
+import { hashPin } from "../lib/security.js";
 import { audit } from "./audit.js";
 import { LIMITS, formatBalance } from "../lib/money.js";
 import { getCoopConfig } from "./coop-config.js";
@@ -10,6 +10,34 @@ export interface JoinResult {
   ok: boolean;
   message: string;
   memberId?: string;
+}
+
+/**
+ * Generate a human-friendly, globally-unique member file number.
+ *
+ * Format: `{COOP}/{YYY}/{MM}/{SEQ}` — e.g. `SC/026/08/081`
+ *   - COOP = cooperative join code, uppercased (e.g. SC)
+ *   - YYY  = last 3 digits of the join year, zero-padded (2026 -> 026)
+ *   - MM   = join month, zero-padded (August -> 08)
+ *   - SEQ  = atomic running per-coop sequence (081 = 81st member of this coop)
+ *
+ * The sequence is incremented atomically on the Cooperative row
+ * (`memberSeq`), so it never collides even under concurrent registration.
+ */
+export async function generateMemberFileNumber(
+  cooperativeId: string,
+  coopCode: string,
+  joinedAt: Date = new Date(),
+): Promise<string> {
+  const prefix = coopCode.trim().toUpperCase();
+  const yy = String(joinedAt.getUTCFullYear() % 1000).padStart(3, "0");
+  const mm = String(joinedAt.getUTCMonth() + 1).padStart(2, "0");
+  const { memberSeq } = await prisma.cooperative.update({
+    where: { id: cooperativeId },
+    data: { memberSeq: { increment: 1 } },
+    select: { memberSeq: true },
+  });
+  return `${prefix}/${yy}/${mm}/${String(memberSeq).padStart(3, "0")}`;
 }
 
 /**
@@ -71,10 +99,7 @@ export async function findOrCreateMember(
     }
   }
 
-  let code = generateMemberCode();
-  while (await prisma.member.findUnique({ where: { code } })) {
-    code = generateMemberCode();
-  }
+  const code = await generateMemberFileNumber(coop.id, coop.code);
 
   const member = await prisma.member.create({
     data: {
@@ -115,10 +140,6 @@ export async function getMemberByPhone(phone: string) {
   });
   if (member) memberCache.set(phone, { data: member, expires: Date.now() + CACHE_TTL });
   return member;
-}
-
-export async function getCoopByCode(code: string) {
-  return prisma.cooperative.findUnique({ where: { code } });
 }
 
 /**

@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import { prisma } from "./prisma.js";
-import { sendText, notifyMember } from "./messaging.js";
-import { cacheDel } from "./cache.js";
+import { sendText } from "./messaging.js";
 import { audit } from "../services/audit.js";
 
 // ---- Device Binding & Session Anomaly Detection ----
@@ -9,13 +8,6 @@ import { audit } from "../services/audit.js";
 
 const DEVICE_FINGERPRINT_KEY = "session:device:";
 const ANOMALY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
-
-interface DeviceInfo {
-  phone: string;
-  platform: string;
-  ip: string;
-  timestamp: number;
-}
 
 /**
  * Record and validate a device fingerprint for a member session.
@@ -124,7 +116,6 @@ export async function recordSuspiciousEvent(params: {
 }): Promise<{ frozen: boolean; reason?: string }> {
   const { memberId, cooperativeId, memberPhone, event, detail } = params;
   const cacheKey = `suspicious:${memberId}`;
-  const now = Date.now();
 
   try {
     const { getRedis } = await import("./cache.js");

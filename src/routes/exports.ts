@@ -2,60 +2,36 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import type { FastifyInstance } from "fastify";
-import crypto from "node:crypto";
-import { timingSafeEqual } from "node:crypto";
+import { verifyAdminToken, isTokenRevoked, requireLiveAdmin } from "../lib/admin-auth.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
-const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
-
-function getSecret(): string {
-  const secret = process.env.ADMIN_JWT_SECRET;
-  if (!secret) throw new Error("ADMIN_JWT_SECRET is not configured");
-  return secret;
-}
 
 /**
- * Verify admin dashboard token (shared with admin.ts).
- * Returns the phone number if valid, null otherwise.
- *
- * NOTE: Must match the token format produced by admin.ts `sign()`:
- * `<base64url(JSON payload + iat)>.` + HMAC hex digest (2 parts). The iat
- * lives inside the JSON payload, not as a separate part.
- */
-function verifyToken(token: string): string | null {
-  const dotIdx = token.lastIndexOf(".");
-  if (dotIdx === -1) return null;
-  const payload = token.slice(0, dotIdx);
-  const sig = token.slice(dotIdx + 1);
-  const secret = getSecret();
-  const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-  try {
-    if (!timingSafeEqual(Buffer.from(expected), Buffer.from(sig))) return null;
-  } catch {
-    return null;
-  }
-  try {
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (!data.phone || Date.now() - data.iat > TOKEN_TTL_MS) return null;
-    return data.phone;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Serves generated export files (Excel/PDF). Requires admin authentication.
+ * Serves generated export files (Excel/PDF). Requires an ACTIVE admin token:
+ * signature + expiry + revocation are checked, then the caller's CURRENT
+ * role/status are re-read live from the DB (fail-closed) so a demoted,
+ * suspended, deceased, or deleted admin can never download files.
  */
 export const serveExportFile = (app: FastifyInstance): void => {
   app.get("/api/export/:filename", async (req, reply) => {
-    // ✅ Require admin authentication
     const auth = req.headers.authorization;
     if (!auth?.startsWith("Bearer ")) {
       return reply.code(401).send({ error: "Authentication required" });
     }
-    const token = verifyToken(auth.slice(7));
-    if (!token) {
+    const rawToken = auth.slice(7);
+    const payload = verifyAdminToken(rawToken);
+    if (!payload) {
       return reply.code(401).send({ error: "Invalid or expired token" });
+    }
+    if (await isTokenRevoked(rawToken)) {
+      return reply.code(401).send({ error: "Token revoked" });
+    }
+    // Fail-closed live check: the caller must CURRENTLY be an active
+    // admin/superadmin in the DB, not merely hold a signed (possibly stale,
+    // revoked, or formerly-admin) token.
+    const live = await requireLiveAdmin(payload);
+    if (!live) {
+      return reply.code(401).send({ error: "Not authorized" });
     }
 
     const { filename } = req.params as { filename: string };

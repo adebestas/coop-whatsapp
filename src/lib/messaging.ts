@@ -1,4 +1,4 @@
-import { sendText as sendWhatsApp, sendFlowMessage, sendTemplate as sendWhatsAppTemplate } from "./whatsapp.js";
+import { sendText as sendWhatsApp, sendFlowMessage } from "./whatsapp.js";
 import { sendTelegramMessage } from "./telegram.js";
 import { config } from "../config.js";
 import { prisma } from "./prisma.js";
@@ -100,16 +100,6 @@ export async function notifyMember(
  * Channel-aware template sender (WhatsApp only).
  * Telegram does not support template messages; falls back to plain text.
  */
-export async function sendTemplate(
-  to: string,
-  templateName: string,
-  langCode: string,
-  params?: string[],
-): Promise<boolean> {
-  if (to.startsWith("tg:")) return false;
-  return sendWhatsAppTemplate(to, templateName, langCode, params);
-}
-
 export async function sendLongText(params: { to: string; text: string }): Promise<boolean> {
   const MAX_LEN = 3500;
   if (params.text.length <= MAX_LEN) return sendText(params);

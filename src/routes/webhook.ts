@@ -50,6 +50,14 @@ function verifyWhatsAppSignature(rawBody: string, signature: string | undefined)
   }
 }
 
+/** Constant-time string comparison (length-guarded so timingSafeEqual doesn't throw). */
+function constantsEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
 export async function webhookRoutes(app: FastifyInstance) {
   // ---- GET: Meta verifies your webhook URL ----
   app.get("/webhook", async (req, reply) => {
@@ -58,10 +66,13 @@ export async function webhookRoutes(app: FastifyInstance) {
     const token = query["hub.verify_token"];
     const challenge = query["hub.challenge"];
 
-    if (mode === "subscribe" && token === config.whatsapp.verifyToken) {
-      return reply.type("text/plain").send(challenge);
+    // Reject outright when no verify token is configured (avoids the
+    // misconfigured empty-default case where mode=subscribe&hub.verify_token=
+    // could complete the handshake), and compare constant-time.
+    if (!config.whatsapp.verifyToken || mode !== "subscribe" || !token || !constantsEqual(token, config.whatsapp.verifyToken)) {
+      return reply.code(403).send("Verification failed");
     }
-    return reply.code(403).send("Verification failed");
+    return reply.type("text/plain").send(challenge);
   });
 
   // ---- POST: Meta delivers incoming messages ----

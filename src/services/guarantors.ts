@@ -184,13 +184,6 @@ export async function confirmGuarantee(phone: string, code: string): Promise<Gua
   };
 }
 
-export async function getLoanWithGuarantors(loanId: string) {
-  return prisma.loan.findUnique({
-    where: { id: loanId },
-    include: { guarantors: { include: { member: true } }, member: true },
-  });
-}
-
 async function uniqueGuarantorCode(): Promise<string> {
   let code = generateGuarantorCode();
   while (await prisma.guarantor.findUnique({ where: { code } })) {

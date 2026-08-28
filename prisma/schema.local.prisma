@@ -26,6 +26,7 @@ model Cooperative {
   loanInterestRate   Float               @default(2) // fallback monthly % charged on loans (percentage)
   dailyPayoutLimit   Int                 @default(100000000) // fraud guard: max total money-out per day in kobo (₦1M)
   reserveFundBalance Int                 @default(0) // statutory reserve fund balance in kobo
+  memberSeq          Int                 @default(0) // atomic per-coop member sequence used for file numbers (COOP/YYY/MM/seq)
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   members            Member[]

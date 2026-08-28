@@ -55,7 +55,7 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
     s.kobo = Math.floor(s.raw);
     s.remainder = s.raw - s.kobo;
   }
-  let assigned = rawShares.reduce((sum, s) => sum + s.kobo, 0);
+  const assigned = rawShares.reduce((sum, s) => sum + s.kobo, 0);
   let leftover = memberPoolKobo - assigned;
   // Distribute leftover kobo to members with largest fractional remainders
   rawShares.sort((a, b) => b.remainder - a.remainder);
@@ -229,7 +229,7 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
       s.kobo = Math.floor(s.raw);
       s.remainder = s.raw - s.kobo;
     }
-    let assigned = rawShares.reduce((sum, s) => sum + s.kobo, 0);
+    const assigned = rawShares.reduce((sum, s) => sum + s.kobo, 0);
     let leftover = memberPoolKobo - assigned;
     rawShares.sort((a, b) => b.remainder - a.remainder);
     for (const s of rawShares) {
@@ -316,70 +316,6 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
 }
 
 /**
- * Resume a partial dividend distribution — credits any "pending" entries
- * that were interrupted. Idempotent: safe to call multiple times.
- */
-export async function resumeDividendDistribution(
-  dividendId: string,
-): Promise<{ ok: boolean; message: string; paidCount: number; remainingCount: number }> {
-  const dividend = await prisma.dividend.findUnique({
-    where: { id: dividendId },
-    include: { entries: { where: { status: "pending" }, include: { member: { include: { wallet: true } } } } },
-  });
-  if (!dividend) return { ok: false, message: "Dividend not found.", paidCount: 0, remainingCount: 0 };
-  if (dividend.entries.length === 0) {
-    return { ok: true, message: "All entries already paid.", paidCount: 0, remainingCount: 0 };
-  }
-
-  let paidCount = 0;
-  // Batch entries in groups of 100 to reduce transaction overhead
-  for (let i = 0; i < dividend.entries.length; i += 100) {
-    const batch = dividend.entries.slice(i, i + 100);
-    for (const entry of batch) {
-      const wallet = entry.member?.wallet;
-      if (!wallet) continue;
-      const share = entry.amount;
-
-      let paid = false;
-      await prisma.$transaction(async (tx) => {
-        const alreadyPaid = await tx.dividendEntry.findFirst({
-          where: {
-            dividendId: entry.dividendId,
-            memberId: entry.memberId,
-            status: "paid",
-          },
-        });
-        if (alreadyPaid) return;
-
-        await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: share } } });
-        await tx.contribution.create({
-          data: {
-            amount: share,
-            type: "dividend",
-            note: `Dividend at ${dividend.rate}% of profit (${dividend.reference})`,
-            reference: `DIV-${dividend.id.slice(-8)}-${entry.memberId.slice(-6)}`,
-            status: "confirmed",
-            paidAt: new Date(),
-            memberId: entry.memberId,
-            cooperativeId: dividend.cooperativeId,
-          },
-        });
-        await tx.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } });
-        paid = true;
-      });
-      if (paid) paidCount += 1;
-    }
-  }
-
-  return {
-    ok: true,
-    message: `Resumed: ${paidCount} entry(ies) paid.`,
-    paidCount,
-    remainingCount: 0,
-  };
-}
-
-/**
  * Get fund balances for a cooperative.
  *
  * NOTE: Reserve fund uses the denormalized `coop.reserveFundBalance` column
@@ -427,7 +363,6 @@ export async function getReserveInfo(cooperativeId: string): Promise<{
   lastQuarter: number;
   growthPercent: number;
 }> {
-  const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
   const reserveAgg = await prisma.reserveAllocation.aggregate({ where: { cooperativeId }, _sum: { amount: true } });
   const balance = reserveAgg._sum.amount ?? 0;
 
