@@ -27,101 +27,32 @@ export async function checkDailyPayoutLimit(
   startOfDay.setHours(0, 0, 0, 0);
   const startOfMonth = new Date(startOfDay.getFullYear(), startOfDay.getMonth(), 1);
 
-  // Try Redis-cached running total first (aggregate once at day boundary)
-  const client = getRedis();
-  const todayKey = `payout:daily:${cooperativeId}:${startOfDay.toISOString().slice(0, 10)}`;
-  const monthKey = `payout:monthly:${cooperativeId}:${startOfDay.toISOString().slice(0, 7)}`;
-
-  let spentToday: number;
-  let monthTotal: number;
-
-  if (client) {
-    try {
-      const cached = await client.get(todayKey);
-      if (cached !== null) {
-        spentToday = Number(cached);
-      } else {
-        // Aggregate once at day boundary, then cache with TTL
-        const [payouts, withdrawals, externals] = await Promise.all([
-          prisma.payout.aggregate({
-            where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
-            _sum: { amount: true },
-          }),
-          prisma.withdrawalRequest.aggregate({
-            where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
-            _sum: { amount: true },
-          }),
-          prisma.externalPayment.aggregate({
-            where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
-            _sum: { amount: true },
-          }),
-        ]);
-        spentToday =
-          (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
-        // Cache until end of day (max 86400s)
-        const secondsLeft = Math.max(1, Math.ceil((new Date(startOfDay.getTime() + 86400000).getTime() - Date.now()) / 1000));
-        await client.setex(todayKey, secondsLeft, String(spentToday));
-      }
-
-      const cachedMonth = await client.get(monthKey);
-      if (cachedMonth !== null) {
-        monthTotal = Number(cachedMonth);
-      } else {
-        const monthPayouts = await prisma.payout.aggregate({
-          where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
-          _sum: { amount: true },
-        });
-        monthTotal = monthPayouts._sum.amount ?? 0;
-        const secondsLeft = Math.max(1, Math.ceil((new Date(startOfMonth.getFullYear(), startOfMonth.getMonth() + 1, 0, 23, 59, 59).getTime() - Date.now()) / 1000));
-        await client.setex(monthKey, secondsLeft, String(monthTotal));
-      }
-    } catch {
-      // Fall through to direct query
-      const [payouts, withdrawals, externals, monthPayouts] = await Promise.all([
-        prisma.payout.aggregate({
-          where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
-          _sum: { amount: true },
-        }),
-        prisma.withdrawalRequest.aggregate({
-          where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
-          _sum: { amount: true },
-        }),
-        prisma.externalPayment.aggregate({
-          where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
-          _sum: { amount: true },
-        }),
-        prisma.payout.aggregate({
-          where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
-          _sum: { amount: true },
-        }),
-      ]);
-      spentToday =
-        (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
-      monthTotal = monthPayouts._sum.amount ?? 0;
-    }
-  } else {
-    const [payouts, withdrawals, externals, monthPayouts] = await Promise.all([
-      prisma.payout.aggregate({
-        where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
-        _sum: { amount: true },
-      }),
-      prisma.withdrawalRequest.aggregate({
-        where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
-        _sum: { amount: true },
-      }),
-      prisma.externalPayment.aggregate({
-        where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
-        _sum: { amount: true },
-      }),
-      prisma.payout.aggregate({
-        where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
-        _sum: { amount: true },
-      }),
-    ]);
-    spentToday =
-      (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
-    monthTotal = monthPayouts._sum.amount ?? 0;
-  }
+  // Always aggregate fresh from the database. We deliberately do NOT cache
+  // running totals in Redis here: a cached aggregate would go stale as soon
+  // as a payout succeeds, letting subsequent money-out exceed the configured
+  // daily/monthly ceiling (a fraud-control bypass). The few extra reads are
+  // cheap relative to the money-out write path this guards.
+  const [payouts, withdrawals, externals, monthPayouts] = await Promise.all([
+    prisma.payout.aggregate({
+      where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
+      _sum: { amount: true },
+    }),
+    prisma.withdrawalRequest.aggregate({
+      where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
+      _sum: { amount: true },
+    }),
+    prisma.externalPayment.aggregate({
+      where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
+      _sum: { amount: true },
+    }),
+    prisma.payout.aggregate({
+      where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
+      _sum: { amount: true },
+    }),
+  ]);
+  const spentToday =
+    (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
+  const monthTotal = monthPayouts._sum.amount ?? 0;
 
   if (spentToday + amount > limit) {
     return {

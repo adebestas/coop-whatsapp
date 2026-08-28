@@ -1305,7 +1305,7 @@ export async function handleAdminCommand(
       const result = await setSalary(
         { id: admin.id, phone, role: admin.role, cooperativeId: coopId },
         targetPhone,
-        off ? "off" : amount,
+        off ? "off" : toKobo(amount),
       );
       await sendText({ to: phone, text: result.message });
       return true;

@@ -132,6 +132,9 @@ export type BotState =
 // ===== Session Data Schema (validates against corruption/tampering) =====
 export const FlowDataSchema = z.object({
   joinCode: z.string().optional(),
+  coopName: z.string().optional(),
+  coopCode: z.string().optional(),
+  coopState: z.string().nullable().optional(),
   pin: z.string().optional(),
   name: z.string().optional(),
   contactPhone: z.string().optional(),

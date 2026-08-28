@@ -399,11 +399,21 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
 export async function rejectLoan(loanId: string): Promise<{ ok: boolean; message: string }> {
   const loan = await findLoan(loanId);
   if (!loan) return { ok: false, message: "Loan not found. Check the id and try again." };
-  if (!["pending", "guaranteed", "admin_approved", "super_approved_1"].includes(loan.status)) {
+  const updatable = ["pending", "guaranteed", "admin_approved", "super_approved_1"];
+  if (!updatable.includes(loan.status)) {
     return { ok: false, message: `Loan is already ${loan.status}.` };
   }
 
-  await prisma.loan.update({ where: { id: loan.id }, data: { status: "rejected", queuePosition: null, queueJoinedAt: null } });
+  // Atomic transition: only succeeds if the loan is still in a rejectable
+  // state, preventing a concurrent approve/reject from being clobbered.
+  const updated = await prisma.loan.updateMany({
+    where: { id: loan.id, status: { in: updatable } },
+    data: { status: "rejected", queuePosition: null, queueJoinedAt: null },
+  });
+  if (updated.count === 0) {
+    const latest = await findLoan(loan.id);
+    return { ok: false, message: `Loan is already ${latest?.status ?? "changed"}.` };
+  }
   await renumberQueue(loan.cooperativeId);
   return { ok: true, message: `Loan *${loan.id.slice(-6)}* for ${loan.member.name} was rejected.` };
 }

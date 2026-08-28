@@ -5,22 +5,23 @@ import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
 import { sendToBank } from "./disbursements.js";
 import { checkDailyPayoutLimit } from "./fraud.js";
+import { toKobo } from "../lib/money.js";
 
 /**
  * Nigeria PAYE tax calculation per Finance Act 2023 rates.
  * First ₦300k/month exempt; then progressive brackets.
  */
 function calculatePaye(grossKobo: number): number {
-  const exemptKobo = 30_000_00; // ₦300,000
+  const exemptKobo = toKobo(300_000); // ₦300,000
   let taxable = Math.max(0, grossKobo - exemptKobo);
   let tax = 0;
   const brackets = [
-    { limit: 20_000_00, rate: 0.07 },   // ₦200k @ 7%
-    { limit: 66_000_00, rate: 0.11 },   // ₦660k @ 11%
-    { limit: 46_000_00, rate: 0.15 },   // ₦460k @ 15%
-    { limit: 160_000_00, rate: 0.19 },  // ₦1.6M @ 19%
-    { limit: 320_000_00, rate: 0.21 },  // ₦3.2M @ 21%
-    { limit: Infinity, rate: 0.24 },    // above @ 24%
+    { limit: toKobo(200_000), rate: 0.07 },   // ₦200k @ 7%
+    { limit: toKobo(660_000), rate: 0.11 },   // ₦660k @ 11%
+    { limit: toKobo(460_000), rate: 0.15 },   // ₦460k @ 15%
+    { limit: toKobo(1_600_000), rate: 0.19 }, // ₦1.6M @ 19%
+    { limit: toKobo(3_200_000), rate: 0.21 }, // ₦3.2M @ 21%
+    { limit: Infinity, rate: 0.24 },          // above @ 24%
   ];
   for (const b of brackets) {
     if (taxable <= 0) break;
