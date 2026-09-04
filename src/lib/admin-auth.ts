@@ -93,7 +93,10 @@ export async function isTokenRevoked(token: string): Promise<boolean> {
     const exists = await client.exists(`${TOKEN_BLACKLIST_PREFIX}${hash}`);
     return exists === 1;
   } catch {
-    return true;
+    // Fail OPEN (not-revoked): a transient Redis/Upstash error must not lock
+    // admins out. `requireLiveAdmin` still re-checks the live DB on every
+    // request, so this does not weaken the real gate.
+    return false;
   }
 }
 

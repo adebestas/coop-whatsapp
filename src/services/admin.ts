@@ -63,6 +63,7 @@ const MONEY_OUT_COMMANDS = new Set([
   "approveclaim",
   "approvepay",
   "runpayroll",
+  "paydividend",
   "disable2fa",
 ]);
 
@@ -89,7 +90,9 @@ async function adminContext(phone: string): Promise<AdminContext | null> {
   });
   if (!admin) return null;
   const coop = admin.cooperative;
-  const isSuper = admin.role === "superadmin" || coop.adminPhone === admin.phone;
+  // The DB role column is the single source of truth for superadmin power.
+  // The coop.adminPhone value is used ONLY for notifications, never for authorization.
+  const isSuper = admin.role === "superadmin";
   // Super admins are always coop-wide; plain admins may be scoped to a unit.
   const unitAdmin = isSuper ? null : await unitAdminOf(admin);
   return { admin, coop, unitAdmin, isSuper };
@@ -119,7 +122,20 @@ export async function handleAdminCommand(
     return true;
   }
   if (cmd === "disable2fa") {
-    const r = await disable2fa(phone);
+    // 2FA is a security control — disabling it requires BOTH your PIN and, when
+    // enrolled, a valid TOTP code appended as the last argument.
+    // Syntax: disable2fa <your PIN> <6-digit code>
+    const gate = await assertMoneyAuthorized(admin.id, args);
+    if (!gate.ok) return guardFailed(phone, gate.message);
+    const [pin] = gate.args;
+    if (!pin) {
+      await sendText({
+        to: phone,
+        text: "Usage: *disable2fa <your PIN> <6-digit code>* — 2FA stays on unless you provide both.",
+      });
+      return true;
+    }
+    const r = await disable2fa(phone, pin);
     await sendText({ to: phone, text: r.message });
     return true;
   }
@@ -2258,6 +2274,13 @@ async function handlePayout(ctx: AdminContext, amount: number, targetPhone: stri
     initiatorPhone: admin.phone,
     targetId: target.id,
   });
+  if (!multiSig.needsApproval && multiSig.blocked) {
+    await sendText({
+      to: admin.phone,
+      text: `⛔ ${multiSig.error ?? "Payout blocked — multi-sig service temporarily unavailable."}`,
+    });
+    return;
+  }
   if (multiSig.needsApproval) {
     await auditSuperadminCommand({
       cooperativeId: coop.id,

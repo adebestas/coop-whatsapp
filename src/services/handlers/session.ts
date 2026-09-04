@@ -13,7 +13,7 @@ import { toKobo } from "../../lib/money.js";
 import { provisionVirtualAccount } from "../payments/topup.js";
 import { verifyMemberPin } from "../pin.js";
 import { resolveBankCode } from "../../lib/banks.js";
-import { applyForLoan } from "../loans.js";
+import { applyForLoan, repayLoan } from "../loans.js";
 import { addGuarantor, requiredGuarantors } from "../guarantors.js";
 import { requestWithdrawal } from "../withdrawals.js";
 import { submitCertificate } from "../deathclaims.js";
@@ -795,6 +795,31 @@ export async function handleAwaitingInput(
           ? { accountNumber: data.withdrawAccount, bankCode: data.withdrawBankCode, bankName: data.withdrawBankName }
           : undefined;
       const result = await requestWithdrawal(phone, data.withdrawAmount ?? 0, bank);
+      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+      await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
+      break;
+    }
+
+    case "awaiting_repay_pin": {
+      const input = text.trim();
+      if (input.toLowerCase() === "menu" || input.toLowerCase() === "cancel") {
+        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
+        await sendText({ to: phone, text: "Repayment cancelled. Reply *menu* to start something else." });
+        return;
+      }
+      const member = await getMemberByPhone(phone);
+      if (!member) {
+        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+        return;
+      }
+      const pinCheck = await verifyMemberPin(member, input);
+      if (!pinCheck.ok) {
+        const msg = pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel.";
+        await sendText({ to: phone, text: msg });
+        await issueSecretChallenge(phone, "awaiting_repay_pin", data, msg);
+        return;
+      }
+      const result = await repayLoan(phone);
       await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
       await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
       break;

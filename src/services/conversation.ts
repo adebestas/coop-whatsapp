@@ -121,6 +121,7 @@ export type BotState =
   | "awaiting_withdraw_account"
   | "awaiting_withdraw_bank"
   | "awaiting_withdraw_pin"
+  | "awaiting_repay_pin"
   | "awaiting_death_cert"
   | "awaiting_ai_confirm"
   | "awaiting_ai_query_confirm"
@@ -172,7 +173,7 @@ export const FlowDataSchema = z.object({
 export type FlowData = z.infer<typeof FlowDataSchema>;
 
 /** States where the user is typing a secret — flow-token guarded, Telegram messages deleted after read. */
-export const SECRET_STATES: BotState[] = ["awaiting_pin", "awaiting_pin_confirm", "awaiting_withdraw_pin"];
+export const SECRET_STATES: BotState[] = ["awaiting_pin", "awaiting_pin_confirm", "awaiting_withdraw_pin", "awaiting_repay_pin", "awaiting_delete_account_pin"];
 
 /** Metadata about how a message arrived (channel-specific extras). */
 export interface MessageMeta {
@@ -339,6 +340,13 @@ export async function handleMessage(
     case "loan":
     case "repay":
     case "withdraw": {
+      if (member && (member.status === "suspended" || member.status === "deceased")) {
+        await sendText({
+          to: phone,
+          text: "🔒 Your account is currently suspended. No money can move until a cooperative admin restores it. Please contact them to review.",
+        });
+        break;
+      }
       if (cmd !== "save" && member) {
         const frozen = await isFrozen(member.id);
         if (frozen.frozen) {

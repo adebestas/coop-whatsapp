@@ -237,7 +237,10 @@ export async function checkMultiSigRequirement(params: {
   amount: number;
   initiatorPhone: string;
   targetId: string;
-}): Promise<{ needsApproval: false; warning?: string; error?: string } | { needsApproval: true; pendingId: string }> {
+}): Promise<
+  | { needsApproval: false; warning?: string; error?: string; blocked?: boolean }
+  | { needsApproval: true; pendingId: string }
+> {
   const { cooperativeId, amount, initiatorPhone, targetId } = params;
 
   if (amount < PAYOUT_MULTI_SIG_THRESHOLD) {
@@ -272,9 +275,15 @@ export async function checkMultiSigRequirement(params: {
     const { getRedis } = await import("./cache.js");
     const redis = getRedis();
     if (!redis) {
-      // If Redis fails and there are enough supers, block instead of allowing
+      // Multi-sig IS required (amount >= threshold, >=2 supers) but the service
+      // can't record it — BLOCK the payout (fail-closed) instead of letting it
+      // proceed without the second superadmin approval.
       if (superadmins.length >= 2) {
-        return { needsApproval: false, error: "Multi-sig service temporarily unavailable. Please try again." };
+        return {
+          needsApproval: false,
+          blocked: true,
+          error: "Multi-sig service temporarily unavailable. The payout has been blocked for safety. Please try again shortly.",
+        };
       }
       return { needsApproval: false };
     }
@@ -301,6 +310,15 @@ export async function checkMultiSigRequirement(params: {
 
     return { needsApproval: true, pendingId };
   } catch {
+    // Fail-closed on the admin money-out path: if multi-sig is required but the
+    // service errored, block the payout rather than letting it proceed unapproved.
+    if (superadmins.length >= 2) {
+      return {
+        needsApproval: false,
+        blocked: true,
+        error: "Multi-sig service temporarily unavailable. The payout has been blocked for safety. Please try again shortly.",
+      };
+    }
     return { needsApproval: false };
   }
 }
@@ -321,47 +339,60 @@ export async function processMultiSigResponse(params: {
     const redis = getRedis();
     if (!redis) return { processed: false, message: "Service unavailable" };
 
-    // Find the pending request
-    const keys = await redis.keys(`multisig:${cooperativeId}:*`);
-    for (const key of keys) {
-      const data = await redis.get(key);
-      if (!data) continue;
-      const pending = JSON.parse(data);
-      if (pending.pendingId.endsWith(pendingIdSuffix)) {
-        // Check expiry
-        if (Date.now() - pending.requestedAt > MULTI_SIG_EXPIRY_MS) {
-          await redis.del(key);
-          return { processed: false, message: "This approval request has expired." };
+    // Find the pending request. Use SCAN (not KEYS) so the whole Redis keyspace
+    // is never blocked on large/multi-tenant installs; the match is still
+    // scoped to this cooperative's multisig keys.
+    type PendingSig = { pendingId: string; requestedAt: number; initiatorPhone: string; approvals: string[] };
+    let foundKey: string | null = null;
+    let found: PendingSig | null = null;
+    for await (const batch of redis.scanStream({ match: `multisig:${cooperativeId}:*`, count: 100 })) {
+      for (const key of batch) {
+        const data = await redis.get(key);
+        if (!data) continue;
+        const pending = JSON.parse(data) as PendingSig;
+        if (pending.pendingId.endsWith(pendingIdSuffix)) {
+          foundKey = key;
+          found = pending;
+          break;
         }
-
-        // Check not already approved by this person
-        if (pending.approvals.includes(responderPhone)) {
-          return { processed: false, message: "You already approved this." };
-        }
-
-        if (action === "reject") {
-          await redis.del(key);
-          return { processed: true, message: "Payout rejected and cancelled." };
-        }
-
-        // Approve
-        pending.approvals.push(responderPhone);
-
-        // Count unique non-initiator approvals (need at least 1 besides initiator)
-        const otherApprovals = pending.approvals.filter((p: string) => p !== pending.initiatorPhone);
-        if (otherApprovals.length >= 1) {
-          // Multi-sig satisfied — clear the request
-          await redis.del(key);
-          return { processed: true, message: "✅ Multi-sig approval complete! Payout can proceed." };
-        }
-
-        // Update the pending record
-        await redis.setex(key, 3600, JSON.stringify(pending));
-        return { processed: true, message: "Approval recorded. Waiting for additional approvals." };
       }
+      if (foundKey) break;
     }
 
-    return { processed: false, message: "No matching approval request found." };
+    if (!foundKey || !found) {
+      return { processed: false, message: "No matching approval request found." };
+    }
+
+    // Check expiry
+    if (Date.now() - found.requestedAt > MULTI_SIG_EXPIRY_MS) {
+      await redis.del(foundKey);
+      return { processed: false, message: "This approval request has expired." };
+    }
+
+    // Check not already approved by this person
+    if (found.approvals.includes(responderPhone)) {
+      return { processed: false, message: "You already approved this." };
+    }
+
+    if (action === "reject") {
+      await redis.del(foundKey);
+      return { processed: true, message: "Payout rejected and cancelled." };
+    }
+
+    // Approve
+    found.approvals.push(responderPhone);
+
+    // Count unique non-initiator approvals (need at least 1 besides initiator)
+    const otherApprovals = found.approvals.filter((p: string) => p !== found.initiatorPhone);
+    if (otherApprovals.length >= 1) {
+      // Multi-sig satisfied — clear the request
+      await redis.del(foundKey);
+      return { processed: true, message: "✅ Multi-sig approval complete! Payout can proceed." };
+    }
+
+    // Update the pending record
+    await redis.setex(foundKey, 3600, JSON.stringify(found));
+    return { processed: true, message: "Approval recorded. Waiting for additional approvals." };
   } catch {
     return { processed: false, message: "Service unavailable." };
   }

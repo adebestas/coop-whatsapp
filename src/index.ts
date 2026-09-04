@@ -23,6 +23,7 @@ import { initRedis, closeRedis, isRedisConnected } from "./lib/cache.js";
 
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
+const RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000; // nightly
 
 // NOTE: Custom structured logger; could be consolidated with Fastify's built-in logger.
 // ===== Structured Logger =====
@@ -178,7 +179,7 @@ async function main() {
   // Nightly reconciliation + anomaly alerts to super admins.
   async function runReconcileLoop() {
     while (true) {
-      await new Promise((r) => setTimeout(r, BACKUP_INTERVAL_MS));
+      await new Promise((r) => setTimeout(r, RECONCILE_INTERVAL_MS));
       await runReconciliation().catch((err) => app.log.error("[reconcile] failed", err));
     }
   }

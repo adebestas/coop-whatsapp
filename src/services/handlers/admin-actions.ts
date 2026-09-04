@@ -157,29 +157,29 @@ export async function handleResolve(phone: string, args: string[]): Promise<void
     return;
   }
 
-  // Check if it's a grievance first
-  const grievance = await prisma.grievance.findFirst({
-    where: {
-      OR: [{ id }, { id: { endsWith: id } }],
-      status: "open",
-    },
-  });
-  if (grievance) {
-    const adminMember = await prisma.member.findFirst({ where: { phone, role: { in: ["admin", "superadmin"] } } });
-    if (!adminMember) {
-      await sendText({ to: phone, text: "Only admins can resolve grievances." });
-      return;
-    }
-    if (!note) {
-      await sendText({ to: phone, text: "Usage: *resolve <grievance id> <response>*" });
-      return;
-    }
-    await prisma.grievance.update({
-      where: { id: grievance.id },
-      data: { status: "resolved", response: note, resolvedById: adminMember.id, resolvedAt: new Date() },
+  // Only admins can resolve grievances, and only within their own cooperative.
+  // (Mirrors resolveTicket's cross-tenant protection in support.ts.)
+  const adminMember = await prisma.member.findFirst({ where: { phone, role: { in: ["admin", "superadmin"] } } });
+  if (adminMember) {
+    const grievance = await prisma.grievance.findFirst({
+      where: {
+        OR: [{ id }, { id: { endsWith: id } }],
+        status: "open",
+        cooperativeId: adminMember.cooperativeId,
+      },
     });
-    await sendText({ to: phone, text: `✅ Grievance *${grievance.id.slice(-6)}* resolved.` });
-    return;
+    if (grievance) {
+      if (!note) {
+        await sendText({ to: phone, text: "Usage: *resolve <grievance id> <response>*" });
+        return;
+      }
+      await prisma.grievance.update({
+        where: { id: grievance.id },
+        data: { status: "resolved", response: note, resolvedById: adminMember.id, resolvedAt: new Date() },
+      });
+      await sendText({ to: phone, text: `✅ Grievance *${grievance.id.slice(-6)}* resolved.` });
+      return;
+    }
   }
 
   // Fall back to support ticket resolution

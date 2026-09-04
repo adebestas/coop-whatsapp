@@ -571,9 +571,7 @@ function resolveBank(input: string): { code: string; name: string } | null {
 async function isSuperAdminOf(phone: string, cooperativeId: string): Promise<boolean> {
   const member = await prisma.member.findFirst({
     where: { phone, cooperativeId },
-    include: { cooperative: { select: { adminPhone: true } } },
   });
   if (!member) return false;
-  if (member.role === "superadmin") return true;
-  return member.cooperative?.adminPhone === phone;
+  return member.role === "superadmin";
 }

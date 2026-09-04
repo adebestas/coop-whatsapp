@@ -12,15 +12,28 @@ export async function showLedger(phone: string): Promise<{ ok: boolean; message:
   }
   const coopId = member.cooperativeId;
 
-  const scope = member.unit ? { cooperativeId: coopId, unitId: member.unit.id } : { cooperativeId: coopId };
+  // Member rows have a direct `unitId`; Contribution/Loan/Payout do NOT, so
+  // unit-scoped money aggregates must filter through the `member` relation
+  // instead of passing `unitId` straight into the model's where clause.
+  const unitScope = member.unit ? { unitId: member.unit.id } : {};
+  const memberScope = { cooperativeId: coopId, ...unitScope };
   const isUnitAdmin = await prisma.unit.findFirst({ where: { adminMemberId: member.id } });
 
   const [memberCount, contributions, loans, payouts, walletAgg, lastDividend] = await Promise.all([
-    prisma.member.count({ where: scope }),
-    prisma.contribution.aggregate({ where: { ...scope, status: "confirmed" }, _sum: { amount: true } }),
-    prisma.loan.aggregate({ where: { ...scope, status: { in: ["approved", "disbursed"] } }, _sum: { balance: true } }),
-    prisma.payout.aggregate({ where: scope, _sum: { amount: true } }),
-    prisma.wallet.aggregate({ where: { member: scope }, _sum: { balance: true } }),
+    prisma.member.count({ where: memberScope }),
+    prisma.contribution.aggregate({
+      where: { cooperativeId: coopId, ...(member.unit ? { member: unitScope } : {}), status: "confirmed" },
+      _sum: { amount: true },
+    }),
+    prisma.loan.aggregate({
+      where: { cooperativeId: coopId, ...(member.unit ? { member: unitScope } : {}), status: { in: ["approved", "disbursed"] } },
+      _sum: { balance: true },
+    }),
+    prisma.payout.aggregate({
+      where: { cooperativeId: coopId, ...(member.unit ? { member: unitScope } : {}) },
+      _sum: { amount: true },
+    }),
+    prisma.wallet.aggregate({ where: { member: memberScope }, _sum: { balance: true } }),
     prisma.dividend.findFirst({ where: { cooperativeId: coopId }, orderBy: { createdAt: "desc" } }),
   ]);
 

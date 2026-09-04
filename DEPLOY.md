@@ -32,7 +32,7 @@ Every future `git push` to `main` auto-deploys to Render.
 3. First build fails on missing secrets — that's expected. Open the
    `coop-bot` service → **Environment** and fill in every variable marked
    `sync: false`:
-   - `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_ID`, `WHATSAPP_VERIFY_TOKEN` (Meta dashboard)
+   - `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN` (Meta dashboard)
    - `TELEGRAM_BOT_TOKEN` (@BotFather)
    - `MONNIFY_API_KEY`, `MONNIFY_SECRET_KEY`, `MONNIFY_CONTRACT_CODE`,
      `MONNIFY_BASE_URL` (sandbox first), `PAYSTACK_SECRET_KEY`

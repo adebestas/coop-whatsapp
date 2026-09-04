@@ -223,15 +223,6 @@ export async function approveLoan(
   if (!loan) return { ok: false, message: "Loan not found. Check the id and try again." };
   const shortId = loan.id.slice(-6);
 
-  // AML check: flag if member has suspicious recent transactions
-  await flagTransaction({
-    memberId: loan.memberId,
-    cooperativeId: loan.cooperativeId,
-    amount: loan.amount,
-    type: "loan_disbursement",
-    direction: "out",
-  });
-
   // Dual-control: nobody approves their own borrowing.
   if (opts.actorId && loan.memberId === opts.actorId) {
     return {
@@ -417,6 +408,9 @@ export async function rejectLoan(loanId: string): Promise<{ ok: boolean; message
   return { ok: true, message: `Loan *${loan.id.slice(-6)}* for ${loan.member.name} was rejected.` };
 }
 
+/** Sentinel thrown when the wallet balance changed mid-repayment (rolls back the transaction). */
+class RepayBalanceChangedError extends Error {}
+
 /**
  * Member repays their loan monthly installment. Debited from wallet.
  */
@@ -465,14 +459,7 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
     };
   }
 
-  // Atomic debit: only succeeds if the balance still covers the total due.
-  const debited = await prisma.wallet.updateMany({
-    where: { id: member.wallet.id, balance: { gte: totalDue } },
-    data: { balance: { decrement: totalDue } },
-  });
-  if (debited.count === 0) {
-    return { ok: false, message: "Your wallet balance changed — please try again." };
-  }
+  const walletId = member.wallet.id;
 
   // NOTE: Interest is flat (not declining balance) for simplicity.
   // For fair member treatment, consider implementing pro-rated interest.
@@ -481,32 +468,47 @@ export async function repayLoan(phone: string, loanId?: string): Promise<{ ok: b
   const interestPortion = Math.floor(totalInterest / loan.tenureMonths);
   const principalPortion = Math.max(0, amount - interestPortion);
 
-  // All operations in one transaction for atomicity
-  await prisma.$transaction([
-    prisma.loan.update({
-      where: { id: loan.id },
-      data: { balance: { decrement: principalPortion } },
-    }),
-    prisma.loanRepayment.create({
-      data: { loanId: loan.id, amount },
-    }),
-    // Fines go to the cooperative pot as a confirmed contribution.
-    ...(fine > 0
-      ? [
-          prisma.contribution.create({
-            data: {
-              memberId: member.id,
-              cooperativeId: member.cooperativeId,
-              type: "fine",
-              amount: fine,
-              status: "confirmed",
-              reference: `FINE-${loan.id.slice(-6)}-${Date.now()}`,
-              note: `Late fine on loan ${loan.id.slice(-6)}`,
-            },
-          }),
-        ]
-      : []),
-  ]);
+  // Atomic: debit the wallet and update the loan/repayment/fines inside ONE
+  // transaction so a mid-way failure rolls everything back — money can never
+  // leave the wallet without the matching loan/repayment record.
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Conditional debit — only succeeds if the balance still covers totalDue.
+      const debited = await tx.wallet.updateMany({
+        where: { id: walletId, balance: { gte: totalDue } },
+        data: { balance: { decrement: totalDue } },
+      });
+      if (debited.count === 0) {
+        throw new RepayBalanceChangedError();
+      }
+      await tx.loan.update({
+        where: { id: loan.id },
+        data: { balance: { decrement: principalPortion } },
+      });
+      await tx.loanRepayment.create({
+        data: { loanId: loan.id, amount },
+      });
+      // Fines go to the cooperative pot as a confirmed contribution.
+      if (fine > 0) {
+        await tx.contribution.create({
+          data: {
+            memberId: member.id,
+            cooperativeId: member.cooperativeId,
+            type: "fine",
+            amount: fine,
+            status: "confirmed",
+            reference: `FINE-${loan.id.slice(-6)}-${Date.now()}`,
+            note: `Late fine on loan ${loan.id.slice(-6)}`,
+          },
+        });
+      }
+    });
+  } catch (err) {
+    if (err instanceof RepayBalanceChangedError) {
+      return { ok: false, message: "Your wallet balance changed — please try again." };
+    }
+    throw err;
+  }
 
   await recordLedger({
     cooperativeId: member.cooperativeId,

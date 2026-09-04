@@ -143,49 +143,6 @@ export async function closeRedis(): Promise<void> {
   }
 }
 
-// ===== Cache Keys =====
-
-export const CACHE_KEYS = {
-  // Session cache (5 min)
-  session: (phone: string) => `session:${phone}`,
-
-  // Member cache (5 min)
-  member: (phone: string) => `member:${phone}`,
-  memberById: (id: string) => `member:id:${id}`,
-
-  // Balance cache (1 min - frequently updated)
-  balance: (memberId: string) => `balance:${memberId}`,
-
-  // Cooperative cache (10 min - rarely changes)
-  coop: (coopId: string) => `coop:${coopId}`,
-
-  // Loan cache (5 min)
-  loan: (loanId: string) => `loan:${loanId}`,
-  activeLoans: (memberId: string) => `loans:active:${memberId}`,
-
-  // Rate limiting (sliding window)
-  rateLimit: (phone: string) => `ratelimit:${phone}`,
-  moneyRateLimit: (phone: string) => `ratelimit:money:${phone}`,
-
-  // OTP cache (10 min)
-  otp: (phone: string) => `otp:${phone}`,
-
-  // Session data
-  sessionData: (phone: string) => `session:data:${phone}`,
-} as const;
-
-// ===== TTL Constants (in seconds) =====
-
-export const CACHE_TTL = {
-  SESSION: 5 * 60, // 5 min
-  MEMBER: 5 * 60, // 5 min
-  BALANCE: 60, // 1 min
-  COOP: 10 * 60, // 10 min
-  LOAN: 5 * 60, // 5 min
-  OTP: 10 * 60, // 10 min
-  RATE_LIMIT: 60, // 1 min
-} as const;
-
 // ===== Redis-backed Rate Limiting =====
 // Falls back to in-memory when Redis is unavailable.
 

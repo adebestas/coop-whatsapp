@@ -74,7 +74,7 @@ export function verifyTotp(secretBase32: string, code: string, timeMs = Date.now
   if (cleaned.length !== 6) return false;
   const secret = base32Decode(secretBase32);
   const counter = Math.floor(timeMs / 30_000);
-  for (const drift of [-1, 0]) { // 60-second window instead of 90
+  for (const drift of [-1, 0, 1]) { // ±1 step window (90 seconds)
     const expected = hotp(secret, counter + drift);
     const a = Buffer.from(expected);
     const b = Buffer.from(cleaned);

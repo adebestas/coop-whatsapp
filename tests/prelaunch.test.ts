@@ -399,7 +399,7 @@ describe("startup environment validation", () => {
   it("fails fatally without core WhatsApp credentials", () => {
     const report = validateEnvironment({
       WHATSAPP_TOKEN: "",
-      WHATSAPP_PHONE_ID: "",
+      WHATSAPP_PHONE_NUMBER_ID: "",
     } as any);
     expect(report.ok).toBe(false);
     expect(report.problems.some((p) => p.includes("FATAL"))).toBe(true);
@@ -412,7 +412,7 @@ describe("startup environment validation", () => {
     try {
       const report = validateEnvironment({
         WHATSAPP_TOKEN: "x",
-        WHATSAPP_PHONE_ID: "y",
+        WHATSAPP_PHONE_NUMBER_ID: "y",
         ADMIN_JWT_SECRET: "a-real-secret-key-that-is-not-a-placeholder-1234567890ab",
       } as any);
       expect(report.ok).toBe(true);

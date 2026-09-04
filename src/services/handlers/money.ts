@@ -9,7 +9,7 @@ import { setAutoSave } from "../scheduler.js";
 import { joinUnit } from "../units.js";
 import { withdrawLimit, canWithdraw } from "../withdrawals.js";
 import { computeDividendPreview } from "../dividends.js";
-import { repayLoan, getQueuePosition } from "../loans.js";
+import { getQueuePosition } from "../loans.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 
 export async function handleBalance(
@@ -166,8 +166,13 @@ export async function handleLoan(phone: string, args: string[]): Promise<void> {
 }
 
 export async function handleRepay(phone: string, _args: string[]): Promise<void> {
-  const result = await repayLoan(phone);
-  await sendText({ to: phone, text: result.message });
+  // Loan repayment is a money-out — require the member's PIN before any debit.
+  await issueSecretChallenge(
+    phone,
+    "awaiting_repay_pin",
+    {},
+    "Enter your 4-digit PIN to confirm the loan repayment.",
+  );
 }
 
 export async function handlePlan(phone: string, args: string[]): Promise<void> {

@@ -26,86 +26,10 @@ export interface NotificationJob {
   priority?: "low" | "normal" | "high";
 }
 
-export interface PaymentJob {
-  type: "disburse" | "refund" | "verify";
-  payoutId: string;
-  provider: string;
-  retryCount?: number;
-}
-
-export interface ExportJob {
-  type: "members" | "ledger" | "deductions";
-  coopId: string;
-  format: "xlsx" | "pdf";
-  requestedBy: string;
-}
-
-export interface BackupJob {
-  type: "full" | "incremental";
-  coopId: string;
-}
-
-export interface DigestJob {
-  type: "daily" | "weekly";
-  coopId: string;
-}
-
 // ===== Queue Singleton =====
 
 const queueMap: Map<string, Queue> = new Map();
 const workerMap: Map<string, Worker> = new Map();
-
-/**
- * Get or create a queue
- */
-function getQueue(name: string): Queue | null {
-  const redis = getRedis();
-  if (!redis) return null;
-
-  if (!queueMap.has(name)) {
-    queueMap.set(
-      name,
-      new Queue(name, {
-        connection: redis,
-        defaultJobOptions: {
-          removeOnComplete: 100,
-          removeOnFail: 50,
-          attempts: 3,
-          backoff: {
-            type: "exponential",
-            delay: 2000,
-          },
-        },
-      }),
-    );
-  }
-
-  return queueMap.get(name)!;
-}
-
-/**
- * Add a job to a queue
- */
-export async function addJob<T>(
-  queueName: string,
-  data: T,
-  options?: { priority?: number; delay?: number; jobId?: string },
-): Promise<string | null> {
-  const queue = getQueue(queueName);
-  if (!queue) {
-    console.warn(`[Queue] Redis unavailable, skipping job: ${queueName}`);
-    return null;
-  }
-
-  try {
-    const job = await queue.add(queueName, data, options);
-    console.warn(`[Queue] Job ${job.id} added to ${queueName}`);
-    return job.id!;
-  } catch (err) {
-    console.error(`[Queue] Failed to add job to ${queueName}:`, err);
-    return null;
-  }
-}
 
 /**
  * Process a queue with a worker
@@ -152,30 +76,6 @@ export function processQueue<T>(
   });
 
   workerMap.set(queueName, worker);
-}
-
-/**
- * Get queue metrics
- */
-export async function getQueueMetrics(
-  queueName: string,
-): Promise<{ waiting: number; active: number; completed: number; failed: number } | null> {
-  const queue = getQueue(queueName);
-  if (!queue) return null;
-
-  try {
-    const [waiting, active, completed, failed] = await Promise.all([
-      queue.getWaitingCount(),
-      queue.getActiveCount(),
-      queue.getCompletedCount(),
-      queue.getFailedCount(),
-    ]);
-
-    return { waiting, active, completed, failed };
-  } catch (err) {
-    console.error(`[Queue] Failed to get metrics for ${queueName}:`, err);
-    return null;
-  }
 }
 
 /**

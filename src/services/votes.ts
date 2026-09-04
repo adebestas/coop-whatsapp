@@ -27,18 +27,6 @@ function buildProgressBar(votes: number, maxVotes: number): string {
   return "█".repeat(filled) + "░".repeat(10 - filled);
 }
 
-function formatTimeRemaining(createdAt: Date): string {
-  const now = new Date();
-  const diffMs = createdAt.getTime() - now.getTime();
-  if (diffMs <= 0) return "Ended";
-  const days = Math.floor(diffMs / (24 * 60 * 60 * 1000));
-  const hours = Math.floor((diffMs % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
-  if (days > 0) return `${days} day${days > 1 ? "s" : ""} ${hours} hour${hours !== 1 ? "s" : ""}`;
-  if (hours > 0) return `${hours} hour${hours > 1 ? "s" : ""}`;
-  const minutes = Math.floor((diffMs % (60 * 60 * 1000)) / (60 * 1000));
-  return `${minutes} minute${minutes !== 1 ? "s" : ""}`;
-}
-
 function electionTypeLabel(vote: { electionType: string; kind: string; position?: string | null; unitId?: string | null }): string {
   if (vote.electionType === "workplace" || vote.kind === "unit") return "🏢 Workplace Election";
   if (vote.electionType === "executive" || vote.kind === "exec") return "🏛️ Executive Election";
@@ -75,7 +63,8 @@ async function buildLiveResultsMessage(voteId: string): Promise<string> {
   });
 
   const quorumStatus = quorumMet ? "✅" : "❌";
-  const timeRemaining = formatTimeRemaining(vote.createdAt);
+  // Votes are closed manually (no end time), so no valid countdown exists —
+  // show an honest status rather than a misleading "Ended" from the start time.
   const typeTag = electionTypeLabel(vote);
   const posLabel = positionLabel(vote);
 
@@ -83,7 +72,7 @@ async function buildLiveResultsMessage(voteId: string): Promise<string> {
     `${typeTag} LIVE: ${vote.title}${posLabel}\n\n` +
     `${lines.join("\n") || "No candidates yet."}\n\n` +
     `Total votes: ${totalVotes} | Quorum: ${totalVotes}/${quorumRequired} (${quorumPercent}%) ${quorumStatus}\n` +
-    `Time left: ${timeRemaining}`
+    `Status: Open — closes when an admin runs *closevote ${vote.id.slice(-6)}*`
   );
 }
 
