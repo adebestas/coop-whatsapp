@@ -454,6 +454,23 @@ export async function adminApiRoutes(app: FastifyInstance) {
     return { ok: true, message: result.message, files: result.files ?? [] };
   });
 
+  // ---- Bulk member import ----
+
+  app.post("/api/admin/members/import", async (req, reply) => {
+    const coopId = req.adminCoopId!;
+    const body = (req.body ?? {}) as { filename?: string; data?: string };
+    if (!body.filename || !body.data) {
+      return reply.code(400).send({ error: "filename and data (base64) are required" });
+    }
+    const buffer = Buffer.from(body.data, "base64");
+    if (buffer.length > 5 * 1024 * 1024) {
+      return reply.code(400).send({ error: "File too large (max 5MB)" });
+    }
+    const { bulkImportMembers } = await import("../services/bulk-import.js");
+    const result = await bulkImportMembers(coopId, buffer, body.filename);
+    return result;
+  });
+
   // ---- Grievances (member complaints) ----
 
   app.get("/api/admin/grievances", async (req) => {

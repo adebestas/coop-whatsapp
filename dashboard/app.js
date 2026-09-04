@@ -416,6 +416,8 @@
           <span class="card-title">All Members</span>
           <div class="flex gap-2">
             <input type="search" id="memberSearch" placeholder="Search members..." style="padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.8125rem; background:var(--bg-card); color:var(--text); width:200px;">
+            <button class="btn btn-secondary" onclick="document.getElementById('importFileInput').click()">Import CSV/Excel</button>
+            <input type="file" id="importFileInput" accept=".csv,.xlsx,.xls" style="display:none;" onchange="importMembers(this)">
             <button class="btn btn-primary" onclick="openMessageModal()">Send Message</button>
           </div>
         </div>
@@ -578,6 +580,51 @@
     } finally {
       btn.disabled = false;
       btn.textContent = 'Send';
+    }
+  };
+
+  // ---- Bulk Import Members ----
+  window.importMembers = async function (input) {
+    const file = input.files[0];
+    if (!file) return;
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (ext !== 'csv' && ext !== 'xlsx' && ext !== 'xls') {
+      toast('Please select a .csv or .xlsx file', 'error');
+      input.value = '';
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast('File too large (max 5MB)', 'error');
+      input.value = '';
+      return;
+    }
+    toast('Importing members...', 'info');
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result;
+          const base64 = typeof result === 'string' ? result.split(',')[1] : '';
+          resolve(base64);
+        };
+        reader.onerror = () => reject(new Error('Failed to read file'));
+        reader.readAsDataURL(file);
+      });
+      const result = await api('/members/import', {
+        method: 'POST',
+        body: { filename: file.name, data: base64 },
+      });
+      if (result.ok) {
+        toast(result.message, 'success');
+        renderMembers(document.getElementById('pageContent'));
+      } else {
+        const errText = (result.errors || []).slice(0, 3).join('; ');
+        toast(result.message + (errText ? ' — ' + errText : ''), 'error');
+      }
+    } catch (err) {
+      toast(err.message || 'Import failed', 'error');
+    } finally {
+      input.value = '';
     }
   };
 
