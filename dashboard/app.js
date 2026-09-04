@@ -46,12 +46,25 @@
     }
   }
 
+  function getMemberRole() {
+    return getMember()?.role || null;
+  }
+
+  function isSuperAdmin() {
+    return getMemberRole() === 'superadmin';
+  }
+
   function loadUserInfo() {
     const member = getMember();
     if (!member) return;
     document.getElementById('userName').textContent = member.name || 'Admin';
     document.getElementById('userAvatar').textContent = (member.name || 'A').charAt(0).toUpperCase();
     document.getElementById('coopName').textContent = member.cooperative?.name || 'Cooperative';
+    const roleText = member.role === 'superadmin' ? 'Super Admin' : member.role === 'admin' ? 'Administrator' : 'Member';
+    const roleEl = document.querySelector('.user-role');
+    if (roleEl) roleEl.textContent = roleText;
+    const navElections = document.getElementById('navElections');
+    if (navElections) navElections.hidden = !isSuperAdmin();
   }
 
   window.logout = async function () {
@@ -149,6 +162,7 @@
       payouts: 'Payouts',
       withdrawals: 'Withdrawals',
       polls: 'Buy Polls',
+      elections: 'Elections',
       reports: 'Annual Report',
       str: 'STR / AML',
       paye: 'PAYE'
@@ -167,6 +181,7 @@
       case 'payouts': renderPayouts(content); break;
       case 'withdrawals': renderWithdrawals(content); break;
       case 'polls': renderPolls(content); break;
+      case 'elections': renderElections(content); break;
       case 'reports': renderReports(content); break;
       case 'str': renderSTR(content); break;
       case 'paye': renderPAYE(content); break;
@@ -920,6 +935,161 @@
       el.innerHTML = `<div class="empty-state"><h3>Failed to load polls</h3><p>${err.message}</p></div>`;
     }
   }
+
+  // ---- Elections ----
+  async function renderElections(el) {
+    if (!isSuperAdmin()) {
+      el.innerHTML = '<div class="empty-state"><h3>Access denied</h3><p class="text-muted">Only the super admin can manage elections.</p></div>';
+      return;
+    }
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Elections</span>
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('newElectionCard').hidden = false">New Election</button>
+        </div>
+        <div class="card-body" id="electionsContent">
+          <div class="empty-state"><p class="text-muted">Loading elections...</p></div>
+        </div>
+      </div>
+
+      <div class="card" id="newElectionCard" hidden>
+        <div class="card-header">
+          <span class="card-title">Start a new election</span>
+        </div>
+        <div class="card-body" style="display:flex;flex-direction:column;gap:10px;">
+          <label class="text-sm text-muted">Election type
+            <select id="electionKind" style="padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.8125rem; background:var(--bg-card); color:var(--text); width:100%;">
+              <option value="exec">Executive / Cooperative-wide</option>
+              <option value="unit">Workplace (per unit)</option>
+            </select>
+          </label>
+          <label class="text-sm text-muted">Unit code (only for workplace elections, e.g. LAG01)
+            <input id="electionUnit" style="padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.8125rem; background:var(--bg-card); color:var(--text); width:100%;" placeholder="Optional">
+          </label>
+          <label class="text-sm text-muted">Title
+            <input id="electionTitle" style="padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.8125rem; background:var(--bg-card); color:var(--text); width:100%;" placeholder="e.g. 2026 Executive Committee Election">
+          </label>
+          <div class="flex gap-2">
+            <button class="btn btn-primary btn-sm" onclick="startElection()">Start Election</button>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('newElectionCard').hidden = true">Cancel</button>
+          </div>
+        </div>
+      </div>`;
+
+    try {
+      const votes = await api('/votes');
+      const content = document.getElementById('electionsContent');
+      if (!votes.length) {
+        content.innerHTML = '<div class="empty-state"><h3>No elections yet</h3><p class="text-muted">Start one above. Members vote in WhatsApp/Telegram with: <code>vote &lt;election id&gt; &lt;candidate code&gt;</code></p></div>';
+        return;
+      }
+      content.innerHTML = votes.map(v => `
+        <div class="card" style="margin-bottom:16px;">
+          <div class="card-header">
+            <span class="card-title">${esc(v.title)}</span>
+            ${electionStatusBadge(v.status)}
+          </div>
+          <div class="card-body">
+            <p class="text-muted text-sm" style="margin-bottom:8px;">
+              ${v.electionType}${v.position ? ' — ' + esc(v.position) : ''} · Total votes: ${v._count?.ballots ?? 0} · Quorum: ${v.quorumRequired}% · Started ${date(v.createdAt)} ${v.closedAt ? '· Closed ' + date(v.closedAt) : ''}
+            </p>
+            <table>
+              <thead><tr><th>Candidate</th><th>Code</th><th>Votes</th></tr></thead>
+              <tbody>
+                ${(v.candidates || []).map(c => `<tr>
+                  <td>${esc(c.member?.name || '—')}</td>
+                  <td class="font-mono">${esc(c.member?.code || '—')}</td>
+                  <td>${c._count?.ballots ?? 0}</td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+            <div class="flex gap-2" style="margin-top:12px;">
+              ${v.status === 'open' ? `
+                <button class="btn btn-secondary btn-sm" onclick="addElectionCandidate('${v.id}')">Add candidate</button>
+                <button class="btn btn-primary btn-sm" onclick="closeElection('${v.id}')">Close & tally</button>` : ''}
+              <button class="btn btn-secondary btn-sm" onclick="showElectionResults('${v.id}')">Live results</button>
+              ${v.status === 'closed' ? `<button class="btn btn-secondary btn-sm" onclick="exportElectionPdf('${v.id}')">Results PDF</button>` : ''}
+            </div>
+          </div>
+        </div>`).join('');
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load elections</h3><p>${err.message}</p></div>`;
+    }
+  }
+
+  function electionStatusBadge(status) {
+    if (status === 'open') return '<span class="badge badge-green">Open</span>';
+    return '<span class="badge badge-gray">Closed</span>';
+  }
+
+  window.startElection = async function () {
+    try {
+      const kind = document.getElementById('electionKind').value;
+      const scope = document.getElementById('electionUnit').value.trim();
+      const title = document.getElementById('electionTitle').value.trim();
+      if (!title) { toast('Please enter a title', 'error'); return; }
+      const result = await api('/votes/start', {
+        method: 'POST',
+        body: { kind, scope: scope || undefined, title },
+      });
+      toast(result.message || 'Election started', 'success');
+      document.getElementById('newElectionCard').hidden = true;
+      renderElections(document.getElementById('pageContent'));
+    } catch (err) {
+      toast(err.message || 'Failed to start election', 'error');
+    }
+  };
+
+  window.addElectionCandidate = async function (id) {
+    const memberCode = prompt('Enter the candidate\'s member code:');
+    if (!memberCode) return;
+    try {
+      const result = await api(`/votes/${id}/candidate`, { method: 'POST', body: { memberCode } });
+      toast(result.message || 'Candidate added', 'success');
+      renderElections(document.getElementById('pageContent'));
+    } catch (err) {
+      toast(err.message || 'Failed to add candidate', 'error');
+    }
+  };
+
+  window.closeElection = async function (id) {
+    if (!confirm('Close this election and tally the final results?')) return;
+    try {
+      const result = await api(`/votes/${id}/close`, { method: 'POST' });
+      toast(result.message || 'Election closed', 'success');
+      renderElections(document.getElementById('pageContent'));
+    } catch (err) {
+      toast(err.message || 'Failed to close election', 'error');
+    }
+  };
+
+  window.showElectionResults = async function (id) {
+    try {
+      const result = await api(`/votes/${id}/results`);
+      toast(result.results || result.message || 'No results', 'info');
+    } catch (err) {
+      toast(err.message || 'Failed to load results', 'error');
+    }
+  };
+
+  window.exportElectionPdf = async function (id) {
+    try {
+      toast('Generating election results PDF...', 'info');
+      const result = await api(`/votes/${id}/export-pdf`, { method: 'POST' });
+      const pdf = (result.files || []).find(f => f.endsWith('.pdf'));
+      toast('PDF ready', 'success');
+      if (pdf) setTimeout(async () => {
+        try {
+          await downloadExport('/api/export/' + encodeURIComponent(pdf), pdf);
+        } catch (err) {
+          toast(err.message || 'Download failed', 'error');
+        }
+      }, 300);
+    } catch (err) {
+      toast(err.message || 'Export failed', 'error');
+    }
+  };
 
   // ---- STR / AML ----
   async function renderSTR(el) {

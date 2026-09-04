@@ -94,6 +94,7 @@ import {
   handleBuyPolls,
   handleVoteBuy,
   handlePollResults,
+  handleElections,
 } from "./handlers/voting.js";
 
 export type BotState =
@@ -168,6 +169,9 @@ export const FlowDataSchema = z.object({
   flowToken: z.string().optional(),
   consentGiven: z.boolean().optional(),
   memberId: z.string().optional(),
+  tgPinBuf: z.string().optional(),
+  keyboardMsgId: z.number().optional(),
+  tgPinPrompt: z.string().optional(),
 });
 
 export type FlowData = z.infer<typeof FlowDataSchema>;
@@ -604,6 +608,10 @@ export async function handleMessage(
 
     case "pollresults":
       await handlePollResults(phone, args);
+      break;
+
+    case "elections":
+      await handleElections(phone);
       break;
 
     case "votediv": {

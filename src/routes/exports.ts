@@ -35,12 +35,13 @@ export const serveExportFile = (app: FastifyInstance): void => {
     }
 
     const { filename } = req.params as { filename: string };
-    // Strict allow-list matching the real generated filenames
-    // (`members-<hex>`, `transactions-<hex>`, `pnl-<hex>`,
-    //  `str-compliance-<hex>`, `paye-compliance-<hex>`) + safe extension.
+    // Strict allow-list matching the real generated filenames:
+    //   `members-<hex>`, `transactions-<hex>`, `pnl-<hex>`,
+    //   `str-compliance-<hex>`, `paye-compliance-<hex>`,
+    //   `election-results-<hex>` + safe extension.
     // No slashes or `..` are allowed, so path traversal is impossible;
     // basename() further strips any directory prefix.
-    if (!/^[a-z]+(-compliance)?-[a-f0-9]{8,32}\.(xlsx|pdf)$/.test(filename)) {
+    if (!/^[a-z]+(-[a-z]+)*-([a-f0-9]{8,32})\.(xlsx|pdf)$/.test(filename)) {
       return reply.code(404).send({ error: "Not found" });
     }
     const full = join(process.cwd(), EXPORT_DIR, basename(filename));

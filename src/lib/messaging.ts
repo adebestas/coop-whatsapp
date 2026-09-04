@@ -1,5 +1,5 @@
 import { sendText as sendWhatsApp, sendFlowMessage } from "./whatsapp.js";
-import { sendTelegramMessage } from "./telegram.js";
+import { sendTelegramMessage, sendTelegramKeyboard, buildPinKeyboard } from "./telegram.js";
 import { config } from "../config.js";
 import { prisma } from "./prisma.js";
 
@@ -43,7 +43,9 @@ export async function sendText(params: { to: string; text: string }): Promise<bo
 /**
  * Channel-aware prompt for secrets (PIN / OTP).
  *
- * - Telegram: plain text (the polling loop deletes the user's reply instead).
+ * - Telegram: inline numeric keyboard — the PIN is tapped via callback queries
+ *   and never rendered as chat text. The returned messageId tracks the card so
+ *   the polling loop can update progress dots and tear it down on submit/cancel.
  * - WhatsApp: interactive Flow card with a masked passcode box when
  *   WHATSAPP_PIN_FLOW_ID is configured — the secret never renders in chat.
  *   Falls back to plain text if the card cannot be delivered.
@@ -52,10 +54,16 @@ export async function sendSecurePrompt(params: {
   to: string;
   text: string;
   flowToken?: string;
-}): Promise<boolean> {
+}): Promise<{ sent: boolean; messageId?: number }> {
   const { to, text, flowToken } = params;
 
-  if (!to.startsWith("tg:") && config.whatsapp.pinFlowId && flowToken) {
+  if (to.startsWith("tg:")) {
+    const prompt = `${text}\n\nTap the digits below — your PIN is never typed as text. When done, press *✓ Done*.`;
+    const messageId = await sendTelegramKeyboard(to.slice(3), prompt, buildPinKeyboard());
+    return { sent: messageId !== null, messageId: messageId ?? undefined };
+  }
+
+  if (config.whatsapp.pinFlowId && flowToken) {
     const sent = await sendFlowMessage({
       to,
       flowId: config.whatsapp.pinFlowId,
@@ -63,11 +71,11 @@ export async function sendSecurePrompt(params: {
       cta: "Enter securely",
       body: text,
     });
-    if (sent) return true;
+    if (sent) return { sent: true };
     // Flow card failed (unpublished flow id, API hiccup) — degrade gracefully.
     // NOTE: Degrades to plaintext PIN prompt when the secure card isn't available.
   }
-  return sendText({ to, text });
+  return { sent: await sendText({ to, text }) };
 }
 
 /** Which platform does this channel id belong to? */

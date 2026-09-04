@@ -207,13 +207,31 @@ export async function issueSecretChallenge(
   text: string,
 ): Promise<void> {
   const flowToken = randomBytes(16).toString("hex");
-  const nextData: FlowData = { ...data, flowToken };
+  // Start a fresh secret entry: drop any stale Telegram kiosk state and reset the buffer.
+  const { keyboardMsgId, tgPinPrompt, tgPinBuf, ...rest } = data;
+  const nextData: FlowData = { ...rest, flowToken, tgPinBuf: "" };
   await prisma.session.upsert({
     where: { phone },
     create: { phone, state, data: JSON.stringify(nextData) },
     update: { state, data: JSON.stringify(nextData) },
   });
-  await sendSecurePrompt({ to: phone, text, flowToken });
+  const sent = await sendSecurePrompt({ to: phone, text, flowToken });
+  if (phone.startsWith("tg:") && sent.messageId) {
+    // Persist the on-screen kiosk card handle + prompt so callback taps can
+    // update progress dots and tear the card down on submit/cancel.
+    const withKiosk: FlowData = { ...nextData, tgPinBuf: "", keyboardMsgId: sent.messageId, tgPinPrompt: text };
+    await prisma.session.update({
+      where: { phone },
+      data: { data: JSON.stringify(withKiosk) },
+    });
+  }
+}
+
+/** Remove the on-screen Telegram PIN kiosk card if one is live for this session. */
+async function teardownTelegramKiosk(phone: string, data: FlowData): Promise<void> {
+  if (phone.startsWith("tg:") && data.keyboardMsgId) {
+    await deleteTelegramMessage(phone.slice(3), data.keyboardMsgId).catch(() => {});
+  }
 }
 
 export async function handleAwaitingInput(
@@ -227,6 +245,7 @@ export async function handleAwaitingInput(
 
   const escapeWords = ["menu", "cancel", "quit", "exit", "back"];
   if (escapeWords.includes(text.trim().toLowerCase())) {
+    await teardownTelegramKiosk(phone, data);
     await prisma.session.update({ where: { phone }, data: { state: "idle", data: "{}" } });
     await sendText({ to: phone, text: "Flow cancelled. Reply *menu* to see options." });
     return;
@@ -237,6 +256,7 @@ export async function handleAwaitingInput(
       void deleteTelegramMessage(phone.slice(3), meta.telegramMessageId).catch(() => {});
     }
     if (data.flowToken && meta.flowToken && meta.flowToken !== data.flowToken) {
+      await teardownTelegramKiosk(phone, data);
       await prisma.session.update({ where: { phone }, data: { state: "idle", data: "{}" } });
       await sendText({
         to: phone,

@@ -1,6 +1,6 @@
 import { sendText } from "../../lib/messaging.js";
 import { getMemberByPhone, formatBalance } from "../cooperative.js";
-import { startVote, addCandidate, castVote, closeVote, showResults, showLiveResults } from "../votes.js";
+import { startVote, addCandidate, castVote, closeVote, showResults, showLiveResults, memberElectionsMessage } from "../votes.js";
 import { castBuyVote, listBuyPolls } from "../buypoll.js";
 
 export async function handleStartVote(phone: string, args: string[]): Promise<void> {
@@ -105,4 +105,14 @@ export async function handlePollResults(phone: string, args: string[]): Promise<
   }
   const result = await showLiveResults(phone, args[0]);
   await sendText({ to: phone, text: result.message });
+}
+
+export async function handleElections(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const text = await memberElectionsMessage(member.cooperativeId, member.unitId);
+  await sendText({ to: phone, text });
 }

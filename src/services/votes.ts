@@ -27,6 +27,17 @@ function buildProgressBar(votes: number, maxVotes: number): string {
   return "█".repeat(filled) + "░".repeat(10 - filled);
 }
 
+function tallyChannels(ballots: { channel?: string | null }[]): string {
+  const counts: Record<string, number> = {};
+  for (const b of ballots) {
+    const ch = b.channel || "whatsapp";
+    counts[ch] = (counts[ch] ?? 0) + 1;
+  }
+  const label: Record<string, string> = { whatsapp: "WhatsApp", telegram: "Telegram", web: "Web" };
+  const parts = Object.entries(counts).map(([k, n]) => `${label[k] ?? k} (${n})`);
+  return parts.length ? parts.join(", ") : "no votes yet";
+}
+
 function electionTypeLabel(vote: { electionType: string; kind: string; position?: string | null; unitId?: string | null }): string {
   if (vote.electionType === "workplace" || vote.kind === "unit") return "🏢 Workplace Election";
   if (vote.electionType === "executive" || vote.kind === "exec") return "🏛️ Executive Election";
@@ -42,7 +53,7 @@ async function buildLiveResultsMessage(voteId: string): Promise<string> {
     where: { id: voteId },
     include: {
       candidates: {
-        include: { member: { select: { name: true } }, ballots: { select: { id: true } } },
+        include: { member: { select: { name: true } }, ballots: { select: { id: true, channel: true } } },
       },
     },
   });
@@ -54,6 +65,8 @@ async function buildLiveResultsMessage(voteId: string): Promise<string> {
   const quorumRequired = Math.ceil((activeMembers * vote.quorumRequired) / 100);
   const quorumMet = totalVotes >= quorumRequired;
   const quorumPercent = activeMembers > 0 ? Math.round((totalVotes / activeMembers) * 100) : 0;
+
+  const channels = tallyChannels(vote.candidates.flatMap((c) => c.ballots));
 
   const lines = vote.candidates.map((c) => {
     const votes = c.ballots.length;
@@ -72,6 +85,7 @@ async function buildLiveResultsMessage(voteId: string): Promise<string> {
     `${typeTag} LIVE: ${vote.title}${posLabel}\n\n` +
     `${lines.join("\n") || "No candidates yet."}\n\n` +
     `Total votes: ${totalVotes} | Quorum: ${totalVotes}/${quorumRequired} (${quorumPercent}%) ${quorumStatus}\n` +
+    `Voting: ${channels} | One person, one vote\n` +
     `Status: Open — closes when an admin runs *closevote ${vote.id.slice(-6)}*`
   );
 }
@@ -264,7 +278,12 @@ export async function castVote(voterPhone: string, voteCode: string, memberCode:
 
   try {
     await prisma.voteBallot.create({
-      data: { voteId: vote.id, candidateId: candidate.id, voterId: voter.id },
+      data: {
+        voteId: vote.id,
+        candidateId: candidate.id,
+        voterId: voter.id,
+        channel: voterPhone.startsWith("tg:") ? "telegram" : "whatsapp",
+      },
     });
   } catch {
     return { ok: false, message: "You already voted in this election. One person, one vote." };
@@ -369,19 +388,21 @@ async function tallyMessage(voteId: string): Promise<string> {
     where: { id: voteId },
     include: {
       candidates: {
-        include: { member: { select: { name: true } }, ballots: { select: { id: true } } },
+        include: { member: { select: { name: true } }, ballots: { select: { id: true, channel: true } } },
       },
     },
   });
   if (!vote) return "Election not found.";
   const typeTag = electionTypeLabel(vote);
   const posLabel = positionLabel(vote);
+  const totalVotes = vote.candidates.reduce((sum, c) => sum + c.ballots.length, 0);
+  const channels = tallyChannels(vote.candidates.flatMap((c) => c.ballots));
   const lines = vote.candidates
     .map((c) => `• ${c.member.name} — ${c.ballots.length} vote(s)`)
     .join("\n");
   return (
     `${typeTag} *${vote.title}*${posLabel} (${vote.status})\n\n${lines || "No candidates yet."}` +
-    (vote.winnerId ? "" : "")
+    `\n\nTotal votes: ${totalVotes}\nVoting: ${channels} | One person, one vote`
   );
 }
 
@@ -418,4 +439,29 @@ export async function getActiveElectionsForNewMember(
     orderBy: { createdAt: "desc" },
   });
   return votes;
+}
+
+/** Member-facing "elections" command: list open elections the member is
+ *  eligible for, with live tallies. */
+export async function memberElectionsMessage(cooperativeId: string, unitId: string | null): Promise<string> {
+  const open = await prisma.vote.findMany({
+    where: {
+      cooperativeId,
+      status: "open",
+      OR: [
+        { unitId: null },
+        ...(unitId ? [{ unitId }] : []),
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+  });
+  if (open.length === 0) {
+    return "There are no open elections right now. Check back later.";
+  }
+  const parts: string[] = [];
+  for (const v of open) {
+    parts.push(await buildLiveResultsMessage(v.id));
+  }
+  return `🗳️ *Open Elections*\n\n` + parts.join("\n\n---\n\n");
 }

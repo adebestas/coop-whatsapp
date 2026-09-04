@@ -1,6 +1,16 @@
 import { config } from "../config.js";
-import { getTelegramUpdates, sendTelegramMessage } from "../lib/telegram.js";
+import {
+  getTelegramUpdates,
+  sendTelegramMessage,
+  deleteTelegramMessage,
+  editTelegramMessage,
+  buildPinKeyboard,
+  answerTelegramCallback,
+} from "../lib/telegram.js";
 import { handleMessage } from "./conversation.js";
+import { SECRET_STATES, type BotState } from "./conversation.js";
+import { handleAwaitingInput, safeParse } from "./handlers/session.js";
+import { prisma } from "../lib/prisma.js";
 
 const API_BASE = "https://api.telegram.org";
 
@@ -98,6 +108,67 @@ async function setTelegramCommands(): Promise<void> {
  * See: https://core.telegram.org/bots/api#setwebhook
  */
 /**
+ * Handle a Telegram inline-keyboard callback (the numeric PIN kiosk). Digits
+ * accumulate in the session buffer; "✓ Done" submits the PIN by feeding it into
+ * the same awaiting-input path used for chat, so all PIN validation is reused.
+ * The PIN is never sent as a chat message.
+ */
+async function handlePinCallback(callbackQuery: {
+  id: string;
+  from: { id: number };
+  data?: string;
+}): Promise<void> {
+  const chatId = callbackQuery.from.id;
+  const userId = `tg:${chatId}`;
+  const data = callbackQuery.data ?? "";
+  void answerTelegramCallback(callbackQuery.id);
+
+  if (!data.startsWith("pin:")) return;
+  const action = data.slice(4);
+
+  const session = await prisma.session.findUnique({ where: { phone: userId } });
+  if (!session) return;
+  const state = session.state as BotState;
+  const sessionData = safeParse(session.data);
+
+  if (!SECRET_STATES.includes(state)) {
+    // Stale / non-secret card — tear it down quietly.
+    if (sessionData.keyboardMsgId) await deleteTelegramMessage(chatId, sessionData.keyboardMsgId).catch(() => {});
+    return;
+  }
+
+  let buf = sessionData.tgPinBuf ?? "";
+
+  if (/^[0-9]$/.test(action)) {
+    if (buf.length < 8) buf += action;
+  } else if (action === "del") {
+    buf = buf.slice(0, -1);
+  } else if (action === "ok") {
+    // Submit the accumulated PIN through the normal awaiting-input path.
+    if (buf) {
+      if (sessionData.keyboardMsgId) await deleteTelegramMessage(chatId, sessionData.keyboardMsgId).catch(() => {});
+      await prisma.session.update({
+        where: { phone: userId },
+        data: { data: JSON.stringify({ ...sessionData, tgPinBuf: "" }) },
+      });
+      await handleAwaitingInput(userId, state, buf, session.data, {});
+    }
+    return;
+  }
+
+  // Live progress feedback on the card (no PIN digits ever shown).
+  const dots = "●".repeat(buf.length) + "○".repeat(4 - buf.length);
+  const header = sessionData.tgPinPrompt ?? "Enter your PIN";
+  if (sessionData.keyboardMsgId) {
+    await editTelegramMessage(chatId, sessionData.keyboardMsgId, `${header}\n\nPIN:\n${dots}`, buildPinKeyboard()).catch(() => {});
+  }
+  await prisma.session.update({
+    where: { phone: userId },
+    data: { data: JSON.stringify({ ...sessionData, tgPinBuf: buf }) },
+  });
+}
+
+/**
  * Start the Telegram bot using long-polling.
  *
  * NOTE: Long-polling does not scale horizontally — for production multi-instance
@@ -128,6 +199,12 @@ export async function startTelegramBot(): Promise<void> {
       consecutiveEmpty = 0;
       for (const update of updates) {
         offset = Math.max(offset, update.update_id + 1);
+        if (update.callback_query) {
+          void handlePinCallback(update.callback_query).catch((err) => {
+            console.error(`[telegram] handlePinCallback failed for ${update.callback_query?.from.id}`, err);
+          });
+          continue;
+        }
         const message = update.message;
         if (!message?.text) continue;
 

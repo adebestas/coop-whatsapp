@@ -92,6 +92,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
         id: member.id,
         name: member.name,
         phone: member.phone,
+        role: member.role,
         cooperative: {
           id: member.cooperative.id,
           name: member.cooperative.name,
@@ -451,5 +452,89 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const result = await runComplianceExport(coopId, kind);
     if (!result.ok) return reply.code(400).send({ error: result.message });
     return { ok: true, message: result.message, files: result.files ?? [] };
+  });
+
+  // ---- Elections (management) ----
+
+  app.get("/api/admin/votes", async (req) => {
+    const coopId = req.adminCoopId!;
+    return prisma.vote.findMany({
+      where: { cooperativeId: coopId },
+      include: {
+        candidates: {
+          include: {
+            member: { select: { name: true, code: true } },
+            _count: { select: { ballots: true } },
+          },
+        },
+        _count: { select: { ballots: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    });
+  });
+
+  async function requireSuper(req: { adminCoopId?: string; adminPhone?: string }): Promise<{ ok: boolean; actorId?: string; phone?: string }> {
+    const coopId = req.adminCoopId;
+    const phone = req.adminPhone;
+    if (!coopId || !phone) return { ok: false };
+    const actor = await prisma.member.findFirst({ where: { phone, cooperativeId: coopId } });
+    if (!actor || actor.role !== "superadmin") return { ok: false };
+    return { ok: true, actorId: actor.id, phone };
+  }
+
+  app.post("/api/admin/votes/start", async (req, reply) => {
+    const superAuth = await requireSuper(req);
+    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can start an election." });
+    const body = (req.body ?? {}) as { kind?: string; scope?: string; title?: string };
+    const { startVote } = await import("../services/votes.js");
+    const result = await startVote(superAuth.phone!, body.kind ?? "", body.scope, body.title ?? "");
+    if (!result.ok) return reply.code(400).send({ error: result.message });
+    return { ok: true, message: result.message, voteId: result.voteId };
+  });
+
+  app.post("/api/admin/votes/:id/candidate", async (req, reply) => {
+    const superAuth = await requireSuper(req);
+    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can add candidates." });
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { memberCode?: string };
+    if (!body.memberCode) return reply.code(400).send({ error: "memberCode is required" });
+    const { addCandidate } = await import("../services/votes.js");
+    const result = await addCandidate(superAuth.phone!, id, body.memberCode);
+    if (!result.ok) return reply.code(400).send({ error: result.message });
+    return { ok: true, message: result.message };
+  });
+
+  app.post("/api/admin/votes/:id/close", async (req, reply) => {
+    const superAuth = await requireSuper(req);
+    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can close an election." });
+    const { id } = req.params as { id: string };
+    const { closeVote } = await import("../services/votes.js");
+    const result = await closeVote(superAuth.phone!, id);
+    if (!result.ok) return reply.code(400).send({ error: result.message });
+    return { ok: true, message: result.message };
+  });
+
+  app.get("/api/admin/votes/:id/results", async (req, reply) => {
+    const coopId = req.adminCoopId!;
+    const phone = req.adminPhone!;
+    const { id } = req.params as { id: string };
+    const vote = await prisma.vote.findFirst({ where: { id, cooperativeId: coopId }, select: { id: true } });
+    if (!vote) return reply.code(404).send({ error: "Election not found" });
+    const { showLiveResults } = await import("../services/votes.js");
+    const result = await showLiveResults(phone, id);
+    if (!result.ok) return reply.code(400).send({ error: result.message });
+    return { ok: true, results: result.message };
+  });
+
+  app.post("/api/admin/votes/:id/export-pdf", async (req, reply) => {
+    const superAuth = await requireSuper(req);
+    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can export results." });
+    const coopId = req.adminCoopId!;
+    const { id } = req.params as { id: string };
+    const { exportElectionPdf } = await import("../services/election-export.js");
+    const result = await exportElectionPdf(coopId, id);
+    if (!result.ok) return reply.code(400).send({ error: result.message });
+    return { ok: true, message: result.message, files: result.file ? [result.file] : [] };
   });
 }

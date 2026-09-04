@@ -780,6 +780,7 @@ model VoteBallot {
   voteId      String
   candidateId String
   voterId     String
+  channel     String   @default("whatsapp") // whatsapp | telegram | web — channel the vote was cast on
   createdAt   DateTime @default(now())
 
   vote      Vote          @relation(fields: [voteId], references: [id])
