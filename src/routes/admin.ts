@@ -454,6 +454,315 @@ export async function adminApiRoutes(app: FastifyInstance) {
     return { ok: true, message: result.message, files: result.files ?? [] };
   });
 
+  // ---- Grievances (member complaints) ----
+
+  app.get("/api/admin/grievances", async (req) => {
+    const coopId = req.adminCoopId!;
+    return prisma.grievance.findMany({
+      where: { cooperativeId: coopId },
+      include: {
+        member: { select: { name: true, phone: true, code: true } },
+        resolvedBy: { select: { name: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+    });
+  });
+
+  app.post("/api/admin/grievances/:id/resolve", async (req, reply) => {
+    const coopId = req.adminCoopId!;
+    const phone = req.adminPhone!;
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { response?: string };
+    const response = String(body.response ?? "").trim();
+    if (!response) return reply.code(400).send({ error: "A response message is required" });
+
+    const actor = await prisma.member.findFirst({ where: { phone, cooperativeId: coopId } });
+    if (!actor) return reply.code(401).send({ error: "actor not found" });
+
+    const grievance = await prisma.grievance.findFirst({ where: { id, cooperativeId: coopId }, include: { member: true } });
+    if (!grievance) return reply.code(404).send({ error: "Grievance not found" });
+    if (grievance.status === "resolved") return reply.code(400).send({ error: "Grievance is already resolved" });
+
+    await prisma.grievance.update({
+      where: { id: grievance.id },
+      data: {
+        status: "resolved",
+        response: response.slice(0, 500),
+        resolvedById: actor.id,
+        resolvedAt: new Date(),
+      },
+    });
+
+    await notifyMember(
+      grievance.member,
+      `✅ Your grievance *${grievance.id.slice(-6)}* has been resolved.\n\nResponse: ${response}`,
+    ).catch(() => {});
+
+    await prisma.auditLog.create({
+      data: {
+        cooperativeId: coopId,
+        actorId: actor.id,
+        actorPhone: phone,
+        actorRole: actor.role,
+        action: "grievance.resolve",
+        targetType: "grievance",
+        targetId: grievance.id,
+        detail: `Resolved grievance from ${grievance.member.name}`,
+      },
+    });
+
+    return { ok: true, message: `Grievance *${grievance.id.slice(-6)}* resolved. ${grievance.member.name} notified.` };
+  });
+
+  // ---- Support Tickets ----
+
+  app.get("/api/admin/tickets", async (req) => {
+    const coopId = req.adminCoopId!;
+    const status = (req.query as { status?: string }).status;
+    return prisma.supportTicket.findMany({
+      where: { cooperativeId: coopId, ...(status ? { status } : {}) },
+      include: {
+        member: { select: { name: true, phone: true, code: true } },
+        assignedTo: { select: { name: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+    });
+  });
+
+  app.post("/api/admin/tickets/:id/resolve", async (req, reply) => {
+    const coopId = req.adminCoopId!;
+    const phone = req.adminPhone!;
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { note?: string };
+    const note = String(body.note ?? "").trim();
+
+    const actor = await prisma.member.findFirst({ where: { phone, cooperativeId: coopId } });
+    if (!actor) return reply.code(401).send({ error: "actor not found" });
+
+    const ticket = await prisma.supportTicket.findFirst({ where: { id, cooperativeId: coopId }, include: { member: true } });
+    if (!ticket) return reply.code(404).send({ error: "Ticket not found" });
+    if (ticket.status === "resolved") return reply.code(400).send({ error: "Ticket is already resolved" });
+
+    await prisma.supportTicket.update({
+      where: { id: ticket.id },
+      data: {
+        status: "resolved",
+        assignedToId: actor.id,
+        resolution: note.slice(0, 500) || null,
+        resolvedAt: new Date(),
+        firstResponseAt: ticket.firstResponseAt ?? new Date(),
+      },
+    });
+
+    await notifyMember(
+      ticket.member,
+      `✅ Your ticket *${ticket.id.slice(-6)}* has been resolved.\n${note ? `Note: ${note}` : ""}`,
+    ).catch(() => {});
+
+    await prisma.auditLog.create({
+      data: {
+        cooperativeId: coopId,
+        actorId: actor.id,
+        actorPhone: phone,
+        actorRole: actor.role,
+        action: "ticket.resolve",
+        targetType: "ticket",
+        targetId: ticket.id,
+        detail: `Resolved ticket from ${ticket.member.name}`,
+      },
+    });
+
+    return { ok: true, message: `Ticket *${ticket.id.slice(-6)}* resolved. ${ticket.member.name} notified.` };
+  });
+
+  // ---- Executive Posts (organogram) ----
+
+  app.get("/api/admin/posts", async (req) => {
+    const coopId = req.adminCoopId!;
+    return prisma.coopPost.findMany({
+      where: { cooperativeId: coopId },
+      include: {
+        incumbent: { select: { name: true, phone: true, code: true } },
+      },
+      orderBy: { title: "asc" },
+    });
+  });
+
+  app.post("/api/admin/posts", async (req, reply) => {
+    const superAuth = await requireSuper(req);
+    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can create posts." });
+    const coopId = req.adminCoopId!;
+    const phone = req.adminPhone!;
+    const body = (req.body ?? {}) as { title?: string };
+    if (!body.title) return reply.code(400).send({ error: "Post title is required" });
+
+    const { normalizeTitle } = await import("../services/posts.js");
+    const title = normalizeTitle(String(body.title));
+    const existing = await prisma.coopPost.findFirst({ where: { cooperativeId: coopId, title } });
+    if (existing) return reply.code(400).send({ error: "A post with this title already exists" });
+
+    const post = await prisma.coopPost.create({
+      data: {
+        cooperativeId: coopId,
+        title,
+        appointedById: superAuth.actorId,
+        appointedAt: new Date(),
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        cooperativeId: coopId,
+        actorId: superAuth.actorId,
+        actorPhone: phone,
+        actorRole: "superadmin",
+        action: "post.create",
+        targetType: "post",
+        targetId: post.id,
+        detail: `Created post "${normalizeTitle(title)}"`,
+      },
+    });
+
+    return { ok: true, message: `Post "${normalizeTitle(title)}" created.` };
+  });
+
+  app.post("/api/admin/posts/:id/assign", async (req, reply) => {
+    const superAuth = await requireSuper(req);
+    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can assign posts." });
+    const coopId = req.adminCoopId!;
+    const phone = req.adminPhone!;
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { memberCode?: string };
+
+    const post = await prisma.coopPost.findFirst({ where: { id, cooperativeId: coopId } });
+    if (!post) return reply.code(404).send({ error: "Post not found" });
+
+    let incumbentId: string | null = null;
+    let memberName = "_vacant_";
+    if (body.memberCode) {
+      const member = await prisma.member.findFirst({ where: { code: body.memberCode, cooperativeId: coopId } });
+      if (!member) return reply.code(400).send({ error: `Member code ${body.memberCode} not found` });
+      incumbentId = member.id;
+      memberName = member.name;
+    }
+
+    await prisma.coopPost.update({
+      where: { id: post.id },
+      data: { incumbentId, appointedById: superAuth.actorId, appointedAt: new Date() },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        cooperativeId: coopId,
+        actorId: superAuth.actorId,
+        actorPhone: phone,
+        actorRole: "superadmin",
+        action: "post.assign",
+        targetType: "post",
+        targetId: post.id,
+        detail: `${body.memberCode ? `Assigned "${post.title}" to ${memberName}` : `Vacated "${post.title}"`}`,
+      },
+    });
+
+    return { ok: true, message: body.memberCode ? `"${post.title}" assigned to ${memberName}.` : `"${post.title}" is now vacant.` };
+  });
+
+  // ---- Payroll ----
+
+  app.get("/api/admin/payroll", async (req) => {
+    const coopId = req.adminCoopId!;
+    const { payrollOverview } = await import("../services/payroll.js");
+    return { participants: await payrollOverview(coopId) };
+  });
+
+  app.post("/api/admin/payroll/set", async (req, reply) => {
+    const superAuth = await requireSuper(req);
+    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can set salaries." });
+    const coopId = req.adminCoopId!;
+    const body = (req.body ?? {}) as { memberCode?: string; amount?: number | "off" };
+    if (!body.memberCode) return reply.code(400).send({ error: "memberCode is required" });
+
+    const actor = await prisma.member.findFirst({ where: { id: superAuth.actorId, cooperativeId: coopId } });
+    if (!actor) return reply.code(401).send({ error: "actor not found" });
+
+    const target = await prisma.member.findFirst({ where: { code: body.memberCode, cooperativeId: coopId } });
+    if (!target) return reply.code(400).send({ error: `Member code ${body.memberCode} not found` });
+
+    const { setSalary } = await import("../services/payroll.js");
+    const result = await setSalary(actor, target.phone, body.amount === "off" ? "off" : Number(body.amount));
+    if (!result.ok) return reply.code(400).send({ error: result.message });
+    return { ok: true, message: result.message };
+  });
+
+  app.post("/api/admin/payroll/run", async (req, reply) => {
+    const superAuth = await requireSuper(req);
+    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can run payroll." });
+    const coopId = req.adminCoopId!;
+    const actor = await prisma.member.findFirst({ where: { id: superAuth.actorId, cooperativeId: coopId } });
+    if (!actor) return reply.code(401).send({ error: "actor not found" });
+
+    const body = (req.body ?? {}) as { narration?: string };
+    const narration = String(body.narration ?? "").trim();
+    if (!narration) return reply.code(400).send({ error: "A narration is required" });
+
+    const { runPayroll } = await import("../services/payroll.js");
+    const result = await runPayroll(coopId, { id: actor.id, phone: actor.phone, role: actor.role }, narration);
+    return { ok: result.ok, message: result.message, paid: result.paid ?? 0, total: result.total ?? 0 };
+  });
+
+  app.get("/api/admin/payroll/history", async (req) => {
+    const coopId = req.adminCoopId!;
+    const [paye, ledger] = await Promise.all([
+      prisma.pAYERecord.findMany({
+        where: { cooperativeId: coopId },
+        include: { member: { select: { name: true, code: true } } },
+        orderBy: [{ year: "desc" }, { month: "desc" }],
+        take: 200,
+      }),
+      prisma.ledgerEntry.findMany({
+        where: { cooperativeId: coopId, category: { in: ["salary", "stipend"] } },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+      }),
+    ]);
+    return { paye, ledger };
+  });
+
+  // ---- Reserves / Funds ----
+
+  app.get("/api/admin/funds", async (req) => {
+    const coopId = req.adminCoopId!;
+    const [coop, reserve, education, development] = await Promise.all([
+      prisma.cooperative.findUnique({ where: { id: coopId }, select: { reserveFundBalance: true } }),
+      prisma.reserveAllocation.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+      }),
+      prisma.educationFund.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+      }),
+      prisma.developmentFund.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+      }),
+    ]);
+    const sum = (rows: { amount: number }[]) => rows.reduce((a, r) => a + r.amount, 0);
+    return {
+      reserveBalance: coop?.reserveFundBalance ?? 0,
+      educationBalance: sum(education),
+      developmentBalance: sum(development),
+      allocations: reserve,
+      education: education,
+      development: development,
+    };
+  });
+
   // ---- Elections (management) ----
 
   app.get("/api/admin/votes", async (req) => {
@@ -482,6 +791,50 @@ export async function adminApiRoutes(app: FastifyInstance) {
     if (!actor || actor.role !== "superadmin") return { ok: false };
     return { ok: true, actorId: actor.id, phone };
   }
+
+  app.post("/api/admin/funds/reserve/allocate", async (req, reply) => {
+    const superAuth = await requireSuper(req);
+    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can allocate to the reserve fund." });
+    const coopId = req.adminCoopId!;
+    const phone = req.adminPhone!;
+    const body = (req.body ?? {}) as { amount?: number; note?: string };
+    const amount = Math.round(Number(body.amount ?? 0));
+    if (!(amount > 0)) return reply.code(400).send({ error: "A valid amount is required (in kobo)" });
+    const note = String(body.note ?? "").trim().slice(0, 200) || null;
+
+    const coop = await prisma.cooperative.findUnique({ where: { id: coopId } });
+    if (!coop) return reply.code(404).send({ error: "Cooperative not found" });
+
+    await prisma.cooperative.update({
+      where: { id: coopId },
+      data: { reserveFundBalance: coop.reserveFundBalance + amount },
+    });
+    await prisma.reserveAllocation.create({
+      data: {
+        cooperativeId: coopId,
+        amount,
+        source: "manual",
+        note,
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        cooperativeId: coopId,
+        actorId: superAuth.actorId,
+        actorPhone: phone,
+        actorRole: "superadmin",
+        action: "funds.reserve.allocate",
+        targetType: "cooperative",
+        amount,
+        detail: `Manual reserve allocation of ${amount} kobo${note ? " — " + note : ""}`,
+      },
+    });
+
+    return { ok: true, message: "Reserve fund allocation recorded and balance updated." };
+  });
+
+  // ---- Elections (management) ----
 
   app.post("/api/admin/votes/start", async (req, reply) => {
     const superAuth = await requireSuper(req);

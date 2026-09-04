@@ -65,6 +65,12 @@
     if (roleEl) roleEl.textContent = roleText;
     const navElections = document.getElementById('navElections');
     if (navElections) navElections.hidden = !isSuperAdmin();
+    const navPosts = document.getElementById('navPosts');
+    if (navPosts) navPosts.hidden = !isSuperAdmin();
+    const navPayroll = document.getElementById('navPayroll');
+    if (navPayroll) navPayroll.hidden = !isSuperAdmin();
+    const navFunds = document.getElementById('navFunds');
+    if (navFunds) navFunds.hidden = !isSuperAdmin();
   }
 
   window.logout = async function () {
@@ -163,6 +169,11 @@
       withdrawals: 'Withdrawals',
       polls: 'Buy Polls',
       elections: 'Elections',
+      grievances: 'Grievances',
+      tickets: 'Support Tickets',
+      posts: 'Executive Posts',
+      payroll: 'Payroll',
+      funds: 'Funds / Reserves',
       reports: 'Annual Report',
       str: 'STR / AML',
       paye: 'PAYE'
@@ -182,6 +193,11 @@
       case 'withdrawals': renderWithdrawals(content); break;
       case 'polls': renderPolls(content); break;
       case 'elections': renderElections(content); break;
+      case 'grievances': renderGrievances(content); break;
+      case 'tickets': renderTickets(content); break;
+      case 'posts': renderPosts(content); break;
+      case 'payroll': renderPayroll(content); break;
+      case 'funds': renderFunds(content); break;
       case 'reports': renderReports(content); break;
       case 'str': renderSTR(content); break;
       case 'paye': renderPAYE(content); break;
@@ -1089,6 +1105,447 @@
     } catch (err) {
       toast(err.message || 'Export failed', 'error');
     }
+  };
+
+  // ---- Grievances (member complaints) ----
+  async function renderGrievances(el) {
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Member Grievances</span>
+          <div class="flex gap-2">
+            <select id="grievanceFilter" style="padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.8125rem; background:var(--bg-card); color:var(--text);">
+              <option value="">All</option>
+              <option value="open">Open</option>
+              <option value="resolved">Resolved</option>
+            </select>
+          </div>
+        </div>
+        <div class="card-body flush" id="grievancesTable">
+          <div class="empty-state"><p class="text-muted">Loading grievances...</p></div>
+        </div>
+      </div>`;
+
+    document.getElementById('grievanceFilter').addEventListener('change', function () {
+      loadGrievances(this.value);
+    });
+    loadGrievances('');
+  }
+
+  async function loadGrievances(status) {
+    const el = document.getElementById('grievancesTable');
+    el.innerHTML = '<div class="empty-state"><p class="text-muted">Loading...</p></div>';
+    try {
+      const rows = await api('/grievances');
+      const filtered = status ? rows.filter(r => r.status === status) : rows;
+      if (!filtered.length) {
+        el.innerHTML = '<div class="empty-state"><h3>No grievances</h3><p class="text-muted">Member complaints will appear here.</p></div>';
+        return;
+      }
+      el.innerHTML = `
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Member</th><th>Complaint</th><th>Status</th><th>Date</th><th></th></tr></thead>
+            <tbody>
+              ${filtered.map(g => `<tr>
+                <td class="font-bold">${esc(g.member?.name || '—')}<div class="text-muted text-sm">${esc(formatPhone(g.member?.phone))}</div></td>
+                <td class="text-sm">${esc(g.message)}</td>
+                <td>${statusBadge(g.status)}</td>
+                <td class="text-muted text-sm">${date(g.createdAt)}</td>
+                <td>${g.status === 'open' ? `<button class="btn btn-primary btn-xs" onclick="resolveGrievance('${g.id}')">Resolve</button>` : '<span class="text-muted text-sm">By ' + esc(g.resolvedBy?.name || '—') + '</span>'}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load</h3><p>${err.message}</p></div>`;
+    }
+  }
+
+  window.resolveGrievance = async function (id) {
+    const response = prompt('Resolution response for the member:');
+    if (response === null) return;
+    if (!response.trim()) { toast('A response is required', 'error'); return; }
+    try {
+      const result = await api(`/grievances/${id}/resolve`, { method: 'POST', body: { response: response.trim() } });
+      toast(result.message || 'Grievance resolved', 'success');
+      renderGrievances(document.getElementById('pageContent'));
+    } catch (err) {
+      toast(err.message || 'Failed to resolve', 'error');
+    }
+  };
+
+  // ---- Support Tickets ----
+  async function renderTickets(el) {
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Support Tickets</span>
+          <div class="flex gap-2">
+            <select id="ticketFilter" style="padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.8125rem; background:var(--bg-card); color:var(--text);">
+              <option value="">All</option>
+              <option value="open">Open</option>
+              <option value="in_progress">In Progress</option>
+              <option value="resolved">Resolved</option>
+            </select>
+          </div>
+        </div>
+        <div class="card-body flush" id="ticketsTable">
+          <div class="empty-state"><p class="text-muted">Loading tickets...</p></div>
+        </div>
+      </div>`;
+
+    document.getElementById('ticketFilter').addEventListener('change', function () {
+      loadTickets(this.value);
+    });
+    loadTickets('');
+  }
+
+  async function loadTickets(status) {
+    const el = document.getElementById('ticketsTable');
+    el.innerHTML = '<div class="empty-state"><p class="text-muted">Loading...</p></div>';
+    try {
+      const rows = await api('/tickets');
+      const filtered = status ? rows.filter(r => r.status === status) : rows;
+      if (!filtered.length) {
+        el.innerHTML = '<div class="empty-state"><h3>No tickets</h3><p class="text-muted">Member support requests will appear here.</p></div>';
+        return;
+      }
+      el.innerHTML = `
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>ID</th><th>Member</th><th>Issue</th><th>Priority</th><th>Status</th><th>Date</th><th></th></tr></thead>
+            <tbody>
+              ${filtered.map(t => `<tr>
+                <td class="font-mono text-sm">#${esc(t.id.slice(-6))}</td>
+                <td class="font-bold">${esc(t.member?.name || '—')}<div class="text-muted text-sm">${esc(formatPhone(t.member?.phone))}</div></td>
+                <td class="text-sm">${esc(t.message)}</td>
+                <td>${priorityBadge(t.priority)}</td>
+                <td>${statusBadge(t.status)}</td>
+                <td class="text-muted text-sm">${date(t.createdAt)}</td>
+                <td>${t.status !== 'resolved' ? `<button class="btn btn-primary btn-xs" onclick="resolveTicket('${t.id}')">Resolve</button>` : '<span class="text-muted text-sm">By ' + esc(t.assignedTo?.name || '—') + '</span>'}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load</h3><p>${err.message}</p></div>`;
+    }
+  }
+
+  function priorityBadge(p) {
+    const c = { urgent: 'red', high: 'red', normal: 'blue', low: 'gray' }[p] || 'gray';
+    return `<span class="badge badge-${c}">${esc(p)}</span>`;
+  }
+
+  window.resolveTicket = async function (id) {
+    const note = prompt('Resolution note (optional):') || '';
+    try {
+      const result = await api(`/tickets/${id}/resolve`, { method: 'POST', body: { note } });
+      toast(result.message || 'Ticket resolved', 'success');
+      renderTickets(document.getElementById('pageContent'));
+    } catch (err) {
+      toast(err.message || 'Failed to resolve', 'error');
+    }
+  };
+
+  // ---- Executive Posts ----
+  async function renderPosts(el) {
+    if (!isSuperAdmin()) {
+      el.innerHTML = '<div class="empty-state"><h3>Access denied</h3><p class="text-muted">Only the super admin can manage executive posts.</p></div>';
+      return;
+    }
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Executive Posts (Organogram)</span>
+          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('newPostCard').hidden = false">New Post</button>
+        </div>
+        <div class="card-body flush" id="postsTable">
+          <div class="empty-state"><p class="text-muted">Loading posts...</p></div>
+        </div>
+      </div>
+
+      <div class="card" id="newPostCard" hidden>
+        <div class="card-header"><span class="card-title">Add an executive post</span></div>
+        <div class="card-body" style="display:flex; gap:10px; align-items:center;">
+          <input id="newPostTitle" placeholder="e.g. Financial Secretary" style="flex:1; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
+          <button class="btn btn-primary btn-sm" onclick="createPost()">Create</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('newPostCard').hidden = true">Cancel</button>
+        </div>
+      </div>`;
+
+    try {
+      const posts = await api('/posts');
+      const table = document.getElementById('postsTable');
+      if (!posts.length) {
+        table.innerHTML = '<div class="empty-state"><h3>No posts yet</h3><p class="text-muted">Create executive posts above, then assign incumbents.</p></div>';
+        return;
+      }
+      table.innerHTML = `
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Post</th><th>Incumbent</th><th>Appointed</th><th></th></tr></thead>
+            <tbody>
+              ${posts.map(p => `<tr>
+                <td class="font-bold">${esc(titleCase(p.title))}</td>
+                <td>${p.incumbent ? `<span class="font-semibold">${esc(p.incumbent.name)}</span><div class="text-muted text-sm">${esc(p.incumbent.code)}</div>` : '<span class="text-muted">Vacant</span>'}</td>
+                <td class="text-muted text-sm">${p.appointedAt ? date(p.appointedAt) : '—'}</td>
+                <td><button class="btn btn-outline btn-xs" onclick="assignPost('${p.id}')">${p.incumbent ? 'Reassign' : 'Assign'}</button></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load</h3><p>${err.message}</p></div>`;
+    }
+  }
+
+  function titleCase(s) {
+    return (s || '').replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  window.createPost = async function () {
+    const title = document.getElementById('newPostTitle').value.trim();
+    if (!title) { toast('Enter a post title', 'error'); return; }
+    try {
+      const result = await api('/posts', { method: 'POST', body: { title } });
+      toast(result.message || 'Post created', 'success');
+      document.getElementById('newPostCard').hidden = true;
+      renderPosts(document.getElementById('pageContent'));
+    } catch (err) {
+      toast(err.message || 'Failed to create post', 'error');
+    }
+  };
+
+  window.assignPost = async function (id) {
+    const answer = prompt('Enter the member code to assign (blank to vacate):');
+    if (answer === null) return;
+    const memberCode = answer.trim();
+    try {
+      const result = await api(`/posts/${id}/assign`, { method: 'POST', body: { memberCode: memberCode || undefined } });
+      toast(result.message || 'Assigned', 'success');
+      renderPosts(document.getElementById('pageContent'));
+    } catch (err) {
+      toast(err.message || 'Failed to assign', 'error');
+    }
+  };
+
+  // ---- Payroll ----
+  async function renderPayroll(el) {
+    if (!isSuperAdmin()) {
+      el.innerHTML = '<div class="empty-state"><h3>Access denied</h3><p class="text-muted">Only the super admin can manage payroll.</p></div>';
+      return;
+    }
+    el.innerHTML = `
+      <div class="stats-grid" id="payrollStats" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));">
+        <div class="stat-card"><div class="stat-label">Configured Payees</div><div class="stat-value skeleton" style="height:28px;width:60px;"></div></div>
+        <div class="stat-card"><div class="stat-label">Monthly Salary Pool</div><div class="stat-value skeleton" style="height:28px;width:120px;"></div></div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header">
+          <span class="card-title">Payroll Configuration</span>
+          <div class="flex gap-2">
+            <button class="btn btn-secondary btn-sm" onclick="setSalary()">Set Salary</button>
+            <button class="btn btn-primary btn-sm" onclick="runPayroll()">Run Payroll</button>
+          </div>
+        </div>
+        <div class="card-body flush" id="payrollTable">
+          <div class="empty-state"><p class="text-muted">Loading payroll...</p></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">PAYE / Remittance History</span></div>
+        <div class="card-body flush" id="payrollHistory">
+          <div class="empty-state"><p class="text-muted">Loading history...</p></div>
+        </div>
+      </div>`;
+
+    try {
+      const [payroll, history] = await Promise.all([
+        api('/payroll'),
+        api('/payroll/history'),
+      ]);
+      const participants = payroll.participants || [];
+      const pool = participants.reduce((a, p) => a + (p.salaryAmount || 0), 0);
+      document.getElementById('payrollStats').innerHTML = `
+        <div class="stat-card"><div class="stat-label">Configured Payees</div><div class="stat-value">${fmt(participants.filter(p => p.salaryAmount > 0).length)}</div></div>
+        <div class="stat-card"><div class="stat-label">Monthly Salary Pool</div><div class="stat-value">${currency(pool)}</div></div>`;
+
+      const table = document.getElementById('payrollTable');
+      if (!participants.length) {
+        table.innerHTML = '<div class="empty-state"><h3>No super admins</h3><p class="text-muted">Salaries are paid to super admin bank accounts. Set one with "Set Salary".</p></div>';
+      } else {
+        table.innerHTML = `
+          <div class="table-wrapper">
+            <table>
+              <thead><tr><th>Name</th><th>Salary</th><th>Bank Account</th></tr></thead>
+              <tbody>
+                ${participants.map(p => `<tr>
+                  <td class="font-bold">${esc(p.name)}</td>
+                  <td class="font-mono">${p.salaryAmount > 0 ? currency(p.salaryAmount) : '<span class="text-muted">—</span>'}</td>
+                  <td>${p.bankAccountNumber ? '<span class="font-mono text-sm">' + esc(p.bankName || '') + ' ••••' + esc(String(p.bankAccountNumber).slice(-4)) + '</span>' : '<span class="text-muted">No bank on file</span>'}</td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>`;
+      }
+
+      const hist = document.getElementById('payrollHistory');
+      const paye = history.paye || [];
+      if (!paye.length) {
+        hist.innerHTML = '<div class="empty-state"><h3>No PAYE records yet</h3><p class="text-muted">PAYE is calculated at source when payroll runs.</p></div>';
+      } else {
+        hist.innerHTML = `
+          <div class="table-wrapper">
+            <table>
+              <thead><tr><th>Member</th><th>Period</th><th>Gross</th><th>Tax</th><th>Net</th><th>Status</th></tr></thead>
+              <tbody>
+                ${paye.map(r => `<tr>
+                  <td class="font-bold">${esc(r.member?.name || '—')}</td>
+                  <td>${String(r.month).padStart(2, '0')}/${r.year}</td>
+                  <td class="font-mono">${currency(r.grossAmount)}</td>
+                  <td class="font-mono">${currency(r.taxAmount)}</td>
+                  <td class="font-mono">${currency(r.netAmount)}</td>
+                  <td>${statusBadge(r.status)}</td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>`;
+      }
+    } catch (err) {
+      document.getElementById('payrollStats').innerHTML = '';
+      el.innerHTML += `<div class="card"><div class="empty-state"><h3>Failed to load</h3><p>${err.message}</p></div></div>`;
+    }
+  }
+
+  window.setSalary = async function () {
+    const memberCode = prompt('Member code of the super admin (or "off" to stop salary)?');
+    if (memberCode === null) return;
+    const code = memberCode.trim();
+    if (code.toLowerCase() === 'off') {
+      const code2 = prompt('Member code to stop salary for:');
+      if (!code2) return;
+      try {
+        const result = await api('/payroll/set', { method: 'POST', body: { memberCode: code2.trim(), amount: 'off' } });
+        toast(result.message || 'Salary stopped', 'success');
+        renderPayroll(document.getElementById('pageContent'));
+      } catch (err) { toast(err.message || 'Failed', 'error'); }
+      return;
+    }
+    const amountStr = prompt('Monthly salary amount in naira (e.g. 100000):');
+    if (!amountStr) return;
+    const amount = Math.round(parseFloat(amountStr) * 100);
+    if (!(amount > 0)) { toast('Invalid amount', 'error'); return; }
+    try {
+      const result = await api('/payroll/set', { method: 'POST', body: { memberCode: code, amount } });
+      toast(result.message || 'Salary set', 'success');
+      renderPayroll(document.getElementById('pageContent'));
+    } catch (err) { toast(err.message || 'Failed', 'error'); }
+  };
+
+  window.runPayroll = async function () {
+    const narration = prompt('Payroll narration (e.g. October stipends):');
+    if (!narration) return;
+    if (!confirm('Run payroll now? Money goes to the super admins\' bank accounts. You cannot be paid by your own run.')) return;
+    try {
+      const result = await api('/payroll/run', { method: 'POST', body: { narration: narration.trim() } });
+      toast(result.message || 'Payroll run complete', 'success');
+      renderPayroll(document.getElementById('pageContent'));
+    } catch (err) { toast(err.message || 'Failed', 'error'); }
+  };
+
+  // ---- Funds / Reserves ----
+  async function renderFunds(el) {
+    if (!isSuperAdmin()) {
+      el.innerHTML = '<div class="empty-state"><h3>Access denied</h3><p class="text-muted">Only the super admin can manage funds and reserves.</p></div>';
+      return;
+    }
+    el.innerHTML = `
+      <div class="stats-grid" id="fundsStats" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));">
+        <div class="stat-card"><div class="stat-label skeleton" style="height:14px;width:80px;"></div><div class="stat-value skeleton" style="height:28px;width:120px;margin-top:12px;"></div></div>
+        <div class="stat-card"><div class="stat-label skeleton" style="height:14px;width:80px;"></div><div class="stat-value skeleton" style="height:28px;width:120px;margin-top:12px;"></div></div>
+        <div class="stat-card"><div class="stat-label skeleton" style="height:14px;width:80px;"></div><div class="stat-value skeleton" style="height:28px;width:120px;margin-top:12px;"></div></div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header">
+          <span class="card-title">Reserve Allocations</span>
+          <button class="btn btn-secondary btn-sm" onclick="allocateReserve()">Allocate to Reserve</button>
+        </div>
+        <div class="card-body flush" id="fundsReserve">
+          <div class="empty-state"><p class="text-muted">Loading...</p></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Education & Development Funds</span></div>
+        <div class="card-body flush" id="fundsTable">
+          <div class="empty-state"><p class="text-muted">Loading...</p></div>
+        </div>
+      </div>`;
+
+    try {
+      const f = await api('/funds');
+      document.getElementById('fundsStats').innerHTML = `
+        <div class="stat-card"><div class="stat-label">Reserve Fund</div><div class="stat-value">${currency(f.reserveBalance)}</div></div>
+        <div class="stat-card"><div class="stat-label">Education Fund</div><div class="stat-value">${currency(f.educationBalance)}</div></div>
+        <div class="stat-card"><div class="stat-label">Development Fund</div><div class="stat-value">${currency(f.developmentBalance)}</div></div>`;
+
+      const reserve = document.getElementById('fundsReserve');
+      if (!f.allocations.length) {
+        reserve.innerHTML = '<div class="empty-state"><h3>No reserve allocations yet</h3><p class="text-muted">Allocate to the statutory reserve fund above.</p></div>';
+      } else {
+        reserve.innerHTML = `
+          <div class="table-wrapper"><table>
+            <thead><tr><th>Amount</th><th>Source</th><th>Note</th><th>Date</th></tr></thead>
+            <tbody>
+              ${f.allocations.map(a => `<tr>
+                <td class="font-mono">${currency(a.amount)}</td>
+                <td>${esc(a.source)}</td>
+                <td class="text-sm">${esc(a.note || '—')}</td>
+                <td class="text-muted text-sm">${date(a.createdAt)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table></div>`;
+      }
+
+      const table = document.getElementById('fundsTable');
+      const rows = [
+        ...f.education.map(e => ({ kind: 'Education', ...e })),
+        ...f.development.map(d => ({ kind: 'Development', ...d })),
+      ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      if (!rows.length) {
+        table.innerHTML = '<div class="empty-state"><h3>No fund activity yet</h3><p class="text-muted">Education and development fund entries will appear here.</p></div>';
+      } else {
+        table.innerHTML = `
+          <div class="table-wrapper"><table>
+            <thead><tr><th>Fund</th><th>Amount</th><th>Source</th><th>Note</th><th>Date</th></tr></thead>
+            <tbody>
+              ${rows.map(r => `<tr>
+                <td><span class="badge badge-${r.kind === 'Education' ? 'blue' : 'purple'}">${r.kind}</span></td>
+                <td class="font-mono">${currency(r.amount)}</td>
+                <td>${esc(r.source)}</td>
+                <td class="text-sm">${esc(r.note || '—')}</td>
+                <td class="text-muted text-sm">${date(r.createdAt)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table></div>`;
+      }
+    } catch (err) {
+      el.innerHTML += `<div class="card"><div class="empty-state"><h3>Failed to load</h3><p>${err.message}</p></div></div>`;
+    }
+  }
+
+  window.allocateReserve = async function () {
+    const amountStr = prompt('Amount to allocate to the reserve fund (naira):');
+    if (!amountStr) return;
+    const amount = Math.round(parseFloat(amountStr) * 100);
+    if (!(amount > 0)) { toast('Invalid amount', 'error'); return; }
+    const note = prompt('Note (optional):') || '';
+    try {
+      const result = await api('/funds/reserve/allocate', { method: 'POST', body: { amount, note } });
+      toast(result.message || 'Allocated', 'success');
+      renderFunds(document.getElementById('pageContent'));
+    } catch (err) { toast(err.message || 'Failed', 'error'); }
   };
 
   // ---- STR / AML ----
