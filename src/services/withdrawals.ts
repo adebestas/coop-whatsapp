@@ -9,6 +9,7 @@ import { getCoopConfig } from "./coop-config.js";
 import { recordLedger } from "./ledger.js";
 import { checkTenureLimit } from "../lib/security-hardening.js";
 import { flagTransaction } from "./aml.js";
+import { assertNotRevoked } from "./revocation.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
@@ -20,15 +21,15 @@ export interface WithdrawResult {
   message: string;
 }
 
-/** Resolve short ID to full withdrawal request ID, ensuring uniqueness. */
-async function resolveRequestId(shortId: string): Promise<{ id: string } | { error: string }> {
+/** Resolve short ID to full withdrawal request ID, scoped to one cooperative. */
+async function resolveRequestId(shortId: string, cooperativeId: string): Promise<{ id: string } | { error: string }> {
   // Try exact match first
-  const exact = await prisma.withdrawalRequest.findUnique({ where: { id: shortId }, select: { id: true } });
+  const exact = await prisma.withdrawalRequest.findUnique({ where: { id: shortId, cooperativeId }, select: { id: true } });
   if (exact) return exact;
 
   // Try suffix match — require exactly one result
   const matches = await prisma.withdrawalRequest.findMany({
-    where: { id: { endsWith: shortId } },
+    where: { id: { endsWith: shortId }, cooperativeId },
     select: { id: true },
     take: 2,
   });
@@ -124,6 +125,10 @@ export async function requestWithdrawal(
     if (member.status === "deceased") {
       return { ok: false, message: "This account is under a death claim." } as const;
     }
+    const revoke = await assertNotRevoked(member.id);
+    if (revoke.blocked) {
+      return { ok: false, message: revoke.message } as const;
+    }
     if (member.lastWithdrawalAt && !member.withdrawalOverride) {
       const coopConfig = await getCoopConfig(member.cooperativeId);
       const cooldownMs = coopConfig.withdrawalCooldownMonths * 30 * 24 * 60 * 60 * 1000;
@@ -210,9 +215,9 @@ export async function requestWithdrawal(
 /** Admin/super admin approval. Super admin approval also pays out immediately. */
 export async function approveWithdrawal(
   requestId: string,
-  actor: { id: string; role: string; phone: string },
+  actor: { id: string; role: string; phone: string; cooperativeId: string },
 ): Promise<WithdrawResult> {
-  const fullId = await resolveRequestId(requestId);
+  const fullId = await resolveRequestId(requestId, actor.cooperativeId);
   if ("error" in fullId) return { ok: false, message: fullId.error };
   const request = await prisma.withdrawalRequest.findFirst({
     where: { id: fullId.id },
@@ -269,9 +274,9 @@ export async function approveWithdrawal(
  */
 export async function finalizeWithdrawal(
   requestId: string,
-  actor: { id: string; role: string; phone: string },
+  actor: { id: string; role: string; phone: string; cooperativeId: string },
 ): Promise<WithdrawResult> {
-  const fullId = await resolveRequestId(requestId);
+  const fullId = await resolveRequestId(requestId, actor.cooperativeId);
   if ("error" in fullId) return { ok: false, message: fullId.error };
   const request = await prisma.withdrawalRequest.findFirst({
     where: { id: fullId.id },
@@ -487,8 +492,8 @@ export async function finalizeWithdrawal(
   }
 }
 
-export async function rejectWithdrawal(requestId: string): Promise<WithdrawResult> {
-  const fullId = await resolveRequestId(requestId);
+export async function rejectWithdrawal(requestId: string, cooperativeId: string): Promise<WithdrawResult> {
+  const fullId = await resolveRequestId(requestId, cooperativeId);
   if ("error" in fullId) return { ok: false, message: fullId.error };
   const request = await prisma.withdrawalRequest.findFirst({
     where: { id: fullId.id },

@@ -294,16 +294,16 @@ export async function adminApiRoutes(app: FastifyInstance) {
     // Look up the admin member to get actorId and determine superadmin status
     const actor = await prisma.member.findFirst({
       where: { phone, cooperativeId: coopId },
-      include: { cooperative: { select: { adminPhone: true } } },
     });
     if (!actor) return reply.code(401).send({ error: "actor not found" });
 
-    const isSuper = actor.role === "superadmin" || actor.cooperative?.adminPhone === phone;
+    // Superadmin is role-based only — no adminPhone alias override (matches chat path).
+    const isSuper = actor.role === "superadmin";
 
     const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
     if (!loan) return reply.code(404).send({ error: "loan not found in your cooperative" });
 
-    const result = await approveLoan(id, { superAdmin: isSuper, actorId: actor.id });
+    const result = await approveLoan(id, { superAdmin: isSuper, actorId: actor.id, cooperativeId: coopId });
     if (!result.ok) {
       return reply.code(400).send({ error: result.message });
     }

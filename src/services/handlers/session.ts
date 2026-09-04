@@ -46,7 +46,17 @@ export function safeParse(json: string): FlowData {
  */
 export function parseNaira(raw?: string): number | null {
   if (!raw) return null;
-  const cleaned = raw.replace(/[,₦\s]/g, "");
+  // Sanitise: strip separator/currency chars, and normalise common human/OCR
+  // digit typos (O/o→0, l/I→1, S/s→5, B→8) so "2O00" or "l000" parse correctly.
+  const cleaned = raw
+    .replace(/[,₦\s]/g, "")
+    .replace(/O/g, "0")
+    .replace(/o/g, "0")
+    .replace(/l/g, "1")
+    .replace(/I/g, "1")
+    .replace(/S/g, "5")
+    .replace(/s/g, "5")
+    .replace(/B/g, "8");
   if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
   const n = Number(cleaned);
   return Number.isFinite(n) && n > 0 ? toKobo(n) : null;

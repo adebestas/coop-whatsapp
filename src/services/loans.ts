@@ -191,18 +191,18 @@ export async function listPendingLoans(cooperativeId: string, limit = 20, unitId
   });
 }
 
-/** Resolve a full loan id from a short (suffix) id shown in chat. */
-async function findLoan(shortId: string) {
+/** Resolve a full loan id from a short (suffix) id shown in chat, scoped to a cooperative. */
+async function findLoan(shortId: string, cooperativeId: string) {
   // Try exact match first
   const exact = await prisma.loan.findUnique({
-    where: { id: shortId },
+    where: { id: shortId, cooperativeId },
     include: { member: true, guarantors: { include: { member: true } } },
   });
   if (exact) return exact;
 
   // Try suffix match — require exactly one result
   const matches = await prisma.loan.findMany({
-    where: { id: { endsWith: shortId } },
+    where: { id: { endsWith: shortId }, cooperativeId },
     include: { member: true, guarantors: { include: { member: true } } },
     take: 2,
   });
@@ -217,9 +217,9 @@ async function findLoan(shortId: string) {
  */
 export async function approveLoan(
   loanId: string,
-  opts: { superAdmin?: boolean; actorId?: string } = {},
+  opts: { superAdmin?: boolean; actorId?: string; cooperativeId: string },
 ): Promise<{ ok: boolean; message: string }> {
-  const loan = await findLoan(loanId);
+  const loan = await findLoan(loanId, opts.cooperativeId);
   if (!loan) return { ok: false, message: "Loan not found. Check the id and try again." };
   const shortId = loan.id.slice(-6);
 
@@ -386,8 +386,8 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
   return { ok: true, message: `${approvedMsg}${amlNote}\n\n${disbursement.message}` };
 }
 
-export async function rejectLoan(loanId: string): Promise<{ ok: boolean; message: string }> {
-  const loan = await findLoan(loanId);
+export async function rejectLoan(loanId: string, cooperativeId: string): Promise<{ ok: boolean; message: string }> {
+  const loan = await findLoan(loanId, cooperativeId);
   if (!loan) return { ok: false, message: "Loan not found. Check the id and try again." };
   const updatable = ["pending", "guaranteed", "admin_approved", "super_approved_1"];
   if (!updatable.includes(loan.status)) {
@@ -401,7 +401,7 @@ export async function rejectLoan(loanId: string): Promise<{ ok: boolean; message
     data: { status: "rejected", queuePosition: null, queueJoinedAt: null },
   });
   if (updated.count === 0) {
-    const latest = await findLoan(loan.id);
+    const latest = await findLoan(loan.id, cooperativeId);
     return { ok: false, message: `Loan is already ${latest?.status ?? "changed"}.` };
   }
   await renumberQueue(loan.cooperativeId);

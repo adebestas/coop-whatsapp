@@ -55,6 +55,8 @@ model Cooperative {
   payeRecords          PAYERecord[]
   byelaws              Byelaw[]
   strs                 STR[]
+  adminAssistActions   AdminAssistAction[]
+  manualCredits        ManualCredit[]
   grievances           Grievance[]
   config             CooperativeConfig?
   branding            BrandingConfig?
@@ -220,6 +222,12 @@ model Member {
   dataConsents            DataConsent[]
   dataConsentGiven        Boolean             @default(false)
   payeRecords             PAYERecord[]
+  adminAssistActions      AdminAssistAction[] @relation("AdminAssistTarget")
+  adminAssistActionsInitiated AdminAssistAction[] @relation("AdminAssistInitiator")
+  manualCreditsTargeted   ManualCredit[]     @relation("ManualCreditTarget")
+  manualCreditsInitiated  ManualCredit[]     @relation("ManualCreditInitiator")
+  manualCreditsApproved   ManualCredit[]     @relation("ManualCreditApprover")
+  sessionsRevokedAt       DateTime? // when the superadmin revoked this member's sessions
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -1060,4 +1068,57 @@ model Grievance {
 
   @@index([cooperativeId, status])
   @@index([memberId])
+}
+
+// ---- Admin-assisted member actions (Maker-Checker style) ----
+// A superadmin initiates a high-value action on behalf of a member (e.g. a
+// withdrawal) and the member confirms via a one-time code relayed back to the
+// admin. The OTP is stored hashed so it can never be read from the database.
+model AdminAssistAction {
+  id              String      @id @default(cuid())
+  cooperativeId   String
+  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  type            String // e.g. "withdrawal" | "credit"
+  targetMemberId  String
+  targetMember    Member      @relation("AdminAssistTarget", fields: [targetMemberId], references: [id])
+  initiatorId     String
+  initiator       Member      @relation("AdminAssistInitiator", fields: [initiatorId], references: [id])
+  amount          Int // kobo
+  metadata        Json? // narration, destination account, etc.
+  otp             String // hashed member OTP (scrypt)
+  otpExpiresAt    DateTime
+  status          String      @default("pending") // pending | confirmed | cancelled | expired
+  createdAt       DateTime    @default(now())
+  confirmedAt     DateTime?
+  confirmedBy     String? // admin phone that confirmed
+
+  @@index([cooperativeId, status, createdAt])
+  @@index([targetMemberId, status])
+}
+
+// ---- Maker-Checker manual credits ----
+// Every manual wallet credit MUST pass through this two-tier pipeline: an
+// admin (maker) submits a pending credit, and a DIFFERENT super admin
+// (checker) signs off with their PIN before the wallet is touched. This is the
+// immutable, audited path for internal balance edits — no unilateral credits.
+model ManualCredit {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId      String
+  member        Member      @relation("ManualCreditTarget", fields: [memberId], references: [id])
+  initiatorId   String
+  initiator     Member      @relation("ManualCreditInitiator", fields: [initiatorId], references: [id])
+  amount        Int // kobo
+  narration     String
+  status        String      @default("pending") // pending | approved | rejected
+  approvedById  String?
+  approvedBy    Member?     @relation("ManualCreditApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  rejectedById  String?
+  createdAt     DateTime    @default(now())
+  approvedAt    DateTime?
+  rejectedAt    DateTime?
+
+  @@index([cooperativeId, status, createdAt])
+  @@index([memberId, status])
 }

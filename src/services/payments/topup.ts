@@ -1,9 +1,11 @@
 import { prisma } from "../../lib/prisma.js";
 import { resolveProvider, markProviderDown, markProviderUp } from "./index.js";
 import type { PaymentNotification } from "./index.js";
+import { notifyMember } from "../../lib/messaging.js";
 import { audit } from "../audit.js";
 import { postJournal } from "../journal.js";
 import { roundMoney } from "../money.js";
+import { formatBalance } from "../cooperative.js";
 import { flagTransaction } from "../aml.js";
 
 /**
@@ -184,6 +186,12 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
   }
 
   console.log(`[topup] credited ${member.phone} with ${amount} ${n.currency} (${n.transactionId})`);
+
+  // Real-time credit alert: tell the member the moment their bank transfer lands.
+  const newBalance = (member.wallet?.balance ?? 0) + amount;
+  await notifyMember(member,
+    `💰 *Wallet credited!*\n\n${formatBalance(amount)} just landed in your savings via ${n.provider} (Ref ${n.transactionId.slice(-8)}).\n\nNew balance: *${formatBalance(newBalance)}*.`,
+  ).catch(() => {});
 
   await audit({
     cooperativeId: member.cooperativeId,

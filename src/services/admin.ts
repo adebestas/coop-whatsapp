@@ -15,6 +15,9 @@ import {
   rejectWithdrawal,
   overrideWithdrawalRule,
 } from "./withdrawals.js";
+import { startAssistWithdrawal, confirmAssistWithdrawal } from "./adminassist.js";
+import { revokeMemberSessions, unrevokeMemberSessions } from "./revocation.js";
+import { requestManualCredit, approveManualCredit, rejectManualCredit } from "./manualcredit.js";
 import {
   startDeathClaim,
   setClaimBank,
@@ -173,7 +176,7 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Usage: *approve <loan id>*" });
         return true;
       }
-      const result = await approveLoan(id, { superAdmin: isSuper, actorId: admin.id });
+      const result = await approveLoan(id, { superAdmin: isSuper, actorId: admin.id, cooperativeId: coopId });
       await sendText({ to: phone, text: result.message });
       await audit({
         cooperativeId: coopId,
@@ -197,7 +200,7 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Usage: *reject <loan id>*" });
         return true;
       }
-      const result = await rejectLoan(id);
+      const result = await rejectLoan(id, coopId);
       await sendText({ to: phone, text: result.message });
       await audit({
         cooperativeId: coopId,
@@ -219,7 +222,9 @@ export async function handleAdminCommand(
         return true;
       }
       const amount = toKobo(Number(args[0]));
-      const targetPhone = args[1]?.replace(/[^0-9]/g, "");
+      const targetPhone = args[1]?.startsWith("tg:")
+        ? "tg:" + args[1].replace(/[^0-9]/g, "")
+        : args[1]?.replace(/[^0-9]/g, "");
       const narration = args.slice(2).join(" ").trim();
       if (!Number.isFinite(amount) || amount <= 0 || !targetPhone || narration.length < 3) {
         await sendText({
@@ -268,7 +273,7 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Usage: *approvewithdraw <request id>*" });
         return true;
       }
-      const result = await approveWithdrawal(id, { id: admin.id, role: admin.role, phone });
+      const result = await approveWithdrawal(id, { id: admin.id, role: admin.role, phone, cooperativeId: coopId });
       await sendText({ to: phone, text: result.message });
       await audit({
         cooperativeId: coopId,
@@ -293,17 +298,19 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Usage: *finalize <request id>*" });
         return true;
       }
-      // Look up the amount so large payouts require a fresh PIN too.
+      // Look up the amount so large payouts require a fresh PIN too. Scoped to
+      // the caller's cooperative so a foreign request can't trigger anything here.
       const req = await prisma.withdrawalRequest.findFirst({
-        where: id.length >= 8
-          ? { OR: [{ id }, { id: { endsWith: id } }] }
-          : { id },
+        where: {
+          cooperativeId: coopId,
+          ...(id.length >= 8 ? { OR: [{ id }, { id: { endsWith: id } }] } : { id }),
+        },
       });
       if (req) {
         const pinCheck = await assertFreshPin(phone, req.amount);
         if (!pinCheck.ok) return guardFailed(phone, pinCheck.message);
       }
-      const result = await finalizeWithdrawal(id, { id: admin.id, role: admin.role, phone });
+      const result = await finalizeWithdrawal(id, { id: admin.id, role: admin.role, phone, cooperativeId: coopId });
       await sendText({ to: phone, text: result.message });
       await audit({
         cooperativeId: coopId,
@@ -318,6 +325,149 @@ export async function handleAdminCommand(
       return true;
     }
 
+    case "assistwithdraw": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can initate assisted withdrawals." });
+        return true;
+      }
+      const targetCode = args[0];
+      const amt = Number(args[1]);
+      if (!targetCode || !Number.isFinite(amt) || amt <= 0) {
+        await sendText({ to: phone, text: "Usage: *assistwithdraw <member code> <amount>* — sends a one-time code to the member for authorisation." });
+        return true;
+      }
+      const result = await startAssistWithdrawal(phone, targetCode, amt);
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    case "confirmassist": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can confirm an assisted withdrawal." });
+        return true;
+      }
+      const assistId = args[0];
+      const memberCode = args[1];
+      if (!assistId || !memberCode) {
+        await sendText({ to: phone, text: "Usage: *confirmassist <assist id> <member code>* — the code the member received." });
+        return true;
+      }
+      // High-value assists require a recently verified PIN (mirrors *finalize*).
+      const assist = await prisma.adminAssistAction.findFirst({
+        where: { cooperativeId: coopId, status: "pending", id: { endsWith: assistId } },
+      });
+      if (assist) {
+        const pinCheck = await assertFreshPin(phone, assist.amount);
+        if (!pinCheck.ok) return guardFailed(phone, pinCheck.message);
+      }
+      const result = await confirmAssistWithdrawal(phone, assistId, memberCode);
+      await sendText({ to: phone, text: result.message });
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorId: admin.id,
+        actorRole: "superadmin",
+        action: "assist.withdrawal.confirm",
+        targetType: "assist",
+        targetId: result.assistId,
+        detail: result.message,
+      });
+      return true;
+    }
+
+    case "revoke": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can revoke a member's sessions." });
+        return true;
+      }
+      const rCode = args[0];
+      if (!rCode) {
+        await sendText({ to: phone, text: "Usage: *revoke <member code>* — revokes a member's sessions and blocks money movement." });
+        return true;
+      }
+      const r = await revokeMemberSessions(phone, admin.id, coopId, rCode);
+      await sendText({ to: phone, text: r.message });
+      return true;
+    }
+
+    case "unrevoke": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can restore a member's sessions." });
+        return true;
+      }
+      const uCode = args[0];
+      if (!uCode) {
+        await sendText({ to: phone, text: "Usage: *unrevoke <member code>* — restores a revoked member's sessions." });
+        return true;
+      }
+      const u = await unrevokeMemberSessions(phone, admin.id, coopId, uCode);
+      await sendText({ to: phone, text: u.message });
+      return true;
+    }
+
+    case "manualcredit": {
+      // Maker step: an admin requests a manual wallet credit. It stays PENDING
+      // until a DIFFERENT super admin approves it (dual control).
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can initiate a manual credit." });
+        return true;
+      }
+      const mcCode = args[0];
+      const mcAmt = Number(args[1]);
+      const mcNarration = args.slice(2).join(" ").trim();
+      if (!mcCode || !Number.isFinite(mcAmt) || mcAmt <= 0) {
+        await sendText({ to: phone, text: "Usage: *manualcredit <member code> <amount> <narration>* — e.g. *manualcredit MEM001 5000 Refund for July*" });
+        return true;
+      }
+      const mcRes = await requestManualCredit(phone, mcCode, mcAmt, mcNarration);
+      await sendText({ to: phone, text: mcRes.message });
+      return true;
+    }
+
+    case "approvemanualcredit": {
+      // Checker step: a DIFFERENT super admin with 2FA + PIN sign-off credits
+      // the wallet. Money-into-membership is gated as strictly as money-out.
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can approve a manual credit." });
+        return true;
+      }
+      const creditGuard = await assertMoneyAuthorized(admin.id, args);
+      if (!creditGuard.ok) return guardFailed(phone, creditGuard.message);
+      const creditArgs = creditGuard.args;
+      const amcId = creditArgs[0];
+      const amcPin = creditArgs[1];
+      if (!amcId || !amcPin) {
+        await sendText({ to: phone, text: "Usage: *approvemanualcredit <credit id> <your PIN>* — the approving super admin must differ from the initiator." });
+        return true;
+      }
+      // High-value approvals need a recently verified PIN (mirrors *finalize*).
+      const amcCredit = await prisma.manualCredit.findFirst({
+        where: { cooperativeId: coopId, status: "pending", id: { endsWith: amcId } },
+      });
+      if (amcCredit) {
+        const amcPinCheck = await assertFreshPin(phone, amcCredit.amount);
+        if (!amcPinCheck.ok) return guardFailed(phone, amcPinCheck.message);
+      }
+      const amcRes = await approveManualCredit(phone, amcId, amcPin);
+      await sendText({ to: phone, text: amcRes.message });
+      return true;
+    }
+
+    case "rejectmanualcredit": {
+      if (!isSuper) {
+        await sendText({ to: phone, text: "Only the *super admin* can reject a manual credit." });
+        return true;
+      }
+      const rmId = args[0];
+      if (!rmId) {
+        await sendText({ to: phone, text: "Usage: *rejectmanualcredit <credit id> [reason]*" });
+        return true;
+      }
+      const rmRes = await rejectManualCredit(phone, rmId, args.slice(1).join(" "));
+      await sendText({ to: phone, text: rmRes.message });
+      return true;
+    }
+
     case "rejectwithdraw": {
       if (unitAdmin) {
         await sendText({ to: phone, text: "Only the cooperative admin can reject withdrawals." });
@@ -328,7 +478,7 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Usage: *rejectwithdraw <request id>*" });
         return true;
       }
-      const result = await rejectWithdrawal(id);
+      const result = await rejectWithdrawal(id, coopId);
       await sendText({ to: phone, text: result.message });
       await audit({
         cooperativeId: coopId,
