@@ -302,6 +302,16 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
       reference: loan.id,
       fundType: "operational",
     });
+    // Balance sheet: loan portfolio increases, bank decreases.
+    await recordLedger({
+      cooperativeId: loan.cooperativeId,
+      type: "balance_sheet",
+      category: "assets:loan_portfolio",
+      amount: disbursable,
+      note: `Loan disbursement ${loan.id.slice(-6)} to ${member.name}`,
+      reference: loan.id,
+      fundType: "operational",
+    });
     return {
       ok: true,
       status: "successful",

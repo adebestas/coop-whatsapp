@@ -35,12 +35,12 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
   // pnl.netProfit is kobo; pool stays in kobo
   const pool = Math.max(0, Math.round(pnl.netProfit * (rate / 100)));
 
-  // Calculate deductions in kobo
-  const reserveAmount = Math.floor(pool * RESERVE_FUND_RATE);
-  const educationAmount = Math.floor(pool * EDUCATION_FUND_RATE);
-  const developmentAmount = Math.floor(pool * DEVELOPMENT_FUND_RATE);
+  // Statutory deductions: 20% of NET PROFIT (not dividend pool) per Nigerian Cooperative Societies Act
+  const reserveAmount = Math.floor(pnl.netProfit * RESERVE_FUND_RATE);
+  const educationAmount = Math.floor(pnl.netProfit * EDUCATION_FUND_RATE);
+  const developmentAmount = Math.floor(pnl.netProfit * DEVELOPMENT_FUND_RATE);
   const totalDeductions = reserveAmount + educationAmount + developmentAmount;
-  const memberPoolKobo = pool - totalDeductions;
+  const memberPoolKobo = Math.max(0, pool - totalDeductions);
 
   // Compute shares as kobo integers to avoid rounding drift
   const eligible = entries.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
@@ -134,12 +134,21 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
   const pool = Math.max(0, Math.round(pnl.netProfit * (rate / 100)));
   const reference = `DIV-${Date.now()}`;
 
-  // Calculate deductions in kobo
-  const reserveAmount = Math.floor(pool * RESERVE_FUND_RATE);
-  const educationAmount = Math.floor(pool * EDUCATION_FUND_RATE);
-  const developmentAmount = Math.floor(pool * DEVELOPMENT_FUND_RATE);
+  // Statutory deductions: 20% of NET PROFIT (not dividend pool) per Nigerian Cooperative Societies Act
+  const reserveAmount = Math.floor(pnl.netProfit * RESERVE_FUND_RATE);
+  const educationAmount = Math.floor(pnl.netProfit * EDUCATION_FUND_RATE);
+  const developmentAmount = Math.floor(pnl.netProfit * DEVELOPMENT_FUND_RATE);
   const totalDeductions = reserveAmount + educationAmount + developmentAmount;
-  const memberPoolKobo = pool - totalDeductions;
+  const memberPoolKobo = Math.max(0, pool - totalDeductions);
+
+  if (memberPoolKobo <= 0) {
+    return {
+      ok: false,
+      message:
+        `Statutory deductions (${formatBalance(totalDeductions)} = 27% of net profit ${formatBalance(pnl.netProfit)}) exceed the dividend pool (${formatBalance(pool)} at ${rate}%). ` +
+        `No dividend remains for members after reserve/education/development allocations. Try a higher dividend rate or wait for more profit.`,
+    };
+  }
 
   return prisma.$transaction(async (tx) => {
     // Create reserve allocation record

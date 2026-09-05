@@ -458,16 +458,49 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.post("/api/admin/members/import", async (req, reply) => {
     const coopId = req.adminCoopId!;
+    const phone = req.adminPhone!;
+    const actorRole = req.adminRole ?? "admin";
     const body = (req.body ?? {}) as { filename?: string; data?: string };
     if (!body.filename || !body.data) {
       return reply.code(400).send({ error: "filename and data (base64) are required" });
     }
+
+    // Rate limit: max 3 imports per 10 minutes per cooperative
+    const rateKey = `import:${coopId}`;
+    const rl = await checkRateLimit(rateKey, 3, 600);
+    if (!rl.allowed) {
+      return reply.code(429).send({ error: "Too many import requests. Try again later.", retryAfter: rl.retryAfter });
+    }
+
     const buffer = Buffer.from(body.data, "base64");
     if (buffer.length > 5 * 1024 * 1024) {
       return reply.code(400).send({ error: "File too large (max 5MB)" });
     }
+
+    // Enforce cooperative member limit (from Subscription record)
+    const sub = await prisma.subscription.findUnique({ where: { cooperativeId: coopId } });
+    const memberLimit = sub?.memberLimit ?? 20;
+    const currentCount = await prisma.member.count({ where: { cooperativeId: coopId } });
+    if (currentCount >= memberLimit) {
+      return reply.code(400).send({ error: `Member limit reached (${memberLimit}). Remove members or upgrade the plan.` });
+    }
+
     const { bulkImportMembers } = await import("../services/bulk-import.js");
     const result = await bulkImportMembers(coopId, buffer, body.filename);
+
+    // Audit log the import attempt
+    await prisma.auditLog.create({
+      data: {
+        cooperativeId: coopId,
+        actorId: "system",
+        actorPhone: phone,
+        actorRole,
+        action: "members.import",
+        targetType: "members",
+        detail: `Bulk import "${body.filename}": ${result.imported} imported, ${result.skipped} skipped, ${result.errors.length} errors`,
+      },
+    });
+
     return result;
   });
 

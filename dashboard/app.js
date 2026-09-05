@@ -294,7 +294,7 @@
       renderRecentContributions(contributionsData.slice(0, 5));
 
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load dashboard</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load dashboard</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -439,7 +439,7 @@
         renderMembersTable(filtered);
       });
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load members</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load members</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -570,9 +570,9 @@
         body: { memberIds, toAll, subject, body },
       });
       result.style.color = '';
-      result.innerHTML = `Sent to <strong>${res.sent}</strong> of ${res.targeted} targeted member(s). ` +
-        (res.skipped ? `${res.skipped} skipped (opted out). ` : '') +
-        (res.failed ? `<span style="color:var(--danger)">${res.failed} failed${res.failures && res.failures.length ? ': ' + esc(res.failures.join(', ')) : ''}.</span>` : '');
+      result.innerHTML = `Sent to <strong>${esc(String(res.sent))}</strong> of ${esc(String(res.targeted))} targeted member(s). ` +
+        (res.skipped ? `${esc(String(res.skipped))} skipped (opted out). ` : '') +
+        (res.failed ? `<span style="color:var(--danger)">${esc(String(res.failed))} failed${res.failures && res.failures.length ? ': ' + esc(res.failures.join(', ')) : ''}.</span>` : '');
       if (res.sent > 0) toast(`Message sent to ${res.sent} member(s)`, 'success');
     } catch (err) {
       result.textContent = err.message;
@@ -659,7 +659,7 @@
         loansData = await api('/loans' + (status ? `?status=${status}` : ''));
         renderLoansTable(loansData);
       } catch (err) {
-        el2.innerHTML = `<div class="empty-state"><h3>Error</h3><p>${err.message}</p></div>`;
+        el2.innerHTML = `<div class="empty-state"><h3>Error</h3><p>${esc(err.message)}</p></div>`;
       }
     });
 
@@ -667,7 +667,7 @@
       loansData = await api('/loans');
       renderLoansTable(loansData);
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load loans</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load loans</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -747,7 +747,7 @@
       contributionsData = await api('/contributions');
       renderContributionsTable(contributionsData);
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load contributions</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load contributions</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -796,7 +796,7 @@
       payoutsData = await api('/payouts');
       renderPayoutsTable(payoutsData);
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load payouts</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load payouts</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -908,7 +908,7 @@
         </div>` : ''}
       `;
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load report</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load report</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -946,7 +946,7 @@
           </table>
         </div>`;
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load withdrawals</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load withdrawals</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -956,10 +956,6 @@
       <div class="card">
         <div class="card-header">
           <span class="card-title">Buy Polls</span>
-          <div class="flex gap-2">
-            <button class="btn btn-secondary btn-sm" onclick="exportCompliance('str')">Export STR</button>
-            <button class="btn btn-secondary btn-sm" onclick="exportCompliance('paye')">Export PAYE</button>
-          </div>
         </div>
         <div class="card-body" id="pollsContent">
           <div class="empty-state"><p class="text-muted">Loading polls...</p></div>
@@ -995,7 +991,7 @@
           </div>
         </div>`).join('');
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load polls</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load polls</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -1055,7 +1051,7 @@
           </div>
           <div class="card-body">
             <p class="text-muted text-sm" style="margin-bottom:8px;">
-              ${v.electionType}${v.position ? ' — ' + esc(v.position) : ''} · Total votes: ${v._count?.ballots ?? 0} · Quorum: ${v.quorumRequired}% · Started ${date(v.createdAt)} ${v.closedAt ? '· Closed ' + date(v.closedAt) : ''}
+              ${esc(v.electionType)}${v.position ? ' — ' + esc(v.position) : ''} · Total votes: ${v._count?.ballots ?? 0} · Quorum: ${v.quorumRequired}% · Started ${date(v.createdAt)} ${v.closedAt ? '· Closed ' + date(v.closedAt) : ''}
             </p>
             <table>
               <thead><tr><th>Candidate</th><th>Code</th><th>Votes</th></tr></thead>
@@ -1077,7 +1073,7 @@
           </div>
         </div>`).join('');
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load elections</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load elections</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -1205,7 +1201,7 @@
           </table>
         </div>`;
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -1276,7 +1272,7 @@
           </table>
         </div>`;
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -1344,7 +1340,7 @@
           </table>
         </div>`;
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -1462,7 +1458,7 @@
       }
     } catch (err) {
       document.getElementById('payrollStats').innerHTML = '';
-      el.innerHTML += `<div class="card"><div class="empty-state"><h3>Failed to load</h3><p>${err.message}</p></div></div>`;
+      el.innerHTML += `<div class="card"><div class="empty-state"><h3>Failed to load</h3><p>${esc(err.message)}</p></div></div>`;
     }
   }
 
@@ -1578,7 +1574,7 @@
           </table></div>`;
       }
     } catch (err) {
-      el.innerHTML += `<div class="card"><div class="empty-state"><h3>Failed to load</h3><p>${err.message}</p></div></div>`;
+      el.innerHTML += `<div class="card"><div class="empty-state"><h3>Failed to load</h3><p>${esc(err.message)}</p></div></div>`;
     }
   }
 
@@ -1631,7 +1627,7 @@
           </table>
         </div>`;
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load STRs</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load STRs</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -1672,7 +1668,7 @@
           </table>
         </div>`;
     } catch (err) {
-      el.innerHTML = `<div class="empty-state"><h3>Failed to load PAYE</h3><p>${err.message}</p></div>`;
+      el.innerHTML = `<div class="empty-state"><h3>Failed to load PAYE</h3><p>${esc(err.message)}</p></div>`;
     }
   }
 
@@ -1768,6 +1764,7 @@
   }
 
   function roleBadge(role) {
+    if (role === 'superadmin') return '<span class="badge badge-purple">Super Admin</span>';
     if (role === 'admin') return '<span class="badge badge-gold">Admin</span>';
     return '<span class="badge badge-gray">Member</span>';
   }

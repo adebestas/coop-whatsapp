@@ -2,7 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { postJournal } from "./journal.js";
 import { roundMoney } from "./money.js";
 
-export type LedgerType = "income" | "expense" | "appropriation";
+export type LedgerType = "income" | "expense" | "appropriation" | "balance_sheet";
 export type LedgerCategory =
   | "interest"
   | "fine"
@@ -15,7 +15,9 @@ export type LedgerCategory =
   | "external_payment"
   | "dividend"
   | "withdrawal"
-  | "other";
+  | "other"
+  | "assets:loan_portfolio"
+  | (string & {});
 
 /**
  * Records the human-readable ledger entry AND the double-entry journal
@@ -59,15 +61,22 @@ export async function recordLedger(input: {
             { account: `expense:${input.category}`, direction: "DEBIT" as const, amount },
             { account: "assets:bank", direction: "CREDIT" as const, amount },
           ]
-        : [
-            // Appropriation: debits a liability account (dividend payable) and
-            // credits the bank account, representing a distribution of profits.
-            // Using liabilities:dividend_payable instead of equity:retained_earnings
-            // ensures the cooperative's obligation to pay is tracked until wallets
-            // are actually credited.
-            { account: "liabilities:dividend_payable", direction: "DEBIT" as const, amount },
-            { account: "assets:bank", direction: "CREDIT" as const, amount },
-          ];
+        : input.type === "balance_sheet"
+          ? [
+              // Balance sheet movement: tracks asset/liability changes without
+              // affecting P&L. The caller specifies the account via `category`.
+              { account: input.category, direction: "DEBIT" as const, amount },
+              { account: "assets:bank", direction: "CREDIT" as const, amount },
+            ]
+          : [
+              // Appropriation: debits a liability account (dividend payable) and
+              // credits the bank account, representing a distribution of profits.
+              // Using liabilities:dividend_payable instead of equity:retained_earnings
+              // ensures the cooperative's obligation to pay is tracked until wallets
+              // are actually credited.
+              { account: "liabilities:dividend_payable", direction: "DEBIT" as const, amount },
+              { account: "assets:bank", direction: "CREDIT" as const, amount },
+            ];
 
   if (input.tx) {
     // Inside an interactive transaction — write directly using tx client
