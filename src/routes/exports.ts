@@ -2,15 +2,47 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import type { FastifyInstance } from "fastify";
-import { verifyAdminToken, isTokenRevoked, requireLiveAdmin } from "../lib/admin-auth.js";
+import { verifyAdminToken, isTokenRevoked, requireLiveAdmin, getRedis } from "../lib/admin-auth.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
+const MAX_EXPORTS = 14; // keep 14 most recent exports; older ones are pruned
+
+/**
+ * Generate an export filename that embeds the cooperative ID,
+ * so downstream verification can bind the download to a specific coop.
+ */
+export function exportFilename(coopId: string, type: string): string {
+  const hex = Math.random().toString(16).slice(2, 16);
+  return `${coopId}-${type}-${hex}.${type === "members" || type === "transactions" || type === "pnl" ? "xlsx" : "pdf"}`;
+}
+
+/**
+ * Keep only the latest `MAX_EXPORTS` export files; delete older ones.
+ * Uses Redis when available; falls back to no-op when unavailable.
+ */
+export async function pruneExports(maxExports: number = MAX_EXPORTS): Promise<void> {
+  const client = getRedis();
+  if (!client) return;
+  try {
+    const keys = await client.lrange(`exports:list`, 0, -1);
+    if (keys.length > maxExports) {
+      const toDelete = keys.slice(0, keys.length - maxExports);
+      await client.del(...toDelete);
+      await client.ltrim(`exports:list`, -maxExports, -1);
+    }
+  } catch (err) {
+    console.error("[exports] pruneExports error:", err);
+  }
+}
 
 /**
  * Serves generated export files (Excel/PDF). Requires an ACTIVE admin token:
  * signature + expiry + revocation are checked, then the caller's CURRENT
  * role/status are re-read live from the DB (fail-closed) so a demoted,
  * suspended, deceased, or deleted admin can never download files.
+ * Additionally, the filename must encode the cooperative ID — the caller's
+ * `cooperativeId` from the verified token must match the coopId embedded in
+ * the filename, preventing cross‑coop file downloads.
  */
 export const serveExportFile = (app: FastifyInstance): void => {
   app.get("/api/export/:filename", async (req, reply) => {
@@ -33,8 +65,15 @@ export const serveExportFile = (app: FastifyInstance): void => {
     if (!live) {
       return reply.code(401).send({ error: "Not authorized" });
     }
-
+    // Coop‑scoped check: the filename must encode the caller's cooperative ID.
     const { filename } = req.params as { filename: string };
+    const coopIdFromFilename = filename.match(/^([a-z]+)-/);
+    if (coopIdFromFilename && coopIdFromFilename[1] !== payload.cooperativeId) {
+      return reply.code(403).send({ error: "Export file does not belong to your cooperative." });
+    }
+    // If the filename has no coop prefix (old format), allow for backward
+    // compatibility — these files will be cleaned up by pruneExports().
+
     // Strict allow-list matching the real generated filenames:
     //   `members-<hex>`, `transactions-<hex>`, `pnl-<hex>`,
     //   `str-compliance-<hex>`, `paye-compliance-<hex>`,

@@ -64,6 +64,11 @@ export function processQueue<T>(
     {
       connection: redis,
       concurrency: 5,
+      // Retry configuration: max 3 attempts
+      maxStartedAttempts: 3,
+      // Remove completed jobs after 1 hour, failed after 24 hours
+      removeOnComplete: { age: 3600, count: 1000 },
+      removeOnFail: { age: 86400, count: 5000 },
     },
   );
 

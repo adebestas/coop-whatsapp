@@ -12,13 +12,9 @@ export function periodOf(d: Date): string {
 function isSuperPhone(phone: string, cooperativeId: string): Promise<boolean> {
   return prisma.member
     .findFirst({
-      where: { phone, cooperativeId },
-      include: { cooperative: true },
+      where: { phone, cooperativeId, role: "superadmin" },
     })
-    .then(
-      (m) =>
-        !!m && (m.role === "superadmin" || m.cooperative.adminPhone === m.phone),
-    );
+    .then((m) => !!m);
 }
 
 /**
@@ -344,8 +340,8 @@ export async function waiveMonth(
 }
 
 /** Member view of their own deduction commitment. */
-export async function myDeduction(phone: string): Promise<{ ok: boolean; message: string }> {
-  const member = await getMemberByPhone(phone);
+export async function myDeduction(phone: string, cooperativeId?: string): Promise<{ ok: boolean; message: string }> {
+  const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) return { ok: false, message: "You need to join a cooperative first. Reply *join <code>* to get started." };
 
   const fresh = await prisma.member.findUnique({
@@ -369,8 +365,8 @@ export async function myDeduction(phone: string): Promise<{ ok: boolean; message
 }
 
 /** Member asks to skip this month — pings admins to confirm. */
-export async function requestMonthWaiver(phone: string): Promise<{ ok: boolean; message: string }> {
-  const member = await getMemberByPhone(phone);
+export async function requestMonthWaiver(phone: string, cooperativeId?: string): Promise<{ ok: boolean; message: string }> {
+  const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) return { ok: false, message: "You need to join a cooperative first. Reply *join <code>* to get started." };
   const already = await prisma.deductionWaiver.findFirst({
     where: { memberId: member.id, period: periodOf(new Date()) },

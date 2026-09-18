@@ -141,6 +141,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
     req.adminPhone = live.phone;
     req.adminCoopId = live.cooperativeId;
     req.adminRole = live.role;
+
+    // Set PostgreSQL session variable for Row-Level Security (RLS).
+    // This ensures all subsequent queries in this request are scoped to
+    // the admin's cooperative, enforcing tenant isolation at the database level.
+    await prisma.$executeRaw`SELECT set_config('app.current_cooperative_id', ${live.cooperativeId}, false)`;
   });
 
   app.post("/api/admin/logout", async (req, reply) => {
@@ -179,17 +184,25 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.get("/api/admin/members", async (req) => {
     const coopId = req.adminCoopId!;
-    return prisma.member.findMany({
-      where: { cooperativeId: coopId },
-      select: {
-        id: true, name: true, phone: true, email: true, code: true,
-        role: true, status: true, cooperativeId: true, createdAt: true,
-        wallet: true,
-        // NOK/DOB removed - sensitive, superadmin-only via chat
-      },
-      orderBy: { createdAt: "desc" },
-      take: 200,
-    });
+    const query = req.query as { page?: string; limit?: string };
+    const page = Math.max(1, Number(query.page ?? 1));
+    const limit = Math.min(100, Number(query.limit ?? 20));
+    const skip = (page - 1) * limit;
+    const [members, total] = await Promise.all([
+      prisma.member.findMany({
+        where: { cooperativeId: coopId },
+        select: {
+          id: true, name: true, phone: true, email: true, code: true,
+          role: true, status: true, cooperativeId: true, createdAt: true,
+          wallet: true,
+        },
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: limit,
+      }),
+      prisma.member.count({ where: { cooperativeId: coopId } }),
+    ]);
+    return { members, total, page, limit, totalPages: Math.ceil(total / limit) };
   });
 
   // Send a broadcast / individual message to members via their messaging channel.

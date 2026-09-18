@@ -4,6 +4,7 @@ import { monnifyAdapter } from "./payments/monnify.js";
 import { paystackAdapter } from "./payments/paystack.js";
 import { handlePaymentNotification } from "./payments/topup.js";
 import type { PaymentNotification, ProviderAdapter } from "./payments/index.js";
+import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 
 /**
  * Combined payment webhook listener.
@@ -123,6 +124,21 @@ export async function processPaymentWebhook(
     return { httpStatus: 200, body: { status: "ok", event: eventId } };
   } catch (err: any) {
     console.error(`[webhook] processing failed for ${eventId}`, err);
+    // Extract cooperativeId from the notification if possible for alerting
+    let cooperativeId: string | undefined;
+    if (notification && "cooperativeId" in notification) {
+      cooperativeId = (notification as any).cooperativeId;
+    }
+
+    // Alert super admins if we have cooperative context
+    if (cooperativeId) {
+      await alertSupers(
+        cooperativeId,
+        `Webhook processing failed for event ${eventId}\n\nError: ${err?.message ?? "unknown"}`,
+        AlertSeverity.CRITICAL,
+      ).catch(() => {});
+    }
+
     await prisma.webhookEvent
       .update({
         where: { id: eventId },

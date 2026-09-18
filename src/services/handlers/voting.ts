@@ -51,8 +51,8 @@ export async function handleResults(phone: string, args: string[]): Promise<void
   await sendText({ to: phone, text: result.message });
 }
 
-export async function handleBuyPolls(phone: string): Promise<void> {
-  const member = await getMemberByPhone(phone);
+export async function handleBuyPolls(phone: string, cooperativeId?: string): Promise<void> {
+  const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
     await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
     return;
@@ -78,8 +78,8 @@ export async function handleBuyPolls(phone: string): Promise<void> {
   });
 }
 
-export async function handleVoteBuy(phone: string, args: string[]): Promise<void> {
-  const member = await getMemberByPhone(phone);
+export async function handleVoteBuy(phone: string, args: string[], cooperativeId?: string): Promise<void> {
+  const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
     await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
     return;
@@ -107,8 +107,8 @@ export async function handlePollResults(phone: string, args: string[]): Promise<
   await sendText({ to: phone, text: result.message });
 }
 
-export async function handleElections(phone: string): Promise<void> {
-  const member = await getMemberByPhone(phone);
+export async function handleElections(phone: string, cooperativeId?: string): Promise<void> {
+  const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
     await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
     return;

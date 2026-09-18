@@ -56,7 +56,7 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
   const fallbacks = otherThan(undefined);
   const attempts = [undefined, ...fallbacks];
   for (const preferred of attempts) {
-    const provider = resolveProvider(preferred ?? lastProviderName);
+    const provider = await resolveProvider(preferred ?? lastProviderName);
     if (lastProviderName && provider.name === lastProviderName) continue; // skip already-failed
     lastProviderName = provider.name;
     try {
@@ -189,9 +189,11 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
 
   // Real-time credit alert: tell the member the moment their bank transfer lands.
   const newBalance = (member.wallet?.balance ?? 0) + amount;
-  await notifyMember(member,
-    `💰 *Wallet credited!*\n\n${formatBalance(amount)} just landed in your savings via ${n.provider} (Ref ${n.transactionId.slice(-8)}).\n\nNew balance: *${formatBalance(newBalance)}*.`,
-  ).catch(() => {});
+await notifyMember(member,
+    `✅ *Wallet credited!*\n\n${formatBalance(amount)} just landed in your savings via ${n.provider} (Ref ${n.transactionId.slice(-8)}).\n\nNew balance: *${formatBalance(newBalance)}*.`,
+  ).catch((err) => {
+    console.error("[topup] Failed to notify member of credit:", err);
+  });
 
   await audit({
     cooperativeId: member.cooperativeId,

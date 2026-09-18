@@ -1,67 +1,192 @@
+# CI Pipeline — Coop WhatsApp
+# Runs on every push to staging/main and on PRs to those branches.
+# Gates: typecheck, lint, format, unit tests, security tests.
+# Staging deploy only proceeds if all checks pass.
+
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [staging, main]
   pull_request:
-    branches: [main]
+    branches: [staging, main]
+
+env:
+  NODE_VERSION: "22"
 
 jobs:
-  typecheck:
-    name: Typecheck & Lint
+  # ---------- Type-check & Lint ----------
+  typecheck-and-lint:
+    name: Type-check & Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Generate Prisma client
+      - name: Generate Prisma Client
         run: npx prisma generate
 
-      - name: TypeScript type check
-        run: npx tsc --noEmit
+      - name: Type-check
+        run: npm run typecheck
 
-      - name: ESLint
-        run: npx eslint src/
-        continue-on-error: false
+      - name: Lint
+        run: npm run lint
 
-  test:
-    name: Tests
+      - name: Format check
+        run: npm run format:check
+
+  # ---------- Unit Tests ----------
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Run unit tests
+        run: npm test
+        env:
+          # Use SQLite for fast local tests (schema.local.prisma)
+          DATABASE_URL: "file:./dev.db"
+
+  # ---------- Security Tests ----------
+  security-tests:
+    name: Security Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Run security tests only
+        run: npx vitest run tests/security.test.ts
+        env:
+          DATABASE_URL: "file:./dev.db"
+
+  # ---------- RLS Tests (PostgreSQL) ----------
+  # These tests verify Row-Level Security policies prevent cross-cooperative data access.
+  # They require a PostgreSQL database with RLS policies applied.
+  rls-tests:
+    name: RLS Isolation Tests
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16-alpine
         env:
+          POSTGRES_DB: coop_test
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
-          POSTGRES_DB: test_db
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --health-cmd="pg_isready -U test -d coop_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Generate Prisma client
+      - name: Generate Prisma Client
         run: npx prisma generate
 
-      - name: Run tests
-        run: npx vitest run
+      - name: Run migrations (including RLS policies)
+        run: npx prisma migrate deploy
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test_db
-          NODE_ENV: test
+          DATABASE_URL: postgresql://test:test@localhost:5432/coop_test
+
+      - name: Run RLS isolation tests
+        run: npx vitest run tests/rls-isolation.test.ts
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/coop_test
+
+  # ---------- Build Verification ----------
+  build:
+    name: Build Verification
+    runs-on: ubuntu-latest
+    needs: [typecheck-and-lint, unit-tests, security-tests, rls-tests]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Build
+        run: npm run build
+
+  # ---------- Staging Deploy Gate ----------
+  # This job only runs on the `staging` branch (not PRs).
+  # It passes through if all previous jobs succeeded.
+  # Render handles the actual deploy via autoDeploy.
+  staging-deploy-gate:
+    name: Staging Deploy Gate
+    runs-on: ubuntu-latest
+    needs: [typecheck-and-lint, unit-tests, security-tests, build]
+    if: github.ref == 'refs/heads/staging'
+    steps:
+      - name: Staging deploy gate passed
+        run: echo "All checks passed. Render will auto-deploy staging."
+
+  # ---------- Production Deploy Gate ----------
+  # This job only runs on the `main` branch (not PRs).
+  # It passes through if all previous jobs succeeded.
+  # Render handles the actual deploy via autoDeploy.
+  production-deploy-gate:
+    name: Production Deploy Gate
+    runs-on: ubuntu-latest
+    needs: [typecheck-and-lint, unit-tests, security-tests, build]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Production deploy gate passed
+        run: echo "All checks passed. Render will auto-deploy production."

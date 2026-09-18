@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 
 const isProd = process.env.NODE_ENV === "production";
+const isTest = process.env.NODE_ENV === "test";
 
 /**
  * Prisma client with automatic connection pooling for production.
@@ -16,6 +17,12 @@ const isProd = process.env.NODE_ENV === "production";
  */
 function resolveDatabaseUrl(): string {
   const url = process.env.DATABASE_URL ?? "";
+  
+  // For tests, use SQLite
+  if (isTest) {
+    return "file:./dev.db";
+  }
+  
   if (!isProd || url.includes("connection_limit")) return url;
   const separator = url.includes("?") ? "&" : "?";
   return `${url}${separator}connection_limit=10&pool_timeout=10`;

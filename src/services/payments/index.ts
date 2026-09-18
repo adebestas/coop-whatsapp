@@ -106,6 +106,7 @@ export interface TransferStatus {
 import { timingSafeEqual } from "node:crypto";
 import { monnifyAdapter } from "./monnify.js";
 import { paystackAdapter } from "./paystack.js";
+import { RedisCircuitBreaker } from "../../lib/redis-mutex.js";
 
 /** Constant-time string comparison for signature checks (anti-timing-attack). */
 export function signaturesMatch(expected: string, received: string): boolean {
@@ -119,22 +120,21 @@ export function signaturesMatch(expected: string, received: string): boolean {
  * Provider availability (circuit breaker). When a provider fails — network
  * outage, downtime — we mark it down for a cooldown and route to the other
  * provider automatically.
+ * Uses Redis-backed circuit breaker for multi-instance safety.
  */
 const PROVIDER_COOLDOWN_MS = 5 * 60 * 1000;
-const providerDownUntil = new Map<string, number>();
 
-export function markProviderDown(name: string): void {
-  providerDownUntil.set(name.toLowerCase(), Date.now() + PROVIDER_COOLDOWN_MS);
+export async function markProviderDown(name: string): Promise<void> {
+  await RedisCircuitBreaker.markDown(name, PROVIDER_COOLDOWN_MS);
 }
 
 /** Mark a provider as available again after a successful operation. */
-export function markProviderUp(name: string): void {
-  providerDownUntil.delete(name.toLowerCase());
+export async function markProviderUp(name: string): Promise<void> {
+  await RedisCircuitBreaker.markUp(name);
 }
 
-export function isProviderAvailable(name: string): boolean {
-  const until = providerDownUntil.get(name.toLowerCase());
-  return !until || until < Date.now();
+export async function isProviderAvailable(name: string): Promise<boolean> {
+  return RedisCircuitBreaker.isAvailable(name);
 }
 
 function adapterFor(name: string): ProviderAdapter | null {
@@ -151,12 +151,12 @@ function adapterFor(name: string): ProviderAdapter | null {
 const ALL_PROVIDERS = ["monnify", "paystack"];
 
 /** Preferred provider first (env or explicit), then any healthy fallback. */
-export function resolveProvider(preferred?: string): ProviderAdapter {
+export async function resolveProvider(preferred?: string): Promise<ProviderAdapter> {
   const configured = (preferred ?? process.env.PAYMENT_PROVIDER ?? "monnify").toLowerCase();
   const order = [configured, ...ALL_PROVIDERS.filter((p) => p !== configured)];
   for (const name of order) {
     const adapter = adapterFor(name);
-    if (adapter && isProviderAvailable(name)) return adapter;
+    if (adapter && await isProviderAvailable(name)) return adapter;
   }
   // Everything is marked down — fall back to the configured one and let the
   // caller surface the error.

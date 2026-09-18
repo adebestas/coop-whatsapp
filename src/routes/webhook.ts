@@ -5,32 +5,16 @@ import { handleMessage } from "../services/conversation.js";
 import { extractWhatsAppMessages } from "../lib/inbound.js";
 import { sendText } from "../lib/messaging.js";
 import { transcribeAudioMessage, transcriptionEnabled } from "../lib/transcribe.js";
+import { RedisMutex } from "../lib/redis-mutex.js";
 
 /**
  * Per-user mutex to serialize message processing per phone number.
+ * Uses Redis-backed mutex for multi-instance safety.
  * Prevents race conditions where two messages from the same user
  * are processed concurrently and cause inconsistent state (e.g. double spend).
  */
-const userMutexes = new Map<string, Promise<void>>();
-
 async function withUserMutex<T>(phone: string, fn: () => Promise<T>): Promise<T> {
-  // Wait for any in-flight processing for this user to finish
-  const prev = userMutexes.get(phone);
-  if (prev) await prev.catch(() => {});
-
-  let release: () => void;
-  const current = new Promise<void>((resolve) => { release = resolve; });
-  userMutexes.set(phone, current);
-
-  try {
-    return await fn();
-  } finally {
-    release!();
-    // Clean up if this is still the latest mutex
-    if (userMutexes.get(phone) === current) {
-      userMutexes.delete(phone);
-    }
-  }
+  return RedisMutex.withMutex(phone, fn, 10_000);
 }
 
 /**
@@ -104,7 +88,9 @@ export async function webhookRoutes(app: FastifyInstance) {
               sendText({
                 to: inbound.from,
                 text: "I couldn't read that voice note. Please type your message instead.",
-              }).catch(() => {});
+              }).catch((err) => {
+                app.log.error({ err, from: inbound.from }, "Failed to send transcription failure message");
+              });
               continue;
             }
             inbound.text = transcript;
@@ -124,7 +110,9 @@ export async function webhookRoutes(app: FastifyInstance) {
             sendText({
               to: inbound.from,
               text: "Sorry, something went wrong processing your message. Please try again.",
-            }).catch(() => {});
+            }).catch((err) => {
+              app.log.error({ err, from: inbound.from }, "Failed to send error fallback message");
+            });
           });
         }
       }

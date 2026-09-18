@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma } from "../src/lib/prisma.js";
+import { prisma } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 
@@ -23,7 +23,6 @@ vi.mock("../src/lib/messaging.js", () => ({
   notifyMember: vi.fn().mockResolvedValue(true),
   platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
   sendSecurePrompt: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
 }));
 
 const ADMIN_PHONE = "2348090000001";

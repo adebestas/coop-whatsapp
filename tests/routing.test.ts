@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma } from "../src/lib/prisma.js";
+import { prisma } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { notifyMember } from "../src/lib/messaging.js";
 import { sendText as sendWhatsApp } from "../src/lib/whatsapp.js";

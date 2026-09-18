@@ -213,3 +213,38 @@ export async function checkAIRateLimit(memberId: string): Promise<boolean> {
   }
   return true;
 }
+
+// ---- AGM Vote rate limiting (per phone, per hour) ----
+// Prevents spam voting attempts
+const VOTE_WINDOW_SECONDS = 60 * 60; // 1 hour
+const VOTE_MAX_PER_HOUR = 10;
+const voteInMemory = new Map<string, { count: number; resetAt: number }>();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of voteInMemory) {
+    if (now > entry.resetAt) voteInMemory.delete(key);
+  }
+}, 60_000).unref();
+
+export async function checkVoteRateLimit(phone: string): Promise<boolean> {
+  const key = `vote:${phone}`;
+  const client = getRedis();
+  if (client) {
+    try {
+      const redisKey = `rl:${key}`;
+      const current = await client.incr(redisKey);
+      await client.expire(redisKey, VOTE_WINDOW_SECONDS); // Always set — idempotent
+      return current <= VOTE_MAX_PER_HOUR;
+    } catch { /* fall through */ }
+  }
+  const now = Date.now();
+  const entry = voteInMemory.get(key);
+  if (!entry || now > entry.resetAt) {
+    voteInMemory.set(key, { count: 1, resetAt: now + VOTE_WINDOW_SECONDS * 1000 });
+    return true;
+  }
+  if (entry.count >= VOTE_MAX_PER_HOUR) return false;
+  entry.count++;
+  return true;
+}

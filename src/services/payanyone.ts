@@ -263,7 +263,7 @@ async function payExternal(
     return { ok: false, message: "This request is already being paid out or was settled — check *pendingpay*." };
   }
 
-  const provider = resolveProvider();
+  const provider = await resolveProvider();
   const reference = `PAYANY-${payment.id.slice(-8)}`;
 
   if (!provider.payout) {

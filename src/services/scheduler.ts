@@ -3,6 +3,7 @@ import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
 import { showHistory } from "./statements.js";
 import { runAllAlerts } from "../lib/ai-alerts.js";
+import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -146,19 +147,26 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
     const batch = members.slice(i, i + 10);
     const results = await Promise.allSettled(
       batch.map(async (m) => {
-        if (!m.dateOfBirth) return;
-        if (m.dateOfBirth.getMonth() !== now.getMonth() || m.dateOfBirth.getDate() !== now.getDate()) return;
-        await notifyMember(
-          m,
-          `🎂 *Happy Birthday, ${m.name}!* 🎉\n\nMay your new year be full of blessings and growth. Your cooperative family celebrates you today. 🥳`,
-        ).catch(() => {});
-        await prisma.member.update({
-          where: { id: m.id },
-          data: { lastBirthdayGreetedYear: now.getFullYear() },
-        });
+        if (!m.dateOfBirth) return false;
+        if (m.dateOfBirth.getMonth() !== now.getMonth() || m.dateOfBirth.getDate() !== now.getDate()) return false;
+        try {
+          await notifyMember(
+            m,
+            `🎂 *Happy Birthday, ${m.name}!* 🎉\n\nMay your new year be full of blessings and growth. Your cooperative family celebrates you today. 🥳`,
+          );
+          await prisma.member.update({
+            where: { id: m.id },
+            data: { lastBirthdayGreetedYear: now.getFullYear() },
+          });
+          return true;
+        } catch (err) {
+          // Log the error but don't fail the entire batch
+          console.error(`[scheduler] Failed to send birthday greeting to ${m.phone}:`, err);
+          return false;
+        }
       }),
     );
-    sent += results.filter((r) => r.status === "fulfilled").length;
+    sent += results.filter((r) => r.status === "fulfilled" && r.value === true).length;
   }
   return sent;
 }
@@ -283,7 +291,11 @@ async function notifySuperAdminsDigest(cooperativeId: string, text: string): Pro
     where: { cooperativeId, role: "superadmin", status: "active" },
   });
   for (const s of supers) {
-    await notifyMember(s, text).catch(() => {});
+    try {
+      await notifyMember(s, text);
+    } catch (err) {
+      console.error(`[scheduler] Failed to send digest to super admin ${s.phone}:`, err);
+    }
   }
 }
 
@@ -293,6 +305,30 @@ async function notifySuperAdminsDigest(cooperativeId: string, text: string): Pro
 // not nagged repeatedly; deduped per cooperative per month.
 
 const aiAlertsLastRun = new Map<string, string>();
+const backupVerifyLastRun = new Map<string, string>();
+
+export async function runBackupVerificationJob(now = new Date()): Promise<number> {
+  // Run on the 2nd of each month (after monthly statements)
+  if (now.getDate() !== 2) return 0;
+
+  const coops = await prisma.cooperative.findMany({ select: { id: true } });
+  let ran = 0;
+  for (const coop of coops) {
+    const key = `${coop.id}:${now.getFullYear()}-${now.getMonth()}`;
+    if (backupVerifyLastRun.get(coop.id) === key) continue;
+    try {
+      const { runBackupVerification } = await import("./backup-verify.js");
+      await runBackupVerification();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "unknown";
+      console.error("[scheduler] backup verification failed", err);
+      await alertSupers("system", `Backup verification failed for cooperative ${coop.id}: ${msg}`, AlertSeverity.CRITICAL);
+    }
+    backupVerifyLastRun.set(coop.id, key);
+    ran++;
+  }
+  return ran;
+}
 
 export async function runProactiveAlerts(now = new Date()): Promise<number> {
   if (now.getDate() !== 1) return 0;
@@ -302,7 +338,13 @@ export async function runProactiveAlerts(now = new Date()): Promise<number> {
   for (const coop of coops) {
     const key = `${coop.id}:${now.getFullYear()}-${now.getMonth()}`;
     if (aiAlertsLastRun.get(coop.id) === key) continue;
-    await runAllAlerts(coop.id).catch((err) => console.error("[scheduler] proactive alerts failed", err));
+    try {
+      await runAllAlerts(coop.id);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "unknown";
+      console.error("[scheduler] proactive alerts failed", err);
+      await alertSupers("system", `Proactive alerts failed for cooperative ${coop.id}: ${msg}`, AlertSeverity.CRITICAL);
+    }
     aiAlertsLastRun.set(coop.id, key);
     ran++;
   }

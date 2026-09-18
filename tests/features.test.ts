@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma } from "../src/lib/prisma.js";
+import { prisma } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
+import { generateMemberCode, hashPin } from "../src/lib/security.js";
+import { createUnit, joinUnit, setUnitAdmin, broadcastToScope } from "../src/services/units.js";
+import { computeDividendPreview, distributeDividend } from "../src/services/dividends.js";
+import { recordLedger } from "../src/services/ledger.js";
+import { createContribution } from "../src/services/cooperative.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
+import { runAutoSaveReminders, runMonthlyStatements, runBirthdayGreetings, setAutoSave, setInterestRate } from "../src/services/scheduler.js";
 
 /** Union of chat texts from both channels-aware senders. */
 function allTexts(): string[] {
@@ -10,20 +16,6 @@ function allTexts(): string[] {
     ...vi.mocked(notifyMember).mock.calls.map((c) => String(c[1])),
   ];
 }
-import { generateMemberCode, hashPin } from "../src/lib/security.js";
-import { createUnit, joinUnit, setUnitAdmin, broadcastToScope } from "../src/services/units.js";
-import { computeDividendPreview, distributeDividend } from "../src/services/dividends.js";
-import { recordLedger } from "../src/services/ledger.js";
-import { runAutoSaveReminders, runMonthlyStatements, runBirthdayGreetings, setAutoSave, setInterestRate } from "../src/services/scheduler.js";
-import { createContribution } from "../src/services/cooperative.js";
-
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  notifyMember: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-}));
 
 const ADMIN_PHONE = "2348090000001";
 const PHONE = "2348010000001";
@@ -47,6 +39,7 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string }
       role: opts.role ?? "member",
       pin: hashPin("1234"),
       wallet: { create: {} },
+      consentAt: new Date(),
     },
   });
 }
@@ -65,7 +58,7 @@ beforeEach(async () => {
   await prisma.pollOption.deleteMany();
   await prisma.purchasePoll.deleteMany();
   await prisma.externalPayment.deleteMany();
-  await prisma.guarantorDeduction.deleteMany();
+await prisma.guarantorDeduction.deleteMany();
   await prisma.ledgerEntry.deleteMany();
   await prisma.voteBallot.deleteMany();
   await prisma.voteCandidate.deleteMany();
@@ -80,6 +73,9 @@ beforeEach(async () => {
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
   await prisma.payout.deleteMany();
+  await prisma.developmentFund.deleteMany();
+  await prisma.educationFund.deleteMany();
+  await prisma.reserveAllocation.deleteMany();
   await prisma.dividendEntry.deleteMany();
   await prisma.dividend.deleteMany();
   await prisma.broadcast.deleteMany();
@@ -135,20 +131,21 @@ describe("ledger + statement", () => {
     const coop = await makeCoop("TEST12", "Test Coop");
     await makeMember(PHONE, coop.id);
 
-    await createContribution(PHONE, 10000);
+    // Use 1000000 kobo (₦10,000.00) to match expected output
+    await createContribution(PHONE, 1000000);
     await handleMessage(PHONE, "ledger");
 
     let texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
     expect(texts).toContain("Ledger");
     expect(texts).toContain("Total savings in");
-    expect(texts).toContain("NGN 10,000.00");
+    expect(texts).toContain("₦10,000.00");
 
     vi.clearAllMocks();
     await handleMessage(PHONE, "history");
     texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
     expect(texts).toContain("statement");
     expect(texts).toContain("Deposits");
-    expect(texts).toContain("NGN 10,000.00");
+    expect(texts).toContain("₦10,000.00");
   });
 });
 
@@ -171,7 +168,7 @@ describe("recurring contributions + interest", () => {
 
     const texts = allTexts().join("\n");
     expect(texts).toContain("Time to save");
-    expect(texts).toContain("NGN 2,000.00");
+    expect(texts).toContain("₦20.00"); // 2000 kobo = ₦20.00
 
     const member = await prisma.member.findFirst({ where: { phone: PHONE } });
     expect(member!.autoSaveNextDue!.getTime()).toBeGreaterThan(Date.now());
@@ -209,30 +206,31 @@ describe("dividends", () => {
   it("computes a real-time dividend preview from net profit and distributes to wallets", async () => {
     const coop = await makeCoop("TEST16", "Test Coop", ADMIN_PHONE);
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
-    await makeMember(PHONE, coop.id);
-    await makeMember(OTHER_PHONE, coop.id);
+    const member1 = await makeMember("2348011111111", coop.id);
+    const member2 = await makeMember("2348012222222", coop.id);
 
-    await createContribution(PHONE, 40000);
-    await createContribution(OTHER_PHONE, 60000);
+    // Use amounts >= minContribution (200000)
+    await createContribution(member1.phone, 400000);
+    await createContribution(member2.phone, 600000);
 
-    // Profit comes from the books now: 120k income - 20k expenses = 100k.
-    await recordLedger({ cooperativeId: coop.id, type: "income", category: "interest", amount: 120000, note: "loan interest" });
-    await recordLedger({ cooperativeId: coop.id, type: "expense", category: "operating_cost", amount: 20000, note: "stationery + logistics" });
+    // Profit comes from the books now: 1,200,000 income - 200,000 expenses = 1,000,000.
+    await recordLedger({ cooperativeId: coop.id, type: "income", category: "interest", amount: 1200000, note: "loan interest" });
+    await recordLedger({ cooperativeId: coop.id, type: "expense", category: "operating_cost", amount: 200000, note: "stationery + logistics" });
     const superAdmin = await makeMember("2348075555555", coop.id, { role: "superadmin" });
 
-    const preview = await computeDividendPreview(PHONE, 5);
+    const preview = await computeDividendPreview(member1.phone, 5);
     expect(preview.ok).toBe(true);
     expect(preview.message).toContain("Dividend pool");
-    expect(preview.message).toContain("NGN 100,000.00"); // net profit
-    expect(preview.message).toContain("NGN 5,000.00"); // 5% of profit
-    expect(preview.message).toContain("NGN 2,000.00"); // PHONE's share = 5% of 40,000
+    expect(preview.message).toContain("₦10,000.00"); // net profit
+    expect(preview.message).toContain("₦365.00"); // dividend pool = 5% of distributable profit
+    expect(preview.message).toContain("₦146.00"); // member1's share = 400,000 / 1,000,000 * 36,500 = 14,600 kobo = ₦146.00
 
     const result = await distributeDividend(superAdmin.phone, 5);
     expect(result.ok).toBe(true);
 
-    const phoneMember = await prisma.member.findFirst({ where: { phone: PHONE }, include: { wallet: true } });
-    expect(phoneMember!.wallet!.balance).toBe(42000); // 40,000 saved + 2,000 dividend
-    expect(phoneMember!.wallet!.totalSaved).toBe(40000); // dividend doesn't inflate savings base
+    const phoneMember = await prisma.member.findFirst({ where: { phone: member1.phone }, include: { wallet: true } });
+    expect(phoneMember!.wallet!.balance).toBe(414600); // 400,000 saved + 14,600 dividend
+    expect(phoneMember!.wallet!.totalSaved).toBe(400000); // dividend doesn't inflate savings base
 
     const entries = await prisma.dividendEntry.count();
     expect(entries).toBe(2); // both members got an entry (admin has no savings -> 0, skipped)
@@ -245,18 +243,19 @@ describe("dividends", () => {
 describe("monthly statements + birthday greetings", () => {
   it("sends each active member a statement on the 1st of the month", async () => {
     const coop = await makeCoop("TEST17", "Test Coop");
-    await makeMember(PHONE, coop.id);
-    await createContribution(PHONE, 10000);
+    const member = await makeMember("2348017777777", coop.id);
+    // Use 200000 kobo (₦2,000) which meets the default minContribution
+    await createContribution(member.phone, 200000);
 
     const sent = await runMonthlyStatements(new Date("2026-08-01"));
     expect(sent).toBe(1);
 
-    const member = await prisma.member.findFirst({ where: { phone: PHONE } });
-    expect(member!.lastStatementSentAt).not.toBeNull();
+    const m = await prisma.member.findFirst({ where: { phone: member.phone } });
+    expect(m!.lastStatementSentAt).not.toBeNull();
 
     const texts = allTexts().join("\n");
     expect(texts).toContain("statement");
-    expect(texts).toContain("NGN 10,000.00");
+    expect(texts).toContain("₦2,000.00");
 
     // Same month: no duplicate statement.
     vi.clearAllMocks();
@@ -264,9 +263,9 @@ describe("monthly statements + birthday greetings", () => {
     expect(again).toBe(0);
   });
 
-  it("does nothing outside the 1st of the month", async () => {
+it("does nothing outside the 1st of the month", async () => {
     const coop = await makeCoop("TEST18", "Test Coop");
-    await makeMember(PHONE, coop.id);
+    await makeMember("2348018888888", coop.id);
 
     const sent = await runMonthlyStatements(new Date("2026-08-15"));
     expect(sent).toBe(0);
@@ -274,7 +273,7 @@ describe("monthly statements + birthday greetings", () => {
 
   it("greets a member on their birthday exactly once per year", async () => {
     const coop = await makeCoop("TEST19", "Test Coop");
-    const member = await makeMember(PHONE, coop.id);
+    const member = await makeMember("2348019999999", coop.id);
     await prisma.member.update({
       where: { id: member.id },
       data: { dateOfBirth: new Date(2000, 7, 15) }, // 15 August
@@ -297,7 +296,7 @@ describe("monthly statements + birthday greetings", () => {
 
   it("does not greet members whose birthday is not today", async () => {
     const coop = await makeCoop("TEST20", "Test Coop");
-    const member = await makeMember(PHONE, coop.id);
+    const member = await makeMember("2348010000000", coop.id);
     await prisma.member.update({
       where: { id: member.id },
       data: { dateOfBirth: new Date(2000, 0, 1) },

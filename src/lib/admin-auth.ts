@@ -124,3 +124,5 @@ export async function requireLiveAdmin(payload: AdminTokenPayload): Promise<{ ph
   }
   return { phone: live.phone, role: live.role, cooperativeId: live.cooperativeId };
 }
+
+export { getRedis };

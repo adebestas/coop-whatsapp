@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { audit } from "./audit.js";
+import { checkVoteRateLimit } from "./fraud.js";
 
 const BROADCAST_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between broadcasts
 
@@ -255,6 +256,12 @@ export async function addCandidate(actorPhone: string, voteCode: string, memberC
 /** A member casts their ballot for a candidate (by member code).
  *  Nominees ARE allowed to vote — one person, one ballot per election. */
 export async function castVote(voterPhone: string, voteCode: string, memberCode: string): Promise<VoteResult> {
+  // Rate limit voting attempts
+  const voteAllowed = await checkVoteRateLimit(voterPhone);
+  if (!voteAllowed) {
+    return { ok: false, message: "Too many voting attempts. Please wait before trying again." };
+  }
+
   const voter = await prisma.member.findFirst({ where: { phone: voterPhone } });
   if (!voter) return { ok: false, message: "You need to join a cooperative first." };
 

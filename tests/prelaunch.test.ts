@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import { prisma } from "../src/lib/prisma.js";
+import { prisma } from "../tests/setup.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { totpAt } from "../src/lib/totp.js";
@@ -19,7 +19,6 @@ vi.mock("../src/lib/messaging.js", () => ({
   notifyMember: vi.fn().mockResolvedValue(true),
   platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
   sendSecurePrompt: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
 }));
 
 // Configurable fake provider so poller tests can script transfer outcomes.

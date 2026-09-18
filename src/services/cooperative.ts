@@ -128,15 +128,50 @@ export async function findOrCreateMember(
 const memberCache = new Map<string, { data: any; expires: number }>();
 const CACHE_TTL = 30_000;
 
-export async function getMemberByPhone(phone: string) {
-  const cached = memberCache.get(phone);
+/**
+ * Clear the member cache — useful for tests.
+ */
+export function clearMemberCache(): void {
+  memberCache.clear();
+}
+
+/**
+ * Resolve a member by phone — always scoped to a cooperative when one is
+ * known, using the `@@unique([cooperativeId, phone])` constraint.
+ *
+ * When `cooperativeId` is omitted (the bare phone-only case), we FAIL CLOSED:
+ * if the phone belongs to more than one cooperative we return `null` instead
+ * of silently guessing which membership is meant (tenant isolation).
+ */
+export async function getMemberByPhone(phone: string, cooperativeId?: string) {
+  const cacheKey = cooperativeId ? `${cooperativeId}:${phone}` : phone;
+  const cached = memberCache.get(cacheKey);
   if (cached && Date.now() < cached.expires) return cached.data;
-  const member = await prisma.member.findFirst({
+
+  if (cooperativeId) {
+    const member = await prisma.member.findUnique({
+      where: { cooperativeId_phone: { cooperativeId, phone } },
+      include: { cooperative: true, wallet: true },
+    });
+    if (member) memberCache.set(cacheKey, { data: member, expires: Date.now() + CACHE_TTL });
+    return member;
+  }
+
+  // Bare phone, no cooperative context: list up to 2 so ambiguity is visible.
+  const candidates = await prisma.member.findMany({
     where: { phone },
     include: { cooperative: true, wallet: true },
     orderBy: { createdAt: "asc" },
+    take: 2,
   });
-  if (member) memberCache.set(phone, { data: member, expires: Date.now() + CACHE_TTL });
+  if (candidates.length > 1) {
+    console.warn(
+      `[coop] getMemberByPhone: phone ${phone} belongs to multiple cooperatives — refusing ambiguous phone-only lookup`,
+    );
+    return null;
+  }
+  const member = candidates[0] ?? null;
+  if (member) memberCache.set(cacheKey, { data: member, expires: Date.now() + CACHE_TTL });
   return member;
 }
 

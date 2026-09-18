@@ -200,7 +200,7 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Usage: *reject <loan id>*" });
         return true;
       }
-      const result = await rejectLoan(id, coopId);
+      const result = await rejectLoan(id, { actorId: admin.id, cooperativeId: coopId, reason: "Admin rejection via chat", stage: "officer" });
       await sendText({ to: phone, text: result.message });
       await audit({
         cooperativeId: coopId,
@@ -900,15 +900,15 @@ export async function handleAdminCommand(
     }
 
     case "interest": {
-      // Interest is now tiered automatically by tenure.
+      // Interest is now tiered automatically by tenure (declining balance).
       await sendText({
         to: phone,
         text:
-          "*Loan interest (automatic tiers)*\n\n" +
-          "• Up to 3 months: *5% flat*\n" +
-          "• 4–6 months: *8% flat*\n" +
-          "• 7–9 months: *9% flat*\n" +
-          "• 10–12 months: *10% flat*\n\n" +
+          "*Loan interest (declining balance tiers)*\n\n" +
+          "• Up to 3 months: *20% APR* (~5% flat equivalent)\n" +
+          "• 4–6 months: *16% APR* (~8% flat equivalent)\n" +
+          "• 7–9 months: *12% APR* (~9% flat equivalent)\n" +
+          "• 10–12 months: *10% APR* (~10% flat equivalent)\n\n" +
           `Admin charge per loan: ${formatBalance(2000)} (deducted at disbursement).`,
       });
       return true;
@@ -1266,10 +1266,10 @@ export async function handleAdminCommand(
       }
 
       // Resolve + verify the beneficiary's name from their bank account.
-      const provider = resolveProvider();
+      const provider = await resolveProvider();
       let beneficiaryName = "";
       if (provider.resolveAccount) {
-        const resolved = await provider.resolveAccount({ accountNumber, bankCode });
+        const resolved = await provider.resolveAccount!({ accountNumber, bankCode });
         if (!resolved.ok || !resolved.name) {
           await sendText({
             to: phone,

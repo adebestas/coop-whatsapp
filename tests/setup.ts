@@ -7,8 +7,65 @@
  */
 import { FastifyInstance } from "fastify";
 import { buildApp } from "../src/app.js";
-import { prisma } from "../src/lib/prisma.js";
+import { PrismaClient } from "@prisma/client";
+import { vi } from "vitest";
+
+// Use SQLite for tests (local schema)
+export const prisma = new PrismaClient({
+  datasources: {
+    db: {
+      url: "file:./dev.db",
+    },
+  },
+});
+
+// ===== Global Mocks =====
+// Mock WhatsApp API to prevent real API calls during tests
+vi.mock("../src/lib/whatsapp.js", () => ({
+  sendText: vi.fn().mockResolvedValue(true),
+  sendFlowMessage: vi.fn().mockResolvedValue(true),
+}));
+
+// Mock messaging to use mocked WhatsApp
+vi.mock("../src/lib/messaging.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/messaging.js")>();
+  return {
+    ...actual,
+    sendText: vi.fn().mockImplementation(async (params) => {
+      console.log('[GLOBAL MOCK sendText]', params);
+      return true;
+    }),
+    notifyMember: vi.fn().mockImplementation(async (member, text) => {
+      console.log('[GLOBAL MOCK notifyMember]', member?.phone, text?.slice(0, 30));
+      return true;
+    }),
+    platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
+    sendSecurePrompt: vi.fn().mockResolvedValue(true),
+  };
+});
+
+// Mock payments module to avoid real API calls in tests
+vi.mock("../src/services/payments/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/services/payments/index.js")>();
+  return {
+    ...actual,
+    resolveProvider: vi.fn(() => ({
+      name: "monnify",
+      createVirtualAccount: vi.fn(),
+      payout: vi.fn(async () => ({ ok: true, providerRef: "pay-trx-1" })),
+      resolveAccount: vi.fn(async () => ({ ok: true, name: "ADA OBI" })),
+      verifyWebhook: () => true,
+      parseNotification: () => null,
+    })),
+    isProviderAvailable: vi.fn().mockResolvedValue(true),
+    markProviderDown: vi.fn(),
+    markProviderUp: vi.fn(),
+    getProviderStatus: vi.fn(),
+  };
+});
+
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
+import { clearMemberCache } from "../src/services/cooperative.js";
 
 // ===== Test App =====
 
@@ -101,8 +158,9 @@ export async function createTestMember(
       role,
       cooperativeId: coopId,
       wallet: { create: {} },
+      consentAt: new Date(),
     },
-    update: { role, name },
+    update: { role, name, consentAt: new Date() },
   });
 
   return { id: member.id, phone: member.phone, code: member.code, name: member.name, role: member.role };
@@ -114,6 +172,7 @@ export async function createTestMember(
  * Clean up test data
  */
 export async function cleanupDatabase(): Promise<void> {
+  clearMemberCache();
   // Delete in reverse dependency order
   const tables = [
     "Posting",

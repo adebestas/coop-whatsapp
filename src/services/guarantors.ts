@@ -26,15 +26,18 @@ export interface GuarantorResult {
  * Auto-generates a unique confirmation code and sends it to the guarantor's
  * WhatsApp. The guarantor must reply `confirm <code>` to accept.
  */
-export async function addGuarantor(phone: string, loanId: string, memberCode: string): Promise<GuarantorResult> {
-  const member = await getMemberByPhone(phone);
-  if (!member) return { ok: false, message: "You need to join a cooperative first." };
-
+export async function addGuarantor(phone: string, loanId: string, memberCode: string, cooperativeId?: string): Promise<GuarantorResult> {
   const loan = await prisma.loan.findUnique({
     where: { id: loanId },
     include: { guarantors: true, member: true },
   });
-  if (!loan || loan.memberId !== member.id) {
+  if (!loan) return { ok: false, message: "That loan doesn't exist." };
+
+  // Resolve the borrower scoped to the LOAN's cooperative (never a bare phone),
+  // then verify ownership.
+  const member = await getMemberByPhone(phone, cooperativeId ?? loan.cooperativeId);
+  if (!member) return { ok: false, message: "You need to join a cooperative first." };
+  if (loan.memberId !== member.id || loan.cooperativeId !== member.cooperativeId) {
     return { ok: false, message: "That loan doesn't belong to you." };
   }
   if (loan.status !== "pending") {
@@ -42,9 +45,14 @@ export async function addGuarantor(phone: string, loanId: string, memberCode: st
   }
 
   const normalized = memberCode.trim().toUpperCase();
+  // Member codes are globally unique, but a guarantor only counts if they
+  // belong to the SAME cooperative — never a cross-tenant member.
   const guarantor = await prisma.member.findUnique({ where: { code: normalized } });
   if (!guarantor) {
     return { ok: false, message: `No member found with code *${normalized}*. Ask the member to reply *code* to see theirs.` };
+  }
+  if (guarantor.cooperativeId !== member.cooperativeId) {
+    return { ok: false, message: `No member found with code *${normalized}*. Codes are cooperative-specific — ask a member of *your* cooperative.` };
   }
   if (guarantor.id === loan.memberId) {
     return { ok: false, message: "You can't be your own guarantor. Pick another member." };

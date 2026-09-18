@@ -32,7 +32,7 @@ export function transferPollIntervalMs(): number {
 }
 
 async function statusFor(reference: string): Promise<TransferStatus> {
-  const provider = resolveProvider();
+  const provider = await resolveProvider();
   if (!provider.getTransferStatus) return { status: "unknown", error: "provider has no getTransferStatus" };
   try {
     return await provider.getTransferStatus(reference);
@@ -217,7 +217,7 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
     const reference = `PAYANY-${p.id.slice(-8)}`;
     const st = await statusFor(reference);
     if (st.status === "successful") {
-      const provider = resolveProvider();
+      const provider = await resolveProvider();
       await prisma.$transaction([
         prisma.externalPayment.updateMany({
           where: { id: p.id, status: "processing" },

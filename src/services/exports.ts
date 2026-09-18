@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
 import nodemailer from "nodemailer";
 import { prisma } from "../lib/prisma.js";
 import { computePnl } from "./ledger.js";
+import { uploadToS3 } from "../lib/s3.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
 
@@ -50,6 +51,17 @@ export async function runExport(
   await writeXlsx(join(EXPORT_DIR, xlsxName), sheets);
   await writePdf(join(EXPORT_DIR, pdfName), `${coop?.name ?? "Cooperative"} — ${kind.toUpperCase()} export`, sheets);
 
+  // Upload to S3 for persistent storage (if configured)
+  const s3Keys: string[] = [];
+  for (const fileName of [xlsxName, pdfName]) {
+    const localPath = join(EXPORT_DIR, fileName);
+    const s3Key = `exports/${requester.cooperativeId}/${fileName}`;
+    const uploaded = await uploadToS3(localPath, s3Key);
+    if (uploaded) {
+      s3Keys.push(s3Key);
+    }
+  }
+
   const links = [
     `📊 Excel: ${appBaseUrl}/api/export/${xlsxName}`,
     `📄 PDF: ${appBaseUrl}/api/export/${pdfName}`,
@@ -83,10 +95,11 @@ export async function runExport(
     },
   });
 
+  const storage = s3Keys.length === 2 ? "S3" : s3Keys.length === 1 ? "S3 (partial)" : "local";
   return {
     ok: true,
     message:
-      `📦 *${kind}* export ready:\n${links.join("\n")}${emailNote}\n\n_Links stay valid while the files exist on the server._`,
+      `📦 *${kind}* export ready (stored on ${storage}):\n${links.join("\n")}${emailNote}\n\n_Links stay valid while the files exist on the server. S3 copies are permanent._`,
     files: [join(EXPORT_DIR, xlsxName), join(EXPORT_DIR, pdfName)],
   };
 }

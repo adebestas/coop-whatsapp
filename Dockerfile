@@ -61,4 +61,6 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Start application
 ENTRYPOINT ["dumb-init", "--"]
+# Run migrations at container startup, then boot the app.
+# This ensures schema is in sync before handling any traffic.
 CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]

@@ -3,6 +3,7 @@ import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
+import { totalRepayable } from "./loans.js";
 
 /** How many months of default trigger guarantor liability. */
 export const DEFAULT_GRACE_MONTHS = 2;
@@ -34,8 +35,10 @@ export async function scanGuarantorDefaults(): Promise<number> {
 
   let notices = 0;
   for (const loan of defaulted) {
-    const flatInterest = Math.round(loan.amount * ((loan.interestRate ?? 0) / 100) * 100) / 100;
-    const share = Math.round(flatInterest * GUARANTOR_INTEREST_SHARE * 100) / 100;
+    // Calculate total interest for declining balance loan
+    const totalRepayableAmount = totalRepayable(loan.amount, loan.tenureMonths);
+    const totalInterest = totalRepayableAmount - loan.amount;
+    const share = Math.round(totalInterest * GUARANTOR_INTEREST_SHARE * 100) / 100;
     if (share <= 0) continue;
 
     for (const g of loan.guarantors) {
@@ -64,7 +67,7 @@ export async function scanGuarantorDefaults(): Promise<number> {
         g.member,
         `⚠️ *10-day deduction notice*\n\n` +
           `${loan.member.name} has defaulted on loan *${loan.id.slice(-6)}* for ${DEFAULT_GRACE_MONTHS}+ months.\n` +
-          `As guarantor, *${formatBalance(share)}* (50% of the loan's interest) will be deducted from your savings on ` +
+          `As guarantor, *${formatBalance(share)}* (50% of the loan's declining balance interest) will be deducted from your savings on ` +
           `*${deductAt.toISOString().slice(0, 10)}*.\n\n` +
           `If the borrower clears the arrears before then, the deduction is cancelled.`,
       ).catch(() => {});

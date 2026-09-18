@@ -560,11 +560,11 @@ export async function handleMessage(
       await sendText({
         to: phone,
         text:
-          "*Loan interest (automatic tiers)*\n\n" +
-          "• Up to 3 months: *5% flat*\n" +
-          "• 4–6 months: *8% flat*\n" +
-          "• 7–9 months: *9% flat*\n" +
-          "• 10–12 months: *10% flat*\n\n" +
+          "*Loan interest (declining balance tiers)*\n\n" +
+          "• Up to 3 months: *20% APR* (~5% flat equivalent)\n" +
+          "• 4–6 months: *16% APR* (~8% flat equivalent)\n" +
+          "• 7–9 months: *12% APR* (~9% flat equivalent)\n" +
+          "• 10–12 months: *10% APR* (~10% flat equivalent)\n\n" +
           `Admin charge per loan: ${formatBalance(2000)} (deducted at disbursement).`,
       });
       break;

@@ -24,11 +24,12 @@ Reply *next* for Lesson 2, or ask me anything about your savings.`,
 Here's exactly how it works, no hidden math:
 
 • You can borrow up to *2x your current savings balance*
-• Interest is *10% flat* (not compounding, so it never grows the longer you take to plan)
+• Interest is *declining balance* (interest calculated on remaining balance only, so it decreases as you repay)
+• Rates by tenure: up to 3 months = 20% APR, 4-6 months = 16% APR, 7-9 months = 12% APR, 10-12 months = 10% APR
 • There's a one-time *₦2,000 service charge*
 • You choose a duration: *6 months* or *11 months*
 
-*Example:* if you've saved ₦50,000, you can borrow up to ₦100,000. At 10% flat, that's ₦10,000 interest, plus the ₦2,000 charge.
+*Example:* if you've saved ₦50,000, you can borrow up to ₦100,000. At 10% APR declining balance over 11 months, that's ~₦5,500 total interest, plus the ₦2,000 charge.
 
 Reply *next* for Lesson 3.`,
   },

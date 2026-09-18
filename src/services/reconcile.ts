@@ -1,8 +1,8 @@
 import { prisma } from "../lib/prisma.js";
 import { verifyAuditChain } from "./audit.js";
-import { notifySupers } from "./payanyone.js";
 import { formatBalance } from "./cooperative.js";
 import { trialBalance } from "./journal.js";
+import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 
 /**
  * Nightly reconciliation: data-integrity checks that alert super admins.
@@ -92,7 +92,13 @@ export async function runReconciliation(): Promise<string[]> {
 
     if (alerts.length > 0) {
       console.log("[reconcile] alerts:\n" + alerts.join("\n"));
-      await notifySupers(coop.id, `🌙 *Nightly reconciliation*\n\n${alerts.join("\n")}`).catch(() => {});
+      for (const coop of coops) {
+        await alertSupers(
+          coop.id,
+          `🌙 *Nightly reconciliation*\n\n${alerts.join("\n")}`,
+          AlertSeverity.WARNING,
+        ).catch(() => {});
+      }
       allAlerts.push(...alerts);
     }
   }

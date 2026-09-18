@@ -4,6 +4,7 @@ import { resolveProvider, markProviderDown, markProviderUp } from "./payments/in
 import { formatBalance } from "./cooperative.js";
 import { recordLedger } from "./ledger.js";
 import { postJournal } from "./journal.js";
+import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 
 export interface DisbursementResult {
   ok: boolean;
@@ -49,7 +50,7 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
   const member = await prisma.member.findUnique({ where: { id: opts.memberId } });
   if (!member) return { ok: false, status: "failed", message: "Member not found." };
 
-  const provider = resolveProvider();
+  const provider = await resolveProvider();
   if (!provider.resolveAccount) {
     if (opts.skipNameCheck) {
       return payOut(opts, member, null);
@@ -61,7 +62,7 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
   }
 
   // 1. Verify the account holder's name matches the member's registered name.
-  const resolved = await provider.resolveAccount({
+  const resolved = await provider.resolveAccount!({
     accountNumber: opts.bankAccountNumber,
     bankCode: opts.bankCode,
   });
@@ -93,7 +94,7 @@ async function payOut(
   member: { id: string; name: string; cooperativeId: string; phone: string },
   _verifiedName: string | null,
 ): Promise<DisbursementResult> {
-  const provider = resolveProvider();
+  const provider = await resolveProvider();
   // Deterministic reference: retries reuse the SAME key, so the provider and
   // our own unique constraint both reject a second execution.
   const reference = opts.idempotencyKey ?? `TFR-${opts.memberId.slice(-8)}-${Date.now()}`;
@@ -168,15 +169,24 @@ async function payOut(
     // the caller's own category ledger (suppressJournal) to avoid a double
     // credit to assets:bank.
     if (!opts.suppressJournal) {
-      await postJournal({
-        cooperativeId: member.cooperativeId,
-        txRef: `PAYOUT-${reference}`,
-        description: opts.note,
-        postings: [
-          { account: "expense:payout", direction: "DEBIT", amount: opts.amount },
-          { account: "assets:bank", direction: "CREDIT", amount: opts.amount },
-        ],
-      }).catch((err) => console.error("[payout] journal failed", err));
+      try {
+        await postJournal({
+          cooperativeId: member.cooperativeId,
+          txRef: `PAYOUT-${reference}`,
+          description: opts.note,
+          postings: [
+            { account: "expense:payout", direction: "DEBIT", amount: opts.amount },
+            { account: "assets:bank", direction: "CREDIT", amount: opts.amount },
+          ],
+        });
+      } catch (err) {
+        // Journal failure means books won't balance — alert super admins immediately
+        await alertSupers(
+          member.cooperativeId,
+          `Journal entry failed for payout ${reference} (${formatBalance(opts.amount)})\n\nError: ${err instanceof Error ? err.message : String(err)}\n\nBooks will be out of balance until this is resolved manually.`,
+          AlertSeverity.CRITICAL,
+        ).catch(() => {});
+      }
     }
 
     const msg = opts.successMessage ?? `✅ ${formatBalance(opts.amount)} sent to your bank account (${opts.bankName ?? opts.bankCode} ****${opts.bankAccountNumber.slice(-4)}). Ref: ${reference.slice(-6)}.`;
@@ -343,5 +353,9 @@ export function namesMatch(accountName: string, registeredName: string): boolean
 }
 
 async function notify(member: { phone: string; altChannelId?: string | null; preferredChannel?: string | null }, text: string): Promise<void> {
-  await notifyMember(member, text).catch(() => {});
+  try {
+    await notifyMember(member, text);
+  } catch (err) {
+    console.error(`[disbursements] Failed to notify member ${member.phone}:`, err);
+  }
 }
