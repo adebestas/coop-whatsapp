@@ -302,7 +302,7 @@ describe("daily movement digest", () => {
 
     await prisma.payout.create({
       data: {
-        amount: 3000,
+        amount: 300000,
         reference: "TFR-WDR-digest1",
         status: "successful",
         provider: "monnify",
@@ -327,7 +327,7 @@ describe("daily movement digest", () => {
     ];
     const digest = texts.find((t) => t.to === superA.phone && t.text.includes("Daily summary"));
     expect(digest).toBeTruthy();
-    expect(digest!.text).toContain("NGN 3,000");
+    expect(digest!.text).toContain("₦3,000");
     expect(digest!.text).toContain("Member withdrawal");
   });
 
@@ -407,6 +407,8 @@ describe("startup environment validation", () => {
         WHATSAPP_TOKEN: "x",
         WHATSAPP_PHONE_NUMBER_ID: "y",
         ADMIN_JWT_SECRET: "a-real-secret-key-that-is-not-a-placeholder-1234567890ab",
+        // FATAL in production since the PostgreSQL migration.
+        DATABASE_URL: "postgresql://user:pass@localhost:5432/coop",
       } as any);
       expect(report.ok).toBe(true);
       expect(report.problems.some((p) => p.includes("No payment provider"))).toBe(true);

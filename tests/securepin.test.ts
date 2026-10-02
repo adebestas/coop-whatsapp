@@ -143,6 +143,7 @@ describe("secure PIN challenges", () => {
   it("rejects a flow submission whose token does not match the outstanding challenge", async () => {
     const coop = await makeCoop("TESTSP2", "Test Coop");
     const member = await makeMember(PHONE, coop.id, { bank: true });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000, totalSaved: 5000000 } });
     await prisma.session.create({
       data: {
         phone: PHONE,
@@ -162,12 +163,13 @@ describe("secure PIN challenges", () => {
   it("accepts a flow submission with the matching token", async () => {
     const coop = await makeCoop("TESTSP3", "Test Coop");
     const member = await makeMember(PHONE, coop.id, { bank: true });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000, totalSaved: 5000000 } });
     await prisma.session.create({
       data: {
         phone: PHONE,
         state: "awaiting_withdraw_pin",
         data: JSON.stringify({
-          withdrawAmount: 10000,
+          withdrawAmount: 2000000,
           withdrawAccount: "0123456789",
           withdrawBankCode: "044",
           withdrawBankName: "Access Bank",
@@ -180,18 +182,19 @@ describe("secure PIN challenges", () => {
 
     const wr = await prisma.withdrawalRequest.findFirst({ where: { memberId: member.id } });
     expect(wr).not.toBeNull();
-    expect(wr!.amount).toBe(10000);
+    expect(wr!.amount).toBe(2000000);
   });
 
   it("still accepts typed PIN text when a flow challenge is outstanding", async () => {
     const coop = await makeCoop("TESTSP4", "Test Coop");
     const member = await makeMember(PHONE, coop.id, { bank: true });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000, totalSaved: 5000000 } });
     await prisma.session.create({
       data: {
         phone: PHONE,
         state: "awaiting_withdraw_pin",
         data: JSON.stringify({
-          withdrawAmount: 10000,
+          withdrawAmount: 2000000,
           withdrawAccount: "0123456789",
           withdrawBankCode: "044",
           withdrawBankName: "Access Bank",
