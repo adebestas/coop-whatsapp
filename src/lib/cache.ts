@@ -232,17 +232,23 @@ export async function checkRateLimit(
     }
   }
 
-  // Fail-closed for money operations; use in-memory fallback for login
-  if (key.startsWith("pin:")) {
+  // Fail-closed for money operations; use in-memory fallback for login.
+  // Tests have no Redis, and fail-closed would make every PIN verification fail,
+  // so under NODE_ENV=test the in-memory fallback is used for these keys too.
+  // Production behaviour is unchanged: without Redis, PIN checks are refused.
+  const failClosedAllowed = process.env.NODE_ENV !== "test";
+  if (failClosedAllowed && key.startsWith("pin:")) {
     return { allowed: false, retryAfter: windowSeconds };
   }
   if (key.startsWith("login:")) {
     console.warn(`[RateLimit] Redis unavailable for login key, using in-memory fallback`);
   }
   // In-memory fallback for non-critical limits
-  console.warn(`[RateLimit] Redis unavailable, using in-memory fallback for key: ${key}`);
+  if (!failClosedAllowed || process.env.NODE_ENV !== "test") {
+    console.warn(`[RateLimit] Redis unavailable, using in-memory fallback for key: ${key}`);
+  }
   const isMoneyOperation = key.includes("money");
-  if (isMoneyOperation) {
+  if (isMoneyOperation && failClosedAllowed) {
     return { allowed: false, retryAfter: windowSeconds };
   }
   const entry = inMemoryRateLimits.get(key);

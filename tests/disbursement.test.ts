@@ -68,12 +68,12 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
 }
 
 /** Run the full loan flow up to approval. Returns the loan + two super admin ids. */
-async function getGuaranteedLoan(borrowerName?: string) {
+async function getGuaranteedLoan(borrowerName?: string, resolveName = "ADA OBI", resolveFails = false) {
   const coop = await makeCoop("TEST21");
   const borrower = await makeMember(PHONE, coop.id, { name: borrowerName });
   await makeMember(G1, coop.id);
   await makeMember(G2, coop.id);
-  await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+  const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
   const super1 = await makeMember("2348070000001", coop.id, { role: "superadmin" });
   const super2 = await makeMember("2348070000002", coop.id, { role: "superadmin" });
 
@@ -84,7 +84,17 @@ async function getGuaranteedLoan(borrowerName?: string) {
     data: { balance: 5000000, totalSaved: 5000000 },
   });
 
+  // Loan disbursement requires at least 20 active members in the cooperative
+  // (Cooperative Societies Act), so pad the fixture out past the threshold.
+  for (let i = 0; i < 20; i++) {
+    await makeMember(`2348090${String(i).padStart(5, "0")}`, coop.id);
+  }
+
   await handleMessage(PHONE, "loan 40000 2");
+  // The bank account name is resolved while the chat flow collects bank details,
+  // so the provider behaviour must be armed before the flow starts.
+  state.resolveName = resolveName;
+  state.resolveFails = resolveFails;
   await handleMessage(PHONE, "0123456789");
   await handleMessage(PHONE, "Access");
   await handleMessage(PHONE, "yes"); // confirm the bank selection
@@ -105,7 +115,37 @@ async function getGuaranteedLoan(borrowerName?: string) {
 
   loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
   expect(loan!.status).toBe("guaranteed");
-  return { loan: loan!, super1Id: super1.id, super2Id: super2.id };
+
+  // Guaranteed loans must clear an Account Officer assigned to this cooperative
+  // before either super admin is allowed to act.
+  const officer = await prisma.accountOfficer.create({
+    data: { email: `ao-${coop.id}@test.local`, name: "Amina Officer", isActive: true },
+  });
+  await prisma.accountOfficerAssignment.create({
+    data: {
+      accountOfficerId: officer.id,
+      cooperativeId: coop.id,
+      assignedById: super1.id,
+      isActive: true,
+    },
+  });
+  const officerReview = await approveLoan(loan!.id.slice(-6), {
+    isAdmin: true,
+    actorId: officer.id,
+    cooperativeId: coop.id,
+  });
+  expect(officerReview.ok).toBe(true);
+
+  // Account Officer review is followed by a plain admin approval.
+  const adminReview = await approveLoan(loan!.id.slice(-6), {
+    isAdmin: true,
+    actorId: admin.id,
+    cooperativeId: coop.id,
+  });
+  expect(adminReview.ok).toBe(true);
+
+  loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
+  return { loan: loan!, coopId: coop.id, super1Id: super1.id, super2Id: super2.id };
 }
 
 beforeEach(async () => {
@@ -153,12 +193,12 @@ beforeEach(async () => {
 
 describe("loan disbursement", () => {
   it("disburses to the member's bank account when the name matches", async () => {
-    const { loan, super1Id, super2Id } = await getGuaranteedLoan("Ada Obi");
+    const { loan, coopId, super1Id, super2Id } = await getGuaranteedLoan("Ada Obi");
 
     // Two distinct super admins must approve; the second auto-disburses.
-    const one = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super1Id });
+    const one = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super1Id });
     expect(one.ok).toBe(true);
-    const result = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super2Id });
+    const result = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super2Id });
     expect(result.ok).toBe(true);
 
     const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
@@ -169,7 +209,7 @@ describe("loan disbursement", () => {
     const payout = await prisma.payout.findFirst({ where: { memberId: loan.memberId } });
     expect(payout).not.toBeNull();
     expect(payout!.status).toBe("successful");
-    expect(payout!.providerRef).toBe("trx-1");
+    expect(payout!.providerRef).toBe("pay-trx-1");
 
     // The member was notified.
     const texts = allTexts().join("\n");
@@ -177,11 +217,11 @@ describe("loan disbursement", () => {
   });
 
   it("blocks disbursement when the account name does not match the registered name", async () => {
-    const { loan, super1Id, super2Id } = await getGuaranteedLoan("Chinedu Eze"); // registered under a different name
-    state.resolveName = "SADE BALOGUN"; // account belongs to someone else
+    // Registered under a different name than the bank account owner.
+    const { loan, coopId, super1Id, super2Id } = await getGuaranteedLoan("Chinedu Eze", "SADE BALOGUN");
 
-    await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super1Id });
-    const result = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super2Id });
+    await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super1Id });
+    const result = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super2Id });
     expect(result.ok).toBe(true); // approved, but NOT paid out
 
     const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
@@ -194,11 +234,10 @@ describe("loan disbursement", () => {
   });
 
   it("marks a failed disbursement without paying when the provider can't resolve", async () => {
-    const { loan, super1Id, super2Id } = await getGuaranteedLoan();
-    state.resolveFails = true;
+    const { loan, coopId, super1Id, super2Id } = await getGuaranteedLoan(undefined, "ADA OBI", true);
 
-    await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super1Id });
-    await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super2Id });
+    await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super1Id });
+    await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super2Id });
 
     const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(updated!.status).toBe("approved");
@@ -207,24 +246,24 @@ describe("loan disbursement", () => {
   });
 
   it("requires the super admin's approval before an admin-approved loan pays out", async () => {
-    const { loan, super1Id, super2Id } = await getGuaranteedLoan("Ada Obi");
+    const { loan, coopId, super1Id, super2Id } = await getGuaranteedLoan("Ada Obi");
 
     // Plain admin approval stops at admin_approved — no money moves.
-    const first = await approveLoan(loan.id.slice(-6));
+    const first = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId });
     expect(first.ok).toBe(true);
     let updated = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(updated!.status).toBe("admin_approved");
     expect(await prisma.payout.count()).toBe(0);
 
     // Two distinct super admins must sign off; the second releases the money.
-    const second = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super1Id });
+    const second = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super1Id });
     expect(second.ok).toBe(true);
     updated = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(updated!.status).toBe("super_approved_1");
     expect(updated!.finalApprovedById).not.toBeNull();
     expect(await prisma.payout.count()).toBe(0);
 
-    const third = await approveLoan(loan.id.slice(-6), { superAdmin: true, actorId: super2Id });
+    const third = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super2Id });
     expect(third.ok).toBe(true);
     updated = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(updated!.status).toBe("disbursed");
@@ -244,13 +283,13 @@ describe("withdrawals", () => {
   it("creates a request, then pays out after admin approval + super admin finalization", async () => {
     const coop = await makeCoop("TEST22");
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
-    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" }); // the coop's super admin
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 100000 } });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" }); // the coop's super admin
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000 } });
 
-    await handleMessage(PHONE, "withdraw 40000");
+    await handleMessage(PHONE, "withdraw 20000");
     await handleMessage(PHONE, "0123456789"); // account
     await handleMessage(PHONE, "Access");
-  await handleMessage(PHONE, "yes"); // confirm the bank selection // bank
+  await handleMessage(PHONE, "yes"); // confirm the bank selection
     await handleMessage(PHONE, "1234"); // PIN
 
     // The request exists but no money has moved yet.
@@ -261,7 +300,7 @@ describe("withdrawals", () => {
       where: { id: member.id },
       include: { wallet: true },
     });
-    expect(updated!.wallet!.balance).toBe(100000);
+    expect(updated!.wallet!.balance).toBe(5000000);
     expect(updated!.bankAccountNumber).toBe("0123456789");
     expect(updated!.bankCode).toBe("044");
 
@@ -272,7 +311,7 @@ describe("withdrawals", () => {
       where: { id: member.id },
       include: { wallet: true },
     });
-    expect(updated!.wallet!.balance).toBe(60000);
+    expect(updated!.wallet!.balance).toBe(3000000);
     expect(updated!.lastWithdrawalAt).not.toBeNull();
 
     const paid = await prisma.withdrawalRequest.findUnique({ where: { id: req!.id } });
@@ -281,7 +320,7 @@ describe("withdrawals", () => {
 
     const payout = await prisma.payout.findFirst({ where: { memberId: member.id } });
     expect(payout).not.toBeNull();
-    expect(payout!.amount).toBe(40000);
+    expect(payout!.amount).toBe(2000000);
     expect(payout!.status).toBe("successful");
 
     const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
@@ -293,9 +332,9 @@ describe("withdrawals", () => {
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
     const plainAdmin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" }); // not the coop adminPhone
     await prisma.cooperative.update({ where: { id: coop.id }, data: { adminPhone: null } });
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 100000 } });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000 } });
 
-    await handleMessage(PHONE, "withdraw 40000");
+await handleMessage(PHONE, "withdraw 20000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
   await handleMessage(PHONE, "yes"); // confirm the bank selection
@@ -323,21 +362,21 @@ describe("withdrawals", () => {
     after = await prisma.withdrawalRequest.findUnique({ where: { id: req!.id } });
     expect(after!.status).toBe("paid");
     const updated = await prisma.member.findUnique({ where: { id: member.id }, include: { wallet: true } });
-    expect(updated!.wallet!.balance).toBe(60000);
+    expect(updated!.wallet!.balance).toBe(3000000);
     void plainAdmin;
   });
 
   it("enforces the 6-month rule and lets an admin override it", async () => {
     const coop = await makeCoop("TEST26");
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
-    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" }); // the coop's super admin
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 100000 } });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" }); // the coop's super admin
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000 } });
     await prisma.member.update({
       where: { id: member.id },
       data: { lastWithdrawalAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }, // 1 month ago
     });
 
-    await handleMessage(PHONE, "withdraw 40000");
+    await handleMessage(PHONE, "withdraw 20000");
     let texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
     expect(texts).toContain("once every 6 months");
     expect(await prisma.withdrawalRequest.count()).toBe(0);
@@ -346,7 +385,7 @@ describe("withdrawals", () => {
     await handleMessage(ADMIN_PHONE, `overridewithdrawal ${PHONE}`);
     vi.mocked(sendText).mock.calls.length = 0;
 
-    await handleMessage(PHONE, "withdraw 40000");
+await handleMessage(PHONE, "withdraw 20000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
   await handleMessage(PHONE, "yes"); // confirm the bank selection
@@ -362,15 +401,15 @@ describe("withdrawals", () => {
   it("rejects a withdrawal above the 45% cap without touching the wallet", async () => {
     const coop = await makeCoop("TEST23");
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 100000 } });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000 } });
 
-    await handleMessage(PHONE, "withdraw 60000"); // max is 45000
+    await handleMessage(PHONE, "withdraw 30000"); // 45% of N50,000 savings is N22,500, so N30,000 is rejected
 
     const updated = await prisma.member.findUnique({
       where: { id: member.id },
       include: { wallet: true },
     });
-    expect(updated!.wallet!.balance).toBe(100000);
+    expect(updated!.wallet!.balance).toBe(5000000);
     expect(await prisma.payout.count()).toBe(0);
     expect(await prisma.withdrawalRequest.count()).toBe(0);
 
@@ -381,10 +420,10 @@ describe("withdrawals", () => {
   it("does not pay a withdrawal when the account name does not match", async () => {
     const coop = await makeCoop("TEST24");
     const member = await makeMember(PHONE, coop.id, { name: "Chinedu Eze" });
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 100000 } });
+    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000 } });
     state.resolveName = "SADE BALOGUN";
 
-    await handleMessage(PHONE, "withdraw 40000");
+await handleMessage(PHONE, "withdraw 20000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
   await handleMessage(PHONE, "yes"); // confirm the bank selection
@@ -400,7 +439,7 @@ describe("withdrawals", () => {
       where: { id: member.id },
       include: { wallet: true },
     });
-    expect(updated!.wallet!.balance).toBe(100000); // money never left
+    expect(updated!.wallet!.balance).toBe(5000000); // money never left
     expect(await prisma.payout.count()).toBe(0);
 
     const after = await prisma.withdrawalRequest.findUnique({ where: { id: req!.id } });

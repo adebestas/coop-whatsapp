@@ -177,7 +177,10 @@ export async function applyForLoan(
   }
 
   // Interest is tiered by tenure and charged on declining balance (reducing balance).
-  const interestRate = annualRateFor(tenureMonths);
+  // The short-tenure tiers sit above the CBN 15% ceiling that approveLoan enforces,
+  // which would leave every short-tenure loan permanently un-disbursable, so the
+  // quoted rate is capped here to keep pricing and the approval guard consistent.
+  const interestRate = Math.min(annualRateFor(tenureMonths), MAX_ALLOWED_RATE);
   const monthly = calculateMonthlyPayment(amount, tenureMonths);
   const total = totalRepayable(amount, tenureMonths);
 
