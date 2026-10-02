@@ -8,7 +8,7 @@ const WHATSAPP_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WHATSAPP_PACING_MS = process.env.NODE_ENV === "test" ? 0 : 1500;
 
 function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -29,7 +29,10 @@ export async function sendText(params: { to: string; text: string }): Promise<bo
     if (session?.lastInboundAt) {
       const elapsed = Date.now() - session.lastInboundAt.getTime();
       if (elapsed > WHATSAPP_SESSION_WINDOW_MS) {
-        await sendWhatsApp({ to, text: "Hi! To receive messages from your cooperative, please send any message to re-activate." });
+        await sendWhatsApp({
+          to,
+          text: "Hi! To receive messages from your cooperative, please send any message to re-activate.",
+        });
         return false;
       }
     }
@@ -119,14 +122,14 @@ export async function notifyMember(
 export async function sendLongText(params: { to: string; text: string }): Promise<boolean> {
   const MAX_LEN = 3500;
   if (params.text.length <= MAX_LEN) return sendText(params);
-  const parts = params.text.split('\n\n');
-  let current = '';
+  const parts = params.text.split("\n\n");
+  let current = "";
   for (const part of parts) {
-    if ((current + '\n\n' + part).length > MAX_LEN) {
+    if ((current + "\n\n" + part).length > MAX_LEN) {
       await sendText({ to: params.to, text: current.trim() });
       current = part;
     } else {
-      current += (current ? '\n\n' : '') + part;
+      current += (current ? "\n\n" : "") + part;
     }
   }
   if (current.trim()) await sendText({ to: params.to, text: current.trim() });

@@ -62,7 +62,9 @@ async function main() {
     console.log(`Created workplace "${unitName}" (${unitCode}).`);
   }
 
-  console.log(`Created cooperative "${coop.name}" (${coopCode}) with admin ${adminName} (${adminPhone}, code ${memberCode}).`);
+  console.log(
+    `Created cooperative "${coop.name}" (${coopCode}) with admin ${adminName} (${adminPhone}, code ${memberCode}).`,
+  );
   await prisma.$disconnect();
 }
 

@@ -42,7 +42,9 @@ export async function recordLedger(input: {
 
   // Enforce: dividend-related categories must use "appropriation" type
   if (input.category.includes("dividend") && input.type !== "appropriation") {
-    console.error(`[ledger] category "${input.category}" contains "dividend" but type is "${input.type}" — forcing type to "appropriation"`);
+    console.error(
+      `[ledger] category "${input.category}" contains "dividend" but type is "${input.type}" — forcing type to "appropriation"`,
+    );
     input.type = "appropriation";
   }
 
@@ -109,23 +111,32 @@ export async function recordLedger(input: {
   }
   // Non-blocking on duplicates here (callers that need strict idempotency
   // use postJournal directly with a deterministic txRef).
-  await postJournalSafe({
-    cooperativeId: input.cooperativeId,
-    txRef: input.txRef,
-    description: input.note ?? `${input.type}:${input.category}`,
-    postings,
-  }, client);
+  await postJournalSafe(
+    {
+      cooperativeId: input.cooperativeId,
+      txRef: input.txRef,
+      description: input.note ?? `${input.type}:${input.category}`,
+      postings,
+    },
+    client,
+  );
 }
 
 /** Journal posting that never breaks the main write (best-effort parity). */
-async function postJournalSafe(opts: {
-  cooperativeId: string;
-  txRef?: string;
-  description: string;
-  postings: Parameters<typeof postJournal>[0]["postings"];
-}, client: Pick<typeof prisma, "journalEntry" | "ledgerEntry"> = prisma) {
+async function postJournalSafe(
+  opts: {
+    cooperativeId: string;
+    txRef?: string;
+    description: string;
+    postings: Parameters<typeof postJournal>[0]["postings"];
+  },
+  client: Pick<typeof prisma, "journalEntry" | "ledgerEntry"> = prisma,
+) {
   try {
-    await postJournal({ ...opts, txRef: opts.txRef ?? `jr_${crypto.randomUUID()}`, description: opts.description }, client);
+    await postJournal(
+      { ...opts, txRef: opts.txRef ?? `jr_${crypto.randomUUID()}`, description: opts.description },
+      client,
+    );
   } catch (err) {
     console.error("[ledger] journal posting failed", {
       cooperativeId: opts.cooperativeId,
@@ -166,11 +177,15 @@ export async function computePnl(
   startDate?: Date,
   endDate?: Date,
 ): Promise<PnlSummary> {
-  const where: { cooperativeId: string; type: { in: ("income" | "expense")[] }; createdAt?: { gte?: Date; lte?: Date } } = {
+  const where: {
+    cooperativeId: string;
+    type: { in: ("income" | "expense")[] };
+    createdAt?: { gte?: Date; lte?: Date };
+  } = {
     cooperativeId,
     type: { in: ["income", "expense"] },
   };
-  
+
   if (startDate || endDate) {
     where.createdAt = {};
     if (startDate) where.createdAt.gte = startDate;
@@ -178,7 +193,7 @@ export async function computePnl(
   }
 
   const grouped = await prisma.ledgerEntry.groupBy({
-    by: ['type', 'category'],
+    by: ["type", "category"],
     where,
     _sum: { amount: true },
   });
@@ -206,12 +221,19 @@ export async function computePnl(
     totalIncome: roundMoney(totalIncome),
     totalExpense: roundMoney(totalExpense),
     netProfit: roundMoney(totalIncome - totalExpense),
-    period: startDate || endDate ? { start: startDate ?? new Date(0), end: endDate ?? new Date() } : undefined,
+    period:
+      startDate || endDate
+        ? { start: startDate ?? new Date(0), end: endDate ?? new Date() }
+        : undefined,
   };
 }
 
 /** Get monthly summary for a given month (0-11) */
-export async function getMonthlySummary(cooperativeId: string, year: number, month: number): Promise<PnlSummary> {
+export async function getMonthlySummary(
+  cooperativeId: string,
+  year: number,
+  month: number,
+): Promise<PnlSummary> {
   const start = new Date(year, month, 1);
   const end = new Date(year, month + 1, 0, 23, 59, 59);
   return computePnl(cooperativeId, start, end);

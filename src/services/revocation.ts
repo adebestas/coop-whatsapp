@@ -21,7 +21,8 @@ export async function revokeMemberSessions(
   const member = await prisma.member.findFirst({
     where: { code: memberCode.trim().toUpperCase(), cooperativeId },
   });
-  if (!member) return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
+  if (!member)
+    return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
 
   await prisma.$transaction([
     prisma.member.update({
@@ -42,7 +43,8 @@ export async function revokeMemberSessions(
     detail: `sessions revoked for ${member.name} (${member.phone})`,
   });
 
-  await notifyMember(member,
+  await notifyMember(
+    member,
     `🔒 Your active sessions were *revoked* by an admin. You can't move money until an admin runs *unrevoke*. Contact your cooperative if this was unexpected.`,
   ).catch(() => {});
 
@@ -62,7 +64,8 @@ export async function unrevokeMemberSessions(
   const member = await prisma.member.findFirst({
     where: { code: memberCode.trim().toUpperCase(), cooperativeId },
   });
-  if (!member) return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
+  if (!member)
+    return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
 
   await prisma.member.update({
     where: { id: member.id },
@@ -80,9 +83,9 @@ export async function unrevokeMemberSessions(
     detail: `sessions restored for ${member.name}`,
   });
 
-  await notifyMember(member,
-    `✅ Your sessions were *restored*. You can move money again.`,
-  ).catch(() => {});
+  await notifyMember(member, `✅ Your sessions were *restored*. You can move money again.`).catch(
+    () => {},
+  );
 
   return {
     ok: true,
@@ -94,8 +97,13 @@ export async function unrevokeMemberSessions(
  * True when a member's sessions are currently revoked. Money-out paths call
  * this before authorising a transfer.
  */
-export async function assertNotRevoked(memberId: string): Promise<{ blocked: boolean; message: string }> {
-  const member = await prisma.member.findUnique({ where: { id: memberId }, select: { sessionsRevokedAt: true, name: true } });
+export async function assertNotRevoked(
+  memberId: string,
+): Promise<{ blocked: boolean; message: string }> {
+  const member = await prisma.member.findUnique({
+    where: { id: memberId },
+    select: { sessionsRevokedAt: true, name: true },
+  });
   if (member?.sessionsRevokedAt) {
     return {
       blocked: true,

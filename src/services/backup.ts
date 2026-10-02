@@ -34,12 +34,21 @@ async function uploadToS3(filePath: string, key: string): Promise<boolean> {
 
     const payloadHash = createHash("sha256").update(fileContent).digest("hex");
     const canonicalRequest = [
-      "PUT", `/${key}`, "", `host:${host}`, `x-amz-content-sha256:${payloadHash}`,
-      `x-amz-date:${date}`, "", "host;x-amz-content-sha256;x-amz-date", payloadHash,
+      "PUT",
+      `/${key}`,
+      "",
+      `host:${host}`,
+      `x-amz-content-sha256:${payloadHash}`,
+      `x-amz-date:${date}`,
+      "",
+      "host;x-amz-content-sha256;x-amz-date",
+      payloadHash,
     ].join("\n");
     const credentialScope = `${dateStamp}/${BACKUP_REGION}/s3/aws4_request`;
     const stringToSign = [
-      "AWS4-HMAC-SHA256", date, credentialScope,
+      "AWS4-HMAC-SHA256",
+      date,
+      credentialScope,
       createHash("sha256").update(canonicalRequest).digest("hex"),
     ].join("\n");
 
@@ -93,7 +102,9 @@ async function fetchWithWarning<T>(
 ): Promise<T[]> {
   const rows = await findManyFn();
   if (rows.length >= BACKUP_WARN_THRESHOLD) {
-    console.warn(`[backup] WARNING: ${tableName} has ${rows.length} rows (limit: ${BACKUP_ROW_LIMIT}). Consider using pg_dump for large tables.`);
+    console.warn(
+      `[backup] WARNING: ${tableName} has ${rows.length} rows (limit: ${BACKUP_ROW_LIMIT}). Consider using pg_dump for large tables.`,
+    );
   }
   return rows;
 }
@@ -102,65 +113,181 @@ export async function runBackup(): Promise<{ ok: boolean; message: string; file?
     await mkdir(BACKUP_DIR, { recursive: true });
 
     const [
-      cooperatives, units, members, wallets, contributions, loans, guarantors,
-      loanRepayments, payouts, withdrawalRequests, deathClaims, deathValidations,
-      auditLogs, supportTickets, votes, voteCandidates, voteBallots, dividends,
-      dividendEntries, broadcasts, sessions, ledgerEntries, externalPayments,
-      purchasePolls, pollOptions, pollBallots, guarantorDeductions,
-      journalEntries, postings, beneficiaries,
+      cooperatives,
+      units,
+      members,
+      wallets,
+      contributions,
+      loans,
+      guarantors,
+      loanRepayments,
+      payouts,
+      withdrawalRequests,
+      deathClaims,
+      deathValidations,
+      auditLogs,
+      supportTickets,
+      votes,
+      voteCandidates,
+      voteBallots,
+      dividends,
+      dividendEntries,
+      broadcasts,
+      sessions,
+      ledgerEntries,
+      externalPayments,
+      purchasePolls,
+      pollOptions,
+      pollBallots,
+      guarantorDeductions,
+      journalEntries,
+      postings,
+      beneficiaries,
     ] = await Promise.all([
-      fetchWithWarning(() => prisma.cooperative.findMany({ take: BACKUP_ROW_LIMIT }), "cooperatives"),
+      fetchWithWarning(
+        () => prisma.cooperative.findMany({ take: BACKUP_ROW_LIMIT }),
+        "cooperatives",
+      ),
       fetchWithWarning(() => prisma.unit.findMany({ take: BACKUP_ROW_LIMIT }), "units"),
       fetchWithWarning(() => prisma.member.findMany({ take: BACKUP_ROW_LIMIT }), "members"),
       fetchWithWarning(() => prisma.wallet.findMany({ take: BACKUP_ROW_LIMIT }), "wallets"),
-      fetchWithWarning(() => prisma.contribution.findMany({ take: BACKUP_ROW_LIMIT }), "contributions"),
+      fetchWithWarning(
+        () => prisma.contribution.findMany({ take: BACKUP_ROW_LIMIT }),
+        "contributions",
+      ),
       fetchWithWarning(() => prisma.loan.findMany({ take: BACKUP_ROW_LIMIT }), "loans"),
       fetchWithWarning(() => prisma.guarantor.findMany({ take: BACKUP_ROW_LIMIT }), "guarantors"),
-      fetchWithWarning(() => prisma.loanRepayment.findMany({ take: BACKUP_ROW_LIMIT }), "loanRepayments"),
+      fetchWithWarning(
+        () => prisma.loanRepayment.findMany({ take: BACKUP_ROW_LIMIT }),
+        "loanRepayments",
+      ),
       fetchWithWarning(() => prisma.payout.findMany({ take: BACKUP_ROW_LIMIT }), "payouts"),
-      fetchWithWarning(() => prisma.withdrawalRequest.findMany({ take: BACKUP_ROW_LIMIT }), "withdrawalRequests"),
+      fetchWithWarning(
+        () => prisma.withdrawalRequest.findMany({ take: BACKUP_ROW_LIMIT }),
+        "withdrawalRequests",
+      ),
       fetchWithWarning(() => prisma.deathClaim.findMany({ take: BACKUP_ROW_LIMIT }), "deathClaims"),
-      fetchWithWarning(() => prisma.deathValidation.findMany({ take: BACKUP_ROW_LIMIT }), "deathValidations"),
+      fetchWithWarning(
+        () => prisma.deathValidation.findMany({ take: BACKUP_ROW_LIMIT }),
+        "deathValidations",
+      ),
       fetchWithWarning(() => prisma.auditLog.findMany({ take: BACKUP_ROW_LIMIT }), "auditLogs"),
-      fetchWithWarning(() => prisma.supportTicket.findMany({ take: BACKUP_ROW_LIMIT }), "supportTickets"),
+      fetchWithWarning(
+        () => prisma.supportTicket.findMany({ take: BACKUP_ROW_LIMIT }),
+        "supportTickets",
+      ),
       fetchWithWarning(() => prisma.vote.findMany({ take: BACKUP_ROW_LIMIT }), "votes"),
-      fetchWithWarning(() => prisma.voteCandidate.findMany({ take: BACKUP_ROW_LIMIT }), "voteCandidates"),
+      fetchWithWarning(
+        () => prisma.voteCandidate.findMany({ take: BACKUP_ROW_LIMIT }),
+        "voteCandidates",
+      ),
       fetchWithWarning(() => prisma.voteBallot.findMany({ take: BACKUP_ROW_LIMIT }), "voteBallots"),
       fetchWithWarning(() => prisma.dividend.findMany({ take: BACKUP_ROW_LIMIT }), "dividends"),
-      fetchWithWarning(() => prisma.dividendEntry.findMany({ take: BACKUP_ROW_LIMIT }), "dividendEntries"),
+      fetchWithWarning(
+        () => prisma.dividendEntry.findMany({ take: BACKUP_ROW_LIMIT }),
+        "dividendEntries",
+      ),
       fetchWithWarning(() => prisma.broadcast.findMany({ take: BACKUP_ROW_LIMIT }), "broadcasts"),
       fetchWithWarning(() => prisma.session.findMany({ take: BACKUP_ROW_LIMIT }), "sessions"),
-      fetchWithWarning(() => prisma.ledgerEntry.findMany({ take: BACKUP_ROW_LIMIT }), "ledgerEntries"),
-      fetchWithWarning(() => prisma.externalPayment.findMany({ take: BACKUP_ROW_LIMIT }), "externalPayments"),
-      fetchWithWarning(() => prisma.purchasePoll.findMany({ take: BACKUP_ROW_LIMIT }), "purchasePolls"),
+      fetchWithWarning(
+        () => prisma.ledgerEntry.findMany({ take: BACKUP_ROW_LIMIT }),
+        "ledgerEntries",
+      ),
+      fetchWithWarning(
+        () => prisma.externalPayment.findMany({ take: BACKUP_ROW_LIMIT }),
+        "externalPayments",
+      ),
+      fetchWithWarning(
+        () => prisma.purchasePoll.findMany({ take: BACKUP_ROW_LIMIT }),
+        "purchasePolls",
+      ),
       fetchWithWarning(() => prisma.pollOption.findMany({ take: BACKUP_ROW_LIMIT }), "pollOptions"),
       fetchWithWarning(() => prisma.pollBallot.findMany({ take: BACKUP_ROW_LIMIT }), "pollBallots"),
-      fetchWithWarning(() => prisma.guarantorDeduction.findMany({ take: BACKUP_ROW_LIMIT }), "guarantorDeductions"),
-      fetchWithWarning(() => prisma.journalEntry.findMany({ take: BACKUP_ROW_LIMIT }), "journalEntries"),
+      fetchWithWarning(
+        () => prisma.guarantorDeduction.findMany({ take: BACKUP_ROW_LIMIT }),
+        "guarantorDeductions",
+      ),
+      fetchWithWarning(
+        () => prisma.journalEntry.findMany({ take: BACKUP_ROW_LIMIT }),
+        "journalEntries",
+      ),
       fetchWithWarning(() => prisma.posting.findMany({ take: BACKUP_ROW_LIMIT }), "postings"),
-      fetchWithWarning(() => prisma.beneficiary.findMany({ take: BACKUP_ROW_LIMIT }), "beneficiaries"),
+      fetchWithWarning(
+        () => prisma.beneficiary.findMany({ take: BACKUP_ROW_LIMIT }),
+        "beneficiaries",
+      ),
     ]);
 
     // Warn when any table was truncated at the 10K limit
     const tableNames = [
-      "cooperatives", "units", "members", "wallets", "contributions", "loans", "guarantors",
-      "loanRepayments", "payouts", "withdrawalRequests", "deathClaims", "deathValidations",
-      "auditLogs", "supportTickets", "votes", "voteCandidates", "voteBallots", "dividends",
-      "dividendEntries", "broadcasts", "sessions", "ledgerEntries", "externalPayments",
-      "purchasePolls", "pollOptions", "pollBallots", "guarantorDeductions",
-      "journalEntries", "postings", "beneficiaries",
+      "cooperatives",
+      "units",
+      "members",
+      "wallets",
+      "contributions",
+      "loans",
+      "guarantors",
+      "loanRepayments",
+      "payouts",
+      "withdrawalRequests",
+      "deathClaims",
+      "deathValidations",
+      "auditLogs",
+      "supportTickets",
+      "votes",
+      "voteCandidates",
+      "voteBallots",
+      "dividends",
+      "dividendEntries",
+      "broadcasts",
+      "sessions",
+      "ledgerEntries",
+      "externalPayments",
+      "purchasePolls",
+      "pollOptions",
+      "pollBallots",
+      "guarantorDeductions",
+      "journalEntries",
+      "postings",
+      "beneficiaries",
     ];
     const allResults = [
-      cooperatives, units, members, wallets, contributions, loans, guarantors,
-      loanRepayments, payouts, withdrawalRequests, deathClaims, deathValidations,
-      auditLogs, supportTickets, votes, voteCandidates, voteBallots, dividends,
-      dividendEntries, broadcasts, sessions, ledgerEntries, externalPayments,
-      purchasePolls, pollOptions, pollBallots, guarantorDeductions,
-      journalEntries, postings, beneficiaries,
+      cooperatives,
+      units,
+      members,
+      wallets,
+      contributions,
+      loans,
+      guarantors,
+      loanRepayments,
+      payouts,
+      withdrawalRequests,
+      deathClaims,
+      deathValidations,
+      auditLogs,
+      supportTickets,
+      votes,
+      voteCandidates,
+      voteBallots,
+      dividends,
+      dividendEntries,
+      broadcasts,
+      sessions,
+      ledgerEntries,
+      externalPayments,
+      purchasePolls,
+      pollOptions,
+      pollBallots,
+      guarantorDeductions,
+      journalEntries,
+      postings,
+      beneficiaries,
     ];
     for (let i = 0; i < allResults.length; i++) {
       if (allResults[i].length >= BACKUP_WARN_THRESHOLD) {
-        console.warn(`[backup] WARNING: table "${tableNames[i]}" has >= ${BACKUP_WARN_THRESHOLD} rows — backup may be truncated. Use pg_dump for full backups.`);
+        console.warn(
+          `[backup] WARNING: table "${tableNames[i]}" has >= ${BACKUP_WARN_THRESHOLD} rows — backup may be truncated. Use pg_dump for full backups.`,
+        );
       }
     }
 
@@ -168,12 +295,36 @@ export async function runBackup(): Promise<{ ok: boolean; message: string; file?
       exportedAt: new Date().toISOString(),
       version: 2,
       tables: {
-        cooperatives, units, members, wallets, contributions, loans, guarantors,
-        loanRepayments, payouts, withdrawalRequests, deathClaims, deathValidations,
-        auditLogs, supportTickets, votes, voteCandidates, voteBallots, dividends,
-        dividendEntries, broadcasts, sessions, ledgerEntries, externalPayments,
-        purchasePolls, pollOptions, pollBallots, guarantorDeductions,
-        journalEntries, postings, beneficiaries,
+        cooperatives,
+        units,
+        members,
+        wallets,
+        contributions,
+        loans,
+        guarantors,
+        loanRepayments,
+        payouts,
+        withdrawalRequests,
+        deathClaims,
+        deathValidations,
+        auditLogs,
+        supportTickets,
+        votes,
+        voteCandidates,
+        voteBallots,
+        dividends,
+        dividendEntries,
+        broadcasts,
+        sessions,
+        ledgerEntries,
+        externalPayments,
+        purchasePolls,
+        pollOptions,
+        pollBallots,
+        guarantorDeductions,
+        journalEntries,
+        postings,
+        beneficiaries,
       },
     };
 
@@ -200,7 +351,9 @@ export async function runBackup(): Promise<{ ok: boolean; message: string; file?
 
 async function pruneOldBackups() {
   if (!Number.isFinite(KEEP_BACKUPS) || KEEP_BACKUPS <= 0) return;
-  const files = (await readdir(BACKUP_DIR)).filter((f) => f.startsWith("coop-backup-") && f.endsWith(".json"));
+  const files = (await readdir(BACKUP_DIR)).filter(
+    (f) => f.startsWith("coop-backup-") && f.endsWith(".json"),
+  );
   files.sort();
   const excess = files.slice(0, Math.max(0, files.length - KEEP_BACKUPS));
   for (const f of excess) {

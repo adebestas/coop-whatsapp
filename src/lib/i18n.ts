@@ -20,8 +20,10 @@ export type Locale = "en" | "pidgin" | "hausa" | "yoruba" | "igbo";
 
 // Keyword heuristics. Ordered so more specific/overlapping languages win.
 const SIGNALS: Record<Exclude<Locale, "en">, RegExp> = {
-  pidgin: /\b(abi|wetin|dey|una|chop|wahala|sabi|guy|how far|no dey|make i|im|dem|dollars|e be|shey|abeg|vex|comot)\b/i,
-  hausa: /\b(sannu|ina kwana|na gode|me ya faru|aiki|kudi|gida|mutum|yaya|don|za ku|aiwatar|runa|ban gane ba)\b/i,
+  pidgin:
+    /\b(abi|wetin|dey|una|chop|wahala|sabi|guy|how far|no dey|make i|im|dem|dollars|e be|shey|abeg|vex|comot)\b/i,
+  hausa:
+    /\b(sannu|ina kwana|na gode|me ya faru|aiki|kudi|gida|mutum|yaya|don|za ku|aiwatar|runa|ban gane ba)\b/i,
   yoruba: /\b(bawo|e kaaro|e se|emi|kilo|owo|ile|eniyan|mo fe|ng|ti o|awon|ṣe|lati|wa|omo)\b/i,
   igbo: /\b(nno|kedu|daalu|ego|ulo|mmadu|gbasara|ihe|na-em|achoro|ọ|ụ|dị|ka|ndị|biko)\b/i,
 };

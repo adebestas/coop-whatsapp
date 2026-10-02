@@ -25,9 +25,7 @@ export interface MoneyGuardResult {
   args: string[];
 }
 
-export async function enable2fa(
-  phone: string,
-): Promise<{ ok: boolean; message: string }> {
+export async function enable2fa(phone: string): Promise<{ ok: boolean; message: string }> {
   const member = await prisma.member.findFirst({ where: { phone } });
   if (!member) return { ok: false, message: "You need to join a cooperative first." };
   if (!["admin", "superadmin"].includes(member.role)) {
@@ -57,11 +55,15 @@ export async function enable2fa(
   };
 }
 
-export async function disable2fa(phone: string, pin?: string): Promise<{ ok: boolean; message: string }> {
+export async function disable2fa(
+  phone: string,
+  pin?: string,
+): Promise<{ ok: boolean; message: string }> {
   const member = await prisma.member.findFirst({ where: { phone } });
   if (!member?.totpSecret) return { ok: false, message: "2FA isn't enabled on your account." };
   if (!pin) return { ok: false, message: "Provide your PIN to disable 2FA." };
-  if (!member.pin) return { ok: false, message: "No PIN set on your account. Cannot verify identity." };
+  if (!member.pin)
+    return { ok: false, message: "No PIN set on your account. Cannot verify identity." };
   const pinResult = await verifyMemberPin(member, pin);
   if (!pinResult.ok) return { ok: false, message: "Wrong PIN. 2FA was not disabled." };
   await prisma.member.update({ where: { id: member.id }, data: { totpSecret: null } });
@@ -105,8 +107,7 @@ export async function assertMoneyAuthorized(
     return { ok: true, args: args.slice(0, -1) };
   }
 
-  const required =
-    process.env.TWO_FA_REQUIRED === "1" && process.env.NODE_ENV !== "test";
+  const required = process.env.TWO_FA_REQUIRED === "1" && process.env.NODE_ENV !== "test";
   if (required && member && ["admin", "superadmin"].includes(member.role)) {
     return {
       ok: false,
@@ -131,14 +132,23 @@ function repinThresholdNgn(): number {
 
 const FRESH_PIN_MINUTES = 10;
 
-export async function refreshPin(phone: string, pin: string): Promise<{ ok: boolean; message: string }> {
+export async function refreshPin(
+  phone: string,
+  pin: string,
+): Promise<{ ok: boolean; message: string }> {
   const member = await prisma.member.findFirst({ where: { phone } });
   if (!member?.pin) return { ok: false, message: "You don't have a PIN set yet." };
   const result = await verifyMemberPin(member, pin);
   if (!result.ok) return { ok: false, message: result.message ?? "Wrong PIN." };
 
   const payload = JSON.stringify({ pinVerifiedAt: Date.now() });
-  const secret = process.env.SESSION_SECRET || (process.env.NODE_ENV === 'production' ? (() => { throw new Error('SESSION_SECRET required') })() : crypto.randomBytes(32).toString('hex'));
+  const secret =
+    process.env.SESSION_SECRET ||
+    (process.env.NODE_ENV === "production"
+      ? (() => {
+          throw new Error("SESSION_SECRET required");
+        })()
+      : crypto.randomBytes(32).toString("hex"));
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   const session = await prisma.session.upsert({
     where: { phone },
@@ -146,21 +156,34 @@ export async function refreshPin(phone: string, pin: string): Promise<{ ok: bool
     update: { data: JSON.stringify({ d: payload, s: sig }) },
   });
   void session;
-  return { ok: true, message: `✅ PIN verified — large payouts are unlocked for the next ${FRESH_PIN_MINUTES} minutes.` };
+  return {
+    ok: true,
+    message: `✅ PIN verified — large payouts are unlocked for the next ${FRESH_PIN_MINUTES} minutes.`,
+  };
 }
 
 /** True when amount is small enough (or feature off) that no fresh PIN is needed. */
-export async function assertFreshPin(phone: string, amount: number): Promise<{ ok: boolean; message?: string }> {
+export async function assertFreshPin(
+  phone: string,
+  amount: number,
+): Promise<{ ok: boolean; message?: string }> {
   const threshold = repinThresholdNgn();
   // threshold is naira (REPIN_THRESHOLD_NGN); amount is kobo — compare in naira.
-  if (threshold === 0 || !Number.isFinite(amount) || toNaira(amount) < threshold) return { ok: true };
+  if (threshold === 0 || !Number.isFinite(amount) || toNaira(amount) < threshold)
+    return { ok: true };
 
   const session = await prisma.session.findUnique({ where: { phone } });
   const verifiedAt = (() => {
     try {
       const parsed = JSON.parse(session?.data ?? "{}");
       if (!parsed.d || !parsed.s) return Number(parsed.pinVerifiedAt ?? 0); // legacy plaintext
-      const secret = process.env.SESSION_SECRET || (process.env.NODE_ENV === 'production' ? (() => { throw new Error('SESSION_SECRET required') })() : "dev-fallback-only");
+      const secret =
+        process.env.SESSION_SECRET ||
+        (process.env.NODE_ENV === "production"
+          ? (() => {
+              throw new Error("SESSION_SECRET required");
+            })()
+          : "dev-fallback-only");
       const expectedSig = crypto.createHmac("sha256", secret).update(parsed.d).digest("hex");
       // Length-guarded constant-time compare (hex digests) so timingSafeEqual never throws.
       const sigA = Buffer.from(expectedSig);
@@ -175,7 +198,6 @@ export async function assertFreshPin(phone: string, amount: number): Promise<{ o
 
   return {
     ok: false,
-    message:
-      `🔐 Payouts of *${threshold.toLocaleString()}+* need a fresh PIN. Reply *verifypin <your PIN>* first, then repeat this command.`,
+    message: `🔐 Payouts of *${threshold.toLocaleString()}+* need a fresh PIN. Reply *verifypin <your PIN>* first, then repeat this command.`,
   };
 }

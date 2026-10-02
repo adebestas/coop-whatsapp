@@ -31,11 +31,15 @@ export async function validateDeviceSession(params: {
     const existing = await redis.get(cacheKey);
     if (!existing) {
       // First session — record it
-      await redis.setex(cacheKey, 600, JSON.stringify({
-        platform,
-        ip,
-        recordedAt: now,
-      }));
+      await redis.setex(
+        cacheKey,
+        600,
+        JSON.stringify({
+          platform,
+          ip,
+          recordedAt: now,
+        }),
+      );
       return { ok: true };
     }
 
@@ -80,17 +84,24 @@ export async function validateDeviceSession(params: {
             });
           }
 
-          return { ok: false, reason: `Rapid session change detected (${Math.round(timeDiff / 1000)}s). Please try again.` };
+          return {
+            ok: false,
+            reason: `Rapid session change detected (${Math.round(timeDiff / 1000)}s). Please try again.`,
+          };
         }
       }
     }
 
     // Update fingerprint
-    await redis.setex(cacheKey, 600, JSON.stringify({
-      platform,
-      ip,
-      recordedAt: now,
-    }));
+    await redis.setex(
+      cacheKey,
+      600,
+      JSON.stringify({
+        platform,
+        ip,
+        recordedAt: now,
+      }),
+    );
 
     return { ok: true };
   } catch {
@@ -255,7 +266,9 @@ export async function checkMultiSigRequirement(params: {
 
   if (superadmins.length < 2) {
     // Only 1 superadmin — can't enforce multi-sig, but log warning
-    console.warn(`[security] Payout ${amount}kobo needs multi-sig but only ${superadmins.length} superadmin(s) exist`);
+    console.warn(
+      `[security] Payout ${amount}kobo needs multi-sig but only ${superadmins.length} superadmin(s) exist`,
+    );
     await audit({
       cooperativeId,
       actorPhone: initiatorPhone,
@@ -266,7 +279,10 @@ export async function checkMultiSigRequirement(params: {
       targetId: cooperativeId,
       detail: `Payout ${amount}kobo needs multi-sig but only ${superadmins.length} superadmin(s) exist`,
     });
-    return { needsApproval: false, warning: `Only ${superadmins.length} superadmin(s) — multi-sig unavailable. Add more superadmins.` };
+    return {
+      needsApproval: false,
+      warning: `Only ${superadmins.length} superadmin(s) — multi-sig unavailable. Add more superadmins.`,
+    };
   }
 
   // Create a pending approval request
@@ -282,21 +298,26 @@ export async function checkMultiSigRequirement(params: {
         return {
           needsApproval: false,
           blocked: true,
-          error: "Multi-sig service temporarily unavailable. The payout has been blocked for safety. Please try again shortly.",
+          error:
+            "Multi-sig service temporarily unavailable. The payout has been blocked for safety. Please try again shortly.",
         };
       }
       return { needsApproval: false };
     }
 
-    const pendingId = `msig_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
-    await redis.setex(cacheKey, 3600, JSON.stringify({
-      pendingId,
-      amount,
-      initiatorPhone,
-      targetId,
-      requestedAt: Date.now(),
-      approvals: [initiatorPhone],
-    }));
+    const pendingId = `msig_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+    await redis.setex(
+      cacheKey,
+      3600,
+      JSON.stringify({
+        pendingId,
+        amount,
+        initiatorPhone,
+        targetId,
+        requestedAt: Date.now(),
+        approvals: [initiatorPhone],
+      }),
+    );
 
     // Notify all other superadmins
     for (const sa of superadmins) {
@@ -316,7 +337,8 @@ export async function checkMultiSigRequirement(params: {
       return {
         needsApproval: false,
         blocked: true,
-        error: "Multi-sig service temporarily unavailable. The payout has been blocked for safety. Please try again shortly.",
+        error:
+          "Multi-sig service temporarily unavailable. The payout has been blocked for safety. Please try again shortly.",
       };
     }
     return { needsApproval: false };
@@ -342,10 +364,18 @@ export async function processMultiSigResponse(params: {
     // Find the pending request. Use SCAN (not KEYS) so the whole Redis keyspace
     // is never blocked on large/multi-tenant installs; the match is still
     // scoped to this cooperative's multisig keys.
-    type PendingSig = { pendingId: string; requestedAt: number; initiatorPhone: string; approvals: string[] };
+    type PendingSig = {
+      pendingId: string;
+      requestedAt: number;
+      initiatorPhone: string;
+      approvals: string[];
+    };
     let foundKey: string | null = null;
     let found: PendingSig | null = null;
-    for await (const batch of redis.scanStream({ match: `multisig:${cooperativeId}:*`, count: 100 })) {
+    for await (const batch of redis.scanStream({
+      match: `multisig:${cooperativeId}:*`,
+      count: 100,
+    })) {
       for (const key of batch) {
         const data = await redis.get(key);
         if (!data) continue;
@@ -448,9 +478,9 @@ export async function auditSuperadminCommand(params: {
 // Limits withdrawal amounts based on how long the member has been active.
 
 const TENURE_LIMITS = [
-  { minMonths: 0, maxMonths: 3, maxDaily: 50_000_00 },    // ₦50k/day for first 3 months
-  { minMonths: 3, maxMonths: 6, maxDaily: 200_000_00 },   // ₦200k/day for 3-6 months
-  { minMonths: 6, maxMonths: 12, maxDaily: 500_000_00 },  // ₦500k/day for 6-12 months
+  { minMonths: 0, maxMonths: 3, maxDaily: 50_000_00 }, // ₦50k/day for first 3 months
+  { minMonths: 3, maxMonths: 6, maxDaily: 200_000_00 }, // ₦200k/day for 3-6 months
+  { minMonths: 6, maxMonths: 12, maxDaily: 500_000_00 }, // ₦500k/day for 6-12 months
   { minMonths: 12, maxMonths: Infinity, maxDaily: Infinity }, // Unlimited after 1 year
 ];
 
@@ -471,7 +501,9 @@ export async function checkTenureLimit(params: {
   if (!member) return { allowed: false, message: "Member not found." };
 
   const tenureMonths = (Date.now() - member.createdAt.getTime()) / (30 * 24 * 60 * 60 * 1000);
-  const limit = TENURE_LIMITS.find(l => tenureMonths >= l.minMonths && tenureMonths < l.maxMonths);
+  const limit = TENURE_LIMITS.find(
+    (l) => tenureMonths >= l.minMonths && tenureMonths < l.maxMonths,
+  );
   if (!limit || limit.maxDaily === Infinity) return { allowed: true };
 
   // Check total withdrawals today

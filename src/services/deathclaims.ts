@@ -50,7 +50,11 @@ export async function startDeathClaim(
   if (!actor) return { ok: false, message: "You need to join a cooperative first." };
 
   if (!familyPhone || familyPhone.trim().length < 6) {
-    return { ok: false, message: "Provide the family member's phone number, e.g. *deathclaim <member> <family phone>*." };
+    return {
+      ok: false,
+      message:
+        "Provide the family member's phone number, e.g. *deathclaim <member> <family phone>*.",
+    };
   }
 
   const deceased = await prisma.member.findFirst({
@@ -65,7 +69,10 @@ export async function startDeathClaim(
       where: { memberId: deceased.id, status: { notIn: ["paid", "rejected"] } },
     });
     if (existing) {
-      return { ok: false, message: `A death claim (*${existing.id.slice(-6)}*) is already open for ${deceased.name}.` };
+      return {
+        ok: false,
+        message: `A death claim (*${existing.id.slice(-6)}*) is already open for ${deceased.name}.`,
+      };
     }
   }
 
@@ -133,7 +140,10 @@ export async function startDeathClaim(
 }
 
 /** Attach the uploaded certificate to the claim and open it for validation. */
-export async function submitCertificate(claimId: string, certificateRef: string): Promise<ClaimResult> {
+export async function submitCertificate(
+  claimId: string,
+  certificateRef: string,
+): Promise<ClaimResult> {
   const claim = await findClaim(claimId);
   if (!claim) return { ok: false, message: "Death claim not found." };
   if (claim.status !== "awaiting_certificate") {
@@ -240,11 +250,17 @@ export async function confirmFamily(
   }
 
   if (!claim.familyConfirmCode) {
-    return { ok: false, message: "No confirmation code was generated for this claim. Contact your admin." };
+    return {
+      ok: false,
+      message: "No confirmation code was generated for this claim. Contact your admin.",
+    };
   }
 
   if (!verifyOtp(code.trim(), claim.familyConfirmCode)) {
-    return { ok: false, message: "Invalid confirmation code. Check the SMS sent to your phone and try again." };
+    return {
+      ok: false,
+      message: "Invalid confirmation code. Check the SMS sent to your phone and try again.",
+    };
   }
 
   await prisma.deathClaim.update({
@@ -291,11 +307,18 @@ export async function setClaimBank(
 
   const account = accountNumber.replace(/[^0-9]/g, "");
   if (!/^\d{10}$/.test(account)) {
-    return { ok: false, message: "Account numbers are 10 digits, e.g. *claimbank ABC123 0123456789 Access*." };
+    return {
+      ok: false,
+      message: "Account numbers are 10 digits, e.g. *claimbank ABC123 0123456789 Access*.",
+    };
   }
   const bank = resolveBank(bankInput);
   if (!bank) {
-    return { ok: false, message: "We don't recognise that bank. Try e.g. *Access*, *GTB*, *Zenith*, or the 5-digit bank code." };
+    return {
+      ok: false,
+      message:
+        "We don't recognise that bank. Try e.g. *Access*, *GTB*, *Zenith*, or the 5-digit bank code.",
+    };
   }
 
   await prisma.deathClaim.update({
@@ -322,23 +345,36 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     return { ok: false, message: "Death claim not found in your cooperative." };
   }
 
-  const isSuper = actor.role === "superadmin" || (await isSuperAdminOf(actor.phone, claim.cooperativeId));
+  const isSuper =
+    actor.role === "superadmin" || (await isSuperAdminOf(actor.phone, claim.cooperativeId));
   if (!isSuper) {
-    return { ok: false, message: "Only the cooperative's super admin can give the final approval on a death claim." };
+    return {
+      ok: false,
+      message: "Only the cooperative's super admin can give the final approval on a death claim.",
+    };
   }
   if (claim.status === "paid") return { ok: false, message: "This claim was already paid." };
   if (claim.status === "processing") {
-    return { ok: false, message: "This claim payout is already in progress — wait for it to settle." };
+    return {
+      ok: false,
+      message: "This claim payout is already in progress — wait for it to settle.",
+    };
   }
   if (claim.status !== "validated") {
-    return { ok: false, message: `The claim must be validated by ${REQUIRED_DEATH_VALIDATIONS} guarantors first (current: ${claim.status}).` };
+    return {
+      ok: false,
+      message: `The claim must be validated by ${REQUIRED_DEATH_VALIDATIONS} guarantors first (current: ${claim.status}).`,
+    };
   }
   // Dual-control: nobody approves a payout on their own wallet.
   if (actor.id === claim.memberId) {
     return { ok: false, message: "⛔ You can't approve a death claim on your own account." };
   }
   if (!claim.familyAccountNumber || !claim.familyBankCode) {
-    return { ok: false, message: `Set the family's bank first: *claimbank ${claim.id.slice(-6)} <account> <bank>*.` };
+    return {
+      ok: false,
+      message: `Set the family's bank first: *claimbank ${claim.id.slice(-6)} <account> <bank>*.`,
+    };
   }
 
   // --- Governance checks ---
@@ -381,12 +417,12 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
   if (!approvalsMet || !familyConfirmed || !waitingPeriodPassed) {
     // Build a status message explaining what's still needed
     const parts: string[] = [];
-    parts.push(`*Approval ${approvalCount}/${approvalsRequired}* recorded for claim *${claim.id.slice(-6)}*.`);
+    parts.push(
+      `*Approval ${approvalCount}/${approvalsRequired}* recorded for claim *${claim.id.slice(-6)}*.`,
+    );
 
     if (!familyConfirmed) {
-      const maskedPhone = claim.familyPhone
-        ? `****${claim.familyPhone.slice(-4)}`
-        : "****";
+      const maskedPhone = claim.familyPhone ? `****${claim.familyPhone.slice(-4)}` : "****";
       parts.push(`⏳ Family confirmation: *pending* (waiting for ${maskedPhone}).`);
     } else {
       parts.push(`✅ Family confirmation: *confirmed*.`);
@@ -395,7 +431,9 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     if (!waitingPeriodPassed && waitingPeriodEnd) {
       const remaining = waitingPeriodEnd.getTime() - Date.now();
       const hours = Math.ceil(remaining / (60 * 60 * 1000));
-      parts.push(`⏳ Waiting period ends: *${waitingPeriodEnd.toLocaleString()}* (${hours}h remaining).`);
+      parts.push(
+        `⏳ Waiting period ends: *${waitingPeriodEnd.toLocaleString()}* (${hours}h remaining).`,
+      );
     } else if (waitingPeriodPassed) {
       parts.push(`✅ Waiting period: *complete*.`);
     }
@@ -412,8 +450,14 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
   const wallet = await prisma.wallet.findUnique({ where: { memberId: claim.memberId } });
   const balance = wallet?.balance ?? 0;
   if (balance <= 0) {
-    await prisma.deathClaim.update({ where: { id: claim.id }, data: { status: "paid", finalizedAt: new Date() } });
-    return { ok: true, message: `No balance left in ${claim.member.name}'s wallet. Claim *${claim.id.slice(-6)}* closed as paid.` };
+    await prisma.deathClaim.update({
+      where: { id: claim.id },
+      data: { status: "paid", finalizedAt: new Date() },
+    });
+    return {
+      ok: true,
+      message: `No balance left in ${claim.member.name}'s wallet. Claim *${claim.id.slice(-6)}* closed as paid.`,
+    };
   }
 
   // ATOMIC CLAIM — exactly one super drives the payout; concurrent calls stop here.
@@ -422,7 +466,10 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     data: { status: "processing" },
   });
   if (claimed.count === 0) {
-    return { ok: false, message: "This claim was just picked up by another approval — check its state." };
+    return {
+      ok: false,
+      message: "This claim was just picked up by another approval — check its state.",
+    };
   }
 
   // Whether money has actually been sent. Once true, the outer catch must NOT
@@ -440,7 +487,10 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
         where: { id: claim.id, status: "processing" },
         data: { status: "validated" },
       });
-      return { ok: false, message: "Balance changed during payout — claim NOT closed. Investigate immediately." };
+      return {
+        ok: false,
+        message: "Balance changed during payout — claim NOT closed. Investigate immediately.",
+      };
     }
 
     // Store the debited amount for accurate refund if provider fails
@@ -476,7 +526,10 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
       // Refund and hand back for retry — only reached when the provider
       // CONFIRMED the transfer did not go out.
       await prisma.$transaction([
-        prisma.wallet.update({ where: { id: wallet!.id }, data: { balance: { increment: balance } } }),
+        prisma.wallet.update({
+          where: { id: wallet!.id },
+          data: { balance: { increment: balance } },
+        }),
         prisma.deathClaim.updateMany({
           where: { id: claim.id },
           data: { status: "validated" },
@@ -519,7 +572,10 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
         })
         .catch(() => {});
       console.error(`[claim] post-payout error for paid claim: ${claim.id}`, err);
-      return { ok: false, message: `⚠️ The claim payout was sent but in-app bookkeeping failed. It was flagged for manual reconciliation.` };
+      return {
+        ok: false,
+        message: `⚠️ The claim payout was sent but in-app bookkeeping failed. It was flagged for manual reconciliation.`,
+      };
     }
     // Money definitely did not go out (sendToBank returns, it does not throw,
     // for provider/DB failures before submit) — safe to restore funds.
@@ -536,7 +592,10 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
       })
       .catch(() => {});
     console.error(`[claim] payout threw, refunded: ${claim.id}`, err);
-    return { ok: false, message: `Claim payout failed and the wallet was refunded (${String(err?.message ?? err).slice(0, 120)}).` };
+    return {
+      ok: false,
+      message: `Claim payout failed and the wallet was refunded (${String(err?.message ?? err).slice(0, 120)}).`,
+    };
   }
 }
 
@@ -561,7 +620,10 @@ export async function rejectClaim(actorPhone: string, claimCode: string): Promis
     targetId: claim.id,
     detail: `for ${claim.member.name}`,
   });
-  return { ok: true, message: `Death claim *${claim.id.slice(-6)}* for ${claim.member.name} was rejected.` };
+  return {
+    ok: true,
+    message: `Death claim *${claim.id.slice(-6)}* for ${claim.member.name} was rejected.`,
+  };
 }
 
 function resolveBank(input: string): { code: string; name: string } | null {

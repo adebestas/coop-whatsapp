@@ -18,9 +18,7 @@ import { groqFetch, groqAvailable, groqModel, GROQ_TIMEOUT_MS } from "./groq.js"
 /**
  * Generate AI-powered financial insights.
  */
-export async function generateFinancialInsights(
-  cooperativeId: string,
-): Promise<string> {
+export async function generateFinancialInsights(cooperativeId: string): Promise<string> {
   if (!groqAvailable()) {
     return generateFallbackInsights(cooperativeId);
   }
@@ -34,14 +32,15 @@ export async function generateFinancialInsights(
   const data = { snapshot, trends, performance };
 
   try {
-    const res = await groqFetch({
-      model: groqModel(),
-      temperature: 0.3,
-      max_tokens: 500,
-      messages: [
-        {
-          role: "system",
-          content: `You are a financial analyst for a Nigerian cooperative.
+    const res = await groqFetch(
+      {
+        model: groqModel(),
+        temperature: 0.3,
+        max_tokens: 500,
+        messages: [
+          {
+            role: "system",
+            content: `You are a financial analyst for a Nigerian cooperative.
 Generate concise, actionable insights from the provided data.
 Do not invent numbers. Only use data provided.
 Focus on:
@@ -53,20 +52,25 @@ Focus on:
 Note: These are AI-generated observations, not financial advice.
 Use the format: ₦XX,XXX for amounts. Be specific with numbers.
 Keep it under 300 words. Be professional but warm.`,
-        },
-        {
-          role: "user",
-          content: `Generate financial insights for this cooperative:\n\n${JSON.stringify(data, null, 2)}`,
-        },
-      ],
-    }, GROQ_TIMEOUT_MS);
+          },
+          {
+            role: "user",
+            content: `Generate financial insights for this cooperative:\n\n${JSON.stringify(data, null, 2)}`,
+          },
+        ],
+      },
+      GROQ_TIMEOUT_MS,
+    );
 
     if (!res.ok) return generateFallbackInsights(cooperativeId);
     const body = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
     const raw = body.choices?.[0]?.message?.content ?? generateFallbackInsights(cooperativeId);
-    return raw + "\n\n_Disclaimer: This is an AI-generated analysis and may not be fully accurate. Contact your cooperative admin for official information._";
+    return (
+      raw +
+      "\n\n_Disclaimer: This is an AI-generated analysis and may not be fully accurate. Contact your cooperative admin for official information._"
+    );
   } catch {
     return generateFallbackInsights(cooperativeId);
   }
@@ -149,8 +153,7 @@ export async function generateLoanRiskAssessment(
 
   // Overall risk
   const riskLevel =
-    performance.repaymentRate > 80 ? "Low" :
-    performance.repaymentRate > 60 ? "Medium" : "High";
+    performance.repaymentRate > 80 ? "Low" : performance.repaymentRate > 60 ? "Medium" : "High";
 
   assessment += `Risk Level: *${riskLevel}*\n`;
   assessment += `Repayment Rate: ${performance.repaymentRate.toFixed(1)}%\n\n`;
@@ -159,9 +162,7 @@ export async function generateLoanRiskAssessment(
   if (overdueLoans.length > 0) {
     assessment += `*Overdue Loans (${overdueLoans.length}):*\n`;
     overdueLoans.forEach((loan) => {
-      const daysOverdue = Math.ceil(
-        (Date.now() - loan.dueDate!.getTime()) / (24 * 60 * 60 * 1000),
-      );
+      const daysOverdue = Math.ceil((Date.now() - loan.dueDate!.getTime()) / (24 * 60 * 60 * 1000));
       assessment += `• ${loan.member.name}: ${fmt(loan.balance)} (${daysOverdue} days)\n`;
     });
     assessment += `\n`;

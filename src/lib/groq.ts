@@ -105,7 +105,9 @@ export function parseTokenUsage(body: unknown): number {
   if (!usage) return 0;
   const total = Number(usage.total_tokens ?? 0);
   if (total > 0) {
-    console.log(`[groq] tokens used: ${total} (prompt: ${usage.prompt_tokens ?? "?"}, completion: ${usage.completion_tokens ?? "?"})`);
+    console.log(
+      `[groq] tokens used: ${total} (prompt: ${usage.prompt_tokens ?? "?"}, completion: ${usage.completion_tokens ?? "?"})`,
+    );
   }
   return total;
 }

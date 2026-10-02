@@ -31,7 +31,9 @@ function getSecret(): string {
 
 export function sign(phone: string, cooperativeId: string, role: string): string {
   const secret = getSecret();
-  const payload = Buffer.from(JSON.stringify({ phone, cooperativeId, role, iat: Date.now() })).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({ phone, cooperativeId, role, iat: Date.now() }),
+  ).toString("base64url");
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   return `${payload}.${sig}`;
 }
@@ -110,7 +112,9 @@ export async function isTokenRevoked(token: string): Promise<boolean> {
  * Returns the live role + cooperativeId, or null when the caller is not a
  * currently-authorized admin.
  */
-export async function requireLiveAdmin(payload: AdminTokenPayload): Promise<{ phone: string; role: string; cooperativeId: string } | null> {
+export async function requireLiveAdmin(
+  payload: AdminTokenPayload,
+): Promise<{ phone: string; role: string; cooperativeId: string } | null> {
   const live = await prisma.member.findFirst({
     where: { phone: payload.phone, cooperativeId: payload.cooperativeId },
     select: { phone: true, role: true, status: true, cooperativeId: true },
@@ -118,7 +122,8 @@ export async function requireLiveAdmin(payload: AdminTokenPayload): Promise<{ ph
   if (
     !live ||
     !["admin", "superadmin"].includes(live.role) ||
-    (live.status === "suspended" || live.status === "deceased")
+    live.status === "suspended" ||
+    live.status === "deceased"
   ) {
     return null;
   }

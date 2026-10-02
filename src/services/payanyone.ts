@@ -23,13 +23,26 @@ export interface PayAnyoneResult {
  */
 export async function requestExternalPayment(
   actor: { id: string; name: string; phone: string; role: string; cooperativeId: string },
-  input: { beneficiaryName: string; accountNumber: string; bankCode: string; bankName?: string; amount: number; purpose?: string },
+  input: {
+    beneficiaryName: string;
+    accountNumber: string;
+    bankCode: string;
+    bankName?: string;
+    amount: number;
+    purpose?: string;
+  },
 ): Promise<PayAnyoneResult> {
   if (!Number.isFinite(input.amount) || input.amount <= 0) {
-    return { ok: false, message: "Use *payanyone <amount> <account> <bank> <name>* — amount must be positive." };
+    return {
+      ok: false,
+      message: "Use *payanyone <amount> <account> <bank> <name>* — amount must be positive.",
+    };
   }
   if (input.amount > LIMITS.MAX_PAYANYONE) {
-    return { ok: false, message: `Maximum pay-anyone amount is *${formatBalance(LIMITS.MAX_PAYANYONE)}* per transaction.` };
+    return {
+      ok: false,
+      message: `Maximum pay-anyone amount is *${formatBalance(LIMITS.MAX_PAYANYONE)}* per transaction.`,
+    };
   }
 
   const limit = await checkDailyPayoutLimit(actor.cooperativeId, input.amount);
@@ -167,9 +180,15 @@ export async function approveExternalPayment(
     if (moved.count === 0) {
       return { ok: false, message: "Someone just recorded an approval — check *pendingpay*." };
     }
-    await notifySupers(actor.cooperativeId, superApprovalPrompt({ ...payment, status: "approved1" }));
+    await notifySupers(
+      actor.cooperativeId,
+      superApprovalPrompt({ ...payment, status: "approved1" }),
+    );
     await logApprove(actor, payment.id, "1/3");
-    return { ok: true, message: `Approval *1 of 3* recorded for ${payment.id.slice(-6)}. Two more supers needed.` };
+    return {
+      ok: true,
+      message: `Approval *1 of 3* recorded for ${payment.id.slice(-6)}. Two more supers needed.`,
+    };
   }
 
   if (payment.status === "approved1" && !payment.approved2ById) {
@@ -180,9 +199,15 @@ export async function approveExternalPayment(
     if (moved.count === 0) {
       return { ok: false, message: "Someone just recorded an approval — check *pendingpay*." };
     }
-    await notifySupers(actor.cooperativeId, superApprovalPrompt({ ...payment, status: "approved2" }));
+    await notifySupers(
+      actor.cooperativeId,
+      superApprovalPrompt({ ...payment, status: "approved2" }),
+    );
     await logApprove(actor, payment.id, "2/3");
-    return { ok: true, message: `Approval *2 of 3* recorded for ${payment.id.slice(-6)}. One more super needed.` };
+    return {
+      ok: true,
+      message: `Approval *2 of 3* recorded for ${payment.id.slice(-6)}. One more super needed.`,
+    };
   }
 
   // Third approval — atomic slot grab, then pay. Status stays "approved2"
@@ -230,7 +255,7 @@ async function payExternal(
   if (!payment) return { ok: false, message: "Request not found." };
 
   // Velocity check: max 5 money-out per 10 minutes.
-  if (!await checkVelocity(actor.id)) {
+  if (!(await checkVelocity(actor.id))) {
     // Revert only the third approval, NOT the whole chain: approved1/2 are still
     // valid, so the request stays at "2 of 3" and any super (or re-approval) can
     // retry once the window clears. Setting status back to "pending" while
@@ -241,7 +266,11 @@ async function payExternal(
       where: { id: payment.id, status: "approved2" },
       data: { approved3ById: null },
     });
-    return { ok: false, message: "🛑 Too many transactions in a short period. Please wait a few minutes and try again." };
+    return {
+      ok: false,
+      message:
+        "🛑 Too many transactions in a short period. Please wait a few minutes and try again.",
+    };
   }
 
   const limit = await checkDailyPayoutLimit(actor.cooperativeId, payment.amount);
@@ -260,7 +289,10 @@ async function payExternal(
     data: { status: "processing" },
   });
   if (claimed.count === 0) {
-    return { ok: false, message: "This request is already being paid out or was settled — check *pendingpay*." };
+    return {
+      ok: false,
+      message: "This request is already being paid out or was settled — check *pendingpay*.",
+    };
   }
 
   const provider = await resolveProvider();
@@ -289,7 +321,10 @@ async function payExternal(
         where: { id: payment.id, status: "processing" },
         data: { status: "approved2", payoutReference: result.error ?? "payout failed" },
       });
-      return { ok: false, message: `Provider refused the transfer (${result.error ?? "unknown"}). No money moved — another super can retry the final approval.` };
+      return {
+        ok: false,
+        message: `Provider refused the transfer (${result.error ?? "unknown"}). No money moved — another super can retry the final approval.`,
+      };
     }
 
     try {
@@ -315,7 +350,10 @@ async function payExternal(
     } catch (err: any) {
       if (err?.code === "P2002") {
         console.error(`[payanyone] duplicate blocked: ${reference} already paid`);
-        return { ok: false, message: "Duplicate payout blocked — this exact transfer was already recorded." };
+        return {
+          ok: false,
+          message: "Duplicate payout blocked — this exact transfer was already recorded.",
+        };
       }
       throw err;
     }
@@ -368,7 +406,10 @@ async function payExternal(
       where: { id: payment.id, status: "processing" },
       data: { status: "approved2", payoutReference: String(err?.message ?? err).slice(0, 200) },
     });
-    return { ok: false, message: `Transfer failed (${err?.message ?? "provider error"}). No money confirmed moved — retry the final approval if unsure.` };
+    return {
+      ok: false,
+      message: `Transfer failed (${err?.message ?? "provider error"}). No money confirmed moved — retry the final approval if unsure.`,
+    };
   }
 }
 
@@ -387,7 +428,11 @@ export async function rejectExternalPayment(
     return { ok: false, message: "Too late — this request was already paid." };
   }
   if (payment.status === "processing") {
-    return { ok: false, message: "This transfer is mid-flight at the provider — wait for it to settle before rejecting." };
+    return {
+      ok: false,
+      message:
+        "This transfer is mid-flight at the provider — wait for it to settle before rejecting.",
+    };
   }
 
   // Atomic — a reject racing the third approval can't clobber a paid state.
@@ -396,7 +441,10 @@ export async function rejectExternalPayment(
     data: { status: "rejected" },
   });
   if (moved.count === 0) {
-    return { ok: false, message: `Request just changed state (now ${payment.status}) — not rejected.` };
+    return {
+      ok: false,
+      message: `Request just changed state (now ${payment.status}) — not rejected.`,
+    };
   }
   await audit({
     cooperativeId: actor.cooperativeId,

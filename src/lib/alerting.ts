@@ -24,7 +24,8 @@ export async function alertSupers(
     select: { phone: true, name: true },
   });
 
-  const prefix = severity === AlertSeverity.CRITICAL ? "🚨" : severity === AlertSeverity.WARNING ? "⚠️" : "ℹ️";
+  const prefix =
+    severity === AlertSeverity.CRITICAL ? "🚨" : severity === AlertSeverity.WARNING ? "⚠️" : "ℹ️";
 
   for (const sa of supers) {
     try {
@@ -46,7 +47,8 @@ export async function alertAdmin(
   message: string,
   severity: AlertSeverity = AlertSeverity.CRITICAL,
 ): Promise<void> {
-  const prefix = severity === AlertSeverity.CRITICAL ? "🚨" : severity === AlertSeverity.WARNING ? "⚠️" : "ℹ️";
+  const prefix =
+    severity === AlertSeverity.CRITICAL ? "🚨" : severity === AlertSeverity.WARNING ? "⚠️" : "ℹ️";
 
   try {
     await notifyMember(

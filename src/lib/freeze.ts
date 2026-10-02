@@ -1,8 +1,6 @@
 import { prisma } from "./prisma.js";
 
-export type FreezeGuard =
-  | { frozen: false }
-  | { frozen: true; message: string };
+export type FreezeGuard = { frozen: false } | { frozen: true; message: string };
 
 export async function isFrozen(memberId: string): Promise<FreezeGuard> {
   const member = await prisma.member.findUnique({

@@ -156,7 +156,7 @@ export async function resolveProvider(preferred?: string): Promise<ProviderAdapt
   const order = [configured, ...ALL_PROVIDERS.filter((p) => p !== configured)];
   for (const name of order) {
     const adapter = adapterFor(name);
-    if (adapter && await isProviderAvailable(name)) return adapter;
+    if (adapter && (await isProviderAvailable(name))) return adapter;
   }
   // Everything is marked down — fall back to the configured one and let the
   // caller surface the error.

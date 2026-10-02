@@ -53,16 +53,24 @@ export async function startAssistWithdrawal(
     where: { code: memberCode.trim().toUpperCase(), cooperativeId: actor.cooperativeId },
     include: { wallet: true },
   });
-  if (!target) return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
+  if (!target)
+    return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
   if (target.id === actor.id) {
-    return { ok: false, message: "You can't assist a withdrawal for yourself — dual control is required." };
+    return {
+      ok: false,
+      message: "You can't assist a withdrawal for yourself — dual control is required.",
+    };
   }
   if (target.frozenAt) return { ok: false, message: `${target.name}'s wallet is frozen.` };
-  if (target.status === "deceased") return { ok: false, message: "This account is under a death claim." };
+  if (target.status === "deceased")
+    return { ok: false, message: "This account is under a death claim." };
   const revoke = await assertNotRevoked(target.id);
   if (revoke.blocked) return { ok: false, message: revoke.message };
   if (!target.bankAccountNumber || !target.bankCode) {
-    return { ok: false, message: `${target.name} has no bank account on file — a withdrawal can't be routed.` };
+    return {
+      ok: false,
+      message: `${target.name} has no bank account on file — a withdrawal can't be routed.`,
+    };
   }
   const balance = target.wallet?.balance ?? 0;
   if (amount > balance) {
@@ -85,7 +93,8 @@ export async function startAssistWithdrawal(
     },
   });
 
-  const delivered = await notifyMember(target,
+  const delivered = await notifyMember(
+    target,
     `🔐 *Admin-assisted withdrawal*\n\n` +
       `An admin wants to authorise a withdrawal of *${formatBalance(amount)}* for you.\n\n` +
       `To approve, give this one-time code to your admin:\n*${otp}*\n\n` +
@@ -125,25 +134,44 @@ export async function confirmAssistWithdrawal(
 
   const action = await findAction(actor.cooperativeId, shortId.trim());
   if (!action) return { ok: false, message: `No pending assist for id *${shortId}*.` };
-  if (action.type !== "withdrawal") return { ok: false, message: "That assist isn't a withdrawal." };
+  if (action.type !== "withdrawal")
+    return { ok: false, message: "That assist isn't a withdrawal." };
   if (action.status !== "pending") {
     return { ok: false, message: `That assist has already been *${action.status}*.` };
   }
 
   const now = new Date();
   if (now > action.otpExpiresAt) {
-    await prisma.adminAssistAction.update({ where: { id: action.id }, data: { status: "expired" } });
-    return { ok: false, message: "The authorisation code has expired. Run *assistwithdraw* again to start over." };
+    await prisma.adminAssistAction.update({
+      where: { id: action.id },
+      data: { status: "expired" },
+    });
+    return {
+      ok: false,
+      message: "The authorisation code has expired. Run *assistwithdraw* again to start over.",
+    };
   }
   if (!verifyOtp(code.trim(), action.otp)) {
-    return { ok: false, message: "❌ Incorrect authorisation code. Ask the member for the right code." };
+    return {
+      ok: false,
+      message: "❌ Incorrect authorisation code. Ask the member for the right code.",
+    };
   }
 
-  const target = await prisma.member.findUnique({ where: { id: action.targetMemberId }, include: { wallet: true } });
+  const target = await prisma.member.findUnique({
+    where: { id: action.targetMemberId },
+    include: { wallet: true },
+  });
   const balance = target?.wallet?.balance ?? 0;
   if (!target || action.amount > balance) {
-    await prisma.adminAssistAction.update({ where: { id: action.id }, data: { status: "cancelled" } });
-    return { ok: false, message: `Code accepted, but the member's balance (${target ? formatBalance(balance) : "—"}) is now too low. Assist cancelled — investigate.` };
+    await prisma.adminAssistAction.update({
+      where: { id: action.id },
+      data: { status: "cancelled" },
+    });
+    return {
+      ok: false,
+      message: `Code accepted, but the member's balance (${target ? formatBalance(balance) : "—"}) is now too low. Assist cancelled — investigate.`,
+    };
   }
 
   await prisma.adminAssistAction.update({

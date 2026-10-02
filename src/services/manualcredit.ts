@@ -46,15 +46,24 @@ export async function requestManualCredit(
     return { ok: false, message: "Usage: *manualcredit <member code> <amount> <narration>*" };
   }
   if (!narration.trim() || narration.trim().length < 3) {
-    return { ok: false, message: "A narration (reason for the credit) is required — e.g. *manualcredit MEM001 5000 Refund for July*" };
+    return {
+      ok: false,
+      message:
+        "A narration (reason for the credit) is required — e.g. *manualcredit MEM001 5000 Refund for July*",
+    };
   }
 
   const target = await prisma.member.findFirst({
     where: { code: memberCode.trim().toUpperCase(), cooperativeId: actor.cooperativeId },
   });
-  if (!target) return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
+  if (!target)
+    return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
   if (target.id === actor.id) {
-    return { ok: false, message: "You can't credit yourself — another super admin must approve the credit (dual control)." };
+    return {
+      ok: false,
+      message:
+        "You can't credit yourself — another super admin must approve the credit (dual control).",
+    };
   }
 
   const credit = await prisma.manualCredit.create({
@@ -80,10 +89,16 @@ export async function requestManualCredit(
 
   // Notify all other super admins that a credit awaits their dual sign-off.
   const otherSupers = await prisma.member.findMany({
-    where: { cooperativeId: actor.cooperativeId, role: "superadmin", id: { not: actor.id }, status: "active" },
+    where: {
+      cooperativeId: actor.cooperativeId,
+      role: "superadmin",
+      id: { not: actor.id },
+      status: "active",
+    },
   });
   for (const s of otherSupers) {
-    await notifyMember(s,
+    await notifyMember(
+      s,
       `🧾 *Pending manual credit*\n\n` +
         `*${actor.name}* wants to credit *${target.name}* with *${formatBalance(amount)}*.\n` +
         `Narration: ${narration.trim()}\n\n` +
@@ -119,7 +134,11 @@ export async function approveManualCredit(
     return { ok: false, message: `That credit is already *${credit.status}*.` };
   }
   if (credit.initiatorId === actor.id) {
-    return { ok: false, message: "You can't approve a credit you initiated yourself — dual control requires a different super admin." };
+    return {
+      ok: false,
+      message:
+        "You can't approve a credit you initiated yourself — dual control requires a different super admin.",
+    };
   }
 
   // Verify the checker's PIN (hashed, timing-safe) BEFORE any money moves — a
@@ -148,9 +167,11 @@ export async function approveManualCredit(
         throw new ManualCreditClaimError();
       }
 
-      const wallet = target.wallet ?? (await tx.wallet.create({
-        data: { memberId: target.id },
-      }));
+      const wallet =
+        target.wallet ??
+        (await tx.wallet.create({
+          data: { memberId: target.id },
+        }));
 
       await tx.wallet.update({
         where: { id: wallet.id },
@@ -201,7 +222,8 @@ export async function approveManualCredit(
     detail: `approved manual credit ${credit.id.slice(-6)} to ${target.name}, amount ${formatBalance(credit.amount)}`,
   });
 
-  await notifyMember(target,
+  await notifyMember(
+    target,
     `✅ *You received a credit*\n\n` +
       `*${formatBalance(credit.amount)}* has been added to your wallet.\n` +
       `Narration: ${credit.narration}\n` +

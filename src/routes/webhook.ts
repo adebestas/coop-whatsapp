@@ -53,7 +53,12 @@ export async function webhookRoutes(app: FastifyInstance) {
     // Reject outright when no verify token is configured (avoids the
     // misconfigured empty-default case where mode=subscribe&hub.verify_token=
     // could complete the handshake), and compare constant-time.
-    if (!config.whatsapp.verifyToken || mode !== "subscribe" || !token || !constantsEqual(token, config.whatsapp.verifyToken)) {
+    if (
+      !config.whatsapp.verifyToken ||
+      mode !== "subscribe" ||
+      !token ||
+      !constantsEqual(token, config.whatsapp.verifyToken)
+    ) {
       return reply.code(403).send("Verification failed");
     }
     return reply.type("text/plain").send(challenge);
@@ -89,7 +94,10 @@ export async function webhookRoutes(app: FastifyInstance) {
                 to: inbound.from,
                 text: "I couldn't read that voice note. Please type your message instead.",
               }).catch((err) => {
-                app.log.error({ err, from: inbound.from }, "Failed to send transcription failure message");
+                app.log.error(
+                  { err, from: inbound.from },
+                  "Failed to send transcription failure message",
+                );
               });
               continue;
             }

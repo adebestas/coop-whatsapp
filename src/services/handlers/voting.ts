@@ -1,6 +1,14 @@
 import { sendText } from "../../lib/messaging.js";
 import { getMemberByPhone, formatBalance } from "../cooperative.js";
-import { startVote, addCandidate, castVote, closeVote, showResults, showLiveResults, memberElectionsMessage } from "../votes.js";
+import {
+  startVote,
+  addCandidate,
+  castVote,
+  closeVote,
+  showResults,
+  showLiveResults,
+  memberElectionsMessage,
+} from "../votes.js";
 import { castBuyVote, listBuyPolls } from "../buypoll.js";
 
 export async function handleStartVote(phone: string, args: string[]): Promise<void> {
@@ -54,40 +62,57 @@ export async function handleResults(phone: string, args: string[]): Promise<void
 export async function handleBuyPolls(phone: string, cooperativeId?: string): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const polls = await listBuyPolls(member.cooperativeId);
   if (polls.length === 0) {
-    await sendText({ to: phone, text: "No buy-votes yet. Admins open one with *startbuyvote <title>*." });
+    await sendText({
+      to: phone,
+      text: "No buy-votes yet. Admins open one with *startbuyvote <title>*.",
+    });
     return;
   }
   const parts: string[] = [];
   for (const p of polls) {
     parts.push(
       `🛒 *${p.title}* (${p.status}) — id *${p.id.slice(-6)}*`,
-      ...p.options.map((o, i) => `   ${i + 1}. ${o.name} — ~${formatBalance(o.estimatedCost)} — ${o._count.ballots} vote(s)`),
+      ...p.options.map(
+        (o, i) =>
+          `   ${i + 1}. ${o.name} — ~${formatBalance(o.estimatedCost)} — ${o._count.ballots} vote(s)`,
+      ),
       "",
     );
   }
   await sendText({
     to: phone,
-    text:
-      parts.join("\n").trim() +
-      `\n\nVote with *votebuy <poll id> <option number>*.`,
+    text: parts.join("\n").trim() + `\n\nVote with *votebuy <poll id> <option number>*.`,
   });
 }
 
-export async function handleVoteBuy(phone: string, args: string[], cooperativeId?: string): Promise<void> {
+export async function handleVoteBuy(
+  phone: string,
+  args: string[],
+  cooperativeId?: string,
+): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const pollCode = args[0];
   const optionNumber = Number(args[1]);
   if (!pollCode || !Number.isInteger(optionNumber) || optionNumber < 1) {
-    await sendText({ to: phone, text: "Usage: *votebuy <poll id> <option number>* — see options with *buypolls*." });
+    await sendText({
+      to: phone,
+      text: "Usage: *votebuy <poll id> <option number>* — see options with *buypolls*.",
+    });
     return;
   }
   const result = await castBuyVote(
@@ -110,7 +135,10 @@ export async function handlePollResults(phone: string, args: string[]): Promise<
 export async function handleElections(phone: string, cooperativeId?: string): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const text = await memberElectionsMessage(member.cooperativeId, member.unitId);

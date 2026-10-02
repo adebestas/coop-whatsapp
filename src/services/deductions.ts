@@ -61,11 +61,19 @@ export async function buildBatch(
         loan.monthlyPayment && loan.monthlyPayment > 0
           ? Math.min(loan.monthlyPayment, loan.balance)
           : loan.balance;
-      items.push({ memberId: m.id, kind: "loan", loanId: loan.id, amount: Math.round(installment * 100) / 100 });
+      items.push({
+        memberId: m.id,
+        kind: "loan",
+        loanId: loan.id,
+        amount: Math.round(installment * 100) / 100,
+      });
     }
   }
   if (items.length === 0) {
-    return { ok: false, message: `Nothing to collect for ${period} — no member has a monthly deduction set (use *setcommit <code> <amount>*), and nobody is repaying a loan.` };
+    return {
+      ok: false,
+      message: `Nothing to collect for ${period} — no member has a monthly deduction set (use *setcommit <code> <amount>*), and nobody is repaying a loan.`,
+    };
   }
 
   const total = items.reduce((s, i) => s + i.amount, 0);
@@ -77,7 +85,14 @@ export async function buildBatch(
       createdById: admin.id,
       note,
       totalAmount: total,
-      items: { create: items.map((i) => ({ memberId: i.memberId, kind: i.kind, loanId: i.loanId ?? null, amount: i.amount })) },
+      items: {
+        create: items.map((i) => ({
+          memberId: i.memberId,
+          kind: i.kind,
+          loanId: i.loanId ?? null,
+          amount: i.amount,
+        })),
+      },
     },
   });
 
@@ -203,7 +218,16 @@ export async function approveBatch(
 
   await prisma.deductionBatch.update({
     where: { id: batch.id },
-    data: { status: "approved", approvedAt: new Date(), approvedById: (await prisma.member.findFirst({ where: { phone: superPhone, cooperativeId: batch.cooperativeId } }))?.id ?? null },
+    data: {
+      status: "approved",
+      approvedAt: new Date(),
+      approvedById:
+        (
+          await prisma.member.findFirst({
+            where: { phone: superPhone, cooperativeId: batch.cooperativeId },
+          })
+        )?.id ?? null,
+    },
   });
   await audit({
     cooperativeId: batch.cooperativeId,
@@ -230,7 +254,10 @@ export async function rejectBatch(
   reason?: string,
 ): Promise<{ ok: boolean; message: string }> {
   const ref = rawRef.trim().toUpperCase();
-  const batch = await prisma.deductionBatch.findUnique({ where: { ref }, include: { createdBy: true } });
+  const batch = await prisma.deductionBatch.findUnique({
+    where: { ref },
+    include: { createdBy: true },
+  });
   if (!batch) return { ok: false, message: "Batch not found." };
   if (!(await isSuperPhone(superPhone, batch.cooperativeId))) {
     return { ok: false, message: "Only the *super admin* can reject deduction batches." };
@@ -269,7 +296,10 @@ export async function setCommitment(
   });
   if (!admin) return { ok: false, message: "Admin account not found." };
   if (!Number.isFinite(amount) || amount < 0) {
-    return { ok: false, message: "Usage: *setcommit <member code> <amount>* (0 stops the deduction)." };
+    return {
+      ok: false,
+      message: "Usage: *setcommit <member code> <amount>* (0 stops the deduction).",
+    };
   }
   const target = await prisma.member.findFirst({
     where: { code: code.toUpperCase(), cooperativeId: admin.cooperativeId },
@@ -336,26 +366,41 @@ export async function waiveMonth(
     target,
     `🤝 Your co-op admin has waived your deduction for ${period}. You will not be deducted this month.`,
   ).catch(() => {});
-  return { ok: true, message: `✅ ${target.name} is waived for ${period}. They have been notified.` };
+  return {
+    ok: true,
+    message: `✅ ${target.name} is waived for ${period}. They have been notified.`,
+  };
 }
 
 /** Member view of their own deduction commitment. */
-export async function myDeduction(phone: string, cooperativeId?: string): Promise<{ ok: boolean; message: string }> {
+export async function myDeduction(
+  phone: string,
+  cooperativeId?: string,
+): Promise<{ ok: boolean; message: string }> {
   const member = await getMemberByPhone(phone, cooperativeId);
-  if (!member) return { ok: false, message: "You need to join a cooperative first. Reply *join <code>* to get started." };
+  if (!member)
+    return {
+      ok: false,
+      message: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    };
 
   const fresh = await prisma.member.findUnique({
     where: { id: member.id },
     include: { loans: { where: { status: "disbursed" } }, deductionWaivers: true },
   });
   const lines: string[] = ["📌 *Your monthly deduction*", ""];
-  lines.push(`• Savings commitment: ${fresh?.monthlyDeduction ? formatBalance(fresh.monthlyDeduction) : "_not set_"}`);
+  lines.push(
+    `• Savings commitment: ${fresh?.monthlyDeduction ? formatBalance(fresh.monthlyDeduction) : "_not set_"}`,
+  );
   const loan = fresh?.loans.find((l) => l.balance > 0);
   if (loan) {
-    const next = loan.monthlyPayment && loan.monthlyPayment > 0
-      ? Math.min(loan.monthlyPayment, loan.balance)
-      : loan.balance;
-    lines.push(`• Loan repayment: ${formatBalance(next)}/month (${formatBalance(loan.balance)} left)`);
+    const next =
+      loan.monthlyPayment && loan.monthlyPayment > 0
+        ? Math.min(loan.monthlyPayment, loan.balance)
+        : loan.balance;
+    lines.push(
+      `• Loan repayment: ${formatBalance(next)}/month (${formatBalance(loan.balance)} left)`,
+    );
   }
   const period = periodOf(new Date());
   if (fresh?.deductionWaivers.some((w) => w.period === period)) {
@@ -365,9 +410,16 @@ export async function myDeduction(phone: string, cooperativeId?: string): Promis
 }
 
 /** Member asks to skip this month — pings admins to confirm. */
-export async function requestMonthWaiver(phone: string, cooperativeId?: string): Promise<{ ok: boolean; message: string }> {
+export async function requestMonthWaiver(
+  phone: string,
+  cooperativeId?: string,
+): Promise<{ ok: boolean; message: string }> {
   const member = await getMemberByPhone(phone, cooperativeId);
-  if (!member) return { ok: false, message: "You need to join a cooperative first. Reply *join <code>* to get started." };
+  if (!member)
+    return {
+      ok: false,
+      message: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    };
   const already = await prisma.deductionWaiver.findFirst({
     where: { memberId: member.id, period: periodOf(new Date()) },
   });

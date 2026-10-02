@@ -189,7 +189,9 @@ async function payOut(
       }
     }
 
-    const msg = opts.successMessage ?? `✅ ${formatBalance(opts.amount)} sent to your bank account (${opts.bankName ?? opts.bankCode} ****${opts.bankAccountNumber.slice(-4)}). Ref: ${reference.slice(-6)}.`;
+    const msg =
+      opts.successMessage ??
+      `✅ ${formatBalance(opts.amount)} sent to your bank account (${opts.bankName ?? opts.bankCode} ****${opts.bankAccountNumber.slice(-4)}). Ref: ${reference.slice(-6)}.`;
     await notify(member, msg);
     return { ok: true, status: "successful", message: msg };
   } catch (err: any) {
@@ -223,7 +225,11 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
   });
   if (!loan) return { ok: false, status: "failed", message: "Loan not found." };
   if (loan.status !== "approved") {
-    return { ok: false, status: "failed", message: `Loan must be approved before disbursement (current: ${loan.status}).` };
+    return {
+      ok: false,
+      status: "failed",
+      message: `Loan must be approved before disbursement (current: ${loan.status}).`,
+    };
   }
 
   // ATOMIC CLAIM — flips disbursementStatus to "processing" only if no other
@@ -352,7 +358,10 @@ export function namesMatch(accountName: string, registeredName: string): boolean
   return a.size > 0;
 }
 
-async function notify(member: { phone: string; altChannelId?: string | null; preferredChannel?: string | null }, text: string): Promise<void> {
+async function notify(
+  member: { phone: string; altChannelId?: string | null; preferredChannel?: string | null },
+  text: string,
+): Promise<void> {
   try {
     await notifyMember(member, text);
   } catch (err) {

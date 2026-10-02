@@ -1,9 +1,6 @@
 import { prisma } from "../../lib/prisma.js";
 import { sendText } from "../../lib/messaging.js";
-import {
-  formatBalance,
-  getMemberByPhone,
-} from "../cooperative.js";
+import { formatBalance, getMemberByPhone } from "../cooperative.js";
 import { provisionVirtualAccount } from "../payments/topup.js";
 import { setAutoSave } from "../scheduler.js";
 import { joinUnit } from "../units.js";
@@ -14,10 +11,18 @@ import { issueSecretChallenge, parseNaira } from "./session.js";
 
 export async function handleBalance(
   phone: string,
-  member: { id: string; name: string; cooperative: { name: string }; wallet: { balance: number } | null } | null,
+  member: {
+    id: string;
+    name: string;
+    cooperative: { name: string };
+    wallet: { balance: number } | null;
+  } | null,
 ): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   const balance = member.wallet?.balance ?? 0;
@@ -27,7 +32,10 @@ export async function handleBalance(
     orderBy: { createdAt: "desc" },
     take: 1,
   });
-  const loanText = loan && loan.balance > 0 ? `\n\n📚 Outstanding loan balance: *${formatBalance(loan.balance)}*.` : "";
+  const loanText =
+    loan && loan.balance > 0
+      ? `\n\n📚 Outstanding loan balance: *${formatBalance(loan.balance)}*.`
+      : "";
   await sendText({
     to: phone,
     text: `Hi *${member.name}*, your savings balance is *${formatBalance(balance)}*.\n\nReply *save <amount>* to contribute more.\nReply *menu* to see other options.${loanText}`,
@@ -37,7 +45,10 @@ export async function handleBalance(
 export async function handleSave(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
 
@@ -72,7 +83,10 @@ export async function handleSave(phone: string, args: string[]): Promise<void> {
 export async function handleFund(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   const result = await provisionVirtualAccount(member.id);
@@ -95,7 +109,10 @@ export async function handleWithdraw(phone: string, args: string[]): Promise<voi
   }
   const limit = await withdrawLimit(phone);
   if (!limit) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   const eligibility = await canWithdraw(phone);
@@ -122,8 +139,15 @@ export async function handleWithdraw(phone: string, args: string[]): Promise<voi
   }
   await prisma.session.upsert({
     where: { phone },
-    create: { phone, state: "awaiting_withdraw_account", data: JSON.stringify({ withdrawAmount: amount }) },
-    update: { state: "awaiting_withdraw_account", data: JSON.stringify({ withdrawAmount: amount }) },
+    create: {
+      phone,
+      state: "awaiting_withdraw_account",
+      data: JSON.stringify({ withdrawAmount: amount }),
+    },
+    update: {
+      state: "awaiting_withdraw_account",
+      data: JSON.stringify({ withdrawAmount: amount }),
+    },
   });
   await sendText({
     to: phone,
@@ -146,7 +170,11 @@ export async function handleLoan(phone: string, args: string[]): Promise<void> {
   if (!Number.isFinite(months) || months < 1 || months > 12) {
     await prisma.session.upsert({
       where: { phone },
-      create: { phone, state: "awaiting_loan_months", data: JSON.stringify({ loanAmount: amount }) },
+      create: {
+        phone,
+        state: "awaiting_loan_months",
+        data: JSON.stringify({ loanAmount: amount }),
+      },
       update: { state: "awaiting_loan_months", data: JSON.stringify({ loanAmount: amount }) },
     });
     await sendText({ to: phone, text: "For how many months? (1–12)" });
@@ -154,8 +182,15 @@ export async function handleLoan(phone: string, args: string[]): Promise<void> {
   }
   await prisma.session.upsert({
     where: { phone },
-    create: { phone, state: "awaiting_loan_bank_account", data: JSON.stringify({ loanAmount: amount, loanMonths: months }) },
-    update: { state: "awaiting_loan_bank_account", data: JSON.stringify({ loanAmount: amount, loanMonths: months }) },
+    create: {
+      phone,
+      state: "awaiting_loan_bank_account",
+      data: JSON.stringify({ loanAmount: amount, loanMonths: months }),
+    },
+    update: {
+      state: "awaiting_loan_bank_account",
+      data: JSON.stringify({ loanAmount: amount, loanMonths: months }),
+    },
   });
   await sendText({
     to: phone,
@@ -200,7 +235,10 @@ export async function handleDividend(phone: string, args: string[]): Promise<voi
   const raw = args[0] ? args[0].replace(/[,₦\s]/g, "") : "";
   const rate = /^\d+(\.\d{1,2})?$/.test(raw) ? Number(raw) : NaN;
   if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
-    await sendText({ to: phone, text: "Usage: *dividend <rate>*, e.g. *dividend 5* for a 5% dividend calculation." });
+    await sendText({
+      to: phone,
+      text: "Usage: *dividend <rate>*, e.g. *dividend 5* for a 5% dividend calculation.",
+    });
     return;
   }
   const result = await computeDividendPreview(phone, rate);
@@ -219,7 +257,10 @@ export async function handleJoinUnit(phone: string, args: string[]): Promise<voi
 export async function handleLoanQueue(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
 
@@ -233,7 +274,10 @@ export async function handleLoanQueue(phone: string): Promise<void> {
   }
 
   const ahead = queue.position - 1;
-  const aheadText = ahead === 0 ? "No members ahead of you." : `${ahead} member${ahead > 1 ? "s" : ""} ahead of you.`;
+  const aheadText =
+    ahead === 0
+      ? "No members ahead of you."
+      : `${ahead} member${ahead > 1 ? "s" : ""} ahead of you.`;
 
   await sendText({
     to: phone,
@@ -247,11 +291,19 @@ export async function handleLoanQueue(phone: string): Promise<void> {
 
 export async function handleAnalytics(
   phone: string,
-  member: { id: string; name: string; cooperativeId: string; wallet: { balance: number; totalSaved: number } | null } | null,
+  member: {
+    id: string;
+    name: string;
+    cooperativeId: string;
+    wallet: { balance: number; totalSaved: number } | null;
+  } | null,
 ): Promise<void> {
   const m = member ?? (await getMemberByPhone(phone));
   if (!m) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
 
@@ -266,7 +318,11 @@ export async function handleAnalytics(
       _sum: { amount: true },
     }),
     prisma.withdrawalRequest.count({
-      where: { memberId: m.id, status: { in: ["approved", "paid", "disbursed"] }, createdAt: { gte: yearStart } },
+      where: {
+        memberId: m.id,
+        status: { in: ["approved", "paid", "disbursed"] },
+        createdAt: { gte: yearStart },
+      },
     }),
     prisma.loan.aggregate({
       where: { memberId: m.id, status: { in: ["disbursed", "partial"] } },

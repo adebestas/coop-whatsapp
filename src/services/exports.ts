@@ -30,7 +30,10 @@ export async function runExport(
   appBaseUrl: string,
 ): Promise<ExportResult> {
   if (!["members", "transactions", "pnl"].includes(kind)) {
-    return { ok: false, message: "Unknown export type. Use *export members*, *export transactions* or *export pnl*." };
+    return {
+      ok: false,
+      message: "Unknown export type. Use *export members*, *export transactions* or *export pnl*.",
+    };
   }
 
   await mkdir(EXPORT_DIR, { recursive: true });
@@ -49,7 +52,11 @@ export async function runExport(
   const pdfName = `${base}.pdf`;
 
   await writeXlsx(join(EXPORT_DIR, xlsxName), sheets);
-  await writePdf(join(EXPORT_DIR, pdfName), `${coop?.name ?? "Cooperative"} — ${kind.toUpperCase()} export`, sheets);
+  await writePdf(
+    join(EXPORT_DIR, pdfName),
+    `${coop?.name ?? "Cooperative"} — ${kind.toUpperCase()} export`,
+    sheets,
+  );
 
   // Upload to S3 for persistent storage (if configured)
   const s3Keys: string[] = [];
@@ -98,8 +105,7 @@ export async function runExport(
   const storage = s3Keys.length === 2 ? "S3" : s3Keys.length === 1 ? "S3 (partial)" : "local";
   return {
     ok: true,
-    message:
-      `📦 *${kind}* export ready (stored on ${storage}):\n${links.join("\n")}${emailNote}\n\n_Links stay valid while the files exist on the server. S3 copies are permanent._`,
+    message: `📦 *${kind}* export ready (stored on ${storage}):\n${links.join("\n")}${emailNote}\n\n_Links stay valid while the files exist on the server. S3 copies are permanent._`,
     files: [join(EXPORT_DIR, xlsxName), join(EXPORT_DIR, pdfName)],
   };
 }
@@ -113,52 +119,141 @@ async function membersData(cooperativeId: string): Promise<{ name: string; rows:
     orderBy: { createdAt: "asc" },
   });
   const rows = [
-    ["Code", "Name", "Chat ID", "Contact Phone", "Email", "DOB", "Next of Kin", "NOK Phone", "Role", "Status", "Unit", "Wallet Balance", "Total Saved", "Joined"],
+    [
+      "Code",
+      "Name",
+      "Chat ID",
+      "Contact Phone",
+      "Email",
+      "DOB",
+      "Next of Kin",
+      "NOK Phone",
+      "Role",
+      "Status",
+      "Unit",
+      "Wallet Balance",
+      "Total Saved",
+      "Joined",
+    ],
     ...members.map((m) => [
-      m.code, m.name, m.phone, m.contactPhone ?? "", m.email ?? "",
+      m.code,
+      m.name,
+      m.phone,
+      m.contactPhone ?? "",
+      m.email ?? "",
       m.dateOfBirth ? m.dateOfBirth.toISOString().slice(0, 10) : "",
-      m.nextOfKinName ?? "", m.nextOfKinPhone ?? "", m.role, m.status,
+      m.nextOfKinName ?? "",
+      m.nextOfKinPhone ?? "",
+      m.role,
+      m.status,
       m.unit?.name ?? "",
-      String(m.wallet?.balance ?? 0), String(m.wallet?.totalSaved ?? 0),
+      String(m.wallet?.balance ?? 0),
+      String(m.wallet?.totalSaved ?? 0),
       m.createdAt.toISOString().slice(0, 10),
     ]),
   ];
   return { name: "Members", rows };
 }
 
-async function transactionsData(cooperativeId: string): Promise<{ name: string; rows: string[][] }> {
+async function transactionsData(
+  cooperativeId: string,
+): Promise<{ name: string; rows: string[][] }> {
   const [contributions, loans, withdrawals, payouts, externals, ledger] = await Promise.all([
     prisma.contribution.findMany({
-      where: { cooperativeId }, include: { member: { select: { name: true } } }, orderBy: { createdAt: "asc" },
+      where: { cooperativeId },
+      include: { member: { select: { name: true } } },
+      orderBy: { createdAt: "asc" },
     }),
     prisma.loan.findMany({
-      where: { cooperativeId }, include: { member: { select: { name: true } } }, orderBy: { createdAt: "asc" },
+      where: { cooperativeId },
+      include: { member: { select: { name: true } } },
+      orderBy: { createdAt: "asc" },
     }),
     prisma.withdrawalRequest.findMany({
-      where: { cooperativeId }, include: { member: { select: { name: true } } }, orderBy: { createdAt: "asc" },
+      where: { cooperativeId },
+      include: { member: { select: { name: true } } },
+      orderBy: { createdAt: "asc" },
     }),
     prisma.payout.findMany({
-      where: { cooperativeId }, include: { member: { select: { name: true } } }, orderBy: { createdAt: "asc" },
+      where: { cooperativeId },
+      include: { member: { select: { name: true } } },
+      orderBy: { createdAt: "asc" },
     }),
     prisma.externalPayment.findMany({ where: { cooperativeId }, orderBy: { createdAt: "asc" } }),
     prisma.ledgerEntry.findMany({ where: { cooperativeId }, orderBy: { createdAt: "asc" } }),
   ]);
 
-  interface Row { date: Date; type: string; direction: string; who: string; amount: number; status: string }
+  interface Row {
+    date: Date;
+    type: string;
+    direction: string;
+    who: string;
+    amount: number;
+    status: string;
+  }
   const all: Row[] = [
-    ...contributions.map((c) => ({ date: c.createdAt, type: `contribution (${c.type})`, direction: "IN", who: c.member.name, amount: c.amount, status: c.status })),
-    ...loans.map((l) => ({ date: l.disbursedAt ?? l.createdAt, type: "loan disbursement", direction: "OUT", who: l.member.name, amount: l.disbursementAmount ?? l.amount, status: l.status })),
-    ...withdrawals.map((w) => ({ date: w.finalizedAt ?? w.createdAt, type: "withdrawal", direction: "OUT", who: w.member.name, amount: w.amount, status: w.status })),
-    ...payouts.map((p) => ({ date: p.createdAt, type: `payout (${p.note ?? "general"})`, direction: "OUT", who: p.member.name, amount: p.amount, status: p.status })),
-    ...externals.map((e) => ({ date: e.updatedAt, type: "pay-anyone", direction: "OUT", who: e.beneficiaryName, amount: e.amount, status: e.status })),
-    ...ledger.map((l) => ({ date: l.createdAt, type: `P&L ${l.type} (${l.category})`, direction: l.type === "income" ? "—" : "—", who: l.note ?? "", amount: l.amount, status: "-" })),
+    ...contributions.map((c) => ({
+      date: c.createdAt,
+      type: `contribution (${c.type})`,
+      direction: "IN",
+      who: c.member.name,
+      amount: c.amount,
+      status: c.status,
+    })),
+    ...loans.map((l) => ({
+      date: l.disbursedAt ?? l.createdAt,
+      type: "loan disbursement",
+      direction: "OUT",
+      who: l.member.name,
+      amount: l.disbursementAmount ?? l.amount,
+      status: l.status,
+    })),
+    ...withdrawals.map((w) => ({
+      date: w.finalizedAt ?? w.createdAt,
+      type: "withdrawal",
+      direction: "OUT",
+      who: w.member.name,
+      amount: w.amount,
+      status: w.status,
+    })),
+    ...payouts.map((p) => ({
+      date: p.createdAt,
+      type: `payout (${p.note ?? "general"})`,
+      direction: "OUT",
+      who: p.member.name,
+      amount: p.amount,
+      status: p.status,
+    })),
+    ...externals.map((e) => ({
+      date: e.updatedAt,
+      type: "pay-anyone",
+      direction: "OUT",
+      who: e.beneficiaryName,
+      amount: e.amount,
+      status: e.status,
+    })),
+    ...ledger.map((l) => ({
+      date: l.createdAt,
+      type: `P&L ${l.type} (${l.category})`,
+      direction: l.type === "income" ? "—" : "—",
+      who: l.note ?? "",
+      amount: l.amount,
+      status: "-",
+    })),
   ].sort((a, b) => a.date.getTime() - b.date.getTime());
 
   return {
     name: "Transactions",
     rows: [
       ["Date", "Type", "Direction", "Member/Beneficiary", "Amount", "Status"],
-      ...all.map((r) => [r.date.toISOString(), r.type, r.direction, r.who, String(r.amount), r.status]),
+      ...all.map((r) => [
+        r.date.toISOString(),
+        r.type,
+        r.direction,
+        r.who,
+        String(r.amount),
+        r.status,
+      ]),
     ],
   };
 }
@@ -172,8 +267,10 @@ async function pnlData(cooperativeId: string): Promise<{ name: string; rows: str
   });
 
   const summary = [["Category", "Type", "Amount"]];
-  for (const [cat, amt] of Object.entries(pnl.incomeByCategory)) summary.push([cat, "income", String(amt)]);
-  for (const [cat, amt] of Object.entries(pnl.expenseByCategory)) summary.push([cat, "expense", String(amt)]);
+  for (const [cat, amt] of Object.entries(pnl.incomeByCategory))
+    summary.push([cat, "income", String(amt)]);
+  for (const [cat, amt] of Object.entries(pnl.expenseByCategory))
+    summary.push([cat, "expense", String(amt)]);
   summary.push(["TOTAL INCOME", "", String(pnl.totalIncome)]);
   summary.push(["TOTAL EXPENSE", "", String(pnl.totalExpense)]);
   summary.push(["NET PROFIT", "", String(pnl.netProfit)]);
@@ -184,7 +281,14 @@ async function pnlData(cooperativeId: string): Promise<{ name: string; rows: str
       ...summary,
       [],
       ["Date", "Type", "Category", "Amount", "Note", "Ref"],
-      ...entries.map((e) => [e.createdAt.toISOString(), e.type, e.category, String(e.amount), e.note ?? "", e.reference ?? ""]),
+      ...entries.map((e) => [
+        e.createdAt.toISOString(),
+        e.type,
+        e.category,
+        String(e.amount),
+        e.note ?? "",
+        e.reference ?? "",
+      ]),
     ],
   };
 }
@@ -197,7 +301,10 @@ async function writeXlsx(path: string, sheet: { name: string; rows: string[][] }
   ws.addRows(sheet.rows);
   ws.getRow(1).font = { bold: true };
   ws.columns.forEach((col) => {
-    col.width = Math.max(12, ...sheet.rows.map((r) => String(r[ws.columns.indexOf(col)] ?? "").length + 2));
+    col.width = Math.max(
+      12,
+      ...sheet.rows.map((r) => String(r[ws.columns.indexOf(col)] ?? "").length + 2),
+    );
   });
   await wb.xlsx.writeFile(path);
 }
@@ -221,7 +328,12 @@ async function writePdf(path: string, title: string, sheet: { rows: string[][] }
   });
 }
 
-async function emailFiles(to: string, subject: string, body: string, attachments: string[]): Promise<boolean> {
+async function emailFiles(
+  to: string,
+  subject: string,
+  body: string,
+  attachments: string[],
+): Promise<boolean> {
   try {
     const transport = nodemailer.createTransport({
       host: process.env.SMTP_HOST,

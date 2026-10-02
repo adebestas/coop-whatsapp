@@ -16,12 +16,12 @@ function calculatePaye(grossKobo: number): number {
   let taxable = Math.max(0, grossKobo - exemptKobo);
   let tax = 0;
   const brackets = [
-    { limit: toKobo(200_000), rate: 0.07 },   // ₦200k @ 7%
-    { limit: toKobo(660_000), rate: 0.11 },   // ₦660k @ 11%
-    { limit: toKobo(460_000), rate: 0.15 },   // ₦460k @ 15%
+    { limit: toKobo(200_000), rate: 0.07 }, // ₦200k @ 7%
+    { limit: toKobo(660_000), rate: 0.11 }, // ₦660k @ 11%
+    { limit: toKobo(460_000), rate: 0.15 }, // ₦460k @ 15%
     { limit: toKobo(1_600_000), rate: 0.19 }, // ₦1.6M @ 19%
     { limit: toKobo(3_200_000), rate: 0.21 }, // ₦3.2M @ 21%
-    { limit: Infinity, rate: 0.24 },          // above @ 24%
+    { limit: Infinity, rate: 0.24 }, // above @ 24%
   ];
   for (const b of brackets) {
     if (taxable <= 0) break;
@@ -55,12 +55,18 @@ export async function setSalary(
   }
 
   const target = await prisma.member.findFirst({
-    where: { cooperativeId: actor.cooperativeId, OR: [{ contactPhone: targetPhone }, { phone: targetPhone }] },
+    where: {
+      cooperativeId: actor.cooperativeId,
+      OR: [{ contactPhone: targetPhone }, { phone: targetPhone }],
+    },
   });
   if (!target) return { ok: false, message: "Member not found." };
 
   if (target.role !== "superadmin") {
-    return { ok: false, message: `${target.name} is not a super admin — salaries are for super admins.` };
+    return {
+      ok: false,
+      message: `${target.name} is not a super admin — salaries are for super admins.`,
+    };
   }
 
   // Dual-control: nobody sets their OWN pay.
@@ -125,7 +131,11 @@ export async function runPayroll(
   narration: string,
 ): Promise<PayrollResult> {
   if (!narration || narration.trim().length < 3) {
-    return { ok: false, message: "Every payment needs a *narration*: *runpayroll <narration>* — e.g. *runpayroll October stipends*." };
+    return {
+      ok: false,
+      message:
+        "Every payment needs a *narration*: *runpayroll <narration>* — e.g. *runpayroll October stipends*.",
+    };
   }
 
   const recipients = await prisma.member.findMany({
@@ -136,7 +146,8 @@ export async function runPayroll(
   if (recipients.length === 0) {
     return {
       ok: true,
-      message: "No salaries configured yet. Set them with *setsalary <phone> <amount>*, then run payroll.",
+      message:
+        "No salaries configured yet. Set them with *setsalary <phone> <amount>*, then run payroll.",
       paid: 0,
       total: 0,
     };
@@ -153,7 +164,9 @@ export async function runPayroll(
 
     // Dual-control on execution: the runner never pays themselves.
     if (r.id === triggeredBy.id) {
-      failures.push(`${r.name} — skipped: you can't run payroll that pays yourself; another super must run it`);
+      failures.push(
+        `${r.name} — skipped: you can't run payroll that pays yourself; another super must run it`,
+      );
       continue;
     }
 

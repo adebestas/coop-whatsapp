@@ -23,7 +23,9 @@ export async function runReconciliation(): Promise<string[]> {
     // 1. Audit chain integrity.
     const chain = await verifyAuditChain(coop.id);
     if (!chain.ok) {
-      alerts.push(`🚨 Audit trail for *${coop.name}* was TAMPERED with at entry ${chain.brokenAt}. Investigate immediately.`);
+      alerts.push(
+        `🚨 Audit trail for *${coop.name}* was TAMPERED with at entry ${chain.brokenAt}. Investigate immediately.`,
+      );
     }
 
     // 2. Negative wallets should be impossible.
@@ -40,15 +42,24 @@ export async function runReconciliation(): Promise<string[]> {
       where: { cooperativeId: coop.id, status: "admin_approved", adminApprovedAt: { lt: weekAgo } },
     });
     if (stale > 0) {
-      alerts.push(`ℹ️ ${stale} withdrawal request(s) have waited over a week for super-admin approval.`);
+      alerts.push(
+        `ℹ️ ${stale} withdrawal request(s) have waited over a week for super-admin approval.`,
+      );
     }
 
     // 4. Pay-anyone requests that recorded a third approval but never paid.
     const stuck = await prisma.externalPayment.count({
-      where: { cooperativeId: coop.id, status: "approved2", approved3ById: { not: null }, updatedAt: { lt: weekAgo } },
+      where: {
+        cooperativeId: coop.id,
+        status: "approved2",
+        approved3ById: { not: null },
+        updatedAt: { lt: weekAgo },
+      },
     });
     if (stuck > 0) {
-      alerts.push(`ℹ️ ${stuck} pay-anyone request(s) are fully approved but not paid — retry with *approvepay <id>*.`);
+      alerts.push(
+        `ℹ️ ${stuck} pay-anyone request(s) are fully approved but not paid — retry with *approvepay <id>*.`,
+      );
     }
 
     // 5. Money mid-flight at the provider for over 24h — needs human eyes,
@@ -66,19 +77,25 @@ export async function runReconciliation(): Promise<string[]> {
       where: { cooperativeId: coop.id, status: "processing", updatedAt: { lt: dayAgo } },
     });
     if (stuckExternals > 0) {
-      alerts.push(`🚨 ${stuckExternals} pay-anyone transfer(s) stuck in "processing" over 24h — verify with the provider.`);
+      alerts.push(
+        `🚨 ${stuckExternals} pay-anyone transfer(s) stuck in "processing" over 24h — verify with the provider.`,
+      );
     }
     const stuckWithdrawals = await prisma.withdrawalRequest.count({
       where: { cooperativeId: coop.id, status: "processing", createdAt: { lt: dayAgo } },
     });
     if (stuckWithdrawals > 0) {
-      alerts.push(`🚨 ${stuckWithdrawals} withdrawal(s) stuck in "processing" over 24h — verify wallets and provider before retry.`);
+      alerts.push(
+        `🚨 ${stuckWithdrawals} withdrawal(s) stuck in "processing" over 24h — verify wallets and provider before retry.`,
+      );
     }
     const stuckClaims = await prisma.deathClaim.count({
       where: { cooperativeId: coop.id, status: "processing", createdAt: { lt: dayAgo } },
     });
     if (stuckClaims > 0) {
-      alerts.push(`🚨 ${stuckClaims} death-claim payout(s) stuck in "processing" over 24h — investigate immediately.`);
+      alerts.push(
+        `🚨 ${stuckClaims} death-claim payout(s) stuck in "processing" over 24h — investigate immediately.`,
+      );
     }
 
     // 6. Double-entry books must balance. Drift means a write bypassed the

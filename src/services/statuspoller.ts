@@ -27,13 +27,15 @@ const MIN_STUCK_MS = 10 * 60 * 1000;
 
 export function transferPollIntervalMs(): number {
   const raw = process.env.TRANSFER_POLL_MINUTES;
-  const minutes = raw !== undefined && raw !== "" ? Number(raw) : process.env.NODE_ENV === "test" ? 0 : 10;
+  const minutes =
+    raw !== undefined && raw !== "" ? Number(raw) : process.env.NODE_ENV === "test" ? 0 : 10;
   return Math.max(0, minutes) * 60 * 1000;
 }
 
 async function statusFor(reference: string): Promise<TransferStatus> {
   const provider = await resolveProvider();
-  if (!provider.getTransferStatus) return { status: "unknown", error: "provider has no getTransferStatus" };
+  if (!provider.getTransferStatus)
+    return { status: "unknown", error: "provider has no getTransferStatus" };
   try {
     return await provider.getTransferStatus(reference);
   } catch (err: any) {
@@ -84,13 +86,23 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
         reference: w.id,
         fundType: "member",
       });
-      actions.push(`Withdrawal ${w.id.slice(-6)} (${formatBalance(w.amount)}) confirmed by provider — marked paid.`);
-      await notifySupers(w.cooperativeId, `✅ Poller: withdrawal *${w.id.slice(-6)}* for ${w.member.name} was confirmed ${"successful"} at the provider and is now marked paid.`);
+      actions.push(
+        `Withdrawal ${w.id.slice(-6)} (${formatBalance(w.amount)}) confirmed by provider — marked paid.`,
+      );
+      await notifySupers(
+        w.cooperativeId,
+        `✅ Poller: withdrawal *${w.id.slice(-6)}* for ${w.member.name} was confirmed ${"successful"} at the provider and is now marked paid.`,
+      );
     } else if (st.status === "failed") {
       const wallet = await prisma.wallet.findUnique({ where: { memberId: w.memberId } });
       await prisma.$transaction([
         ...(wallet
-          ? [prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: w.amount } } })]
+          ? [
+              prisma.wallet.update({
+                where: { id: wallet.id },
+                data: { balance: { increment: w.amount } },
+              }),
+            ]
           : []),
         prisma.withdrawalRequest.updateMany({
           where: { id: w.id, status: "processing" },
@@ -98,7 +110,10 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
         }),
       ]);
       actions.push(`Withdrawal ${w.id.slice(-6)} FAILED at provider — wallet refunded.`);
-      await notifySupers(w.cooperativeId, `↩️ Poller: withdrawal *${w.id.slice(-6)}* failed at the provider. Wallet refunded automatically.`);
+      await notifySupers(
+        w.cooperativeId,
+        `↩️ Poller: withdrawal *${w.id.slice(-6)}* failed at the provider. Wallet refunded automatically.`,
+      );
     }
   }
 
@@ -126,12 +141,18 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
         detail: `Death claim ${c.id.slice(-6)} confirmed by provider polling`,
       });
       actions.push(`Death claim ${c.id.slice(-6)} confirmed by provider — closed as paid.`);
-      await notifySupers(c.cooperativeId, `🕊️ Poller: death claim *${c.id.slice(-6)}* (${c.member.name}) confirmed paid by the provider.`);
+      await notifySupers(
+        c.cooperativeId,
+        `🕊️ Poller: death claim *${c.id.slice(-6)}* (${c.member.name}) confirmed paid by the provider.`,
+      );
     } else if (st.status === "failed") {
       const wallet = await prisma.wallet.findUnique({ where: { memberId: c.memberId } });
       if (amount > 0 && wallet) {
         await prisma.$transaction([
-          prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: amount } } }),
+          prisma.wallet.update({
+            where: { id: wallet.id },
+            data: { balance: { increment: amount } },
+          }),
           prisma.deathClaim.updateMany({
             where: { id: c.id, status: "processing" },
             data: { status: "validated" },
@@ -153,8 +174,13 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
         amount,
         detail: `Death claim ${c.id.slice(-6)} failed at provider — refunded ${amount} kobo`,
       });
-      actions.push(`Death claim ${c.id.slice(-6)} FAILED at provider — reverted${amount > 0 ? ", wallet refunded" : ""}.`);
-      await notifySupers(c.cooperativeId, `↩️ Poller: death claim *${c.id.slice(-6)}* failed at the provider — reverted${amount > 0 ? " and wallet refunded" : ""}.`);
+      actions.push(
+        `Death claim ${c.id.slice(-6)} FAILED at provider — reverted${amount > 0 ? ", wallet refunded" : ""}.`,
+      );
+      await notifySupers(
+        c.cooperativeId,
+        `↩️ Poller: death claim *${c.id.slice(-6)}* failed at the provider — reverted${amount > 0 ? " and wallet refunded" : ""}.`,
+      );
     }
   }
 
@@ -197,15 +223,26 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
         amount: disbursable,
         detail: `Loan ${loan.id.slice(-6)} disbursement confirmed by provider polling`,
       });
-      actions.push(`Loan ${loan.id.slice(-6)} disbursement confirmed by provider — marked disbursed.`);
-      await notifySupers(loan.cooperativeId, `🎉 Poller: loan *${loan.id.slice(-6)}* (${loan.member.name}) disbursement confirmed by the provider.`);
+      actions.push(
+        `Loan ${loan.id.slice(-6)} disbursement confirmed by provider — marked disbursed.`,
+      );
+      await notifySupers(
+        loan.cooperativeId,
+        `🎉 Poller: loan *${loan.id.slice(-6)}* (${loan.member.name}) disbursement confirmed by the provider.`,
+      );
     } else if (st.status === "failed") {
       await prisma.loan.updateMany({
         where: { id: loan.id, disbursementStatus: "processing" },
-        data: { disbursementStatus: "failed", disbursementError: st.error ?? "provider reported failure" },
+        data: {
+          disbursementStatus: "failed",
+          disbursementError: st.error ?? "provider reported failure",
+        },
       });
       actions.push(`Loan ${loan.id.slice(-6)} disbursement FAILED at provider — retryable.`);
-      await notifySupers(loan.cooperativeId, `↩️ Poller: loan *${loan.id.slice(-6)}* disbursement failed at the provider. Reply *pending* to review.`);
+      await notifySupers(
+        loan.cooperativeId,
+        `↩️ Poller: loan *${loan.id.slice(-6)}* disbursement failed at the provider. Reply *pending* to review.`,
+      );
     }
   }
 
@@ -255,18 +292,25 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
         targetId: p.id,
         detail: `${formatBalance(p.amount)} confirmed by provider polling`,
       });
-      actions.push(`Pay-anyone ${p.id.slice(-6)} (${formatBalance(p.amount)}) confirmed by provider — marked paid.`);
-      await notifySupers(p.cooperativeId, `💸 Poller: pay-anyone *${p.id.slice(-6)}* to ${p.beneficiaryName} was confirmed by the provider and booked.`);
+      actions.push(
+        `Pay-anyone ${p.id.slice(-6)} (${formatBalance(p.amount)}) confirmed by provider — marked paid.`,
+      );
+      await notifySupers(
+        p.cooperativeId,
+        `💸 Poller: pay-anyone *${p.id.slice(-6)}* to ${p.beneficiaryName} was confirmed by the provider and booked.`,
+      );
     } else if (st.status === "failed") {
       await prisma.externalPayment.updateMany({
         where: { id: p.id, status: "processing" },
         data: { status: "approved2", payoutReference: st.error ?? "provider reported failure" },
       });
       actions.push(`Pay-anyone ${p.id.slice(-6)} FAILED at provider — reverted for retry.`);
-      await notifySupers(p.cooperativeId, `↩️ Poller: pay-anyone *${p.id.slice(-6)}* failed at the provider — reverted so a super can retry the final approval.`);
+      await notifySupers(
+        p.cooperativeId,
+        `↩️ Poller: pay-anyone *${p.id.slice(-6)}* failed at the provider — reverted so a super can retry the final approval.`,
+      );
     }
   }
 
   return actions;
 }
-

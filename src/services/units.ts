@@ -24,7 +24,10 @@ export async function createUnit(
   await prisma.unit.create({
     data: { name: name.trim(), code: normalized, cooperativeId: admin.cooperativeId },
   });
-  return { ok: true, message: `Unit *${name.trim()}* (${normalized}) created. Members can join with *joinunit ${normalized}*.` };
+  return {
+    ok: true,
+    message: `Unit *${name.trim()}* (${normalized}) created. Members can join with *joinunit ${normalized}*.`,
+  };
 }
 
 /** Assign a unit admin using a member code. */
@@ -39,14 +42,20 @@ export async function setUnitAdmin(
   if (!admin) return { ok: false, message: "Only a cooperative admin can assign unit admins." };
 
   const unit = await prisma.unit.findUnique({
-    where: { cooperativeId_code: { cooperativeId: admin.cooperativeId, code: unitCode.trim().toUpperCase() } },
+    where: {
+      cooperativeId_code: {
+        cooperativeId: admin.cooperativeId,
+        code: unitCode.trim().toUpperCase(),
+      },
+    },
   });
   if (!unit) return { ok: false, message: `No unit with code *${unitCode}* in your cooperative.` };
 
   const member = await prisma.member.findFirst({
     where: { cooperativeId: admin.cooperativeId, code: memberCode.trim().toUpperCase() },
   });
-  if (!member) return { ok: false, message: `No member with code *${memberCode}* in your cooperative.` };
+  if (!member)
+    return { ok: false, message: `No member with code *${memberCode}* in your cooperative.` };
 
   await prisma.$transaction([
     prisma.unit.update({ where: { id: unit.id }, data: { adminMemberId: member.id } }),
@@ -59,16 +68,24 @@ export async function setUnitAdmin(
 }
 
 /** Member joins a unit by its code. */
-export async function joinUnit(phone: string, code: string): Promise<{ ok: boolean; message: string }> {
+export async function joinUnit(
+  phone: string,
+  code: string,
+): Promise<{ ok: boolean; message: string }> {
   const member = await prisma.member.findFirst({ where: { phone } });
   if (!member) {
     return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
   }
   const unit = await prisma.unit.findUnique({
-    where: { cooperativeId_code: { cooperativeId: member.cooperativeId, code: code.trim().toUpperCase() } },
+    where: {
+      cooperativeId_code: { cooperativeId: member.cooperativeId, code: code.trim().toUpperCase() },
+    },
   });
   if (!unit) {
-    return { ok: false, message: `No workplace with code *${code}* in your cooperative. Ask your admin for the code.` };
+    return {
+      ok: false,
+      message: `No workplace with code *${code}* in your cooperative. Ask your admin for the code.`,
+    };
   }
   if (member.unitId === unit.id) {
     return { ok: false, message: `You're already in *${unit.name}*.` };
@@ -102,7 +119,9 @@ export async function listUnits(phone: string): Promise<{ ok: boolean; message: 
 }
 
 /** The unit-scoped admin of a member, if any. */
-export async function unitAdminOf(member: { id: string }): Promise<{ unit: { id: string; name: string }; admin: { id: string } } | null> {
+export async function unitAdminOf(member: {
+  id: string;
+}): Promise<{ unit: { id: string; name: string }; admin: { id: string } } | null> {
   const unit = await prisma.unit.findFirst({ where: { adminMemberId: member.id } });
   if (!unit) return null;
   return { unit: { id: unit.id, name: unit.name }, admin: { id: member.id } };
@@ -114,7 +133,9 @@ export async function broadcastToScope(opts: {
   message: string;
   scope: "coop" | "unit";
 }): Promise<{ ok: boolean; message: string }> {
-  const admin = await prisma.member.findFirst({ where: { phone: opts.senderPhone, role: "admin" } });
+  const admin = await prisma.member.findFirst({
+    where: { phone: opts.senderPhone, role: "admin" },
+  });
   if (!admin) return { ok: false, message: "Only admins can broadcast." };
 
   let unitId: string | null = null;
@@ -122,7 +143,10 @@ export async function broadcastToScope(opts: {
   if (opts.scope === "unit") {
     const unit = await unitAdminOf(admin);
     if (!unit) {
-      return { ok: false, message: "You're not the admin of any workplace. Broadcast to the whole coop instead." };
+      return {
+        ok: false,
+        message: "You're not the admin of any workplace. Broadcast to the whole coop instead.",
+      };
     }
     unitId = unit.unit.id;
     unitName = unit.unit.name;

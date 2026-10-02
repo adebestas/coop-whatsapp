@@ -30,8 +30,7 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
   // Real phone for the provider KYC. WhatsApp members have it on `phone`;
   // Telegram members must have set `contactPhone` (collected at onboarding
   // or via the `phone <number>` command).
-  const kycPhone =
-    member.contactPhone ?? (member.phone.startsWith("tg:") ? null : member.phone);
+  const kycPhone = member.contactPhone ?? (member.phone.startsWith("tg:") ? null : member.phone);
   if (!kycPhone) {
     return {
       ok: false,
@@ -93,7 +92,7 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
 
 function otherThan(name?: string): string[] {
   const providers = ["monnify", "paystack"];
-  return providers.filter(p => p !== name);
+  return providers.filter((p) => p !== name);
 }
 
 /**
@@ -107,7 +106,9 @@ function otherThan(name?: string): string[] {
 export async function handlePaymentNotification(n: PaymentNotification): Promise<void> {
   if (n.status !== "successful") return;
   if (n.currency !== "NGN") {
-    console.warn(`[topup] rejected notification with currency ${n.currency} (expected NGN), txId=${n.transactionId}`);
+    console.warn(
+      `[topup] rejected notification with currency ${n.currency} (expected NGN), txId=${n.transactionId}`,
+    );
     return;
   }
 
@@ -136,7 +137,12 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
           description: `Wallet top-up via ${n.provider} (${n.transactionId})`,
           postings: [
             { account: "assets:bank", direction: "DEBIT" as const, amount },
-            { account: `member_wallet:${member.wallet!.id}`, direction: "CREDIT" as const, amount, memberId: member.id },
+            {
+              account: `member_wallet:${member.wallet!.id}`,
+              direction: "CREDIT" as const,
+              amount,
+              memberId: member.id,
+            },
           ],
           throwOnDuplicate: true,
         },
@@ -189,7 +195,8 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
 
   // Real-time credit alert: tell the member the moment their bank transfer lands.
   const newBalance = (member.wallet?.balance ?? 0) + amount;
-await notifyMember(member,
+  await notifyMember(
+    member,
     `✅ *Wallet credited!*\n\n${formatBalance(amount)} just landed in your savings via ${n.provider} (Ref ${n.transactionId.slice(-8)}).\n\nNew balance: *${formatBalance(newBalance)}*.`,
   ).catch((err) => {
     console.error("[topup] Failed to notify member of credit:", err);

@@ -65,7 +65,11 @@ export class RedisMutex {
    * @param timeoutMs - Max time to wait for mutex
    * @returns Result of fn, or throws if mutex could not be acquired
    */
-  static async withMutex<T>(key: string, fn: () => Promise<T>, timeoutMs: number = 10_000): Promise<T> {
+  static async withMutex<T>(
+    key: string,
+    fn: () => Promise<T>,
+    timeoutMs: number = 10_000,
+  ): Promise<T> {
     const acquired = await this.acquire(key, timeoutMs);
     if (!acquired) {
       throw new Error(`Could not acquire mutex for ${key} within ${timeoutMs}ms`);
@@ -90,7 +94,10 @@ export class RedisCircuitBreaker {
   /**
    * Mark a provider as down (unavailable) for a cooldown period.
    */
-  static async markDown(name: string, cooldownMs: number = this.DEFAULT_COOLDOWN_MS): Promise<void> {
+  static async markDown(
+    name: string,
+    cooldownMs: number = this.DEFAULT_COOLDOWN_MS,
+  ): Promise<void> {
     const client = getRedis();
     if (!client) return;
 

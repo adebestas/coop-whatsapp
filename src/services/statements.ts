@@ -6,7 +6,10 @@ import { formatBalance } from "./cooperative.js";
  * Lets every member see aggregate totals — no "money soup" worries.
  */
 export async function showLedger(phone: string): Promise<{ ok: boolean; message: string }> {
-  const member = await prisma.member.findFirst({ where: { phone }, include: { cooperative: true, unit: true } });
+  const member = await prisma.member.findFirst({
+    where: { phone },
+    include: { cooperative: true, unit: true },
+  });
   if (!member) {
     return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
   }
@@ -22,11 +25,19 @@ export async function showLedger(phone: string): Promise<{ ok: boolean; message:
   const [memberCount, contributions, loans, payouts, walletAgg, lastDividend] = await Promise.all([
     prisma.member.count({ where: memberScope }),
     prisma.contribution.aggregate({
-      where: { cooperativeId: coopId, ...(member.unit ? { member: unitScope } : {}), status: "confirmed" },
+      where: {
+        cooperativeId: coopId,
+        ...(member.unit ? { member: unitScope } : {}),
+        status: "confirmed",
+      },
       _sum: { amount: true },
     }),
     prisma.loan.aggregate({
-      where: { cooperativeId: coopId, ...(member.unit ? { member: unitScope } : {}), status: { in: ["approved", "disbursed"] } },
+      where: {
+        cooperativeId: coopId,
+        ...(member.unit ? { member: unitScope } : {}),
+        status: { in: ["approved", "disbursed"] },
+      },
       _sum: { balance: true },
     }),
     prisma.payout.aggregate({
@@ -49,7 +60,9 @@ export async function showLedger(phone: string): Promise<{ ok: boolean; message:
   ];
 
   if (lastDividend) {
-    lines.push(`🎉 Last dividend: ${lastDividend.rate}% → pool ${formatBalance(lastDividend.totalPool)} (${lastDividend.status})`);
+    lines.push(
+      `🎉 Last dividend: ${lastDividend.rate}% → pool ${formatBalance(lastDividend.totalPool)} (${lastDividend.status})`,
+    );
   }
 
   if (isUnitAdmin) {
@@ -62,7 +75,10 @@ export async function showLedger(phone: string): Promise<{ ok: boolean; message:
       lines.push(`• ${u.name} (${u.code}) — ${u._count.members} members`);
     }
   } else if (member.unit) {
-    lines.push(``, `Your workplace: *${member.unit.name}* (${member.unit.code}). Reply *history* for your personal statement.`);
+    lines.push(
+      ``,
+      `Your workplace: *${member.unit.name}* (${member.unit.code}). Reply *history* for your personal statement.`,
+    );
   }
 
   return { ok: true, message: lines.join("\n") };
@@ -72,24 +88,45 @@ export async function showLedger(phone: string): Promise<{ ok: boolean; message:
 export async function showHistory(phone: string): Promise<{ ok: boolean; message: string }> {
   const member = await prisma.member.findFirst({
     where: { phone },
-    include: { cooperative: true, wallet: true, contributions: true, dividendEntries: { include: { dividend: true } } },
+    include: {
+      cooperative: true,
+      wallet: true,
+      contributions: true,
+      dividendEntries: { include: { dividend: true } },
+    },
   });
   if (!member) {
     return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
   }
 
   const [loans, payouts] = await Promise.all([
-    prisma.loan.findMany({ where: { memberId: member.id }, orderBy: { createdAt: "desc" }, take: 5 }),
-    prisma.payout.findMany({ where: { memberId: member.id }, orderBy: { createdAt: "desc" }, take: 5 }),
+    prisma.loan.findMany({
+      where: { memberId: member.id },
+      orderBy: { createdAt: "desc" },
+      take: 5,
+    }),
+    prisma.payout.findMany({
+      where: { memberId: member.id },
+      orderBy: { createdAt: "desc" },
+      take: 5,
+    }),
   ]);
 
   const lines = [`*Your statement — ${member.cooperative.name}*`, ``];
-  const fmt = (d: Date) => d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+  const fmt = (d: Date) =>
+    d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 
   if (member.contributions.length > 0) {
     lines.push(`*Deposits (latest ${Math.min(member.contributions.length, 10)}):*`);
     for (const c of member.contributions.slice(-10).reverse()) {
-      const tag = c.type === "topup" ? "transfer" : c.type === "interest" ? "interest" : c.type === "dividend" ? "dividend" : "savings";
+      const tag =
+        c.type === "topup"
+          ? "transfer"
+          : c.type === "interest"
+            ? "interest"
+            : c.type === "dividend"
+              ? "dividend"
+              : "savings";
       lines.push(`• ${fmt(c.paidAt ?? c.createdAt)} — +${formatBalance(c.amount)} (${tag})`);
     }
   }
@@ -97,7 +134,9 @@ export async function showHistory(phone: string): Promise<{ ok: boolean; message
   if (loans.length > 0) {
     lines.push(``, `*Loans:*`);
     for (const l of loans) {
-      lines.push(`• ${l.status} — ${formatBalance(l.amount)} (${l.tenureMonths}mo) — balance ${formatBalance(l.balance)}`);
+      lines.push(
+        `• ${l.status} — ${formatBalance(l.amount)} (${l.tenureMonths}mo) — balance ${formatBalance(l.balance)}`,
+      );
     }
   }
 
@@ -120,8 +159,18 @@ export async function showHistory(phone: string): Promise<{ ok: boolean; message
 }
 
 const MONTHS = [
-  "january","february","march","april","may","june",
-  "july","august","september","october","november","december"
+  "january",
+  "february",
+  "march",
+  "april",
+  "may",
+  "june",
+  "july",
+  "august",
+  "september",
+  "october",
+  "november",
+  "december",
 ];
 
 function parseMonthYear(args: string): { year: number; month: number } | null {
@@ -141,15 +190,23 @@ function parseMonthYear(args: string): { year: number; month: number } | null {
   return null;
 }
 
-export async function getMonthlyStatement(phone: string, args: string): Promise<{ ok: boolean; message: string }> {
+export async function getMonthlyStatement(
+  phone: string,
+  args: string,
+): Promise<{ ok: boolean; message: string }> {
   const parsed = parseMonthYear(args);
-  if (!parsed) return { ok: false, message: "Usage: *statement august 2026* or just *statement* for current month." };
+  if (!parsed)
+    return {
+      ok: false,
+      message: "Usage: *statement august 2026* or just *statement* for current month.",
+    };
 
   const member = await prisma.member.findFirst({
     where: { phone },
     include: { cooperative: true, wallet: true },
   });
-  if (!member) return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
+  if (!member)
+    return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
 
   const start = new Date(parsed.year, parsed.month - 1, 1);
   const end = new Date(parsed.year, parsed.month, 0, 23, 59, 59, 999);
@@ -173,7 +230,9 @@ export async function getMonthlyStatement(phone: string, args: string): Promise<
       where: { memberId: member.id, createdAt: { gte: start, lte: end } },
       orderBy: { createdAt: "asc" },
     }),
-    prisma.loan.findFirst({ where: { memberId: member.id, status: { in: ["approved", "disbursed"] } } }),
+    prisma.loan.findFirst({
+      where: { memberId: member.id, status: { in: ["approved", "disbursed"] } },
+    }),
   ]);
 
   const totalContributions = contributions.reduce((s, c) => s + c.amount, 0);
@@ -214,12 +273,16 @@ export async function getMonthlyStatement(phone: string, args: string): Promise<
   return { ok: true, message: lines.join("\n") };
 }
 
-export async function getYearlyStatement(phone: string, year: number): Promise<{ ok: boolean; message: string }> {
+export async function getYearlyStatement(
+  phone: string,
+  year: number,
+): Promise<{ ok: boolean; message: string }> {
   const member = await prisma.member.findFirst({
     where: { phone },
     include: { cooperative: true, wallet: true },
   });
-  if (!member) return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
+  if (!member)
+    return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
 
   const start = new Date(year, 0, 1);
   const end = new Date(year, 11, 31, 23, 59, 59, 999);

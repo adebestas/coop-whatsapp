@@ -30,7 +30,17 @@ async function strData(cooperativeId: string): Promise<{ name: string; rows: str
   });
 
   const rows = [
-    ["Filing Ref", "Date", "Member Code", "Member Name", "Phone", "Amount (kobo)", "Amount", "Reason", "Status"],
+    [
+      "Filing Ref",
+      "Date",
+      "Member Code",
+      "Member Name",
+      "Phone",
+      "Amount (kobo)",
+      "Amount",
+      "Reason",
+      "Status",
+    ],
     ...strs.map((s) => [
       s.id,
       s.createdAt.toISOString(),
@@ -56,7 +66,20 @@ async function payeData(cooperativeId: string): Promise<{ name: string; rows: st
   });
 
   const rows = [
-    ["Record ID", "Member Code", "Member Name", "Period (MM/YYYY)", "Gross (kobo)", "Gross", "Tax (kobo)", "Tax", "Net (kobo)", "Net", "Status", "Remitted At"],
+    [
+      "Record ID",
+      "Member Code",
+      "Member Name",
+      "Period (MM/YYYY)",
+      "Gross (kobo)",
+      "Gross",
+      "Tax (kobo)",
+      "Tax",
+      "Net (kobo)",
+      "Net",
+      "Status",
+      "Remitted At",
+    ],
     ...records.map((r) => [
       r.id,
       r.member.code,
@@ -95,12 +118,13 @@ export async function runComplianceExport(
   const pdfName = `${base}.pdf`;
 
   await writeXlsx(join(EXPORT_DIR, xlsxName), sheet);
-  await writePdf(join(EXPORT_DIR, pdfName), `${coop?.name ?? "Cooperative"} — ${kind.toUpperCase()} compliance export`, sheet);
+  await writePdf(
+    join(EXPORT_DIR, pdfName),
+    `${coop?.name ?? "Cooperative"} — ${kind.toUpperCase()} compliance export`,
+    sheet,
+  );
 
-  const links = [
-    `📊 Excel: /api/export/${xlsxName}`,
-    `📄 PDF: /api/export/${pdfName}`,
-  ];
+  const links = [`📊 Excel: /api/export/${xlsxName}`, `📄 PDF: /api/export/${pdfName}`];
 
   await prisma.auditLog.create({
     data: {
@@ -127,7 +151,10 @@ async function writeXlsx(path: string, sheet: { name: string; rows: string[][] }
   ws.addRows(sheet.rows);
   ws.getRow(1).font = { bold: true };
   ws.columns.forEach((col) => {
-    col.width = Math.max(12, ...sheet.rows.map((r) => String(r[ws.columns.indexOf(col)] ?? "").length + 2));
+    col.width = Math.max(
+      12,
+      ...sheet.rows.map((r) => String(r[ws.columns.indexOf(col)] ?? "").length + 2),
+    );
   });
   await wb.xlsx.writeFile(path);
 }

@@ -60,7 +60,8 @@ export async function checkAnniversaries(now = new Date()): Promise<number> {
   let sent = 0;
   for (const m of members) {
     if (!m.createdAt) continue;
-    if (m.createdAt.getMonth() !== now.getMonth() || m.createdAt.getDate() !== now.getDate()) continue;
+    if (m.createdAt.getMonth() !== now.getMonth() || m.createdAt.getDate() !== now.getDate())
+      continue;
 
     const years = calculateYearsSince(m.createdAt, now);
     if (years < 1) continue;

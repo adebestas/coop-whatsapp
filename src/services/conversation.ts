@@ -28,7 +28,11 @@ const TIER_LIMITS = {
   tier2: { maxSingle: 500_000_00, dailyMax: 5_000_000_00 }, // ₦500k single, ₦5M daily (in kobo)
 } as const;
 
-async function checkTierLimit(phone: string, amount: number, memberId: string): Promise<string | null> {
+async function checkTierLimit(
+  phone: string,
+  amount: number,
+  memberId: string,
+): Promise<string | null> {
   const tier = "tier1"; // Default tier — upgrade via BVN verification
   const limits = TIER_LIMITS[tier];
   if (amount > limits.maxSingle) {
@@ -50,7 +54,13 @@ async function checkTierLimit(phone: string, amount: number, memberId: string): 
 
 import { z } from "zod"; // used by FlowDataSchema below
 
-import { buildMenu, buildFullMenu, buildAdminMenu, handleAwaitingInput, parseNaira } from "./handlers/session.js";
+import {
+  buildMenu,
+  buildFullMenu,
+  buildAdminMenu,
+  handleAwaitingInput,
+  parseNaira,
+} from "./handlers/session.js";
 import { handleJoinStart, handleOnboardStart } from "./handlers/join.js";
 import {
   handleBalance,
@@ -178,7 +188,13 @@ export const FlowDataSchema = z.object({
 export type FlowData = z.infer<typeof FlowDataSchema>;
 
 /** States where the user is typing a secret — flow-token guarded, Telegram messages deleted after read. */
-export const SECRET_STATES: BotState[] = ["awaiting_pin", "awaiting_pin_confirm", "awaiting_withdraw_pin", "awaiting_repay_pin", "awaiting_delete_account_pin"];
+export const SECRET_STATES: BotState[] = [
+  "awaiting_pin",
+  "awaiting_pin_confirm",
+  "awaiting_withdraw_pin",
+  "awaiting_repay_pin",
+  "awaiting_delete_account_pin",
+];
 
 /** Metadata about how a message arrived (channel-specific extras). */
 export interface MessageMeta {
@@ -237,7 +253,10 @@ export async function handleMessage(
     ip: meta.ip ?? "unknown",
   });
   if (!deviceCheck.ok) {
-    await sendText({ to: phone, text: `⚠️ ${deviceCheck.reason}\n\nIf this was you, try again in a few minutes.` });
+    await sendText({
+      to: phone,
+      text: `⚠️ ${deviceCheck.reason}\n\nIf this was you, try again in a few minutes.`,
+    });
     return;
   }
 
@@ -270,7 +289,10 @@ export async function handleMessage(
     if (member) {
       await prisma.member.update({ where: { id: member.id }, data: { optedOut: true } });
       invalidateMemberCache(phone, member.cooperativeId);
-      await sendText({ to: phone, text: "You have been opted out of all messages. Reply *optin* to re-enable." });
+      await sendText({
+        to: phone,
+        text: "You have been opted out of all messages. Reply *optin* to re-enable.",
+      });
     } else {
       await sendText({ to: phone, text: "You are not a registered member." });
     }
@@ -278,11 +300,20 @@ export async function handleMessage(
   }
   if (preCmd === "optin") {
     if (member) {
-      await prisma.member.update({ where: { id: member.id }, data: { optedOut: false, consentAt: member.consentAt ?? new Date() } });
+      await prisma.member.update({
+        where: { id: member.id },
+        data: { optedOut: false, consentAt: member.consentAt ?? new Date() },
+      });
       invalidateMemberCache(phone, member.cooperativeId);
-      await sendText({ to: phone, text: "Welcome back! You have been re-enabled for messages. Reply *menu* to see your options." });
+      await sendText({
+        to: phone,
+        text: "Welcome back! You have been re-enabled for messages. Reply *menu* to see your options.",
+      });
     } else {
-      await sendText({ to: phone, text: "You are not a registered member. Reply *join* to get started." });
+      await sendText({
+        to: phone,
+        text: "You are not a registered member. Reply *join* to get started.",
+      });
     }
     return;
   }
@@ -367,7 +398,7 @@ export async function handleMessage(
           break;
         }
       }
-      if (!await checkMoneyRateLimit(phone)) {
+      if (!(await checkMoneyRateLimit(phone))) {
         await sendText({
           to: phone,
           text: "⏳ You've made several money requests in the last hour. For your safety, please wait a little before trying again.",
@@ -399,7 +430,10 @@ export async function handleMessage(
     case "freeze":
     case "unfreeze": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const freezing = cmd === "freeze";
@@ -416,7 +450,10 @@ export async function handleMessage(
 
     case "payees": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const payees = await listPayees(member.id);
@@ -426,7 +463,10 @@ export async function handleMessage(
 
     case "addpayee": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const name = args[0];
@@ -440,18 +480,29 @@ export async function handleMessage(
         break;
       }
       const result = await savePayee(member.id, name, acct, bank);
-      await sendText({ to: phone, text: result.ok ? `✅ Payee *${result.payee.name}* saved. Reply *payees* to see your list.` : result.message });
+      await sendText({
+        to: phone,
+        text: result.ok
+          ? `✅ Payee *${result.payee.name}* saved. Reply *payees* to see your list.`
+          : result.message,
+      });
       break;
     }
 
     case "delpayee": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const target = args[0];
       if (!target) {
-        await sendText({ to: phone, text: "Usage: *delpayee <name or number>* — choose from your *payees* list." });
+        await sendText({
+          to: phone,
+          text: "Usage: *delpayee <name or number>* — choose from your *payees* list.",
+        });
         break;
       }
       const payees = await listPayees(member.id);
@@ -459,7 +510,10 @@ export async function handleMessage(
         ? payees[parseInt(target, 10) - 1]
         : payees.find((p) => p.name.includes(target.toLowerCase()));
       if (!picked) {
-        await sendText({ to: phone, text: "Couldn't find that payee. Reply *payees* to see your saved list." });
+        await sendText({
+          to: phone,
+          text: "Couldn't find that payee. Reply *payees* to see your saved list.",
+        });
         break;
       }
       await deletePayee(member.id, picked.id);
@@ -625,7 +679,10 @@ export async function handleMessage(
 
     case "votediv": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const voteResult = await castDividendVote(
@@ -638,7 +695,10 @@ export async function handleMessage(
 
     case "votedivstatus": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const voteResult = await dividendVoteStatus(member.cooperativeId);
@@ -657,11 +717,17 @@ export async function handleMessage(
     case "grievance": {
       const grievanceMsg = args.join(" ").trim();
       if (!grievanceMsg) {
-        await sendText({ to: phone, text: "Usage: *grievance <your complaint>* — submit a grievance to the cooperative admin." });
+        await sendText({
+          to: phone,
+          text: "Usage: *grievance <your complaint>* — submit a grievance to the cooperative admin.",
+        });
         break;
       }
       if (!member) {
-        await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+        await sendText({
+          to: phone,
+          text: "You need to be a member first. Reply *join* to get started.",
+        });
         break;
       }
       await prisma.grievance.create({
@@ -687,7 +753,10 @@ export async function handleMessage(
 
     case "byelaws": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+        await sendText({
+          to: phone,
+          text: "You need to be a member first. Reply *join* to get started.",
+        });
         break;
       }
       const coop = await prisma.cooperative.findUnique({
@@ -724,7 +793,7 @@ export async function handleMessage(
             });
             break;
           }
-          if (!await checkAIRateLimit(member.id)) {
+          if (!(await checkAIRateLimit(member.id))) {
             await sendText({
               to: phone,
               text: "⏳ You've reached the limit of 10 AI queries per hour. Please try again later.",
@@ -759,7 +828,7 @@ export async function handleMessage(
           }
         }
 
-        if (member && await checkAIRateLimit(member.id)) {
+        if (member && (await checkAIRateLimit(member.id))) {
           const suggestion = await suggestCommand(text);
           if (suggestion) {
             await prisma.session.upsert({
@@ -792,18 +861,14 @@ export async function handleMessage(
           });
           return;
         }
-        if (!await checkAIRateLimit(member.id)) {
+        if (!(await checkAIRateLimit(member.id))) {
           await sendText({
             to: phone,
             text: "⏳ You've reached the limit of 10 AI queries per hour. Please try again later.",
           });
           return;
         }
-        const supportResponse = await generateSupportResponse(
-          text,
-          member.name,
-          member.role,
-        );
+        const supportResponse = await generateSupportResponse(text, member.name, member.role);
         await sendText({ to: phone, text: supportResponse });
         return;
       }
@@ -817,9 +882,16 @@ export async function handleMessage(
   }
 }
 
-async function handleClass(phone: string, member: { id: string } | null, args: string[]): Promise<void> {
+async function handleClass(
+  phone: string,
+  member: { id: string } | null,
+  args: string[],
+): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
     return;
   }
 
@@ -829,7 +901,10 @@ async function handleClass(phone: string, member: { id: string } | null, args: s
   if (arg === "progress") {
     const progress = await prisma.memberProgress.findUnique({ where: { memberId: member.id } });
     if (!progress) {
-      await sendText({ to: phone, text: "You haven't started the financial class yet. Reply *class* to begin." });
+      await sendText({
+        to: phone,
+        text: "You haven't started the financial class yet. Reply *class* to begin.",
+      });
       return;
     }
     const completed = JSON.parse(progress.completedLessons) as number[];
@@ -846,7 +921,10 @@ async function handleClass(phone: string, member: { id: string } | null, args: s
     const lessonNum = parseInt(arg.replace("replay ", ""));
     const lesson = getLesson(lessonNum);
     if (!lesson) {
-      await sendText({ to: phone, text: "Invalid lesson number. Reply *class progress* to see your progress." });
+      await sendText({
+        to: phone,
+        text: "Invalid lesson number. Reply *class progress* to see your progress.",
+      });
       return;
     }
     await sendText({ to: phone, text: lesson.content });
@@ -864,7 +942,10 @@ async function handleClass(phone: string, member: { id: string } | null, args: s
   // Get current lesson
   const lesson = getLesson(progress.currentLesson);
   if (!lesson) {
-    await sendText({ to: phone, text: "🎉 You've completed all lessons! Reply *class progress* to review." });
+    await sendText({
+      to: phone,
+      text: "🎉 You've completed all lessons! Reply *class progress* to review.",
+    });
     return;
   }
 
@@ -873,7 +954,10 @@ async function handleClass(phone: string, member: { id: string } | null, args: s
 
 async function handleNextLesson(phone: string, member: { id: string } | null): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
     return;
   }
 
@@ -924,19 +1008,26 @@ async function handleNextLesson(phone: string, member: { id: string } | null): P
   }
 }
 
-async function handleReserveInfo(phone: string, member: { cooperativeId: string } | null): Promise<void> {
+async function handleReserveInfo(
+  phone: string,
+  member: { cooperativeId: string } | null,
+): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
     return;
   }
 
   const info = await getReserveInfo(member.cooperativeId);
-  
-  const growthText = info.growthPercent > 0
-    ? `📈 *+${info.growthPercent}%* growth this quarter`
-    : info.growthPercent < 0
-      ? `📉 *${info.growthPercent}%* this quarter`
-      : `➡️ No change this quarter`;
+
+  const growthText =
+    info.growthPercent > 0
+      ? `📈 *+${info.growthPercent}%* growth this quarter`
+      : info.growthPercent < 0
+        ? `📉 *${info.growthPercent}%* this quarter`
+        : `➡️ No change this quarter`;
 
   const body = [
     `🛡️ *Reserve Fund Dashboard*`,
@@ -954,18 +1045,35 @@ async function handleReserveInfo(phone: string, member: { cooperativeId: string 
   await sendText({ to: phone, text: body.join("\n") });
 }
 
-async function handleAnniversary(phone: string, member: { id: string; name: string; createdAt: Date; wallet?: { totalSaved: number } | null } | null): Promise<void> {
+async function handleAnniversary(
+  phone: string,
+  member: {
+    id: string;
+    name: string;
+    createdAt: Date;
+    wallet?: { totalSaved: number } | null;
+  } | null,
+): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
     return;
   }
 
   const now = new Date();
   const diffMs = now.getTime() - member.createdAt.getTime();
   const years = Math.floor(diffMs / (365.25 * 24 * 60 * 60 * 1000));
-  const months = Math.floor((diffMs % (365.25 * 24 * 60 * 60 * 1000)) / (30.44 * 24 * 60 * 60 * 1000));
+  const months = Math.floor(
+    (diffMs % (365.25 * 24 * 60 * 60 * 1000)) / (30.44 * 24 * 60 * 60 * 1000),
+  );
 
-  const regDate = member.createdAt.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
+  const regDate = member.createdAt.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
 
   const message = [
     `📅 *Your Anniversary Info*`,

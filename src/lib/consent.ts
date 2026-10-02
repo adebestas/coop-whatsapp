@@ -9,4 +9,5 @@ export const MESSAGE_CONSENT_PROMPT =
   "This includes savings alerts, loan updates, and important notices.\n\n" +
   "Reply *YES* to opt-in or *NO* to skip. (You can still use commands like *balance* either way.)";
 
-export const MESSAGE_CONSENT_REASK = "Please reply *YES* to receive messages from your cooperative, or *NO* to skip them.";
+export const MESSAGE_CONSENT_REASK =
+  "Please reply *YES* to receive messages from your cooperative, or *NO* to skip them.";

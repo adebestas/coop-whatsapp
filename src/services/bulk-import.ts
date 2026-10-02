@@ -70,14 +70,32 @@ export async function bulkImportMembers(
   } else if (ext === "xlsx" || ext === "xls") {
     rows = await parseExcel(buffer);
   } else {
-    return { ok: false, imported: 0, skipped: 0, errors: ["Unsupported file type. Use .csv or .xlsx."], message: "Unsupported file type." };
+    return {
+      ok: false,
+      imported: 0,
+      skipped: 0,
+      errors: ["Unsupported file type. Use .csv or .xlsx."],
+      message: "Unsupported file type.",
+    };
   }
 
   if (rows.length === 0) {
-    return { ok: false, imported: 0, skipped: 0, errors: ["No valid rows found. Ensure columns: Name, Phone."], message: "No rows found." };
+    return {
+      ok: false,
+      imported: 0,
+      skipped: 0,
+      errors: ["No valid rows found. Ensure columns: Name, Phone."],
+      message: "No rows found.",
+    };
   }
   if (rows.length > MAX_ROWS) {
-    return { ok: false, imported: 0, skipped: 0, errors: [`Too many rows (max ${MAX_ROWS}). File has ${rows.length}.`], message: "Too many rows." };
+    return {
+      ok: false,
+      imported: 0,
+      skipped: 0,
+      errors: [`Too many rows (max ${MAX_ROWS}). File has ${rows.length}.`],
+      message: "Too many rows.",
+    };
   }
 
   const existingPhones = new Set(
@@ -90,7 +108,14 @@ export async function bulkImportMembers(
   );
 
   const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
-  if (!coop) return { ok: false, imported: 0, skipped: 0, errors: ["Cooperative not found"], message: "Cooperative not found." };
+  if (!coop)
+    return {
+      ok: false,
+      imported: 0,
+      skipped: 0,
+      errors: ["Cooperative not found"],
+      message: "Cooperative not found.",
+    };
 
   let imported = 0;
   let skipped = 0;
@@ -136,9 +161,10 @@ export async function bulkImportMembers(
     }
   }
 
-  const msg = imported > 0
-    ? `${imported} member(s) imported. ${skipped > 0 ? `${skipped} skipped (existing).` : ""} ${errors.length > 0 ? `${errors.length} errors.` : ""}`
-    : `No members imported. ${skipped > 0 ? `${skipped} already exist.` : ""} ${errors.length > 0 ? errors[0] : ""}`;
+  const msg =
+    imported > 0
+      ? `${imported} member(s) imported. ${skipped > 0 ? `${skipped} skipped (existing).` : ""} ${errors.length > 0 ? `${errors.length} errors.` : ""}`
+      : `No members imported. ${skipped > 0 ? `${skipped} already exist.` : ""} ${errors.length > 0 ? errors[0] : ""}`;
 
   return { ok: imported > 0, imported, skipped, errors, message: msg };
 }

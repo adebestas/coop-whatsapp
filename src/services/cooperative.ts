@@ -54,14 +54,20 @@ export async function findOrCreateMember(
 ): Promise<JoinResult> {
   const coop = await prisma.cooperative.findUnique({ where: { code: coopCode } });
   if (!coop) {
-    return { ok: false, message: `We couldn't find a cooperative with code *${coopCode}*. Check the code and try again.` };
+    return {
+      ok: false,
+      message: `We couldn't find a cooperative with code *${coopCode}*. Check the code and try again.`,
+    };
   }
 
   const existing = await prisma.member.findUnique({
     where: { cooperativeId_phone: { cooperativeId: coop.id, phone } },
   });
   if (existing) {
-    return { ok: false, message: `You're already a member of *${coop.name}*. Reply *menu* to see what you can do.` };
+    return {
+      ok: false,
+      message: `You're already a member of *${coop.name}*. Reply *menu* to see what you can do.`,
+    };
   }
 
   // Platform lock: one account per person per cooperative. A member who
@@ -194,10 +200,16 @@ export async function getMemberByPhone(phone: string, cooperativeId?: string) {
  * unrelated scenarios. Any production code that wants to credit a wallet must
  * go through a verified payment — never through this function.
  */
-export async function createContribution(phone: string, amount: number): Promise<{ ok: boolean; message: string }> {
+export async function createContribution(
+  phone: string,
+  amount: number,
+): Promise<{ ok: boolean; message: string }> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    return { ok: false, message: "You need to join a cooperative first. Reply *join <code>* to get started." };
+    return {
+      ok: false,
+      message: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    };
   }
   if (!member.wallet) {
     return { ok: false, message: "No wallet found. Please contact your cooperative admin." };
@@ -207,7 +219,10 @@ export async function createContribution(phone: string, amount: number): Promise
   }
   const coopConfig = await getCoopConfig(member.cooperativeId);
   if (amount < coopConfig.minContribution) {
-    return { ok: false, message: `Minimum save amount is *${formatBalance(coopConfig.minContribution)}*.` };
+    return {
+      ok: false,
+      message: `Minimum save amount is *${formatBalance(coopConfig.minContribution)}*.`,
+    };
   }
   if (amount > LIMITS.MAX_SAVE) {
     return { ok: false, message: `Maximum save amount is *${formatBalance(LIMITS.MAX_SAVE)}*.` };
@@ -264,7 +279,9 @@ export async function createCooperative(data: {
   registrationNumber?: string;
 }) {
   if (!data.registrationNumber) {
-    console.warn(`[compliance] Cooperative "${data.name}" created without a registration number. Registration number is required under CAMA for legal recognition.`);
+    console.warn(
+      `[compliance] Cooperative "${data.name}" created without a registration number. Registration number is required under CAMA for legal recognition.`,
+    );
   }
   return prisma.cooperative.create({ data });
 }

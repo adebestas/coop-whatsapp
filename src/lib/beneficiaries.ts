@@ -2,7 +2,16 @@ import { prisma } from "./prisma.js";
 import { resolveBankCode } from "./banks.js";
 
 export type PayeeResult =
-  | { ok: true; payee: { id: string; name: string; accountNumber: string; bankCode: string; bankName: string | null } }
+  | {
+      ok: true;
+      payee: {
+        id: string;
+        name: string;
+        accountNumber: string;
+        bankCode: string;
+        bankName: string | null;
+      };
+    }
   | { ok: false; message: string };
 
 export interface FavoritePayeeRecord {
@@ -33,7 +42,10 @@ export async function savePayee(
 ): Promise<PayeeResult> {
   const cleanName = normalizeName(name);
   if (!NAME_RE.test(cleanName)) {
-    return { ok: false, message: "Please use a short label (letters and numbers only, up to 40 characters)." };
+    return {
+      ok: false,
+      message: "Please use a short label (letters and numbers only, up to 40 characters).",
+    };
   }
   if (!ACCT_RE.test(accountNumber.replace(/\s/g, ""))) {
     return { ok: false, message: "Please provide a valid 10-digit bank account number." };
@@ -47,7 +59,10 @@ export async function savePayee(
     where: { memberId_name: { memberId, name: cleanName } },
   });
   if (existing) {
-    return { ok: false, message: `You already have a saved payee called *${cleanName}*. Delete it first, or use a different name.` };
+    return {
+      ok: false,
+      message: `You already have a saved payee called *${cleanName}*. Delete it first, or use a different name.`,
+    };
   }
 
   const payee = await prisma.favoritePayee.create({
@@ -82,7 +97,10 @@ export function getPayeesText(payees: FavoritePayeeRecord[]): string {
   return `*👥 Your saved payees*\n\n${lines.join("\n")}\n\nReply *addpayee <name> <account> <bank>*, or a number to use one.`;
 }
 
-export async function resolvePayee(memberId: string, query: string): Promise<FavoritePayeeRecord | null> {
+export async function resolvePayee(
+  memberId: string,
+  query: string,
+): Promise<FavoritePayeeRecord | null> {
   const trimmed = query.trim();
   if (!trimmed) return null;
 
@@ -113,7 +131,10 @@ async function bumpPayee(id: string): Promise<FavoritePayeeRecord | null> {
   }
 }
 
-export async function deletePayee(memberId: string, id: string): Promise<{ ok: boolean; message?: string }> {
+export async function deletePayee(
+  memberId: string,
+  id: string,
+): Promise<{ ok: boolean; message?: string }> {
   try {
     await prisma.favoritePayee.deleteMany({ where: { id, memberId } });
     return { ok: true };

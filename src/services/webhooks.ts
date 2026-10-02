@@ -33,7 +33,9 @@ const SIGNATURE_HEADERS: Record<string, string> = {
   "x-paystack-signature": "paystack",
 };
 
-export function detectProvider(headers: Record<string, string | string[] | undefined>): string | null {
+export function detectProvider(
+  headers: Record<string, string | string[] | undefined>,
+): string | null {
   for (const [header, provider] of Object.entries(SIGNATURE_HEADERS)) {
     const value = headers[header];
     if ((Array.isArray(value) ? value[0] : value)?.length) return provider;
@@ -100,7 +102,10 @@ export async function processPaymentWebhook(
       // structured 5xx so the provider retries — never throw, which would
       // surface as a bare 500 with no trace of the attempt.
       console.error(`[webhook] failed to record delivery ${eventId}:`, err);
-      return { httpStatus: 500, body: { status: "failed", error: "could not record webhook event" } };
+      return {
+        httpStatus: 500,
+        body: { status: "failed", error: "could not record webhook event" },
+      };
     }
     // Already seen this delivery. Only ack as "duplicate" when it fully
     // succeeded end-to-end; otherwise a previously FAILED (or still
@@ -115,7 +120,9 @@ export async function processPaymentWebhook(
       return { httpStatus: 200, body: { status: "duplicate", event: eventId } };
     }
     // Reprocess failed/received deliveries instead of acknowledging them.
-    console.log(`[webhook] re-processing previously ${existing?.status ?? "?"} delivery: ${eventId}`);
+    console.log(
+      `[webhook] re-processing previously ${existing?.status ?? "?"} delivery: ${eventId}`,
+    );
   }
 
   // 4. Process synchronously — a crash here marks the event failed and the

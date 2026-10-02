@@ -38,10 +38,7 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
       continue;
     }
 
-    if (
-      message.type === "interactive" &&
-      message.interactive?.type === "nfm_reply"
-    ) {
+    if (message.type === "interactive" && message.interactive?.type === "nfm_reply") {
       let fields: Record<string, unknown> = {};
       try {
         fields = JSON.parse(message.interactive.nfm_reply?.response_json ?? "{}");

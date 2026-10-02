@@ -353,7 +353,7 @@ export interface BackupVerifyResult {
 
 /**
  * Verify a backup by restoring to a scratch database and comparing checksums.
- * 
+ *
  * This function:
  * 1. Fetches the latest backup from Cloudinary (or local)
  * 2. Restores to a temporary database
@@ -392,7 +392,7 @@ export async function verifyBackupRestore(
   // For now, we verify against the live database itself
   // In production, this would restore from Cloudinary backup to a scratch DB
   // and compare against the live DB
-  
+
   try {
     // Compute checksums for all critical tables
     for (const table of CRITICAL_TABLES) {
@@ -401,7 +401,7 @@ export async function verifyBackupRestore(
         const countResult = await (sourcePrisma as any)[table.toLowerCase()].count({
           where: { cooperativeId },
         });
-        
+
         tablesVerified.push(table);
         rowCounts[table] = countResult;
         checksums[table] = checksum;
@@ -415,10 +415,14 @@ export async function verifyBackupRestore(
             rowCounts[table] = countResult;
             checksums[table] = checksum;
           } catch (e) {
-            errors.push(`Failed to checksum ${table}: ${e instanceof Error ? e.message : String(e)}`);
+            errors.push(
+              `Failed to checksum ${table}: ${e instanceof Error ? e.message : String(e)}`,
+            );
           }
         } else {
-          errors.push(`Failed to checksum ${table}: ${err instanceof Error ? err.message : String(err)}`);
+          errors.push(
+            `Failed to checksum ${table}: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
     }
@@ -430,12 +434,12 @@ export async function verifyBackupRestore(
     // 4. Compute checksums on temp DB
     // 5. Compare with source checksums
     // 6. Clean up temp DB
-    
+
     // For now, we just verify the live data is self-consistent
     // and return the checksums for manual comparison later
 
     const ok = errors.length === 0;
-    
+
     return {
       ok,
       cooperativeId: coop.id,
@@ -445,7 +449,7 @@ export async function verifyBackupRestore(
       rowCounts,
       checksums,
       errors,
-      message: ok 
+      message: ok
         ? `Verified ${tablesVerified.length} critical tables for ${coop.name}. All checksums computed successfully.`
         : `Verification completed with ${errors.length} error(s). See errors for details.`,
     };
@@ -492,7 +496,9 @@ export async function runBackupVerification(): Promise<BackupVerifyResult[]> {
           ).catch(() => {});
         } else {
           // Log success
-          console.log(`[backup-verify] ${coop.name}: ${result.tablesVerified.length} tables verified, ${result.errors.length} errors`);
+          console.log(
+            `[backup-verify] ${coop.name}: ${result.tablesVerified.length} tables verified, ${result.errors.length} errors`,
+          );
         }
       } catch (err) {
         results.push({
@@ -527,10 +533,13 @@ export async function runBackupVerification(): Promise<BackupVerifyResult[]> {
  */
 export async function storeVerificationResult(result: BackupVerifyResult): Promise<void> {
   // In a full implementation, save to a dedicated table
-  console.log("[backup-verify] Stored result:", JSON.stringify({
-    cooperativeId: result.cooperativeId,
-    ok: result.ok,
-    tablesVerified: result.tablesVerified.length,
-    verifiedAt: result.verifiedAt,
-  }));
+  console.log(
+    "[backup-verify] Stored result:",
+    JSON.stringify({
+      cooperativeId: result.cooperativeId,
+      ok: result.ok,
+      tablesVerified: result.tablesVerified.length,
+      verifiedAt: result.verifiedAt,
+    }),
+  );
 }

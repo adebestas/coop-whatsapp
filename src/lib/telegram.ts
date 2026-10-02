@@ -35,10 +35,7 @@ export interface TelegramUpdate {
 function convertToTelegramHTML(text: string): string {
   // Escape HTML special characters BEFORE applying formatting tags.
   // Otherwise user-supplied <, >, & could inject HTML or break parsing.
-  let result = text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  let result = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   result = result.replace(/\*([^*]+)\*/g, "<b>$1</b>");
   result = result.replace(/_([^_]+)_/g, "<i>$1</i>");
   result = result.replace(/~([^~]+)~/g, "<s>$1</s>");
@@ -124,7 +121,10 @@ export async function getTelegramUpdates(offset: number, timeout = 30): Promise<
  * including ones sent by the user. Used to make typed PINs/OTPs vanish
  * from chat history right after they are read.
  */
-export async function deleteTelegramMessage(chatId: string | number, messageId: number): Promise<boolean> {
+export async function deleteTelegramMessage(
+  chatId: string | number,
+  messageId: number,
+): Promise<boolean> {
   if (!config.telegram.token) return false;
   const res = await fetch(`${API_BASE}/bot${config.telegram.token}/deleteMessage`, {
     method: "POST",

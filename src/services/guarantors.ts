@@ -26,7 +26,12 @@ export interface GuarantorResult {
  * Auto-generates a unique confirmation code and sends it to the guarantor's
  * WhatsApp. The guarantor must reply `confirm <code>` to accept.
  */
-export async function addGuarantor(phone: string, loanId: string, memberCode: string, cooperativeId?: string): Promise<GuarantorResult> {
+export async function addGuarantor(
+  phone: string,
+  loanId: string,
+  memberCode: string,
+  cooperativeId?: string,
+): Promise<GuarantorResult> {
   const loan = await prisma.loan.findUnique({
     where: { id: loanId },
     include: { guarantors: true, member: true },
@@ -41,7 +46,10 @@ export async function addGuarantor(phone: string, loanId: string, memberCode: st
     return { ok: false, message: "That loan doesn't belong to you." };
   }
   if (loan.status !== "pending") {
-    return { ok: false, message: `This loan can no longer accept guarantors (status: ${loan.status}).` };
+    return {
+      ok: false,
+      message: `This loan can no longer accept guarantors (status: ${loan.status}).`,
+    };
   }
 
   const normalized = memberCode.trim().toUpperCase();
@@ -49,10 +57,16 @@ export async function addGuarantor(phone: string, loanId: string, memberCode: st
   // belong to the SAME cooperative — never a cross-tenant member.
   const guarantor = await prisma.member.findUnique({ where: { code: normalized } });
   if (!guarantor) {
-    return { ok: false, message: `No member found with code *${normalized}*. Ask the member to reply *code* to see theirs.` };
+    return {
+      ok: false,
+      message: `No member found with code *${normalized}*. Ask the member to reply *code* to see theirs.`,
+    };
   }
   if (guarantor.cooperativeId !== member.cooperativeId) {
-    return { ok: false, message: `No member found with code *${normalized}*. Codes are cooperative-specific — ask a member of *your* cooperative.` };
+    return {
+      ok: false,
+      message: `No member found with code *${normalized}*. Codes are cooperative-specific — ask a member of *your* cooperative.`,
+    };
   }
   if (guarantor.id === loan.memberId) {
     return { ok: false, message: "You can't be your own guarantor. Pick another member." };
@@ -154,7 +168,10 @@ export async function confirmGuarantee(phone: string, code: string): Promise<Gua
     include: { member: true, loan: { include: { member: true, guarantors: true } } },
   });
   if (!g) {
-    return { ok: false, message: `No guarantor request matches code *${normalized}*. Check and try again.` };
+    return {
+      ok: false,
+      message: `No guarantor request matches code *${normalized}*. Check and try again.`,
+    };
   }
   if (g.member.phone !== phone) {
     return { ok: false, message: "This confirmation code belongs to another member's WhatsApp." };

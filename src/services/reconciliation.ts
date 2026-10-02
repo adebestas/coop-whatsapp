@@ -24,7 +24,13 @@ export async function runWalletReconciliation(
 ): Promise<ReconciliationReport> {
   const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
   if (!coop) {
-    return { ok: false, message: "Cooperative not found.", discrepancy: 0, status: "error", logId: "" };
+    return {
+      ok: false,
+      message: "Cooperative not found.",
+      discrepancy: 0,
+      status: "error",
+      logId: "",
+    };
   }
 
   // 1. Sum of all wallet balances for this cooperative
@@ -76,22 +82,23 @@ export async function runWalletReconciliation(
   });
 
   // Use aggregate + count instead of loading all rows into memory
-  const [activeLoanCountAgg, activeLoanSumAgg, pendingWithdrawalCountAgg, pendingWithdrawalSumAgg] = await Promise.all([
-    prisma.loan.count({
-      where: { cooperativeId, status: { in: ["approved", "disbursed"] } },
-    }),
-    prisma.loan.aggregate({
-      where: { cooperativeId, status: { in: ["approved", "disbursed"] } },
-      _sum: { amount: true },
-    }),
-    prisma.withdrawalRequest.count({
-      where: { cooperativeId, status: { in: ["pending", "admin_approved"] } },
-    }),
-    prisma.withdrawalRequest.aggregate({
-      where: { cooperativeId, status: { in: ["pending", "admin_approved"] } },
-      _sum: { amount: true },
-    }),
-  ]);
+  const [activeLoanCountAgg, activeLoanSumAgg, pendingWithdrawalCountAgg, pendingWithdrawalSumAgg] =
+    await Promise.all([
+      prisma.loan.count({
+        where: { cooperativeId, status: { in: ["approved", "disbursed"] } },
+      }),
+      prisma.loan.aggregate({
+        where: { cooperativeId, status: { in: ["approved", "disbursed"] } },
+        _sum: { amount: true },
+      }),
+      prisma.withdrawalRequest.count({
+        where: { cooperativeId, status: { in: ["pending", "admin_approved"] } },
+      }),
+      prisma.withdrawalRequest.aggregate({
+        where: { cooperativeId, status: { in: ["pending", "admin_approved"] } },
+        _sum: { amount: true },
+      }),
+    ]);
   const activeLoanCount = activeLoanCountAgg;
   const activeLoanTotal = activeLoanSumAgg._sum.amount ?? 0;
   const pendingWithdrawalCount = pendingWithdrawalCountAgg;
@@ -133,7 +140,9 @@ export async function runWalletReconciliation(
 
   if (discrepancy === 0) {
     lines.push(`Member wallets:      ${formatBalance(totalWalletBalances)}`);
-    lines.push(`Statutory funds:     ${formatBalance(statutoryFunds)} (reserve ${formatBalance(funds.reserve)} + education ${formatBalance(funds.education)} + development ${formatBalance(funds.development)})`);
+    lines.push(
+      `Statutory funds:     ${formatBalance(statutoryFunds)} (reserve ${formatBalance(funds.reserve)} + education ${formatBalance(funds.education)} + development ${formatBalance(funds.development)})`,
+    );
     lines.push(`Outstanding loans:   ${formatBalance(outstandingLoans)}`);
     lines.push(`Expected (bank):     ${formatBalance(expectedBalance)}`);
     lines.push(`Actual (bank):       ${formatBalance(bankBalance)}`);
@@ -159,14 +168,14 @@ export async function runWalletReconciliation(
   lines.push("");
   lines.push(`Member count: ${memberCount}`);
   lines.push(`Active loans: ${activeLoanCount} (${formatBalance(activeLoanTotal)} disbursed)`);
-  lines.push(`Pending withdrawals: ${pendingWithdrawalCount} (${formatBalance(pendingWithdrawalTotal)})`);
+  lines.push(
+    `Pending withdrawals: ${pendingWithdrawalCount} (${formatBalance(pendingWithdrawalTotal)})`,
+  );
   lines.push("");
   lines.push("_Note: Discrepancies may include unrecorded journal entries._");
 
   if (lastLog) {
-    const daysAgo = Math.floor(
-      (Date.now() - lastLog.createdAt.getTime()) / (24 * 60 * 60 * 1000),
-    );
+    const daysAgo = Math.floor((Date.now() - lastLog.createdAt.getTime()) / (24 * 60 * 60 * 1000));
     lines.push("");
     lines.push(
       `Last reconciliation: ${lastLog.createdAt.toISOString().slice(0, 10)} (${daysAgo === 0 ? "today" : `${daysAgo} day${daysAgo > 1 ? "s" : ""} ago`})`,
@@ -209,7 +218,7 @@ export async function getReserveReport(cooperativeId: string): Promise<string> {
   // NOTE: Uses cumulative net profit; should use per-period (e.g. annual) profit for accurate reserve requirements.
   const pnl = await computePnl(cooperativeId);
   const netProfit = pnl.netProfit;
-  const requiredReserve = Math.floor(Math.max(0, netProfit) * 0.20);
+  const requiredReserve = Math.floor(Math.max(0, netProfit) * 0.2);
   const isCompliant = netProfit <= 0 || currentBalance >= requiredReserve;
 
   const lastAlloc = allocations[0];
@@ -223,7 +232,9 @@ export async function getReserveReport(cooperativeId: string): Promise<string> {
   if (lastAlloc) {
     const date = lastAlloc.createdAt.toISOString().slice(0, 10);
     const ref = lastAlloc.referenceId ? ` (batch ${lastAlloc.referenceId})` : "";
-    lines.push(`Last allocation:    ${date} (${formatBalance(lastAlloc.amount)} from ${lastAlloc.source}${ref})`);
+    lines.push(
+      `Last allocation:    ${date} (${formatBalance(lastAlloc.amount)} from ${lastAlloc.source}${ref})`,
+    );
   } else {
     lines.push(`Last allocation:    (none yet)`);
   }
@@ -233,7 +244,9 @@ export async function getReserveReport(cooperativeId: string): Promise<string> {
     lines.push(`Net profit:         ${formatBalance(netProfit)}`);
     lines.push(`Required (20%):     ${formatBalance(requiredReserve)}`);
     lines.push(``);
-    lines.push(`Status: ${isCompliant ? "✅ Compliant (reserve >= 20% of net profit)" : "⚠️ Below minimum — reserve < 20% of net profit"}`);
+    lines.push(
+      `Status: ${isCompliant ? "✅ Compliant (reserve >= 20% of net profit)" : "⚠️ Below minimum — reserve < 20% of net profit"}`,
+    );
   } else {
     lines.push(`Status: ✅ No profit yet — reserve requirement not applicable`);
   }

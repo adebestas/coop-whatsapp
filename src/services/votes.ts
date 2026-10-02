@@ -39,7 +39,12 @@ function tallyChannels(ballots: { channel?: string | null }[]): string {
   return parts.length ? parts.join(", ") : "no votes yet";
 }
 
-function electionTypeLabel(vote: { electionType: string; kind: string; position?: string | null; unitId?: string | null }): string {
+function electionTypeLabel(vote: {
+  electionType: string;
+  kind: string;
+  position?: string | null;
+  unitId?: string | null;
+}): string {
   if (vote.electionType === "workplace" || vote.kind === "unit") return "🏢 Workplace Election";
   if (vote.electionType === "executive" || vote.kind === "exec") return "🏛️ Executive Election";
   return "🗳️ General Vote";
@@ -54,7 +59,10 @@ async function buildLiveResultsMessage(voteId: string): Promise<string> {
     where: { id: voteId },
     include: {
       candidates: {
-        include: { member: { select: { name: true } }, ballots: { select: { id: true, channel: true } } },
+        include: {
+          member: { select: { name: true } },
+          ballots: { select: { id: true, channel: true } },
+        },
       },
     },
   });
@@ -160,17 +168,25 @@ export async function startVote(
     }
     const unit = await prisma.unit.findUnique({
       where: {
-        cooperativeId_code: { cooperativeId: actor.cooperativeId, code: scopeArg.trim().toUpperCase() },
+        cooperativeId_code: {
+          cooperativeId: actor.cooperativeId,
+          code: scopeArg.trim().toUpperCase(),
+        },
       },
     });
-    if (!unit) return { ok: false, message: `No unit with code *${scopeArg}* in your cooperative.` };
+    if (!unit)
+      return { ok: false, message: `No unit with code *${scopeArg}* in your cooperative.` };
     unitId = unit.id;
     position = `Admin — ${unit.name}`;
     voteTitle = title.trim() || `Admin for ${unit.name}`;
   } else {
     electionType = "executive";
     if (!scopeArg) {
-      return { ok: false, message: "Usage: *startvote exec <position> <title>* e.g. *startvote exec President Executive election 2026*." };
+      return {
+        ok: false,
+        message:
+          "Usage: *startvote exec <position> <title>* e.g. *startvote exec President Executive election 2026*.",
+      };
     }
     position = scopeArg.trim();
     voteTitle = title.trim() || `${position} election`;
@@ -181,7 +197,10 @@ export async function startVote(
     where: { cooperativeId: actor.cooperativeId, unitId, kind, status: "open" },
   });
   if (open) {
-    return { ok: false, message: `There's already an open ${kind} election (*${open.id.slice(-6)}*). Close it first with *closevote ${open.id.slice(-6)}*.` };
+    return {
+      ok: false,
+      message: `There's already an open ${kind} election (*${open.id.slice(-6)}*). Close it first with *closevote ${open.id.slice(-6)}*.`,
+    };
   }
 
   const vote = await prisma.vote.create({
@@ -227,20 +246,26 @@ export async function startVote(
 }
 
 /** Admin adds a candidate to an open election. */
-export async function addCandidate(actorPhone: string, voteCode: string, memberCode: string): Promise<VoteResult> {
+export async function addCandidate(
+  actorPhone: string,
+  voteCode: string,
+  memberCode: string,
+): Promise<VoteResult> {
   const actor = await prisma.member.findFirst({
     where: { phone: actorPhone, role: { in: ["admin", "superadmin"] } },
   });
   if (!actor) return { ok: false, message: "Only an admin can add candidates." };
 
   const vote = await findVote(voteCode);
-  if (!vote || vote.cooperativeId !== actor.cooperativeId) return { ok: false, message: "Election not found." };
+  if (!vote || vote.cooperativeId !== actor.cooperativeId)
+    return { ok: false, message: "Election not found." };
   if (vote.status !== "open") return { ok: false, message: "This election is closed." };
 
   const candidate = await prisma.member.findFirst({
     where: { cooperativeId: actor.cooperativeId, code: memberCode.trim().toUpperCase() },
   });
-  if (!candidate) return { ok: false, message: `No member with code *${memberCode}* in your cooperative.` };
+  if (!candidate)
+    return { ok: false, message: `No member with code *${memberCode}* in your cooperative.` };
   if (vote.unitId && candidate.unitId !== vote.unitId) {
     return { ok: false, message: "Candidates for a unit election must belong to that unit." };
   }
@@ -255,7 +280,11 @@ export async function addCandidate(actorPhone: string, voteCode: string, memberC
 
 /** A member casts their ballot for a candidate (by member code).
  *  Nominees ARE allowed to vote — one person, one ballot per election. */
-export async function castVote(voterPhone: string, voteCode: string, memberCode: string): Promise<VoteResult> {
+export async function castVote(
+  voterPhone: string,
+  voteCode: string,
+  memberCode: string,
+): Promise<VoteResult> {
   // Rate limit voting attempts
   const voteAllowed = await checkVoteRateLimit(voterPhone);
   if (!voteAllowed) {
@@ -266,7 +295,8 @@ export async function castVote(voterPhone: string, voteCode: string, memberCode:
   if (!voter) return { ok: false, message: "You need to join a cooperative first." };
 
   const vote = await findVote(voteCode);
-  if (!vote || vote.cooperativeId !== voter.cooperativeId) return { ok: false, message: "Election not found." };
+  if (!vote || vote.cooperativeId !== voter.cooperativeId)
+    return { ok: false, message: "Election not found." };
   if (vote.status !== "open") return { ok: false, message: "This election is closed." };
   if (vote.unitId && voter.unitId !== vote.unitId) {
     return { ok: false, message: "Only members of this unit can vote in its election." };
@@ -280,7 +310,10 @@ export async function castVote(voterPhone: string, voteCode: string, memberCode:
     include: { member: { select: { name: true } } },
   });
   if (!candidate) {
-    return { ok: false, message: `That member isn't a candidate. Reply *results ${vote.id.slice(-6)}* to see the candidates.` };
+    return {
+      ok: false,
+      message: `That member isn't a candidate. Reply *results ${vote.id.slice(-6)}* to see the candidates.`,
+    };
   }
 
   try {
@@ -298,7 +331,10 @@ export async function castVote(voterPhone: string, voteCode: string, memberCode:
 
   await broadcastLiveResults(vote.id);
 
-  return { ok: true, message: `🗳️ Vote recorded for *${candidate.member.name}*. Thank you for participating.` };
+  return {
+    ok: true,
+    message: `🗳️ Vote recorded for *${candidate.member.name}*. Thank you for participating.`,
+  };
 }
 
 /** Show live results (tallies without revealing individual ballots). */
@@ -326,7 +362,8 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
   if (!actor) return { ok: false, message: "Only an admin can close an election." };
 
   const vote = await findVote(voteCode);
-  if (!vote || vote.cooperativeId !== actor.cooperativeId) return { ok: false, message: "Election not found." };
+  if (!vote || vote.cooperativeId !== actor.cooperativeId)
+    return { ok: false, message: "Election not found." };
   if (vote.status !== "open") return { ok: false, message: "This election is already closed." };
 
   const tally = await prisma.voteCandidate.findMany({
@@ -334,7 +371,10 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
     include: { member: { select: { name: true } }, ballots: { select: { id: true } } },
   });
   if (tally.length === 0) {
-    await prisma.vote.update({ where: { id: vote.id }, data: { status: "closed", closedAt: new Date() } });
+    await prisma.vote.update({
+      where: { id: vote.id },
+      data: { status: "closed", closedAt: new Date() },
+    });
     return { ok: true, message: "Election closed with no candidates. No winner." };
   }
 
@@ -360,7 +400,12 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
   }
 
   let extra = "";
-  if (!tied && quorumMet && (vote.kind === "unit" || vote.electionType === "workplace") && vote.unitId) {
+  if (
+    !tied &&
+    quorumMet &&
+    (vote.kind === "unit" || vote.electionType === "workplace") &&
+    vote.unitId
+  ) {
     const unit = await prisma.unit.findUnique({ where: { id: vote.unitId } });
     if (unit) {
       await prisma.$transaction([
@@ -369,7 +414,12 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
       ]);
       extra = `\n\n🎉 ${winner.member.name} is now the elected admin of *${unit.name}* (${unit.code}).`;
     }
-  } else if (!tied && !quorumMet && (vote.kind === "unit" || vote.electionType === "workplace") && vote.unitId) {
+  } else if (
+    !tied &&
+    !quorumMet &&
+    (vote.kind === "unit" || vote.electionType === "workplace") &&
+    vote.unitId
+  ) {
     extra = `\n\n⚠️ Quorum was not met, so *${winner.member.name}* is NOT installed as ${vote.unitId ? "admin" : "executive"}. Per cooperative rules, the election must reach quorum to be binding — please conduct a fresh election.`;
   } else if (!tied && (vote.kind === "exec" || vote.electionType === "executive")) {
     extra = `\n\n🎉 ${winner.member.name} is elected *${vote.position ?? "executive"}*.`;
@@ -395,7 +445,10 @@ async function tallyMessage(voteId: string): Promise<string> {
     where: { id: voteId },
     include: {
       candidates: {
-        include: { member: { select: { name: true } }, ballots: { select: { id: true, channel: true } } },
+        include: {
+          member: { select: { name: true } },
+          ballots: { select: { id: true, channel: true } },
+        },
       },
     },
   });
@@ -430,7 +483,16 @@ async function findVote(shortId: string) {
 export async function getActiveElectionsForNewMember(
   cooperativeId: string,
   unitId: string | null,
-): Promise<Array<{ id: string; title: string; position: string | null; electionType: string; kind: string; createdAt: Date }>> {
+): Promise<
+  Array<{
+    id: string;
+    title: string;
+    position: string | null;
+    electionType: string;
+    kind: string;
+    createdAt: Date;
+  }>
+> {
   const votes = await prisma.vote.findMany({
     where: {
       cooperativeId,
@@ -442,7 +504,14 @@ export async function getActiveElectionsForNewMember(
         ...(unitId ? [{ unitId }] : []),
       ],
     },
-    select: { id: true, title: true, position: true, electionType: true, kind: true, createdAt: true },
+    select: {
+      id: true,
+      title: true,
+      position: true,
+      electionType: true,
+      kind: true,
+      createdAt: true,
+    },
     orderBy: { createdAt: "desc" },
   });
   return votes;
@@ -450,15 +519,15 @@ export async function getActiveElectionsForNewMember(
 
 /** Member-facing "elections" command: list open elections the member is
  *  eligible for, with live tallies. */
-export async function memberElectionsMessage(cooperativeId: string, unitId: string | null): Promise<string> {
+export async function memberElectionsMessage(
+  cooperativeId: string,
+  unitId: string | null,
+): Promise<string> {
   const open = await prisma.vote.findMany({
     where: {
       cooperativeId,
       status: "open",
-      OR: [
-        { unitId: null },
-        ...(unitId ? [{ unitId }] : []),
-      ],
+      OR: [{ unitId: null }, ...(unitId ? [{ unitId }] : [])],
     },
     orderBy: { createdAt: "desc" },
     take: 20,

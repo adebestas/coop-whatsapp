@@ -20,7 +20,9 @@ export async function uploadToS3(filePath: string, key: string): Promise<boolean
       ? `${BACKUP_ENDPOINT}/${BACKUP_BUCKET}/${key}`
       : `https://${BACKUP_BUCKET}.s3.${BACKUP_REGION}.amazonaws.com/${key}`;
 
-    const payloadHash = createHash("sha256").update(await readFile(filePath)).digest("hex");
+    const payloadHash = createHash("sha256")
+      .update(await readFile(filePath))
+      .digest("hex");
     const canonicalRequest = [
       "PUT",
       `/${key}`,

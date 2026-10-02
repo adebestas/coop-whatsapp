@@ -13,7 +13,10 @@ export interface BuyPollResult {
 /** Resolve short ID to full purchase poll ID, ensuring uniqueness. */
 async function resolvePollId(shortId: string, cooperativeId: string) {
   // Try exact match first
-  const exact = await prisma.purchasePoll.findUnique({ where: { id: shortId }, select: { id: true } });
+  const exact = await prisma.purchasePoll.findUnique({
+    where: { id: shortId },
+    select: { id: true },
+  });
   if (exact) return exact.id;
 
   // Try suffix match — require exactly one result
@@ -35,14 +38,21 @@ export async function startBuyPoll(
   title: string,
 ): Promise<BuyPollResult> {
   if (!title || title.length < 3) {
-    return { ok: false, message: "Give it a title: *startbuyvote <title>* — e.g. *startbuyvote New office generator*." };
+    return {
+      ok: false,
+      message:
+        "Give it a title: *startbuyvote <title>* — e.g. *startbuyvote New office generator*.",
+    };
   }
 
   const open = await prisma.purchasePoll.findFirst({
     where: { cooperativeId: actor.cooperativeId, status: "open" },
   });
   if (open) {
-    return { ok: false, message: `Poll *${open.id.slice(-6)}* ("${open.title}") is still open. Close it first with *closebuyvote ${open.id.slice(-6)}*.` };
+    return {
+      ok: false,
+      message: `Poll *${open.id.slice(-6)}* ("${open.title}") is still open. Close it first with *closebuyvote ${open.id.slice(-6)}*.`,
+    };
   }
 
   const poll = await prisma.purchasePoll.create({
@@ -84,7 +94,11 @@ export async function addPollOption(
   if (!poll.ok) return poll;
 
   if (!name || !Number.isFinite(cost) || cost <= 0) {
-    return { ok: false, message: "Use *addoption <poll id> <item> <cost> <account> <bank>* — e.g. *addoption abc123 Generator 450000 0123456789 GTB*." };
+    return {
+      ok: false,
+      message:
+        "Use *addoption <poll id> <item> <cost> <account> <bank>* — e.g. *addoption abc123 Generator 450000 0123456789 GTB*.",
+    };
   }
 
   const count = await prisma.pollOption.count({ where: { pollId: poll.poll!.id } });
@@ -204,7 +218,10 @@ export async function closeBuyPoll(
       targetId: poll.id,
       detail: `winner: ${winner.name}; payanyone: ${payment.paymentId?.slice(-6) ?? "n/a"}`,
     });
-    return { ok: true, message: `${summary}\n\nA pay-anyone request was raised for it — it needs *3 super admin approvals*.` };
+    return {
+      ok: true,
+      message: `${summary}\n\nA pay-anyone request was raised for it — it needs *3 super admin approvals*.`,
+    };
   }
 
   await audit({
@@ -233,12 +250,13 @@ export async function listBuyPolls(cooperativeId: string) {
   });
 }
 
-async function findOpenPoll(
-  cooperativeId: string,
-  shortId: string,
-): Promise<BuyPollResult> {
+async function findOpenPoll(cooperativeId: string, shortId: string): Promise<BuyPollResult> {
   const pollId = await resolvePollId(shortId, cooperativeId);
-  if (!pollId) return { ok: false, message: "Open buy-vote not found. Check the id (or it's already closed)." };
+  if (!pollId)
+    return {
+      ok: false,
+      message: "Open buy-vote not found. Check the id (or it's already closed).",
+    };
   const poll = await prisma.purchasePoll.findFirst({
     where: { id: pollId, cooperativeId, status: "open" },
     select: { id: true, title: true },

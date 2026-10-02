@@ -34,10 +34,7 @@ const workerMap: Map<string, Worker> = new Map();
 /**
  * Process a queue with a worker
  */
-export function processQueue<T>(
-  queueName: string,
-  handler: (job: Job<T>) => Promise<void>,
-): void {
+export function processQueue<T>(queueName: string, handler: (job: Job<T>) => Promise<void>): void {
   const redis = getRedis();
   if (!redis) {
     console.warn(`[Queue] Redis unavailable, worker not started: ${queueName}`);

@@ -25,7 +25,11 @@ export async function handleJoinStart(phone: string, args: string[]): Promise<vo
   if (args[0]) {
     await prisma.session.upsert({
       where: { phone },
-      create: { phone, state: "awaiting_name", data: JSON.stringify({ joinCode: args[0].toUpperCase() }) },
+      create: {
+        phone,
+        state: "awaiting_name",
+        data: JSON.stringify({ joinCode: args[0].toUpperCase() }),
+      },
       update: { state: "awaiting_name", data: JSON.stringify({ joinCode: args[0].toUpperCase() }) },
     });
     await sendText({

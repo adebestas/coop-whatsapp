@@ -38,7 +38,10 @@ export async function exportElectionPdf(
     return { ok: false, message: "Election not found." };
   }
   if (vote.status !== "closed") {
-    return { ok: false, message: "Election results PDF is only available after the election is closed." };
+    return {
+      ok: false,
+      message: "Election results PDF is only available after the election is closed.",
+    };
   }
 
   const unitName = vote.unitId
@@ -128,7 +131,10 @@ function writeElectionPdf(
     doc.text(`Quorum required: ${vote.quorumRequired}% of active members`);
 
     if (vote.winnerId && winner) {
-      doc.moveDown(1).fontSize(12).text(`Winner: ${winner.name}  (${winner.code || "—"})`, { underline: true });
+      doc
+        .moveDown(1)
+        .fontSize(12)
+        .text(`Winner: ${winner.name}  (${winner.code || "—"})`, { underline: true });
     }
 
     doc.moveDown(1).fontSize(10).text("Voters", { underline: true });

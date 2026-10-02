@@ -52,7 +52,8 @@ export async function postJournal(
   );
   // Balanced to the kobo — no half-posted entries ever reach the books.
   if (totals.d !== totals.c || totals.d <= 0) {
-    if (opts.throwOnDuplicate) throw new Error(`journal posting unbalanced (D=${totals.d} C=${totals.c})`);
+    if (opts.throwOnDuplicate)
+      throw new Error(`journal posting unbalanced (D=${totals.d} C=${totals.c})`);
     return { posted: false, reason: "unbalanced" };
   }
 

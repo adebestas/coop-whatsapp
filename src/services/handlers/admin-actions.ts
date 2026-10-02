@@ -15,7 +15,10 @@ import { issueSecretChallenge } from "./session.js";
 export async function handleValidateClaim(phone: string, args: string[]): Promise<void> {
   const code = args[0];
   if (!code) {
-    await sendText({ to: phone, text: "To validate a death claim, reply *validate <claim id>* with the id you received." });
+    await sendText({
+      to: phone,
+      text: "To validate a death claim, reply *validate <claim id>* with the id you received.",
+    });
     return;
   }
   const result = await validateClaim(phone, code);
@@ -26,7 +29,10 @@ export async function handleConfirmClaim(phone: string, args: string[]): Promise
   const claimCode = args[0];
   const code = args[1];
   if (!claimCode || !code) {
-    await sendText({ to: phone, text: "Usage: *confirmclaim <claim id> <code>* — the code was sent to your phone via SMS." });
+    await sendText({
+      to: phone,
+      text: "Usage: *confirmclaim <claim id> <code>* — the code was sent to your phone via SMS.",
+    });
     return;
   }
   const result = await confirmFamily(phone, claimCode, code);
@@ -36,7 +42,10 @@ export async function handleConfirmClaim(phone: string, args: string[]): Promise
 export async function handleConfirm(phone: string, args: string[]): Promise<void> {
   const code = args[0];
   if (!code) {
-    await sendText({ to: phone, text: "To accept a guarantor request, reply *confirm <code>* with the code you received." });
+    await sendText({
+      to: phone,
+      text: "To accept a guarantor request, reply *confirm <code>* with the code you received.",
+    });
     return;
   }
   const result = await confirmGuarantee(phone, code);
@@ -46,7 +55,10 @@ export async function handleConfirm(phone: string, args: string[]): Promise<void
 export async function handleCode(phone: string, cooperativeId?: string): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   await sendText({
@@ -55,10 +67,17 @@ export async function handleCode(phone: string, cooperativeId?: string): Promise
   });
 }
 
-export async function handlePhone(phone: string, args: string[], cooperativeId?: string): Promise<void> {
+export async function handlePhone(
+  phone: string,
+  args: string[],
+  cooperativeId?: string,
+): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   const contactPhone = normalizePhone(args.join(""));
@@ -73,13 +92,19 @@ export async function handlePhone(phone: string, args: string[], cooperativeId?:
     where: { id: member.id },
     data: { contactPhone },
   });
-  await sendText({ to: phone, text: `Thanks! Your phone is now set to *${contactPhone}*. Reply *fund* to get your funding account.` });
+  await sendText({
+    to: phone,
+    text: `Thanks! Your phone is now set to *${contactPhone}*. Reply *fund* to get your funding account.`,
+  });
 }
 
 export async function handleSupport(phone: string, text: string): Promise<void> {
   const message = text.trim().replace(/^\s*support\s*/i, "");
   if (message.length < 10) {
-    await sendText({ to: phone, text: "Please describe your issue in at least 10 characters. Try *support <your message>*." });
+    await sendText({
+      to: phone,
+      text: "Please describe your issue in at least 10 characters. Try *support <your message>*.",
+    });
     return;
   }
   const result = await createTicket(phone, message);
@@ -100,7 +125,10 @@ export async function handleStatement(phone: string, args: string[]): Promise<vo
   const text = args.join(" ").trim().toLowerCase();
   const bareYear = /^\d{4}$/.test(text) ? parseInt(text, 10) : NaN;
 
-  if (text.startsWith("yearly") || (!Number.isNaN(bareYear) && bareYear >= 2000 && bareYear <= 2100)) {
+  if (
+    text.startsWith("yearly") ||
+    (!Number.isNaN(bareYear) && bareYear >= 2000 && bareYear <= 2100)
+  ) {
     let year: number;
     if (!Number.isNaN(bareYear)) {
       year = bareYear;
@@ -128,7 +156,10 @@ export async function handleStatement(phone: string, args: string[]): Promise<vo
 export async function handlePosts(phone: string, cooperativeId?: string): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   await sendText({ to: phone, text: await listPosts(member.cooperativeId) });
@@ -149,7 +180,11 @@ export async function handleTickets(phone: string): Promise<void> {
   await sendText({ to: phone, text: result.message });
 }
 
-export async function handleResolve(phone: string, args: string[], cooperativeId?: string): Promise<void> {
+export async function handleResolve(
+  phone: string,
+  args: string[],
+  cooperativeId?: string,
+): Promise<void> {
   const id = args[0];
   const note = args.slice(1).join(" ");
   if (!id) {
@@ -177,7 +212,12 @@ export async function handleResolve(phone: string, args: string[], cooperativeId
       }
       await prisma.grievance.update({
         where: { id: grievance.id },
-        data: { status: "resolved", response: note, resolvedById: adminMember.id, resolvedAt: new Date() },
+        data: {
+          status: "resolved",
+          response: note,
+          resolvedById: adminMember.id,
+          resolvedAt: new Date(),
+        },
       });
       await sendText({ to: phone, text: `✅ Grievance *${grievance.id.slice(-6)}* resolved.` });
       return;
@@ -189,7 +229,10 @@ export async function handleResolve(phone: string, args: string[], cooperativeId
   await sendText({ to: phone, text: result.message });
 }
 
-export async function handleInsights(phone: string, member: { role: string; cooperativeId: string } | null): Promise<void> {
+export async function handleInsights(
+  phone: string,
+  member: { role: string; cooperativeId: string } | null,
+): Promise<void> {
   if (!member || (member.role !== "admin" && member.role !== "superadmin")) {
     await sendText({ to: phone, text: "Only admins can view financial insights." });
     return;
@@ -199,16 +242,25 @@ export async function handleInsights(phone: string, member: { role: string; coop
   await sendText({ to: phone, text: insights });
 }
 
-export async function handleContextHelp(phone: string, member: { id: string } | null): Promise<void> {
+export async function handleContextHelp(
+  phone: string,
+  member: { id: string } | null,
+): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "Please register first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "Please register first. Reply *join <code>* to get started.",
+    });
     return;
   }
   const helpText = await generateContextualHelp(member.id);
   await sendText({ to: phone, text: helpText });
 }
 
-export async function handleRisk(phone: string, member: { role: string; cooperativeId: string } | null): Promise<void> {
+export async function handleRisk(
+  phone: string,
+  member: { role: string; cooperativeId: string } | null,
+): Promise<void> {
   if (!member || (member.role !== "admin" && member.role !== "superadmin")) {
     await sendText({ to: phone, text: "Only admins can view risk assessments." });
     return;
@@ -221,11 +273,17 @@ export async function handleRisk(phone: string, member: { role: string; cooperat
 export async function handleDeleteAccount(phone: string, cooperativeId?: string): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   if (!member.pin) {
-    await sendText({ to: phone, text: "No PIN set on your account. Please contact your cooperative admin to delete your account." });
+    await sendText({
+      to: phone,
+      text: "No PIN set on your account. Please contact your cooperative admin to delete your account.",
+    });
     return;
   }
   await issueSecretChallenge(
@@ -239,18 +297,27 @@ export async function handleDeleteAccount(phone: string, cooperativeId?: string)
 export async function handleResetPin(phone: string, cooperativeId?: string): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   if (!member.pin) {
-    await sendText({ to: phone, text: "No PIN set on your account. Please contact your cooperative admin to reset your PIN." });
+    await sendText({
+      to: phone,
+      text: "No PIN set on your account. Please contact your cooperative admin to reset your PIN.",
+    });
     return;
   }
   // Check rate limit for PIN reset requests (max 3 per 10 minutes per phone)
   const { checkOtpRateLimit } = await import("../../lib/cache.js");
   const rateLimit = await checkOtpRateLimit(phone);
   if (!rateLimit.allowed) {
-    await sendText({ to: phone, text: rateLimit.message ?? "Too many PIN reset requests. Please wait before trying again." });
+    await sendText({
+      to: phone,
+      text: rateLimit.message ?? "Too many PIN reset requests. Please wait before trying again.",
+    });
     return;
   }
 
@@ -275,10 +342,17 @@ export async function handleResetPin(phone: string, cooperativeId?: string): Pro
   });
 }
 
-export async function handleResetPinCode(phone: string, code: string, _cooperativeId?: string): Promise<void> {
+export async function handleResetPinCode(
+  phone: string,
+  code: string,
+  _cooperativeId?: string,
+): Promise<void> {
   const session = await prisma.session.findUnique({ where: { phone } });
   if (!session || session.state !== "awaiting_reset_pin") {
-    await sendText({ to: phone, text: "No active PIN reset request found. Reply *resetpin* to start a new one." });
+    await sendText({
+      to: phone,
+      text: "No active PIN reset request found. Reply *resetpin* to start a new one.",
+    });
     return;
   }
 
@@ -291,7 +365,10 @@ export async function handleResetPinCode(phone: string, code: string, _cooperati
 
   const { verifyPinResetCode } = await import("../../lib/security.js");
   if (!verifyPinResetCode(code, data.resetCode)) {
-    await sendText({ to: phone, text: "Invalid or expired reset code. Please try again or request a new one." });
+    await sendText({
+      to: phone,
+      text: "Invalid or expired reset code. Please try again or request a new one.",
+    });
     return;
   }
 
@@ -307,10 +384,17 @@ export async function handleResetPinCode(phone: string, code: string, _cooperati
   });
 }
 
-export async function handleNewPin(phone: string, newPin: string, cooperativeId?: string): Promise<void> {
+export async function handleNewPin(
+  phone: string,
+  newPin: string,
+  cooperativeId?: string,
+): Promise<void> {
   const session = await prisma.session.findUnique({ where: { phone } });
   if (!session || session.state !== "awaiting_new_pin") {
-    await sendText({ to: phone, text: "No active PIN reset session. Reply *resetpin* to start over." });
+    await sendText({
+      to: phone,
+      text: "No active PIN reset session. Reply *resetpin* to start over.",
+    });
     return;
   }
 
@@ -334,10 +418,17 @@ export async function handleNewPin(phone: string, newPin: string, cooperativeId?
 
   await prisma.session.update({ where: { phone }, data: { state: "idle", data: "{}" } });
 
-  await sendText({ to: phone, text: "✅ PIN has been reset successfully. You can now use your new PIN for transactions." });
+  await sendText({
+    to: phone,
+    text: "✅ PIN has been reset successfully. You can now use your new PIN for transactions.",
+  });
 }
 
-export async function handleDeleteAccountPin(phone: string, pin: string, cooperativeId?: string): Promise<void> {
+export async function handleDeleteAccountPin(
+  phone: string,
+  pin: string,
+  cooperativeId?: string,
+): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
     await sendText({ to: phone, text: "Account not found." });
@@ -345,7 +436,10 @@ export async function handleDeleteAccountPin(phone: string, pin: string, coopera
   }
   const pinCheck = await verifyMemberPin(member, pin);
   if (!pinCheck.ok) {
-    await sendText({ to: phone, text: "Incorrect PIN. Account deletion cancelled. Reply *menu* to start again." });
+    await sendText({
+      to: phone,
+      text: "Incorrect PIN. Account deletion cancelled. Reply *menu* to start again.",
+    });
     return;
   }
 
@@ -387,7 +481,10 @@ export async function handleDeleteAccountPin(phone: string, pin: string, coopera
 export async function handleMyData(phone: string, cooperativeId?: string): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
 

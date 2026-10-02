@@ -100,7 +100,10 @@ async function setTelegramCommands(): Promise<void> {
     { command: "approve", description: "Admin: approve a loan" },
     { command: "reject", description: "Admin: reject a loan" },
     { command: "approvewdraw", description: "Admin: approve a withdrawal" },
-    { command: "startvote", description: "Admin: start an election (/startvote exec President ...)" },
+    {
+      command: "startvote",
+      description: "Admin: start an election (/startvote exec President ...)",
+    },
     { command: "candidate", description: "Admin: add election candidate (/candidate ID CODE)" },
     { command: "closevote", description: "Admin: close & tally an election" },
     { command: "startbuyvote", description: "Admin: start a buy poll (/startbuyvote title)" },
@@ -163,7 +166,8 @@ async function handlePinCallback(callbackQuery: {
 
   if (!SECRET_STATES.includes(state)) {
     // Stale / non-secret card — tear it down quietly.
-    if (sessionData.keyboardMsgId) await deleteTelegramMessage(chatId, sessionData.keyboardMsgId).catch(() => {});
+    if (sessionData.keyboardMsgId)
+      await deleteTelegramMessage(chatId, sessionData.keyboardMsgId).catch(() => {});
     return;
   }
 
@@ -176,7 +180,8 @@ async function handlePinCallback(callbackQuery: {
   } else if (action === "ok") {
     // Submit the accumulated PIN through the normal awaiting-input path.
     if (buf) {
-      if (sessionData.keyboardMsgId) await deleteTelegramMessage(chatId, sessionData.keyboardMsgId).catch(() => {});
+      if (sessionData.keyboardMsgId)
+        await deleteTelegramMessage(chatId, sessionData.keyboardMsgId).catch(() => {});
       await prisma.session.update({
         where: { phone: userId },
         data: { data: JSON.stringify({ ...sessionData, tgPinBuf: "" }) },
@@ -190,7 +195,12 @@ async function handlePinCallback(callbackQuery: {
   const dots = "●".repeat(buf.length) + "○".repeat(4 - buf.length);
   const header = sessionData.tgPinPrompt ?? "Enter your PIN";
   if (sessionData.keyboardMsgId) {
-    await editTelegramMessage(chatId, sessionData.keyboardMsgId, `${header}\n\nPIN:\n${dots}`, buildPinKeyboard()).catch(() => {});
+    await editTelegramMessage(
+      chatId,
+      sessionData.keyboardMsgId,
+      `${header}\n\nPIN:\n${dots}`,
+      buildPinKeyboard(),
+    ).catch(() => {});
   }
   await prisma.session.update({
     where: { phone: userId },
@@ -232,9 +242,11 @@ export async function startTelegramBot(): Promise<void> {
         offset = Math.max(offset, update.update_id + 1);
         if (update.callback_query) {
           const cb = update.callback_query;
-          void withTelegramUserMutex(`tg:${cb.from.id}`, () => handlePinCallback(cb)).catch((err) => {
-            console.error(`[telegram] handlePinCallback failed for ${cb.from.id}`, err);
-          });
+          void withTelegramUserMutex(`tg:${cb.from.id}`, () => handlePinCallback(cb)).catch(
+            (err) => {
+              console.error(`[telegram] handlePinCallback failed for ${cb.from.id}`, err);
+            },
+          );
           continue;
         }
         const message = update.message;

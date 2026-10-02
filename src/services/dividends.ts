@@ -3,16 +3,22 @@ import { formatBalance } from "./cooperative.js";
 import { computePnl, recordLedger } from "./ledger.js";
 
 // Nigerian cooperative standard deduction rates
-const RESERVE_FUND_RATE = 0.20; // 20%
+const RESERVE_FUND_RATE = 0.2; // 20%
 const EDUCATION_FUND_RATE = 0.02; // 2%
 const DEVELOPMENT_FUND_RATE = 0.05; // 5%
 
 /** Compute an instant dividend preview for any caller (real-time).
  *  Standard cooperative formula: a percentage of the accumulated NET PROFIT,
  *  shared proportionally to each member's lifetime savings. */
-export async function computeDividendPreview(phone: string, rate: number): Promise<{ ok: boolean; message: string }> {
+export async function computeDividendPreview(
+  phone: string,
+  rate: number,
+): Promise<{ ok: boolean; message: string }> {
   if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
-    return { ok: false, message: "Rate must be between 0 and 100, e.g. *dividend 50* for 50% of profit." };
+    return {
+      ok: false,
+      message: "Rate must be between 0 and 100, e.g. *dividend 50* for 50% of profit.",
+    };
   }
 
   const member = await prisma.member.findFirst({
@@ -47,7 +53,7 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
   const rawShares = eligible.map((m) => ({
     memberId: m.id,
     name: m.name,
-    raw: totalSaved > 0 ? (m.wallet?.totalSaved ?? 0) / totalSaved * memberPoolKobo : 0,
+    raw: totalSaved > 0 ? ((m.wallet?.totalSaved ?? 0) / totalSaved) * memberPoolKobo : 0,
     kobo: 0,
     remainder: 0,
   }));
@@ -100,16 +106,25 @@ export async function computeDividendPreview(phone: string, rate: number): Promi
 }
 
 /** Super admin distributes a dividend run — % of actual net profit. */
-export async function distributeDividend(phone: string, rate: number): Promise<{ ok: boolean; message: string }> {
+export async function distributeDividend(
+  phone: string,
+  rate: number,
+): Promise<{ ok: boolean; message: string }> {
   const admin = await prisma.member.findFirst({ where: { phone, role: "superadmin" } });
   if (!admin) {
     return { ok: false, message: "Only the super admin can pay dividends." };
   }
   if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
-    return { ok: false, message: "Rate must be between 0 and 100, e.g. *paydividend 50* pays 50% of profit." };
+    return {
+      ok: false,
+      message: "Rate must be between 0 and 100, e.g. *paydividend 50* pays 50% of profit.",
+    };
   }
   if (rate > 25) {
-    return { ok: false, message: "Dividend rate cannot exceed 25% per Nigerian Cooperative Societies Act." };
+    return {
+      ok: false,
+      message: "Dividend rate cannot exceed 25% per Nigerian Cooperative Societies Act.",
+    };
   }
 
   const pnl = await computePnl(admin.cooperativeId);
@@ -233,7 +248,7 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
     const eligible = members.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
     const rawShares = eligible.map((m) => ({
       member: m,
-      raw: totalSaved > 0 ? (m.wallet?.totalSaved ?? 0) / totalSaved * memberPoolKobo : 0,
+      raw: totalSaved > 0 ? ((m.wallet?.totalSaved ?? 0) / totalSaved) * memberPoolKobo : 0,
       kobo: 0,
       remainder: 0,
     }));
@@ -295,7 +310,10 @@ export async function distributeDividend(phone: string, rate: number): Promise<{
           },
         });
         if (entry) {
-          await tx.dividendEntry.update({ where: { id: entry.id }, data: { status: "paid", paidAt: new Date() } });
+          await tx.dividendEntry.update({
+            where: { id: entry.id },
+            data: { status: "paid", paidAt: new Date() },
+          });
         }
       }
     }
@@ -354,7 +372,9 @@ export async function getFundBalances(cooperativeId: string): Promise<{
   const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
   const reported = coop?.reserveFundBalance ?? 0;
   if (Math.abs(reported - reserveBalance) > 1) {
-    console.warn(`[compliance] Reserve fund divergence: reported ${reported}, actual ${reserveBalance}`);
+    console.warn(
+      `[compliance] Reserve fund divergence: reported ${reported}, actual ${reserveBalance}`,
+    );
     await prisma.cooperative.update({
       where: { id: cooperativeId },
       data: { reserveFundBalance: reserveBalance },
@@ -375,7 +395,10 @@ export async function getReserveInfo(cooperativeId: string): Promise<{
   lastQuarter: number;
   growthPercent: number;
 }> {
-  const reserveAgg = await prisma.reserveAllocation.aggregate({ where: { cooperativeId }, _sum: { amount: true } });
+  const reserveAgg = await prisma.reserveAllocation.aggregate({
+    where: { cooperativeId },
+    _sum: { amount: true },
+  });
   const balance = reserveAgg._sum.amount ?? 0;
 
   const now = new Date();

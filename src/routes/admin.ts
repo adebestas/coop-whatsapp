@@ -5,7 +5,13 @@ import { checkRateLimit } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 import { approveLoan } from "../services/loans.js";
 import { notifyMember } from "../lib/messaging.js";
-import { sign, revokeToken, isTokenRevoked, verifyAdminToken, requireLiveAdmin } from "../lib/admin-auth.js";
+import {
+  sign,
+  revokeToken,
+  isTokenRevoked,
+  verifyAdminToken,
+  requireLiveAdmin,
+} from "../lib/admin-auth.js";
 
 /**
  * Minimal admin auth for the dashboard: members log in with their WhatsApp
@@ -19,14 +25,21 @@ const LOGIN_WINDOW_SECONDS = 60; // 1 minute
 const MAX_ACCOUNT_ATTEMPTS = 10;
 const ACCOUNT_WINDOW_SECONDS = 15 * 60; // 15 minutes
 
-async function checkLoginRateLimit(ip: string, phone?: string): Promise<{ allowed: boolean; retryAfter?: number }> {
+async function checkLoginRateLimit(
+  ip: string,
+  phone?: string,
+): Promise<{ allowed: boolean; retryAfter?: number }> {
   // Per-IP limit
   const ipResult = await checkRateLimit(`login:ip:${ip}`, MAX_LOGIN_ATTEMPTS, LOGIN_WINDOW_SECONDS);
   if (!ipResult.allowed) return ipResult;
 
   // Per-account limit
   if (phone) {
-    const acctResult = await checkRateLimit(`login:acct:${phone}`, MAX_ACCOUNT_ATTEMPTS, ACCOUNT_WINDOW_SECONDS);
+    const acctResult = await checkRateLimit(
+      `login:acct:${phone}`,
+      MAX_ACCOUNT_ATTEMPTS,
+      ACCOUNT_WINDOW_SECONDS,
+    );
     if (!acctResult.allowed) return acctResult;
   }
 
@@ -125,7 +138,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     if (!payload) {
       return reply.code(401).send({ error: "unauthorized" });
     }
-    if (rawToken && await isTokenRevoked(rawToken)) {
+    if (rawToken && (await isTokenRevoked(rawToken))) {
       return reply.code(401).send({ error: "token revoked" });
     }
 
@@ -167,8 +180,13 @@ export async function adminApiRoutes(app: FastifyInstance) {
           where: { cooperativeId: coopId, status: "confirmed" },
           _sum: { amount: true },
         }),
-        prisma.loan.count({ where: { cooperativeId: coopId, status: { in: ["approved", "disbursed"] } } }),
-        prisma.wallet.aggregate({ where: { member: { cooperativeId: coopId } }, _sum: { balance: true, totalSaved: true } }),
+        prisma.loan.count({
+          where: { cooperativeId: coopId, status: { in: ["approved", "disbursed"] } },
+        }),
+        prisma.wallet.aggregate({
+          where: { member: { cooperativeId: coopId } },
+          _sum: { balance: true, totalSaved: true },
+        }),
         prisma.payout.count({ where: { cooperativeId: coopId } }),
       ]);
 
@@ -192,8 +210,15 @@ export async function adminApiRoutes(app: FastifyInstance) {
       prisma.member.findMany({
         where: { cooperativeId: coopId },
         select: {
-          id: true, name: true, phone: true, email: true, code: true,
-          role: true, status: true, cooperativeId: true, createdAt: true,
+          id: true,
+          name: true,
+          phone: true,
+          email: true,
+          code: true,
+          role: true,
+          status: true,
+          cooperativeId: true,
+          createdAt: true,
           wallet: true,
         },
         orderBy: { createdAt: "desc" },
@@ -210,7 +235,12 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const coopId = req.adminCoopId!;
     const actorPhone = req.adminPhone!;
     const actorRole = req.adminRole ?? "admin";
-    const { memberIds = [], toAll = false, subject = "", body } = (req.body || {}) as {
+    const {
+      memberIds = [],
+      toAll = false,
+      subject = "",
+      body,
+    } = (req.body || {}) as {
       memberIds?: string[];
       toAll?: boolean;
       subject?: string;
@@ -223,16 +253,37 @@ export async function adminApiRoutes(app: FastifyInstance) {
     }
 
     // Resolve the intended recipients within this cooperative only.
-    let targets: { id: string; code: string; phone: string; optedOut: boolean; altChannelId: string | null; preferredChannel: string | null }[];
+    let targets: {
+      id: string;
+      code: string;
+      phone: string;
+      optedOut: boolean;
+      altChannelId: string | null;
+      preferredChannel: string | null;
+    }[];
     if (toAll) {
       targets = await prisma.member.findMany({
         where: { cooperativeId: coopId, status: "active" },
-        select: { id: true, code: true, phone: true, optedOut: true, altChannelId: true, preferredChannel: true },
+        select: {
+          id: true,
+          code: true,
+          phone: true,
+          optedOut: true,
+          altChannelId: true,
+          preferredChannel: true,
+        },
       });
     } else if (Array.isArray(memberIds) && memberIds.length > 0) {
       targets = await prisma.member.findMany({
         where: { id: { in: memberIds }, cooperativeId: coopId },
-        select: { id: true, code: true, phone: true, optedOut: true, altChannelId: true, preferredChannel: true },
+        select: {
+          id: true,
+          code: true,
+          phone: true,
+          optedOut: true,
+          altChannelId: true,
+          preferredChannel: true,
+        },
       });
     } else {
       return reply.code(400).send({ error: "select at least one member or broadcast to all" });
@@ -317,7 +368,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
     if (!loan) return reply.code(404).send({ error: "loan not found in your cooperative" });
 
-    const result = await approveLoan(id, { superAdmin: isSuper, actorId: actor.id, cooperativeId: coopId });
+    const result = await approveLoan(id, {
+      superAdmin: isSuper,
+      actorId: actor.id,
+      cooperativeId: coopId,
+    });
     if (!result.ok) {
       return reply.code(400).send({ error: result.message });
     }
@@ -360,32 +415,58 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const startOfYear = new Date(reportYear, 0, 1);
     const endOfYear = new Date(reportYear + 1, 0, 1);
 
-    const [contribAgg, loanAgg, repaymentAgg, dividendAgg, memberCount, reserve, eduAgg, devAgg, walletAgg] =
-      await Promise.all([
-        prisma.contribution.aggregate({
-          where: { cooperativeId: coopId, status: "confirmed", createdAt: { gte: startOfYear, lt: endOfYear } },
-          _sum: { amount: true },
-        }),
-        prisma.loan.aggregate({
-          where: { cooperativeId: coopId, status: { in: ["approved", "disbursed"] }, approvedAt: { gte: startOfYear, lt: endOfYear } },
-          _sum: { amount: true },
-          _count: true,
-        }),
-        prisma.loanRepayment.aggregate({
-          where: { loan: { cooperativeId: coopId }, paidAt: { gte: startOfYear, lt: endOfYear } },
-          _sum: { amount: true },
-        }),
-        prisma.dividend.aggregate({
-          where: { cooperativeId: coopId, createdAt: { gte: startOfYear, lt: endOfYear } },
-          _sum: { totalPool: true },
-          _count: true,
-        }),
-        prisma.member.count({ where: { cooperativeId: coopId, status: "active" } }),
-        prisma.cooperative.findUnique({ where: { id: coopId }, select: { reserveFundBalance: true } }),
-        prisma.educationFund.aggregate({ where: { cooperativeId: coopId }, _sum: { amount: true } }),
-        prisma.developmentFund.aggregate({ where: { cooperativeId: coopId }, _sum: { amount: true } }),
-        prisma.wallet.aggregate({ where: { member: { cooperativeId: coopId } }, _sum: { balance: true } }),
-      ]);
+    const [
+      contribAgg,
+      loanAgg,
+      repaymentAgg,
+      dividendAgg,
+      memberCount,
+      reserve,
+      eduAgg,
+      devAgg,
+      walletAgg,
+    ] = await Promise.all([
+      prisma.contribution.aggregate({
+        where: {
+          cooperativeId: coopId,
+          status: "confirmed",
+          createdAt: { gte: startOfYear, lt: endOfYear },
+        },
+        _sum: { amount: true },
+      }),
+      prisma.loan.aggregate({
+        where: {
+          cooperativeId: coopId,
+          status: { in: ["approved", "disbursed"] },
+          approvedAt: { gte: startOfYear, lt: endOfYear },
+        },
+        _sum: { amount: true },
+        _count: true,
+      }),
+      prisma.loanRepayment.aggregate({
+        where: { loan: { cooperativeId: coopId }, paidAt: { gte: startOfYear, lt: endOfYear } },
+        _sum: { amount: true },
+      }),
+      prisma.dividend.aggregate({
+        where: { cooperativeId: coopId, createdAt: { gte: startOfYear, lt: endOfYear } },
+        _sum: { totalPool: true },
+        _count: true,
+      }),
+      prisma.member.count({ where: { cooperativeId: coopId, status: "active" } }),
+      prisma.cooperative.findUnique({
+        where: { id: coopId },
+        select: { reserveFundBalance: true },
+      }),
+      prisma.educationFund.aggregate({ where: { cooperativeId: coopId }, _sum: { amount: true } }),
+      prisma.developmentFund.aggregate({
+        where: { cooperativeId: coopId },
+        _sum: { amount: true },
+      }),
+      prisma.wallet.aggregate({
+        where: { member: { cooperativeId: coopId } },
+        _sum: { balance: true },
+      }),
+    ]);
 
     const totalDividends = dividendAgg._sum.totalPool ?? 0;
     const perMember = memberCount > 0 ? Math.round(totalDividends / memberCount) : 0;
@@ -482,7 +563,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const rateKey = `import:${coopId}`;
     const rl = await checkRateLimit(rateKey, 3, 600);
     if (!rl.allowed) {
-      return reply.code(429).send({ error: "Too many import requests. Try again later.", retryAfter: rl.retryAfter });
+      return reply
+        .code(429)
+        .send({ error: "Too many import requests. Try again later.", retryAfter: rl.retryAfter });
     }
 
     const buffer = Buffer.from(body.data, "base64");
@@ -495,7 +578,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const memberLimit = sub?.memberLimit ?? 20;
     const currentCount = await prisma.member.count({ where: { cooperativeId: coopId } });
     if (currentCount >= memberLimit) {
-      return reply.code(400).send({ error: `Member limit reached (${memberLimit}). Remove members or upgrade the plan.` });
+      return reply.code(400).send({
+        error: `Member limit reached (${memberLimit}). Remove members or upgrade the plan.`,
+      });
     }
 
     const { bulkImportMembers } = await import("../services/bulk-import.js");
@@ -543,9 +628,13 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const actor = await prisma.member.findFirst({ where: { phone, cooperativeId: coopId } });
     if (!actor) return reply.code(401).send({ error: "actor not found" });
 
-    const grievance = await prisma.grievance.findFirst({ where: { id, cooperativeId: coopId }, include: { member: true } });
+    const grievance = await prisma.grievance.findFirst({
+      where: { id, cooperativeId: coopId },
+      include: { member: true },
+    });
     if (!grievance) return reply.code(404).send({ error: "Grievance not found" });
-    if (grievance.status === "resolved") return reply.code(400).send({ error: "Grievance is already resolved" });
+    if (grievance.status === "resolved")
+      return reply.code(400).send({ error: "Grievance is already resolved" });
 
     await prisma.grievance.update({
       where: { id: grievance.id },
@@ -575,7 +664,10 @@ export async function adminApiRoutes(app: FastifyInstance) {
       },
     });
 
-    return { ok: true, message: `Grievance *${grievance.id.slice(-6)}* resolved. ${grievance.member.name} notified.` };
+    return {
+      ok: true,
+      message: `Grievance *${grievance.id.slice(-6)}* resolved. ${grievance.member.name} notified.`,
+    };
   });
 
   // ---- Support Tickets ----
@@ -604,9 +696,13 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const actor = await prisma.member.findFirst({ where: { phone, cooperativeId: coopId } });
     if (!actor) return reply.code(401).send({ error: "actor not found" });
 
-    const ticket = await prisma.supportTicket.findFirst({ where: { id, cooperativeId: coopId }, include: { member: true } });
+    const ticket = await prisma.supportTicket.findFirst({
+      where: { id, cooperativeId: coopId },
+      include: { member: true },
+    });
     if (!ticket) return reply.code(404).send({ error: "Ticket not found" });
-    if (ticket.status === "resolved") return reply.code(400).send({ error: "Ticket is already resolved" });
+    if (ticket.status === "resolved")
+      return reply.code(400).send({ error: "Ticket is already resolved" });
 
     await prisma.supportTicket.update({
       where: { id: ticket.id },
@@ -637,7 +733,10 @@ export async function adminApiRoutes(app: FastifyInstance) {
       },
     });
 
-    return { ok: true, message: `Ticket *${ticket.id.slice(-6)}* resolved. ${ticket.member.name} notified.` };
+    return {
+      ok: true,
+      message: `Ticket *${ticket.id.slice(-6)}* resolved. ${ticket.member.name} notified.`,
+    };
   });
 
   // ---- Executive Posts (organogram) ----
@@ -655,7 +754,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.post("/api/admin/posts", async (req, reply) => {
     const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can create posts." });
+    if (!superAuth.ok)
+      return reply.code(403).send({ error: "Only the super admin can create posts." });
     const coopId = req.adminCoopId!;
     const phone = req.adminPhone!;
     const body = (req.body ?? {}) as { title?: string };
@@ -693,7 +793,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.post("/api/admin/posts/:id/assign", async (req, reply) => {
     const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can assign posts." });
+    if (!superAuth.ok)
+      return reply.code(403).send({ error: "Only the super admin can assign posts." });
     const coopId = req.adminCoopId!;
     const phone = req.adminPhone!;
     const { id } = req.params as { id: string };
@@ -705,8 +806,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
     let incumbentId: string | null = null;
     let memberName = "_vacant_";
     if (body.memberCode) {
-      const member = await prisma.member.findFirst({ where: { code: body.memberCode, cooperativeId: coopId } });
-      if (!member) return reply.code(400).send({ error: `Member code ${body.memberCode} not found` });
+      const member = await prisma.member.findFirst({
+        where: { code: body.memberCode, cooperativeId: coopId },
+      });
+      if (!member)
+        return reply.code(400).send({ error: `Member code ${body.memberCode} not found` });
       incumbentId = member.id;
       memberName = member.name;
     }
@@ -729,7 +833,12 @@ export async function adminApiRoutes(app: FastifyInstance) {
       },
     });
 
-    return { ok: true, message: body.memberCode ? `"${post.title}" assigned to ${memberName}.` : `"${post.title}" is now vacant.` };
+    return {
+      ok: true,
+      message: body.memberCode
+        ? `"${post.title}" assigned to ${memberName}.`
+        : `"${post.title}" is now vacant.`,
+    };
   });
 
   // ---- Payroll ----
@@ -742,28 +851,40 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.post("/api/admin/payroll/set", async (req, reply) => {
     const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can set salaries." });
+    if (!superAuth.ok)
+      return reply.code(403).send({ error: "Only the super admin can set salaries." });
     const coopId = req.adminCoopId!;
     const body = (req.body ?? {}) as { memberCode?: string; amount?: number | "off" };
     if (!body.memberCode) return reply.code(400).send({ error: "memberCode is required" });
 
-    const actor = await prisma.member.findFirst({ where: { id: superAuth.actorId, cooperativeId: coopId } });
+    const actor = await prisma.member.findFirst({
+      where: { id: superAuth.actorId, cooperativeId: coopId },
+    });
     if (!actor) return reply.code(401).send({ error: "actor not found" });
 
-    const target = await prisma.member.findFirst({ where: { code: body.memberCode, cooperativeId: coopId } });
+    const target = await prisma.member.findFirst({
+      where: { code: body.memberCode, cooperativeId: coopId },
+    });
     if (!target) return reply.code(400).send({ error: `Member code ${body.memberCode} not found` });
 
     const { setSalary } = await import("../services/payroll.js");
-    const result = await setSalary(actor, target.phone, body.amount === "off" ? "off" : Number(body.amount));
+    const result = await setSalary(
+      actor,
+      target.phone,
+      body.amount === "off" ? "off" : Number(body.amount),
+    );
     if (!result.ok) return reply.code(400).send({ error: result.message });
     return { ok: true, message: result.message };
   });
 
   app.post("/api/admin/payroll/run", async (req, reply) => {
     const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can run payroll." });
+    if (!superAuth.ok)
+      return reply.code(403).send({ error: "Only the super admin can run payroll." });
     const coopId = req.adminCoopId!;
-    const actor = await prisma.member.findFirst({ where: { id: superAuth.actorId, cooperativeId: coopId } });
+    const actor = await prisma.member.findFirst({
+      where: { id: superAuth.actorId, cooperativeId: coopId },
+    });
     if (!actor) return reply.code(401).send({ error: "actor not found" });
 
     const body = (req.body ?? {}) as { narration?: string };
@@ -771,8 +892,17 @@ export async function adminApiRoutes(app: FastifyInstance) {
     if (!narration) return reply.code(400).send({ error: "A narration is required" });
 
     const { runPayroll } = await import("../services/payroll.js");
-    const result = await runPayroll(coopId, { id: actor.id, phone: actor.phone, role: actor.role }, narration);
-    return { ok: result.ok, message: result.message, paid: result.paid ?? 0, total: result.total ?? 0 };
+    const result = await runPayroll(
+      coopId,
+      { id: actor.id, phone: actor.phone, role: actor.role },
+      narration,
+    );
+    return {
+      ok: result.ok,
+      message: result.message,
+      paid: result.paid ?? 0,
+      total: result.total ?? 0,
+    };
   });
 
   app.get("/api/admin/payroll/history", async (req) => {
@@ -798,7 +928,10 @@ export async function adminApiRoutes(app: FastifyInstance) {
   app.get("/api/admin/funds", async (req) => {
     const coopId = req.adminCoopId!;
     const [coop, reserve, education, development] = await Promise.all([
-      prisma.cooperative.findUnique({ where: { id: coopId }, select: { reserveFundBalance: true } }),
+      prisma.cooperative.findUnique({
+        where: { id: coopId },
+        select: { reserveFundBalance: true },
+      }),
       prisma.reserveAllocation.findMany({
         where: { cooperativeId: coopId },
         orderBy: { createdAt: "desc" },
@@ -846,7 +979,10 @@ export async function adminApiRoutes(app: FastifyInstance) {
     });
   });
 
-  async function requireSuper(req: { adminCoopId?: string; adminPhone?: string }): Promise<{ ok: boolean; actorId?: string; phone?: string }> {
+  async function requireSuper(req: {
+    adminCoopId?: string;
+    adminPhone?: string;
+  }): Promise<{ ok: boolean; actorId?: string; phone?: string }> {
     const coopId = req.adminCoopId;
     const phone = req.adminPhone;
     if (!coopId || !phone) return { ok: false };
@@ -857,13 +993,20 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.post("/api/admin/funds/reserve/allocate", async (req, reply) => {
     const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can allocate to the reserve fund." });
+    if (!superAuth.ok)
+      return reply
+        .code(403)
+        .send({ error: "Only the super admin can allocate to the reserve fund." });
     const coopId = req.adminCoopId!;
     const phone = req.adminPhone!;
     const body = (req.body ?? {}) as { amount?: number; note?: string };
     const amount = Math.round(Number(body.amount ?? 0));
-    if (!(amount > 0)) return reply.code(400).send({ error: "A valid amount is required (in kobo)" });
-    const note = String(body.note ?? "").trim().slice(0, 200) || null;
+    if (!(amount > 0))
+      return reply.code(400).send({ error: "A valid amount is required (in kobo)" });
+    const note =
+      String(body.note ?? "")
+        .trim()
+        .slice(0, 200) || null;
 
     const coop = await prisma.cooperative.findUnique({ where: { id: coopId } });
     if (!coop) return reply.code(404).send({ error: "Cooperative not found" });
@@ -901,7 +1044,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.post("/api/admin/votes/start", async (req, reply) => {
     const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can start an election." });
+    if (!superAuth.ok)
+      return reply.code(403).send({ error: "Only the super admin can start an election." });
     const body = (req.body ?? {}) as { kind?: string; scope?: string; title?: string };
     const { startVote } = await import("../services/votes.js");
     const result = await startVote(superAuth.phone!, body.kind ?? "", body.scope, body.title ?? "");
@@ -911,7 +1055,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.post("/api/admin/votes/:id/candidate", async (req, reply) => {
     const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can add candidates." });
+    if (!superAuth.ok)
+      return reply.code(403).send({ error: "Only the super admin can add candidates." });
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { memberCode?: string };
     if (!body.memberCode) return reply.code(400).send({ error: "memberCode is required" });
@@ -923,7 +1068,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.post("/api/admin/votes/:id/close", async (req, reply) => {
     const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can close an election." });
+    if (!superAuth.ok)
+      return reply.code(403).send({ error: "Only the super admin can close an election." });
     const { id } = req.params as { id: string };
     const { closeVote } = await import("../services/votes.js");
     const result = await closeVote(superAuth.phone!, id);
@@ -935,7 +1081,10 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const coopId = req.adminCoopId!;
     const phone = req.adminPhone!;
     const { id } = req.params as { id: string };
-    const vote = await prisma.vote.findFirst({ where: { id, cooperativeId: coopId }, select: { id: true } });
+    const vote = await prisma.vote.findFirst({
+      where: { id, cooperativeId: coopId },
+      select: { id: true },
+    });
     if (!vote) return reply.code(404).send({ error: "Election not found" });
     const { showLiveResults } = await import("../services/votes.js");
     const result = await showLiveResults(phone, id);
@@ -945,7 +1094,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
 
   app.post("/api/admin/votes/:id/export-pdf", async (req, reply) => {
     const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can export results." });
+    if (!superAuth.ok)
+      return reply.code(403).send({ error: "Only the super admin can export results." });
     const coopId = req.adminCoopId!;
     const { id } = req.params as { id: string };
     const { exportElectionPdf } = await import("../services/election-export.js");
