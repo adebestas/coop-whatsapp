@@ -1,7 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { prisma } from "../tests/setup.js";
-import { sendText } from "../src/lib/messaging.js";
+
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { paystackAdapter } from "../src/services/payments/paystack.js";
 import { processPaymentWebhook } from "../src/services/webhooks.js";

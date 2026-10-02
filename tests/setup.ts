@@ -266,7 +266,7 @@ export async function expectError(
     throw new Error("Expected an error to be thrown");
   } catch (err: any) {
     if (expectedMessage && !err.message.includes(expectedMessage)) {
-      throw new Error(`Expected "${expectedMessage}" but got "${err.message}"`);
+      throw new Error(`Expected "${expectedMessage}" but got "${err.message}"`, { cause: err });
     }
   }
 }

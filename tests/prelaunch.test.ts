@@ -12,7 +12,7 @@ import { runTransferPolling } from "../src/services/statuspoller.js";
 import { runDailyDigest } from "../src/services/scheduler.js";
 import { checkDailyPayoutLimit, checkMoneyRateLimit, resetMoneyRateLimit } from "../src/services/fraud.js";
 import { validateEnvironment } from "../src/lib/envcheck.js";
-import { resolveProvider } from "../src/services/payments/index.js";
+
 
 // Configurable fake provider so poller tests can script transfer outcomes.
 const fakeProvider = {

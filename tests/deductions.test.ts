@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma } from "../tests/setup.js";
+import { prisma, cleanupDatabase } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
@@ -42,24 +42,7 @@ function texts() {
 
 beforeEach(async () => {
   vi.clearAllMocks();
-  await prisma.coopPost.deleteMany();
-  await prisma.deductionItem.deleteMany();
-  await prisma.deductionWaiver.deleteMany();
-  await prisma.deductionBatch.deleteMany();
-  await prisma.posting.deleteMany();
-  await prisma.journalEntry.deleteMany();
-  await prisma.webhookEvent.deleteMany();
-  await prisma.beneficiary.deleteMany();
-  await prisma.auditLog.deleteMany();
-  await prisma.contribution.deleteMany();
-  await prisma.loanRepayment.deleteMany();
-  await prisma.guarantor.deleteMany();
-  await prisma.loan.deleteMany();
-  await prisma.wallet.deleteMany();
-  await prisma.member.deleteMany();
-  await prisma.unit.deleteMany();
-  await prisma.cooperative.deleteMany();
-  await prisma.session.deleteMany();
+  await cleanupDatabase();
 });
 
 describe("employer deduction remittance", () => {
@@ -119,7 +102,9 @@ describe("employer deduction remittance", () => {
     const payerWallet = await prisma.wallet.findUnique({ where: { memberId: payer.id } });
     expect(payerWallet!.balance).toBe(3000); // loan item did NOT touch wallet
 
-    const notes = vi.mocked(notifyMember).mock.calls.map((c) => ({ to: c[0].phone, text: String(c[1]) }));
+    const notes = vi
+      .mocked(notifyMember)
+      .mock.calls.map((c) => ({ to: c[0].phone, text: String(c[1]) }));
     expect(notes.find((n) => n.to === saver.phone)?.text).toContain("credited to your savings");
     expect(notes.find((n) => n.to === payer.phone)?.text).toContain("Remaining balance");
 
@@ -147,7 +132,12 @@ describe("employer deduction remittance", () => {
     vi.clearAllMocks();
     await handleMessage(ADMIN_PHONE, `waive ${waver.code}`);
     expect(await prisma.deductionWaiver.count({ where: { memberId: waver.id } })).toBe(1);
-    expect(vi.mocked(notifyMember).mock.calls.map((c) => String(c[1])).join("\n")).toContain("waived your deduction");
+    expect(
+      vi
+        .mocked(notifyMember)
+        .mock.calls.map((c) => String(c[1]))
+        .join("\n"),
+    ).toContain("waived your deduction");
 
     await handleMessage(ADMIN_PHONE, "newbatch");
     expect(texts()).not.toContain(waver.code);
@@ -170,14 +160,21 @@ describe("employer deduction remittance", () => {
 
     await handleMessage(ADMIN_PHONE, `approvebatch ${batch!.ref}`);
     expect(texts()).toContain("Only the *super admin*");
-    expect((await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } }))!.status).toBe("draft");
+    expect((await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } }))!.status).toBe(
+      "draft",
+    );
 
     await handleMessage(ADMIN_PHONE, `submitbatch ${batch!.ref}`);
     vi.clearAllMocks();
     await handleMessage(SUPER_PHONE, `rejectbatch ${batch!.ref} cheque bounced`);
-    expect((await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } }))!.status).toBe("rejected");
+    expect((await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } }))!.status).toBe(
+      "rejected",
+    );
     expect(
-      vi.mocked(sendText).mock.calls.map((c) => c[0].text).some((t) => t.includes("rejected") && t.includes("cheque bounced")),
+      vi
+        .mocked(sendText)
+        .mock.calls.map((c) => c[0].text)
+        .some((t) => t.includes("rejected") && t.includes("cheque bounced")),
     ).toBe(true);
 
     // A rejected batch cannot be approved afterwards.
@@ -192,13 +189,25 @@ describe("employer deduction remittance", () => {
     const payer = await makeMember(M1, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${payer.code} 0`); // no savings item
     const loan = await prisma.loan.create({
-      data: { memberId: payer.id, cooperativeId: coop.id, amount: 8000, balance: 8000, status: "disbursed" }, // no monthlyPayment -> full balance due
+      data: {
+        memberId: payer.id,
+        cooperativeId: coop.id,
+        amount: 8000,
+        balance: 8000,
+        status: "disbursed",
+      }, // no monthlyPayment -> full balance due
     });
 
     await handleMessage(ADMIN_PHONE, "newbatch");
-    await handleMessage(ADMIN_PHONE, `submitbatch ${(await prisma.deductionBatch.findFirst())!.ref}`);
+    await handleMessage(
+      ADMIN_PHONE,
+      `submitbatch ${(await prisma.deductionBatch.findFirst())!.ref}`,
+    );
     vi.clearAllMocks();
-    await handleMessage(SUPER_PHONE, `approvebatch ${(await prisma.deductionBatch.findFirst())!.ref}`);
+    await handleMessage(
+      SUPER_PHONE,
+      `approvebatch ${(await prisma.deductionBatch.findFirst())!.ref}`,
+    );
 
     const done = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(done!.balance).toBe(0);
@@ -223,7 +232,10 @@ describe("lost phone / WhatsApp recovery", () => {
     expect(audited).not.toBeNull();
     // Old number was warned.
     expect(
-      vi.mocked(sendText).mock.calls.map((c) => c[0].to).includes(M1),
+      vi
+        .mocked(sendText)
+        .mock.calls.map((c) => c[0].to)
+        .includes(M1),
     ).toBe(true);
     // The old number can no longer act as the member.
     await handleMessage(M1, "balance");

@@ -16,7 +16,7 @@ import { resetRateLimit } from "../src/lib/cache.js";
 import { addGuarantor } from "../src/services/guarantors.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { applyForLoan, repayLoan } from "../src/services/loans.js";
-import { resolveProvider, markProviderDown, isProviderAvailable } from "../src/services/payments/index.js";
+
 import { createTicket, listTickets, resolveTicket } from "../src/services/support.js";
 
 const ADMIN_PHONE = "2348090000001";

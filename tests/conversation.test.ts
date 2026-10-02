@@ -9,7 +9,7 @@ vi.mock("../lib/messaging.js", () => ({
 
 import { prisma } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
-import * as messaging from "../lib/messaging.js";
+
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { clearMemberCache } from "../src/services/cooperative.js";

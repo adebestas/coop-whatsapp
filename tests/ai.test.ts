@@ -48,7 +48,6 @@ async function makeCoopAndMember() {
 
 function texts(): string[] {
   const t = vi.mocked(sendText).mock.calls.map((c) => c[0].text);
-  console.log('TEXTS>>>', JSON.stringify(t));
   return t;
 }
 

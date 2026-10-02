@@ -3,7 +3,7 @@ import { prisma } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { notifyMember } from "../src/lib/messaging.js";
 import { sendText as sendWhatsApp } from "../src/lib/whatsapp.js";
-import { sendTelegramMessage, deleteTelegramMessage } from "../src/lib/telegram.js";
+import { sendTelegramMessage } from "../src/lib/telegram.js";
 import { runAutoSaveReminders } from "../src/services/scheduler.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 

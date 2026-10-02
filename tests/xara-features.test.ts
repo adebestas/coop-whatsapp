@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { prisma } from "../tests/setup.js";
 import { savePayee, listPayees, resolvePayee, deletePayee } from "../src/lib/beneficiaries.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
