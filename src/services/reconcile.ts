@@ -92,13 +92,11 @@ export async function runReconciliation(): Promise<string[]> {
 
     if (alerts.length > 0) {
       console.log("[reconcile] alerts:\n" + alerts.join("\n"));
-      for (const coop of coops) {
-        await alertSupers(
-          coop.id,
-          `🌙 *Nightly reconciliation*\n\n${alerts.join("\n")}`,
-          AlertSeverity.WARNING,
-        ).catch(() => {});
-      }
+      await alertSupers(
+        coop.id,
+        `🌙 *Nightly reconciliation*\n\n${alerts.join("\n")}`,
+        AlertSeverity.WARNING,
+      ).catch(() => {});
       allAlerts.push(...alerts);
     }
   }

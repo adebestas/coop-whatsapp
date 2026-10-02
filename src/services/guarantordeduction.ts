@@ -38,7 +38,9 @@ export async function scanGuarantorDefaults(): Promise<number> {
     // Calculate total interest for declining balance loan
     const totalRepayableAmount = totalRepayable(loan.amount, loan.tenureMonths);
     const totalInterest = totalRepayableAmount - loan.amount;
-    const share = Math.round(totalInterest * GUARANTOR_INTEREST_SHARE * 100) / 100;
+    const rawShare = Math.round(totalInterest * GUARANTOR_INTEREST_SHARE * 100) / 100;
+    // A guarantor can never be debited more than what is still owed on the loan.
+    const share = Math.min(rawShare, loan.balance);
     if (share <= 0) continue;
 
     for (const g of loan.guarantors) {
@@ -127,7 +129,11 @@ export async function executeDueDeductions(): Promise<{ deducted: number; cancel
 
     await prisma.guarantorDeduction.update({
       where: { id: d.id },
-      data: { status: "deducted", deductedAt: new Date(), note: "auto-deducted after notice period" },
+      data: {
+        status: "deducted",
+        deductedAt: new Date(),
+        note: "auto-deducted after notice period",
+      },
     });
 
     await recordLedger({

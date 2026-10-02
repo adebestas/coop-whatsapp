@@ -95,7 +95,13 @@ export async function processPaymentWebhook(
       },
     });
   } catch (err: any) {
-    if (err?.code !== "P2002") throw err;
+    if (err?.code !== "P2002") {
+      // Recording the delivery itself failed (transient DB outage). Return a
+      // structured 5xx so the provider retries — never throw, which would
+      // surface as a bare 500 with no trace of the attempt.
+      console.error(`[webhook] failed to record delivery ${eventId}:`, err);
+      return { httpStatus: 500, body: { status: "failed", error: "could not record webhook event" } };
+    }
     // Already seen this delivery. Only ack as "duplicate" when it fully
     // succeeded end-to-end; otherwise a previously FAILED (or still
     // "received") event must be reprocessed on the provider's retry —

@@ -32,7 +32,7 @@ export async function checkDailyPayoutLimit(
   // as a payout succeeds, letting subsequent money-out exceed the configured
   // daily/monthly ceiling (a fraud-control bypass). The few extra reads are
   // cheap relative to the money-out write path this guards.
-  const [payouts, withdrawals, externals, monthPayouts] = await Promise.all([
+  const [payouts, withdrawals, externals, monthPayouts, monthWithdrawals, monthExternals] = await Promise.all([
     prisma.payout.aggregate({
       where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
       _sum: { amount: true },
@@ -49,10 +49,19 @@ export async function checkDailyPayoutLimit(
       where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
       _sum: { amount: true },
     }),
+    prisma.withdrawalRequest.aggregate({
+      where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfMonth } },
+      _sum: { amount: true },
+    }),
+    prisma.externalPayment.aggregate({
+      where: { cooperativeId, status: "paid", updatedAt: { gte: startOfMonth } },
+      _sum: { amount: true },
+    }),
   ]);
   const spentToday =
     (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
-  const monthTotal = monthPayouts._sum.amount ?? 0;
+  const monthTotal =
+    (monthPayouts._sum.amount ?? 0) + (monthWithdrawals._sum.amount ?? 0) + (monthExternals._sum.amount ?? 0);
 
   if (spentToday + amount > limit) {
     return {

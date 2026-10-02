@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { z } from "zod";
 import type {
   ProviderAdapter,
   CreateVirtualAccountParams,
@@ -14,6 +15,24 @@ import { signaturesMatch } from "./index.js";
 import { forProvider } from "../../lib/money.js";
 
 const API_BASE = "https://api.paystack.co";
+
+/** Shape contract for a charge.success webhook payload (amounts stay in kobo). */
+const PaystackChargeSchema = z
+  .object({
+    event: z.literal("charge.success"),
+    data: z
+      .object({
+        id: z.union([z.string(), z.number()]).optional(),
+        transaction_id: z.union([z.string(), z.number()]).optional(),
+        reference: z.string().optional(),
+        amount: z.coerce.number(),
+        status: z.string(),
+        account: z.object({ number: z.string().optional() }).passthrough().optional(),
+        currency: z.string().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
 
 function getSecret(): string {
   const key = process.env.PAYSTACK_SECRET_KEY ?? "";
@@ -165,11 +184,11 @@ export const paystackAdapter: ProviderAdapter = {
   },
 
   parseNotification(body: any): PaymentNotification | null {
-    if (!body || !body.data) return null;
-    const d = body.data;
-
-    // charge.success fires for transfers into dedicated accounts.
-    if (body.event !== "charge.success") return null;
+    // Fail-closed on shape drift: a charge.success whose payload doesn't match
+    // the expected schema is dropped rather than mis-credited.
+    const parsed = PaystackChargeSchema.safeParse(body);
+    if (!parsed.success) return null;
+    const d = parsed.data.data;
     if (d.status !== "success" && d.status !== "successful") return null;
 
     const amountKobo = Number(d.amount ?? 0);
@@ -187,10 +206,9 @@ export const paystackAdapter: ProviderAdapter = {
 
   async getTransferStatus(reference) {
     try {
-      const res = await api<{ data?: { status?: string; id?: number | string; transfer_code?: string } }>(
-        `/transfer/verify/${encodeURIComponent(reference)}`,
-        "GET",
-      );
+      const res = await api<{
+        data?: { status?: string; id?: number | string; transfer_code?: string };
+      }>(`/transfer/verify/${encodeURIComponent(reference)}`, "GET");
       const s = String(res.data?.status ?? "").toLowerCase();
       const status: TransferStatus["status"] =
         s === "success"
@@ -202,7 +220,8 @@ export const paystackAdapter: ProviderAdapter = {
               : "unknown";
       return {
         status,
-        providerRef: res.data?.transfer_code ?? (res.data?.id !== undefined ? String(res.data.id) : undefined),
+        providerRef:
+          res.data?.transfer_code ?? (res.data?.id !== undefined ? String(res.data.id) : undefined),
       };
     } catch (err: any) {
       // Unconfigured or HTTP error — treat as unknown, never guess.
@@ -211,7 +230,10 @@ export const paystackAdapter: ProviderAdapter = {
   },
 };
 
-function header(headers: Record<string, string | string[] | undefined>, name: string): string | undefined {
+function header(
+  headers: Record<string, string | string[] | undefined>,
+  name: string,
+): string | undefined {
   const v = headers[name] ?? headers[name.toLowerCase()];
   return Array.isArray(v) ? v[0] : v;
 }

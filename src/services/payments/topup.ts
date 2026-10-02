@@ -195,15 +195,21 @@ await notifyMember(member,
     console.error("[topup] Failed to notify member of credit:", err);
   });
 
-  await audit({
-    cooperativeId: member.cooperativeId,
-    actorPhone: member.phone,
-    actorId: member.id,
-    actorRole: member.role,
-    action: "topup.credit",
-    targetType: "contribution",
-    detail: `${amount} ${n.currency} via ${n.provider} (${n.transactionId})`,
-  });
+  // Append-only audit must never turn a successful credit into a 500: if the
+  // audit write fails, log it and keep the money path idempotently successful.
+  try {
+    await audit({
+      cooperativeId: member.cooperativeId,
+      actorPhone: member.phone,
+      actorId: member.id,
+      actorRole: member.role,
+      action: "topup.credit",
+      targetType: "contribution",
+      detail: `${amount} ${n.currency} via ${n.provider} (${n.transactionId})`,
+    });
+  } catch (err) {
+    console.error("[topup] credit audit failed:", err);
+  }
 }
 
 /**

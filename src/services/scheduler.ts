@@ -4,6 +4,7 @@ import { formatBalance } from "./cooperative.js";
 import { showHistory } from "./statements.js";
 import { runAllAlerts } from "../lib/ai-alerts.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
+import { getRedis } from "../lib/cache.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -25,7 +26,12 @@ export async function setAutoSave(
     // "plan off" or invalid -> disable.
     await prisma.member.update({
       where: { id: member.id },
-      data: { autoSaveEnabled: false, autoSaveAmount: null, autoSaveInterval: null, autoSaveNextDue: null },
+      data: {
+        autoSaveEnabled: false,
+        autoSaveAmount: null,
+        autoSaveInterval: null,
+        autoSaveNextDue: null,
+      },
     });
     return { ok: true, message: "Your recurring contribution plan is turned off." };
   }
@@ -77,10 +83,15 @@ export async function setInterestRate(
   phone: string,
   rate: number,
 ): Promise<{ ok: boolean; message: string }> {
-  const admin = await prisma.member.findFirst({ where: { phone, role: { in: ["admin", "superadmin"] } } });
+  const admin = await prisma.member.findFirst({
+    where: { phone, role: { in: ["admin", "superadmin"] } },
+  });
   if (!admin) return { ok: false, message: "Only a cooperative admin can set the interest rate." };
   if (!Number.isFinite(rate) || rate < 0 || rate > 20) {
-    return { ok: false, message: "Monthly loan interest must be between 0 and 20%, e.g. *interest 2* for 2%." };
+    return {
+      ok: false,
+      message: "Monthly loan interest must be between 0 and 20%, e.g. *interest 2* for 2%.",
+    };
   }
   await prisma.cooperative.update({
     where: { id: admin.cooperativeId },
@@ -137,7 +148,10 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
       status: "active",
       consentAt: { not: null },
       dateOfBirth: { not: null },
-      OR: [{ lastBirthdayGreetedYear: null }, { lastBirthdayGreetedYear: { not: now.getFullYear() } }],
+      OR: [
+        { lastBirthdayGreetedYear: null },
+        { lastBirthdayGreetedYear: { not: now.getFullYear() } },
+      ],
     },
   });
 
@@ -148,7 +162,11 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
     const results = await Promise.allSettled(
       batch.map(async (m) => {
         if (!m.dateOfBirth) return false;
-        if (m.dateOfBirth.getMonth() !== now.getMonth() || m.dateOfBirth.getDate() !== now.getDate()) return false;
+        if (
+          m.dateOfBirth.getMonth() !== now.getMonth() ||
+          m.dateOfBirth.getDate() !== now.getDate()
+        )
+          return false;
         try {
           await notifyMember(
             m,
@@ -177,7 +195,9 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
 // (CAMA), cooperative financial records must be retained for at least 6 years;
 // we use 7 for safety margin.
 
-export async function runDataRetention(now = new Date()): Promise<{ anonymized: number; deleted: number }> {
+export async function runDataRetention(
+  now = new Date(),
+): Promise<{ anonymized: number; deleted: number }> {
   // Monthly job — runs on the 1st of the month.
   if (now.getDate() !== 1) return { anonymized: 0, deleted: 0 };
 
@@ -215,7 +235,9 @@ export async function runDataRetention(now = new Date()): Promise<{ anonymized: 
   });
 
   if (anonymized > 0 || deleted > 0) {
-    console.log(`[compliance] Data retention: anonymized ${anonymized} members (7yr), deleted ${deleted} sessions (30d)`);
+    console.log(
+      `[compliance] Data retention: anonymized ${anonymized} members (7yr), deleted ${deleted} sessions (30d)`,
+    );
   }
 
   return { anonymized, deleted };
@@ -228,15 +250,34 @@ export async function runDataRetention(now = new Date()): Promise<{ anonymized: 
 const digestLastSentDate = new Map<string, string>();
 
 export async function runDailyDigest(now = new Date()): Promise<number> {
-  const hour = now.getHours();
+  // Fire on the configured hour in WEST AFRICA TIME, not the container's own
+  // timezone (Render/Docker run UTC, so getHours() was firing an hour late).
+  const hour = Number(
+    new Intl.DateTimeFormat("en-US", {
+      hour: "numeric",
+      hour12: false,
+      timeZone: "Africa/Lagos",
+    }).format(now),
+  );
   const targetHour = Number(process.env.DIGEST_HOUR ?? 20); // 8pm default
   if (hour !== targetHour) return 0;
 
   const coops = await prisma.cooperative.findMany({ select: { id: true, name: true } });
+  const redis = getRedis();
   let sent = 0;
   for (const coop of coops) {
     const key = `${coop.id}:${now.toDateString()}`;
-    if (digestLastSentDate.get(coop.id) === key) continue;
+
+    // Dedupe across restarts via Redis (in-memory fallback for single-instance).
+    let alreadySent = digestLastSentDate.get(coop.id) === key;
+    if (!alreadySent && redis) {
+      try {
+        alreadySent = (await redis.get(`digest:last:${coop.id}`)) === key;
+      } catch {
+        /* ignore — fall back to the in-memory marker */
+      }
+    }
+    if (alreadySent) continue;
 
     const start = new Date(now);
     start.setDate(start.getDate() - 1);
@@ -253,7 +294,12 @@ export async function runDailyDigest(now = new Date()): Promise<number> {
         where: { cooperativeId: coop.id, status: "paid", updatedAt: { gte: start, lt: end } },
       }),
       prisma.contribution.aggregate({
-        where: { cooperativeId: coop.id, type: "topup", status: "confirmed", paidAt: { gte: start, lt: end } },
+        where: {
+          cooperativeId: coop.id,
+          type: "topup",
+          status: "confirmed",
+          paidAt: { gte: start, lt: end },
+        },
         _sum: { amount: true },
       }),
     ]);
@@ -262,7 +308,9 @@ export async function runDailyDigest(now = new Date()): Promise<number> {
     const lines: string[] = [];
     let outTotal = 0;
     for (const p of payouts) {
-      lines.push(`• ${formatBalance(p.amount)} → ${p.member.name} (${p.note?.slice(0, 60) ?? "payout"})`);
+      lines.push(
+        `• ${formatBalance(p.amount)} → ${p.member.name} (${p.note?.slice(0, 60) ?? "payout"})`,
+      );
       outTotal += p.amount;
     }
     for (const e of externals) {
@@ -280,6 +328,9 @@ export async function runDailyDigest(now = new Date()): Promise<number> {
 
     await notifySuperAdminsDigest(coop.id, text);
     digestLastSentDate.set(coop.id, key);
+    if (redis) {
+      await redis.set(`digest:last:${coop.id}`, key).catch(() => {});
+    }
     sent++;
   }
   return sent;
@@ -322,7 +373,11 @@ export async function runBackupVerificationJob(now = new Date()): Promise<number
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "unknown";
       console.error("[scheduler] backup verification failed", err);
-      await alertSupers("system", `Backup verification failed for cooperative ${coop.id}: ${msg}`, AlertSeverity.CRITICAL);
+      await alertSupers(
+        "system",
+        `Backup verification failed for cooperative ${coop.id}: ${msg}`,
+        AlertSeverity.CRITICAL,
+      );
     }
     backupVerifyLastRun.set(coop.id, key);
     ran++;
@@ -343,7 +398,11 @@ export async function runProactiveAlerts(now = new Date()): Promise<number> {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "unknown";
       console.error("[scheduler] proactive alerts failed", err);
-      await alertSupers("system", `Proactive alerts failed for cooperative ${coop.id}: ${msg}`, AlertSeverity.CRITICAL);
+      await alertSupers(
+        "system",
+        `Proactive alerts failed for cooperative ${coop.id}: ${msg}`,
+        AlertSeverity.CRITICAL,
+      );
     }
     aiAlertsLastRun.set(coop.id, key);
     ran++;

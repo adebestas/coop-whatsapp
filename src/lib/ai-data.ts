@@ -97,7 +97,11 @@ export async function getCoopSnapshot(cooperativeId: string): Promise<CoopSnapsh
       _count: true,
     }),
     prisma.contribution.aggregate({
-      where: { cooperativeId, status: "confirmed", createdAt: { gte: startOfLastMonth, lt: startOfMonth } },
+      where: {
+        cooperativeId,
+        status: "confirmed",
+        createdAt: { gte: startOfLastMonth, lt: startOfMonth },
+      },
       _sum: { amount: true },
     }),
     prisma.contribution.aggregate({
@@ -145,10 +149,12 @@ export async function getCoopSnapshot(cooperativeId: string): Promise<CoopSnapsh
       totalSaved: walletAgg._sum.totalSaved ?? 0,
       totalWalletBalance: walletAgg._sum.balance ?? 0,
       activeLoanBalance:
-        (loanMap.get("disbursed")?._sum.balance ?? 0) + (loanMap.get("approved")?._sum.balance ?? 0),
+        (loanMap.get("disbursed")?._sum.balance ?? 0) +
+        (loanMap.get("approved")?._sum.balance ?? 0),
       totalDisbursed: loanMap.get("disbursed")?._sum.amount ?? 0,
       totalRepaid:
-        (loanMap.get("disbursed")?._sum.amount ?? 0) - (loanMap.get("disbursed")?._sum.balance ?? 0),
+        (loanMap.get("disbursed")?._sum.amount ?? 0) -
+        (loanMap.get("disbursed")?._sum.balance ?? 0),
       pendingWithdrawals: withdrawalStats._count,
       pendingWithdrawalAmount: withdrawalStats._sum.amount ?? 0,
       todayPayoutTotal: payoutStats._sum.amount ?? 0,
@@ -253,6 +259,51 @@ export async function getSavingsTrend(cooperativeId: string, months: number = 6)
   }
 
   return trends;
+}
+
+/**
+ * Financial memory — a reasoning bundle the AI can use to answer forward-looking
+ * questions like "can I afford a ₦50k loan before December?".
+ *
+ * This is the persistent, deterministic persona state (savings trajectory,
+ * standing debt capacity, projected affordability) that lets the assistant
+ * reason across sessions rather than answering each message in isolation.
+ */
+export async function getFinancialMemory(memberId: string) {
+  const member = await prisma.member.findUnique({
+    where: { id: memberId },
+    include: {
+      wallet: true,
+      loans: { where: { status: "disbursed" }, orderBy: { createdAt: "desc" } },
+      contributions: { where: { status: "confirmed" }, orderBy: { createdAt: "desc" }, take: 12 },
+    },
+  });
+  if (!member) return null;
+
+  const totalSaved = member.wallet?.totalSaved ?? 0;
+  const balance = member.wallet?.balance ?? 0;
+
+  // Standing debt capacity = 2x savings minus already-outstanding loan balance.
+  const outstanding = member.loans.reduce((sum, l) => sum + l.balance, 0);
+  const maxLoan = Math.max(0, Math.floor(totalSaved * 2) - outstanding);
+
+  // Average monthly savings over the recent history (drives "can I afford X by date").
+  const recent = member.contributions;
+  const avgMonthly =
+    recent.length > 0 ? recent.reduce((s, c) => s + c.amount, 0) / recent.length : 0;
+
+  return {
+    memberId: member.id,
+    name: member.name,
+    balance,
+    totalSaved,
+    outstandingLoanBalance: outstanding,
+    activeLoanCount: member.loans.length,
+    maxAdditionalLoan: maxLoan, // remaining borrowing headroom in kobo
+    avgMonthlySavings: Math.round(avgMonthly),
+    recentContributionCount: recent.length,
+    memberSince: member.createdAt.toISOString(),
+  };
 }
 
 /**

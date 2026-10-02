@@ -107,8 +107,13 @@ export async function bulkImportMembers(
       continue;
     }
     try {
-      const seq = coop.memberSeq + 1;
-      await prisma.cooperative.update({ where: { id: cooperativeId }, data: { memberSeq: seq } });
+      // Atomic sequence bump — never read-then-write, which would collide
+      // member codes when two imports (or a join) run concurrently.
+      const { memberSeq: seq } = await prisma.cooperative.update({
+        where: { id: cooperativeId },
+        data: { memberSeq: { increment: 1 } },
+        select: { memberSeq: true },
+      });
       const code = `${coop.code}/${String(seq).padStart(3, "0")}`;
 
       const member = await prisma.member.create({

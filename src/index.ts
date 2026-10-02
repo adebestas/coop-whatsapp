@@ -11,6 +11,7 @@ import {
   runBackupVerificationJob,
 } from "./services/scheduler.js";
 import { checkAnniversaries } from "./services/anniversary.js";
+import { escalateOverdueSTRs } from "./services/aml.js";
 import { scanGuarantorDefaults, executeDueDeductions } from "./services/guarantordeduction.js";
 import { postAutoStatus } from "./services/status-scheduler.js";
 import { cleanupExpiredVirtualAccounts } from "./services/payments/topup.js";
@@ -148,10 +149,18 @@ async function main() {
       }
       schedulerRunning = true;
       try {
-        await runAutoSaveReminders().catch((err) => app.log.error("[scheduler] auto-save reminders failed", err));
-        await runMonthlyStatements().catch((err) => app.log.error("[scheduler] monthly statements failed", err));
-        await runBirthdayGreetings().catch((err) => app.log.error("[scheduler] birthday greetings failed", err));
-        await checkAnniversaries().catch((err) => app.log.error("[scheduler] anniversary greetings failed", err));
+        await runAutoSaveReminders().catch((err) =>
+          app.log.error("[scheduler] auto-save reminders failed", err),
+        );
+        await runMonthlyStatements().catch((err) =>
+          app.log.error("[scheduler] monthly statements failed", err),
+        );
+        await runBirthdayGreetings().catch((err) =>
+          app.log.error("[scheduler] birthday greetings failed", err),
+        );
+        await checkAnniversaries().catch((err) =>
+          app.log.error("[scheduler] anniversary greetings failed", err),
+        );
         await scanGuarantorDefaults()
           .then(async (n) => {
             if (n > 0) {
@@ -159,17 +168,32 @@ async function main() {
               await logAndAlert(
                 "system",
                 "executeDueDeductions (guarantor default deductions)",
-                async () => { await executeDueDeductions(); },
+                async () => {
+                  await executeDueDeductions();
+                },
                 AlertSeverity.CRITICAL,
               );
             }
           })
           .catch((err) => app.log.error("[scheduler] guarantor default scan failed", err));
-        await postAutoStatus().catch((err) => app.log.error("[scheduler] status auto-post failed", err));
-        await cleanupExpiredVirtualAccounts().catch((err) => app.log.error("[scheduler] virtual account cleanup failed", err));
-        await runDataRetention().catch((err) => app.log.error("[scheduler] data retention failed", err));
-        await runProactiveAlerts().catch((err) => app.log.error("[scheduler] proactive alerts failed", err));
-        await runBackupVerificationJob().catch((err) => app.log.error("[scheduler] backup verification failed", err));
+        await postAutoStatus().catch((err) =>
+          app.log.error("[scheduler] status auto-post failed", err),
+        );
+        await cleanupExpiredVirtualAccounts().catch((err) =>
+          app.log.error("[scheduler] virtual account cleanup failed", err),
+        );
+        await runDataRetention().catch((err) =>
+          app.log.error("[scheduler] data retention failed", err),
+        );
+        await escalateOverdueSTRs().catch((err) =>
+          app.log.error("[scheduler] STR deadline escalation failed", err),
+        );
+        await runProactiveAlerts().catch((err) =>
+          app.log.error("[scheduler] proactive alerts failed", err),
+        );
+        await runBackupVerificationJob().catch((err) =>
+          app.log.error("[scheduler] backup verification failed", err),
+        );
       } finally {
         schedulerRunning = false;
       }
@@ -182,7 +206,14 @@ async function main() {
   async function runBackupLoop() {
     while (true) {
       await new Promise((r) => setTimeout(r, BACKUP_INTERVAL_MS));
-      await logAndAlert("system", "runBackup (daily backup)", async () => { await runBackup(); }, AlertSeverity.CRITICAL);
+      await logAndAlert(
+        "system",
+        "runBackup (daily backup)",
+        async () => {
+          await runBackup();
+        },
+        AlertSeverity.CRITICAL,
+      );
     }
   }
   void runBackupLoop();
@@ -191,7 +222,14 @@ async function main() {
   async function runReconcileLoop() {
     while (true) {
       await new Promise((r) => setTimeout(r, RECONCILE_INTERVAL_MS));
-      await logAndAlert("system", "runReconciliation (nightly reconciliation)", async () => { await runReconciliation(); }, AlertSeverity.CRITICAL);
+      await logAndAlert(
+        "system",
+        "runReconciliation (nightly reconciliation)",
+        async () => {
+          await runReconciliation();
+        },
+        AlertSeverity.CRITICAL,
+      );
     }
   }
   void runReconcileLoop();
@@ -202,7 +240,14 @@ async function main() {
     async function runPollerLoop() {
       while (true) {
         await new Promise((r) => setTimeout(r, pollMs));
-        await logAndAlert("system", "runTransferPolling (payout status polling)", async () => { await runTransferPolling(); }, AlertSeverity.CRITICAL);
+        await logAndAlert(
+          "system",
+          "runTransferPolling (payout status polling)",
+          async () => {
+            await runTransferPolling();
+          },
+          AlertSeverity.CRITICAL,
+        );
       }
     }
     void runPollerLoop();
@@ -212,7 +257,14 @@ async function main() {
   async function runDigestLoop() {
     while (true) {
       await new Promise((r) => setTimeout(r, SCHEDULER_INTERVAL_MS));
-      await logAndAlert("system", "runDailyDigest (daily movement digest)", async () => { await runDailyDigest(); }, AlertSeverity.CRITICAL);
+      await logAndAlert(
+        "system",
+        "runDailyDigest (daily movement digest)",
+        async () => {
+          await runDailyDigest();
+        },
+        AlertSeverity.CRITICAL,
+      );
     }
   }
   void runDigestLoop();

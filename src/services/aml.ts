@@ -56,7 +56,7 @@ export interface STRReport {
  * Rule 1: Large transaction alert — any single transaction above the cooperative's threshold.
  */
 function checkLargeTransaction(amount: number, largeTxThreshold: number): string | null {
-  if (amount > largeTxThreshold) {
+  if (amount >= largeTxThreshold) {
     return `Large transaction: ${formatBalance(amount)} exceeds ${formatBalance(largeTxThreshold)} threshold`;
   }
   return null;
@@ -65,7 +65,10 @@ function checkLargeTransaction(amount: number, largeTxThreshold: number): string
 /**
  * Rule 2: Rapid sequence — 3+ money-out transactions within 10 minutes from the same member.
  */
-async function checkRapidSequence(memberId: string, direction: "in" | "out"): Promise<string | null> {
+async function checkRapidSequence(
+  memberId: string,
+  direction: "in" | "out",
+): Promise<string | null> {
   if (direction !== "out") return null;
 
   const since = new Date(Date.now() - RAPID_SEQUENCE_WINDOW_MS);
@@ -96,7 +99,10 @@ async function checkRapidSequence(memberId: string, direction: "in" | "out"): Pr
 /**
  * Rule 3: Round number pattern — multiple round-number transactions within 24 hours.
  */
-async function checkRoundNumberPattern(memberId: string, cooperativeId: string): Promise<string | null> {
+async function checkRoundNumberPattern(
+  memberId: string,
+  cooperativeId: string,
+): Promise<string | null> {
   const since = new Date(Date.now() - ROUND_NUMBER_WINDOW_MS);
 
   const [withdrawals, payouts] = await Promise.all([
@@ -136,7 +142,11 @@ async function checkRoundNumberPattern(memberId: string, cooperativeId: string):
 /**
  * Rule 4: Structuring detection — transactions just below the reporting threshold.
  */
-async function checkStructuring(memberId: string, cooperativeId: string, reportingThreshold: number): Promise<string | null> {
+async function checkStructuring(
+  memberId: string,
+  cooperativeId: string,
+  reportingThreshold: number,
+): Promise<string | null> {
   const since = new Date(Date.now() - ROUND_NUMBER_WINDOW_MS);
   const minAmount = Math.floor(reportingThreshold * STRUCTURING_RATIO);
 
@@ -175,7 +185,11 @@ async function checkStructuring(memberId: string, cooperativeId: string, reporti
  * threshold within 24 hours. Money-in structuring can indicate layering
  * (breaking large sums into smaller deposits to avoid detection).
  */
-async function checkDepositStructuring(memberId: string, cooperativeId: string, reportingThreshold: number): Promise<string | null> {
+async function checkDepositStructuring(
+  memberId: string,
+  cooperativeId: string,
+  reportingThreshold: number,
+): Promise<string | null> {
   const since = new Date(Date.now() - ROUND_NUMBER_WINDOW_MS);
   const minAmount = Math.floor(reportingThreshold * STRUCTURING_RATIO);
 
@@ -226,7 +240,11 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
 
   // Check deposit structuring for money-in transactions
   if (tx.direction === "in") {
-    const depositStructuring = await checkDepositStructuring(tx.memberId, tx.cooperativeId, reportingThreshold);
+    const depositStructuring = await checkDepositStructuring(
+      tx.memberId,
+      tx.cooperativeId,
+      reportingThreshold,
+    );
     if (depositStructuring) reasons.push(depositStructuring);
   }
 
@@ -234,17 +252,17 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
   if (tx.direction === "out") {
     const agg = await checkAggregateThreshold(tx.memberId, tx.cooperativeId, reportingThreshold);
     if (agg.exceeds) {
-      const aggReason = `Aggregate outflow ₦${(agg.total / 100).toLocaleString()} in 24h exceeds ₦5,000,000 CBN threshold`;
+      const aggReason = `Aggregate outflow ₦${(agg.total / 100).toLocaleString()} in 24h exceeds ₦${(reportingThreshold / 100).toLocaleString()} CBN threshold`;
       reasons.push(aggReason);
-      await autoFileSTR(tx, aggReason);
+      await autoFileSTR(tx, aggReason, agg.total);
     }
   }
 
   // Auto-file STR for single large transactions at or above ₦5,000,000
   if (tx.amount >= REPORTING_THRESHOLD) {
-    const singleReason = `Single transaction ${formatBalance(tx.amount)} meets CBN ₦5,000,000 STR threshold`;
+    const singleReason = `Single transaction ${formatBalance(tx.amount)} meets CBN ₦${(REPORTING_THRESHOLD / 100).toLocaleString()} STR threshold`;
     reasons.push(singleReason);
-    await autoFileSTR(tx, singleReason);
+    await autoFileSTR(tx, singleReason, tx.amount);
   }
 
   return { flagged: reasons.length > 0, reasons };
@@ -253,7 +271,10 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
 /**
  * Generate a Suspicious Transaction Report (STR) summary for a member.
  */
-export async function generateSTR(memberPhone: string, cooperativeId: string): Promise<STRReport | null> {
+export async function generateSTR(
+  memberPhone: string,
+  cooperativeId: string,
+): Promise<STRReport | null> {
   const member = await prisma.member.findFirst({
     where: { phone: memberPhone, cooperativeId },
     include: { cooperative: true },
@@ -380,6 +401,7 @@ export async function handleSTR(
 export async function autoFileSTR(
   tx: TransactionDetail,
   reason: string,
+  reportedAmount: number = tx.amount,
 ): Promise<{ filed: boolean; strId?: string }> {
   try {
     // Prevent duplicate STR for the same member on the same day
@@ -398,11 +420,14 @@ export async function autoFileSTR(
     // CBN requires filing within 72 hours of detection. If CBN_STR_WEBHOOK is
     // not configured, the report is created as PENDING and super admins are
     // notified to file manually within the 72-hour deadline.
+    //
+    // `amount` stores the TRUE reported amount — the aggregate total when this
+    // STR was triggered by a 24h aggregate, or the single-tx amount otherwise.
     const str = await prisma.sTR.create({
       data: {
         cooperativeId: tx.cooperativeId,
         memberId: tx.memberId,
-        amount: tx.amount,
+        amount: reportedAmount,
         reason,
         status: "pending",
       },
@@ -427,7 +452,9 @@ export async function autoFileSTR(
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...(process.env.CBN_STR_TOKEN ? { Authorization: `Bearer ${process.env.CBN_STR_TOKEN}` } : {}),
+            ...(process.env.CBN_STR_TOKEN
+              ? { Authorization: `Bearer ${process.env.CBN_STR_TOKEN}` }
+              : {}),
           },
           body: JSON.stringify(payload),
           signal: AbortSignal.timeout(10_000),
@@ -465,6 +492,39 @@ export async function autoFileSTR(
     console.error("[aml] autoFileSTR failed:", err);
     return { filed: false };
   }
+}
+
+/**
+ * CBN filing deadline: a Suspicious Transaction Report must be filed within 72
+ * hours of detection. This job finds PENDING STRs older than that window and
+ * alerts every super admin to file immediately. Returns the count escalated.
+ */
+export async function escalateOverdueSTRs(now = new Date()): Promise<number> {
+  const SIXTY_ENDING_HOURS_MS = 72 * 60 * 60 * 1000;
+  const overdue = await prisma.sTR.findMany({
+    where: {
+      status: "pending",
+      createdAt: { lt: new Date(now.getTime() - SIXTY_ENDING_HOURS_MS) },
+    },
+    select: { id: true, cooperativeId: true, member: { select: { name: true, code: true } } },
+  });
+
+  let escalated = 0;
+  for (const str of overdue) {
+    const supers = await prisma.member.findMany({
+      where: { cooperativeId: str.cooperativeId, role: "superadmin", status: "active" },
+    });
+    for (const admin of supers) {
+      await notifyMember(
+        admin,
+        `🚨 *STR filing deadline breached*\n\nA Suspicious Transaction Report for *${str.member.name}* (${str.member.code}) ` +
+          `has been pending for over 72 hours. CBN requires filing within 72 hours — file it *now* (\`strs\` to review).`,
+      ).catch(() => {});
+    }
+    escalated += 1;
+  }
+
+  return escalated;
 }
 
 /**

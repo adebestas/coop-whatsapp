@@ -13,8 +13,13 @@ export async function paymentWebhookRoutes(app: FastifyInstance) {
     if (typeof rawBody !== "string") {
       return reply.code(400).send({ error: "raw body unavailable" });
     }
-    const outcome = await processPaymentWebhook(rawBody, req.headers as Record<string, string>);
-    return reply.code(outcome.httpStatus).send(outcome.body);
+    try {
+      const outcome = await processPaymentWebhook(rawBody, req.headers as Record<string, string>);
+      return reply.code(outcome.httpStatus).send(outcome.body);
+    } catch (err) {
+      req.log?.error?.({ err }, "payment webhook handler crashed");
+      return reply.code(500).send({ error: "internal webhook error" });
+    }
   }
 
   app.post("/webhooks/payments", handle);

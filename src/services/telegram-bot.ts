@@ -11,10 +11,40 @@ import { handleMessage } from "./conversation.js";
 import { SECRET_STATES, type BotState } from "./conversation.js";
 import { handleAwaitingInput, safeParse } from "./handlers/session.js";
 import { prisma } from "../lib/prisma.js";
+import { getRedis } from "../lib/cache.js";
+import { RedisMutex } from "../lib/redis-mutex.js";
 
 const API_BASE = "https://api.telegram.org";
 
 let offset = 0;
+const OFFSET_KEY = "telegram:offset";
+
+/** Serialize message processing per Telegram user (mirrors the WhatsApp mutex). */
+async function withTelegramUserMutex<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  if (!getRedis()) return fn(); // single-process dev/test — no cross-instance contention
+  return RedisMutex.withMutex(key, fn, 10_000);
+}
+
+async function loadOffset(): Promise<void> {
+  const client = getRedis();
+  if (!client) return;
+  try {
+    const value = await client.get(OFFSET_KEY);
+    if (value) offset = Number(value);
+  } catch (err) {
+    console.error("[telegram] failed to load polling offset:", err);
+  }
+}
+
+async function saveOffset(): Promise<void> {
+  const client = getRedis();
+  if (!client) return;
+  try {
+    await client.set(OFFSET_KEY, String(offset));
+  } catch (err) {
+    console.error("[telegram] failed to save polling offset:", err);
+  }
+}
 
 /**
  * Register the bot's command list with Telegram so users see
@@ -182,6 +212,7 @@ export async function startTelegramBot(): Promise<void> {
 
   console.log("[telegram] long-polling started");
   await setTelegramCommands();
+  await loadOffset();
   let consecutiveEmpty = 0;
   for (;;) {
     try {
@@ -200,8 +231,9 @@ export async function startTelegramBot(): Promise<void> {
       for (const update of updates) {
         offset = Math.max(offset, update.update_id + 1);
         if (update.callback_query) {
-          void handlePinCallback(update.callback_query).catch((err) => {
-            console.error(`[telegram] handlePinCallback failed for ${update.callback_query?.from.id}`, err);
+          const cb = update.callback_query;
+          void withTelegramUserMutex(`tg:${cb.from.id}`, () => handlePinCallback(cb)).catch((err) => {
+            console.error(`[telegram] handlePinCallback failed for ${cb.from.id}`, err);
           });
           continue;
         }
@@ -221,10 +253,13 @@ export async function startTelegramBot(): Promise<void> {
         const userId = `tg:${chatId}`;
         const text = message.text.trim();
 
-        void handleMessage(userId, text, { telegramMessageId: message.message_id }).catch((err) => {
+        void withTelegramUserMutex(userId, () =>
+          handleMessage(userId, text, { telegramMessageId: message.message_id }),
+        ).catch((err) => {
           console.error(`[telegram] handleMessage failed for ${userId}`, err);
         });
       }
+      await saveOffset();
     } catch (err) {
       console.error("[telegram] polling error:", err);
       await sleep(5000);

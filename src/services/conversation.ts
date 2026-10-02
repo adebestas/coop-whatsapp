@@ -570,10 +570,10 @@ export async function handleMessage(
         to: phone,
         text:
           "*Loan interest (declining balance tiers)*\n\n" +
-          "• Up to 3 months: *20% APR* (~5% flat equivalent)\n" +
-          "• 4–6 months: *16% APR* (~8% flat equivalent)\n" +
-          "• 7–9 months: *12% APR* (~9% flat equivalent)\n" +
-          "• 10–12 months: *10% APR* (~10% flat equivalent)\n\n" +
+          "• Up to 3 months: *6% APR*\n" +
+          "• 4–6 months: *8% APR*\n" +
+          "• 7–9 months: *9% APR*\n" +
+          "• 10–12 months: *10% APR*\n\n" +
           `Admin charge per loan: ${formatBalance(2000)} (deducted at disbursement).`,
       });
       break;

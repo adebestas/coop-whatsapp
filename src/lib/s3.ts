@@ -14,10 +14,8 @@ const BACKUP_REGION = process.env.BACKUP_REGION ?? "eu-west-1";
 export async function uploadToS3(filePath: string, key: string): Promise<boolean> {
   if (!s3Configured()) return false;
   try {
-    const fileContent = await readFile(filePath);
     const date = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
     const dateStamp = date.slice(0, 8);
-    const host = `${BACKUP_BUCKET}.s3.${BACKUP_REGION}.amazonaws.com`;
     const endpoint = BACKUP_ENDPOINT
       ? `${BACKUP_ENDPOINT}/${BACKUP_BUCKET}/${key}`
       : `https://${BACKUP_BUCKET}.s3.${BACKUP_REGION}.amazonaws.com/${key}`;

@@ -9,3 +9,6 @@ prisma/dev.db-journal
 web/dist/
 web/node_modules/
 exports/
+backups/
+test-*.txt
+debug-*.ts

@@ -64,7 +64,14 @@ export function parseNaira(raw?: string): number | null {
   return Number.isFinite(n) && n > 0 ? toKobo(n) : null;
 }
 
-export function buildMenu(member: { name: string; cooperative: { name: string }; wallet: { balance: number } | null; createdAt?: Date } | null): string {
+export function buildMenu(
+  member: {
+    name: string;
+    cooperative: { name: string };
+    wallet: { balance: number } | null;
+    createdAt?: Date;
+  } | null,
+): string {
   if (!member) {
     return (
       `Welcome to your cooperative's WhatsApp bot! 🤝\n\n` +
@@ -83,7 +90,15 @@ export function buildMenu(member: { name: string; cooperative: { name: string };
   );
 }
 
-export function buildFullMenu(member: { name: string; cooperative: { name: string }; wallet: { balance: number } | null; role?: string; createdAt?: Date } | null): string {
+export function buildFullMenu(
+  member: {
+    name: string;
+    cooperative: { name: string };
+    wallet: { balance: number } | null;
+    role?: string;
+    createdAt?: Date;
+  } | null,
+): string {
   if (!member) {
     return (
       `Welcome to your cooperative's WhatsApp bot! 🤝\n\n` +
@@ -91,7 +106,8 @@ export function buildFullMenu(member: { name: string; cooperative: { name: strin
       `To get started, reply *join <code>* with your cooperative's code.`
     );
   }
-  const isNewMember = member.createdAt && (Date.now() - member.createdAt.getTime()) < 3 * 24 * 60 * 60 * 1000;
+  const isNewMember =
+    member.createdAt && Date.now() - member.createdAt.getTime() < 3 * 24 * 60 * 60 * 1000;
   if (isNewMember) {
     return (
       `Hi *${member.name}* from *${member.cooperative.name}* 🏦\n\n` +
@@ -144,8 +160,7 @@ export function buildFullMenu(member: { name: string; cooperative: { name: strin
     `• *menu* — show this menu\n`;
 
   if (member.role === "admin" || member.role === "superadmin") {
-    menu +=
-      `\n*Admin commands:* *admin*\n`;
+    menu += `\n*Admin commands:* *admin*\n`;
   }
 
   return menu;
@@ -210,8 +225,13 @@ export async function issueSecretChallenge(
 ): Promise<void> {
   const flowToken = randomBytes(16).toString("hex");
   // Start a fresh secret entry: drop any stale Telegram kiosk state and reset the buffer.
-  const { keyboardMsgId, tgPinPrompt, tgPinBuf, ...rest } = data;
-  const nextData: FlowData = { ...rest, flowToken, tgPinBuf: "" };
+  const nextData: FlowData = {
+    ...data,
+    flowToken,
+    tgPinBuf: "",
+    keyboardMsgId: undefined,
+    tgPinPrompt: undefined,
+  };
   await prisma.session.upsert({
     where: { phone },
     create: { phone, state, data: JSON.stringify(nextData) },
@@ -221,7 +241,12 @@ export async function issueSecretChallenge(
   if (phone.startsWith("tg:") && sent.messageId) {
     // Persist the on-screen kiosk card handle + prompt so callback taps can
     // update progress dots and tear the card down on submit/cancel.
-    const withKiosk: FlowData = { ...nextData, tgPinBuf: "", keyboardMsgId: sent.messageId, tgPinPrompt: text };
+    const withKiosk: FlowData = {
+      ...nextData,
+      tgPinBuf: "",
+      keyboardMsgId: sent.messageId,
+      tgPinPrompt: text,
+    };
     await prisma.session.update({
       where: { phone },
       data: { data: JSON.stringify(withKiosk) },
@@ -276,7 +301,10 @@ export async function handleAwaitingInput(
         create: { phone, state: "awaiting_name", data: JSON.stringify({ joinCode: code }) },
         update: { state: "awaiting_name", data: JSON.stringify({ joinCode: code }) },
       });
-      await sendText({ to: phone, text: `Great — joining cooperative *${code}*. What's your full name?` });
+      await sendText({
+        to: phone,
+        text: `Great — joining cooperative *${code}*. What's your full name?`,
+      });
       break;
     }
 
@@ -311,8 +339,15 @@ export async function handleAwaitingInput(
         // Store consent in session data and proceed
         await prisma.session.upsert({
           where: { phone },
-          create: { phone, state: "awaiting_phone", data: JSON.stringify({ ...data, consentGiven: true }) },
-          update: { state: "awaiting_phone", data: JSON.stringify({ ...data, consentGiven: true }) },
+          create: {
+            phone,
+            state: "awaiting_phone",
+            data: JSON.stringify({ ...data, consentGiven: true }),
+          },
+          update: {
+            state: "awaiting_phone",
+            data: JSON.stringify({ ...data, consentGiven: true }),
+          },
         });
         if (phone.startsWith("tg:")) {
           await sendText({
@@ -330,7 +365,10 @@ export async function handleAwaitingInput(
           create: { phone, state: "idle", data: "{}" },
           update: { state: "idle", data: "{}" },
         });
-        await sendText({ to: phone, text: "Registration cancelled. Your data will not be stored." });
+        await sendText({
+          to: phone,
+          text: "Registration cancelled. Your data will not be stored.",
+        });
         return;
       }
       await sendText({ to: phone, text: "Please reply *YES* to consent or *NO* to cancel." });
@@ -340,7 +378,10 @@ export async function handleAwaitingInput(
     case "awaiting_phone": {
       const contactPhone = normalizePhone(text);
       if (!contactPhone) {
-        await sendText({ to: phone, text: "That doesn't look like a valid number. Try e.g. *08012345678* or *+2348012345678*." });
+        await sendText({
+          to: phone,
+          text: "That doesn't look like a valid number. Try e.g. *08012345678* or *+2348012345678*.",
+        });
         return;
       }
       const code = String(randomInt(100000, 999999));
@@ -352,11 +393,21 @@ export async function handleAwaitingInput(
           create: {
             phone,
             state: "awaiting_otp",
-            data: JSON.stringify({ ...data, contactPhone, otp: hashedCode, otpExpiresAt: Date.now() + OTP_TTL_MS }),
+            data: JSON.stringify({
+              ...data,
+              contactPhone,
+              otp: hashedCode,
+              otpExpiresAt: Date.now() + OTP_TTL_MS,
+            }),
           },
           update: {
             state: "awaiting_otp",
-            data: JSON.stringify({ ...data, contactPhone, otp: hashedCode, otpExpiresAt: Date.now() + OTP_TTL_MS }),
+            data: JSON.stringify({
+              ...data,
+              contactPhone,
+              otp: hashedCode,
+              otpExpiresAt: Date.now() + OTP_TTL_MS,
+            }),
           },
         });
         await sendText({
@@ -367,8 +418,15 @@ export async function handleAwaitingInput(
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_email", data: JSON.stringify({ ...data, contactPhone, phoneVerified: false }) },
-        update: { state: "awaiting_email", data: JSON.stringify({ ...data, contactPhone, phoneVerified: false }) },
+        create: {
+          phone,
+          state: "awaiting_email",
+          data: JSON.stringify({ ...data, contactPhone, phoneVerified: false }),
+        },
+        update: {
+          state: "awaiting_email",
+          data: JSON.stringify({ ...data, contactPhone, phoneVerified: false }),
+        },
       });
       await askEmail(phone, { ...data, contactPhone, phoneVerified: false });
       break;
@@ -377,7 +435,10 @@ export async function handleAwaitingInput(
     case "awaiting_otp": {
       const input = text.trim();
       if (!/^\d{6}$/.test(input)) {
-        await sendText({ to: phone, text: "Enter the 6-digit code we sent to your WhatsApp, or reply *resend*." });
+        await sendText({
+          to: phone,
+          text: "Enter the 6-digit code we sent to your WhatsApp, or reply *resend*.",
+        });
         return;
       }
       if (!data.otpExpiresAt || data.otpExpiresAt < Date.now()) {
@@ -385,13 +446,23 @@ export async function handleAwaitingInput(
         return;
       }
       if (!data.otp || !verifyOtp(input, data.otp)) {
-        await sendText({ to: phone, text: "Wrong code. Check the WhatsApp message and try again." });
+        await sendText({
+          to: phone,
+          text: "Wrong code. Check the WhatsApp message and try again.",
+        });
         return;
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_email", data: JSON.stringify({ ...data, otp: undefined, phoneVerified: true }) },
-        update: { state: "awaiting_email", data: JSON.stringify({ ...data, otp: undefined, phoneVerified: true }) },
+        create: {
+          phone,
+          state: "awaiting_email",
+          data: JSON.stringify({ ...data, otp: undefined, phoneVerified: true }),
+        },
+        update: {
+          state: "awaiting_email",
+          data: JSON.stringify({ ...data, otp: undefined, phoneVerified: true }),
+        },
       });
       await askEmail(phone, { ...data, phoneVerified: true });
       break;
@@ -404,7 +475,10 @@ export async function handleAwaitingInput(
         return;
       }
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        await sendText({ to: phone, text: "That doesn't look like a valid email. Reply *skip* to skip this step, or enter an email like *ada@example.com*." });
+        await sendText({
+          to: phone,
+          text: "That doesn't look like a valid email. Reply *skip* to skip this step, or enter an email like *ada@example.com*.",
+        });
         return;
       }
       await prisma.session.upsert({
@@ -424,13 +498,23 @@ export async function handleAwaitingInput(
       }
       const dob = parseBirthday(raw);
       if (!dob) {
-        await sendText({ to: phone, text: "That doesn't look like a valid birthday. Use *DD/MM* format, e.g. *15/08*, or reply *skip*." });
+        await sendText({
+          to: phone,
+          text: "That doesn't look like a valid birthday. Use *DD/MM* format, e.g. *15/08*, or reply *skip*.",
+        });
         return;
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_nok_name", data: JSON.stringify({ ...data, dateOfBirth: dob.toISOString() }) },
-        update: { state: "awaiting_nok_name", data: JSON.stringify({ ...data, dateOfBirth: dob.toISOString() }) },
+        create: {
+          phone,
+          state: "awaiting_nok_name",
+          data: JSON.stringify({ ...data, dateOfBirth: dob.toISOString() }),
+        },
+        update: {
+          state: "awaiting_nok_name",
+          data: JSON.stringify({ ...data, dateOfBirth: dob.toISOString() }),
+        },
       });
       await askNokName(phone, { ...data, dateOfBirth: dob.toISOString() });
       break;
@@ -439,7 +523,10 @@ export async function handleAwaitingInput(
     case "awaiting_nok_name": {
       const nokName = text.trim().replace(/\s+/g, " ");
       if (!nokName || nokName.length < 2) {
-        await sendText({ to: phone, text: "Please enter your next of kin's full name (e.g. *Chidi Okafor*)." });
+        await sendText({
+          to: phone,
+          text: "Please enter your next of kin's full name (e.g. *Chidi Okafor*).",
+        });
         return;
       }
       await prisma.session.upsert({
@@ -457,7 +544,10 @@ export async function handleAwaitingInput(
     case "awaiting_nok_phone": {
       const nokPhone = normalizePhone(text);
       if (!nokPhone) {
-        await sendText({ to: phone, text: "That doesn't look like a valid number. Try e.g. *08012345678* or *+2348012345678*." });
+        await sendText({
+          to: phone,
+          text: "That doesn't look like a valid number. Try e.g. *08012345678* or *+2348012345678*.",
+        });
         return;
       }
       const nextData: FlowData = { ...data, nokPhone };
@@ -496,7 +586,10 @@ export async function handleAwaitingInput(
 
     case "awaiting_pin_confirm": {
       if (!data.pin || !verifyPin(text.trim(), data.pin)) {
-        await sendText({ to: phone, text: "PINs didn't match. Let's start again — choose a 4-digit PIN." });
+        await sendText({
+          to: phone,
+          text: "PINs didn't match. Let's start again — choose a 4-digit PIN.",
+        });
         await prisma.session.upsert({
           where: { phone },
           create: { phone, state: "awaiting_pin" },
@@ -531,7 +624,11 @@ export async function handleAwaitingInput(
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_optin", data: JSON.stringify({ memberId: result.memberId }) },
+        create: {
+          phone,
+          state: "awaiting_optin",
+          data: JSON.stringify({ memberId: result.memberId }),
+        },
         update: { state: "awaiting_optin", data: JSON.stringify({ memberId: result.memberId }) },
       });
       await sendText({
@@ -549,7 +646,10 @@ export async function handleAwaitingInput(
       if (result.ok && result.memberId) {
         const newMember = await prisma.member.findUnique({ where: { id: result.memberId } });
         if (newMember) {
-          const activeElections = await getActiveElectionsForNewMember(newMember.cooperativeId, newMember.unitId);
+          const activeElections = await getActiveElectionsForNewMember(
+            newMember.cooperativeId,
+            newMember.unitId,
+          );
           if (activeElections.length > 0) {
             const electionLines = activeElections.map((e, i) => {
               const typeTag = e.electionType === "workplace" || e.kind === "unit" ? "🏢" : "🏛️";
@@ -572,13 +672,23 @@ export async function handleAwaitingInput(
     case "awaiting_save_amount": {
       const amount = parseNaira(text);
       if (amount === null) {
-        await sendText({ to: phone, text: "That doesn't look like a valid amount. Try *save 5000* or *save 10000*." });
+        await sendText({
+          to: phone,
+          text: "That doesn't look like a valid amount. Try *save 5000* or *save 10000*.",
+        });
         return;
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_save_confirm", data: JSON.stringify({ ...data, saveAmount: amount }) },
-        update: { state: "awaiting_save_confirm", data: JSON.stringify({ ...data, saveAmount: amount }) },
+        create: {
+          phone,
+          state: "awaiting_save_confirm",
+          data: JSON.stringify({ ...data, saveAmount: amount }),
+        },
+        update: {
+          state: "awaiting_save_confirm",
+          data: JSON.stringify({ ...data, saveAmount: amount }),
+        },
       });
       await sendText({
         to: phone,
@@ -599,15 +709,18 @@ export async function handleAwaitingInput(
           ? `To save *${formatBalance(saveAmount)}*, transfer that exact amount to your funding account below — your wallet is credited automatically once the transfer is confirmed.`
           : `Transfer any amount to your funding account below — your wallet is credited automatically once the transfer is confirmed.`;
         const fund = member ? await provisionVirtualAccount(member.id) : null;
-        const accountLine =
-          fund?.ok
-            ? fund.message
-            : "We couldn't set up your funding account right now. Please try *fund* again.";
+        const accountLine = fund?.ok
+          ? fund.message
+          : "We couldn't set up your funding account right now. Please try *fund* again.";
         await sendText({ to: phone, text: `${amountLine}\n\n${accountLine}` });
       } else {
         await sendText({ to: phone, text: "Save cancelled. Reply *menu* to see options." });
       }
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle" },
+      });
       break;
     }
 
@@ -619,8 +732,15 @@ export async function handleAwaitingInput(
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_loan_months", data: JSON.stringify({ ...data, loanAmount: amount }) },
-        update: { state: "awaiting_loan_months", data: JSON.stringify({ ...data, loanAmount: amount }) },
+        create: {
+          phone,
+          state: "awaiting_loan_months",
+          data: JSON.stringify({ ...data, loanAmount: amount }),
+        },
+        update: {
+          state: "awaiting_loan_months",
+          data: JSON.stringify({ ...data, loanAmount: amount }),
+        },
       });
       await sendText({ to: phone, text: "For how many months? (1–12)" });
       break;
@@ -634,8 +754,15 @@ export async function handleAwaitingInput(
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_loan_bank_account", data: JSON.stringify({ ...data, loanMonths: months }) },
-        update: { state: "awaiting_loan_bank_account", data: JSON.stringify({ ...data, loanMonths: months }) },
+        create: {
+          phone,
+          state: "awaiting_loan_bank_account",
+          data: JSON.stringify({ ...data, loanMonths: months }),
+        },
+        update: {
+          state: "awaiting_loan_bank_account",
+          data: JSON.stringify({ ...data, loanMonths: months }),
+        },
       });
       await sendText({
         to: phone,
@@ -654,8 +781,15 @@ export async function handleAwaitingInput(
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_loan_bank_code", data: JSON.stringify({ ...data, loanAccount: account }) },
-        update: { state: "awaiting_loan_bank_code", data: JSON.stringify({ ...data, loanAccount: account }) },
+        create: {
+          phone,
+          state: "awaiting_loan_bank_code",
+          data: JSON.stringify({ ...data, loanAccount: account }),
+        },
+        update: {
+          state: "awaiting_loan_bank_code",
+          data: JSON.stringify({ ...data, loanAccount: account }),
+        },
       });
       await sendText({
         to: phone,
@@ -675,10 +809,20 @@ export async function handleAwaitingInput(
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_loan_bank_confirm", data: JSON.stringify({ ...data, loanBankCode: bank.code, loanBankName: bank.name }) },
-        update: { state: "awaiting_loan_bank_confirm", data: JSON.stringify({ ...data, loanBankCode: bank.code, loanBankName: bank.name }) },
+        create: {
+          phone,
+          state: "awaiting_loan_bank_confirm",
+          data: JSON.stringify({ ...data, loanBankCode: bank.code, loanBankName: bank.name }),
+        },
+        update: {
+          state: "awaiting_loan_bank_confirm",
+          data: JSON.stringify({ ...data, loanBankCode: bank.code, loanBankName: bank.name }),
+        },
       });
-      await sendText({ to: phone, text: `You selected *${bank.name}*. Is this correct? Reply *yes* or *no*.` });
+      await sendText({
+        to: phone,
+        text: `You selected *${bank.name}*. Is this correct? Reply *yes* or *no*.`,
+      });
       break;
     }
 
@@ -703,12 +847,20 @@ export async function handleAwaitingInput(
       });
       if (!result.ok || !result.loanId) {
         await sendText({ to: phone, text: result.message });
-        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle" },
+        });
         return;
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_guarantor_1", data: JSON.stringify({ loanId: result.loanId }) },
+        create: {
+          phone,
+          state: "awaiting_guarantor_1",
+          data: JSON.stringify({ loanId: result.loanId }),
+        },
         update: { state: "awaiting_guarantor_1", data: JSON.stringify({ loanId: result.loanId }) },
       });
       await sendText({ to: phone, text: result.message });
@@ -729,7 +881,11 @@ export async function handleAwaitingInput(
       if (result.ok) {
         await prisma.session.upsert({
           where: { phone },
-          create: { phone, state: "awaiting_guarantor_2", data: JSON.stringify({ loanId: data.loanId }) },
+          create: {
+            phone,
+            state: "awaiting_guarantor_2",
+            data: JSON.stringify({ loanId: data.loanId }),
+          },
           update: { state: "awaiting_guarantor_2", data: JSON.stringify({ loanId: data.loanId }) },
         });
       }
@@ -740,7 +896,11 @@ export async function handleAwaitingInput(
       const result = await addGuarantor(phone, data.loanId ?? "", text);
       await sendText({ to: phone, text: result.message });
       if (result.ok) {
-        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle" },
+        });
       }
       break;
     }
@@ -748,7 +908,10 @@ export async function handleAwaitingInput(
     case "awaiting_withdraw_amount": {
       const amount = parseNaira(text);
       if (amount === null) {
-        await sendText({ to: phone, text: "That doesn't look like a valid amount. Try *withdraw 5000* or *withdraw 10000*." });
+        await sendText({
+          to: phone,
+          text: "That doesn't look like a valid amount. Try *withdraw 5000* or *withdraw 10000*.",
+        });
         return;
       }
       const member = await getMemberByPhone(phone);
@@ -762,8 +925,15 @@ export async function handleAwaitingInput(
       } else {
         await prisma.session.upsert({
           where: { phone },
-          create: { phone, state: "awaiting_withdraw_account", data: JSON.stringify({ ...data, withdrawAmount: amount }) },
-          update: { state: "awaiting_withdraw_account", data: JSON.stringify({ ...data, withdrawAmount: amount }) },
+          create: {
+            phone,
+            state: "awaiting_withdraw_account",
+            data: JSON.stringify({ ...data, withdrawAmount: amount }),
+          },
+          update: {
+            state: "awaiting_withdraw_account",
+            data: JSON.stringify({ ...data, withdrawAmount: amount }),
+          },
         });
         await sendText({
           to: phone,
@@ -776,22 +946,38 @@ export async function handleAwaitingInput(
     case "awaiting_withdraw_account": {
       const account = text.trim().replace(/[^0-9]/g, "");
       if (!/^\d{10}$/.test(account)) {
-        await sendText({ to: phone, text: "Account numbers are 10 digits. Please re-enter, e.g. *0123456789*." });
+        await sendText({
+          to: phone,
+          text: "Account numbers are 10 digits. Please re-enter, e.g. *0123456789*.",
+        });
         return;
       }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_withdraw_bank", data: JSON.stringify({ ...data, withdrawAccount: account }) },
-        update: { state: "awaiting_withdraw_bank", data: JSON.stringify({ ...data, withdrawAccount: account }) },
+        create: {
+          phone,
+          state: "awaiting_withdraw_bank",
+          data: JSON.stringify({ ...data, withdrawAccount: account }),
+        },
+        update: {
+          state: "awaiting_withdraw_bank",
+          data: JSON.stringify({ ...data, withdrawAccount: account }),
+        },
       });
-      await sendText({ to: phone, text: `Which bank? (e.g. *Access*, *GTB*, *Zenith*, *UBA*, *Kuda*)` });
+      await sendText({
+        to: phone,
+        text: `Which bank? (e.g. *Access*, *GTB*, *Zenith*, *UBA*, *Kuda*)`,
+      });
       break;
     }
 
     case "awaiting_withdraw_bank": {
       const bank = resolveBankCode(text);
       if (!bank) {
-        await sendText({ to: phone, text: "We don't recognise that bank. Try e.g. *Access*, *GTB*, *Zenith*, *Kuda*, or the 5-digit bank code." });
+        await sendText({
+          to: phone,
+          text: "We don't recognise that bank. Try e.g. *Access*, *GTB*, *Zenith*, *Kuda*, or the 5-digit bank code.",
+        });
         return;
       }
       await issueSecretChallenge(
@@ -806,13 +992,23 @@ export async function handleAwaitingInput(
     case "awaiting_withdraw_pin": {
       const input = text.trim();
       if (input.toLowerCase() === "menu" || input.toLowerCase() === "cancel") {
-        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
-        await sendText({ to: phone, text: "Withdrawal cancelled. Reply *menu* to start something else." });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({
+          to: phone,
+          text: "Withdrawal cancelled. Reply *menu* to start something else.",
+        });
         return;
       }
       const member = await getMemberByPhone(phone);
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+        });
         return;
       }
       const pinCheck = await verifyMemberPin(member, input);
@@ -824,24 +1020,45 @@ export async function handleAwaitingInput(
       }
       const bank =
         data.withdrawAccount && data.withdrawBankCode
-          ? { accountNumber: data.withdrawAccount, bankCode: data.withdrawBankCode, bankName: data.withdrawBankName }
+          ? {
+              accountNumber: data.withdrawAccount,
+              bankCode: data.withdrawBankCode,
+              bankName: data.withdrawBankName,
+            }
           : undefined;
       const result = await requestWithdrawal(phone, data.withdrawAmount ?? 0, bank);
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
-      await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle" },
+      });
+      await sendText({
+        to: phone,
+        text: result.message + "\n\nReply *menu* to see other options.",
+      });
       break;
     }
 
     case "awaiting_repay_pin": {
       const input = text.trim();
       if (input.toLowerCase() === "menu" || input.toLowerCase() === "cancel") {
-        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
-        await sendText({ to: phone, text: "Repayment cancelled. Reply *menu* to start something else." });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({
+          to: phone,
+          text: "Repayment cancelled. Reply *menu* to start something else.",
+        });
         return;
       }
       const member = await getMemberByPhone(phone);
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+        });
         return;
       }
       const pinCheck = await verifyMemberPin(member, input);
@@ -852,19 +1069,33 @@ export async function handleAwaitingInput(
         return;
       }
       const result = await repayLoan(phone);
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
-      await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle" },
+      });
+      await sendText({
+        to: phone,
+        text: result.message + "\n\nReply *menu* to see other options.",
+      });
       break;
     }
 
     case "awaiting_death_cert": {
       const cert = text.trim();
       if (!cert) {
-        await sendText({ to: phone, text: "Please send the death certificate (photo, document or reference details)." });
+        await sendText({
+          to: phone,
+          text: "Please send the death certificate (photo, document or reference details).",
+        });
         return;
       }
       const result = await submitCertificate(data.deathClaimId ?? "", cert);
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle" },
+      });
       await sendText({ to: phone, text: result.message });
       break;
     }
@@ -872,12 +1103,23 @@ export async function handleAwaitingInput(
     case "awaiting_delete_account_pin": {
       const input = text.trim();
       if (input.toLowerCase() === "menu" || input.toLowerCase() === "cancel") {
-        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
-        await sendText({ to: phone, text: "Account deletion cancelled. Reply *menu* to start something else." });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({
+          to: phone,
+          text: "Account deletion cancelled. Reply *menu* to start something else.",
+        });
         return;
       }
       const { handleDeleteAccountPin } = await import("./admin-actions.js");
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle", data: "{}" },
+      });
       await handleDeleteAccountPin(phone, input);
       break;
     }
@@ -886,7 +1128,11 @@ export async function handleAwaitingInput(
       const answer = text.trim().toLowerCase();
       const memberId = data.memberId as string | undefined;
       if (!memberId) {
-        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle", data: "{}" }, update: { state: "idle", data: "{}" } });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle", data: "{}" },
+          update: { state: "idle", data: "{}" },
+        });
         break;
       }
       if (answer === "yes" || answer === "y") {
@@ -902,8 +1148,15 @@ export async function handleAwaitingInput(
             granted: true,
           },
         });
-        await sendText({ to: phone, text: "✅ You're all set! You'll receive messages from your cooperative. Reply *menu* to see your options." });
-        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle", data: "{}" }, update: { state: "idle", data: "{}" } });
+        await sendText({
+          to: phone,
+          text: "✅ You're all set! You'll receive messages from your cooperative. Reply *menu* to see your options.",
+        });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle", data: "{}" },
+          update: { state: "idle", data: "{}" },
+        });
       } else if (answer === "no" || answer === "n") {
         await prisma.member.update({
           where: { id: memberId },
@@ -914,7 +1167,11 @@ export async function handleAwaitingInput(
           to: phone,
           text: "You've been opted out of messages. You can still use *balance*, *statement* and the rest of the menu — reply *optin* any time to receive messages again.",
         });
-        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle", data: "{}" }, update: { state: "idle", data: "{}" } });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle", data: "{}" },
+          update: { state: "idle", data: "{}" },
+        });
       } else {
         // Anything else (including the founder re-sending "menu") is not an answer.
         // Re-ask instead of silently recording a NO the member never gave.
@@ -925,7 +1182,11 @@ export async function handleAwaitingInput(
 
     case "awaiting_ai_confirm": {
       const answer = text.trim().toLowerCase();
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle", data: "{}" },
+      });
       if (answer === "yes" || answer === "1" || answer === "ok") {
         const proposed = [data.aiCommand, ...(data.aiArgs ?? [])].filter(Boolean).join(" ");
         const { handleMessage } = await import("../conversation.js");
@@ -938,11 +1199,21 @@ export async function handleAwaitingInput(
 
     case "awaiting_ai_query_confirm": {
       const answer = text.trim().toLowerCase();
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle", data: "{}" } });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle", data: "{}" },
+      });
       if (answer === "yes" || answer === "1" || answer === "ok") {
-        await sendText({ to: phone, text: "Great! Reply *menu* to see your options, or ask me anything else." });
+        await sendText({
+          to: phone,
+          text: "Great! Reply *menu* to see your options, or ask me anything else.",
+        });
       } else if (answer === "no" || answer === "0") {
-        await sendText({ to: phone, text: "Got it. Reply *menu* to see your options, or try asking differently." });
+        await sendText({
+          to: phone,
+          text: "Got it. Reply *menu* to see your options, or try asking differently.",
+        });
       } else {
         await sendText({ to: phone, text: "Reply *menu* to see your options." });
       }
@@ -952,7 +1223,10 @@ export async function handleAwaitingInput(
     case "awaiting_onboard_name": {
       const coopName = text.trim().replace(/\s+/g, " ");
       if (!coopName || coopName.length < 3) {
-        await sendText({ to: phone, text: "Please enter your cooperative name (at least 3 characters)." });
+        await sendText({
+          to: phone,
+          text: "Please enter your cooperative name (at least 3 characters).",
+        });
         return;
       }
       await prisma.session.upsert({
@@ -968,9 +1242,15 @@ export async function handleAwaitingInput(
     }
 
     case "awaiting_onboard_code": {
-      const code = text.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const code = text
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
       if (!code || code.length < 3 || code.length > 10) {
-        await sendText({ to: phone, text: "Code should be 3-10 characters (letters and numbers only), e.g. *LAG01*." });
+        await sendText({
+          to: phone,
+          text: "Code should be 3-10 characters (letters and numbers only), e.g. *LAG01*.",
+        });
         return;
       }
       const existing = await prisma.cooperative.findUnique({ where: { code } });
@@ -981,8 +1261,15 @@ export async function handleAwaitingInput(
       const prevData1 = safeParse(dataJson);
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_onboard_state", data: JSON.stringify({ ...prevData1, coopCode: code }) },
-        update: { state: "awaiting_onboard_state", data: JSON.stringify({ ...prevData1, coopCode: code }) },
+        create: {
+          phone,
+          state: "awaiting_onboard_state",
+          data: JSON.stringify({ ...prevData1, coopCode: code }),
+        },
+        update: {
+          state: "awaiting_onboard_state",
+          data: JSON.stringify({ ...prevData1, coopCode: code }),
+        },
       });
       await sendText({
         to: phone,
@@ -997,8 +1284,15 @@ export async function handleAwaitingInput(
       const prevData2 = safeParse(dataJson);
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_onboard_phone", data: JSON.stringify({ ...prevData2, coopState: stateValue }) },
-        update: { state: "awaiting_onboard_phone", data: JSON.stringify({ ...prevData2, coopState: stateValue }) },
+        create: {
+          phone,
+          state: "awaiting_onboard_phone",
+          data: JSON.stringify({ ...prevData2, coopState: stateValue }),
+        },
+        update: {
+          state: "awaiting_onboard_phone",
+          data: JSON.stringify({ ...prevData2, coopState: stateValue }),
+        },
       });
       await sendText({
         to: phone,
@@ -1010,7 +1304,10 @@ export async function handleAwaitingInput(
     case "awaiting_onboard_phone": {
       const adminPhone = normalizePhone(text);
       if (!adminPhone) {
-        await sendText({ to: phone, text: "That doesn't look like a valid number. Try e.g. *08012345678* or *+2348012345678*." });
+        await sendText({
+          to: phone,
+          text: "That doesn't look like a valid number. Try e.g. *08012345678* or *+2348012345678*.",
+        });
         return;
       }
       const prevData3 = safeParse(dataJson) as any;
@@ -1084,7 +1381,11 @@ export async function handleAwaitingInput(
     }
 
     default:
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle" }, update: { state: "idle" } });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle" },
+      });
       await sendText({ to: phone, text: buildMenu(null) });
   }
 }

@@ -34,7 +34,10 @@ function scheduleReconnect(): void {
       // Connection failed, will retry on next interval
       const now = Date.now();
       if (now - lastErrorLog > 60_000) {
-        console.error("[Redis] Background reconnection failed:", err instanceof Error ? err.message : String(err));
+        console.error(
+          "[Redis] Background reconnection failed:",
+          err instanceof Error ? err.message : String(err),
+        );
         lastErrorLog = now;
       }
     }
@@ -217,11 +220,16 @@ export async function checkRateLimit(
   if (client) {
     try {
       const redisKey = `rl:${key}`;
-      const current = await client.eval(`
+      const current = (await client.eval(
+        `
         local current = redis.call('INCR', KEYS[1])
         if current == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
         return current
-      `, 1, redisKey, windowSeconds.toString()) as number;
+      `,
+        1,
+        redisKey,
+        windowSeconds.toString(),
+      )) as number;
       if (current > maxAttempts) {
         const ttl = await client.ttl(redisKey);
         return { allowed: false, retryAfter: ttl > 0 ? ttl : windowSeconds };
@@ -284,7 +292,9 @@ export async function resetRateLimit(key: string): Promise<void> {
  * - 3 OTP codes per 10-minute window per phone
  * - 5 wrong verification attempts → 30-min lockout per phone
  */
-export async function checkOtpRateLimit(phone: string): Promise<{ allowed: boolean; message?: string; retryAfter?: number }> {
+export async function checkOtpRateLimit(
+  phone: string,
+): Promise<{ allowed: boolean; message?: string; retryAfter?: number }> {
   const client = getRedis();
   const now = Date.now();
 
@@ -302,21 +312,33 @@ export async function checkOtpRateLimit(phone: string): Promise<{ allowed: boole
     // 60s cooldown check
     if (cooldownEntry && now - cooldownEntry.resetAt < 60_000) {
       const remaining = Math.ceil((60_000 - (now - cooldownEntry.resetAt)) / 1000);
-      return { allowed: false, message: `Please wait *${remaining}* more second(s) before requesting a new OTP.`, retryAfter: remaining };
+      return {
+        allowed: false,
+        message: `Please wait *${remaining}* more second(s) before requesting a new OTP.`,
+        retryAfter: remaining,
+      };
     }
 
     // 3 OTP codes per 10 min window
     if (genEntry && genEntry.count >= 3) {
-      const remainingSec = Math.ceil((genEntry.resetAt as number - now) / 1000);
-      return { allowed: false, message: `You have reached the limit of 3 OTP codes per 10 minutes. Try again in *${Math.ceil(remainingSec / 60)}* minute(s).`, retryAfter: remainingSec };
+      const remainingSec = Math.ceil(((genEntry.resetAt as number) - now) / 1000);
+      return {
+        allowed: false,
+        message: `You have reached the limit of 3 OTP codes per 10 minutes. Try again in *${Math.ceil(remainingSec / 60)}* minute(s).`,
+        retryAfter: remainingSec,
+      };
     }
 
-// 5 wrong verification attempts → lockout
+    // 5 wrong verification attempts → lockout
     if (verifyEntry && verifyEntry.count >= 5) {
       const lockoutEnd = verifyEntry.resetAt ? new Date(verifyEntry.resetAt as number) : new Date();
       const now = Date.now();
       const lockoutMinutes = Math.ceil((lockoutEnd.getTime() - now) / 60_000);
-      return { allowed: false, message: `Your OTP account is locked for *${lockoutMinutes} minute(s)* after 5 wrong attempts.`, retryAfter: lockoutMinutes * 60 };
+      return {
+        allowed: false,
+        message: `Your OTP account is locked for *${lockoutMinutes} minute(s)* after 5 wrong attempts.`,
+        retryAfter: lockoutMinutes * 60,
+      };
     }
 
     // In-memory: increment counters
@@ -332,8 +354,9 @@ export async function checkOtpRateLimit(phone: string): Promise<{ allowed: boole
       verifyEntry.count++;
       verifyEntry.resetAt = now + 30 * 60 * 1000;
     }
-    // 60s cooldown: store timestamp
-    inMemoryRateLimits.set(cooldownKey, { count: 1, resetAt: now + 60_000 });
+    // 60s cooldown: store the generation timestamp (NOT a future resetAt — the
+    // check above compares `now - resetAt < 60_000`).
+    inMemoryRateLimits.set(cooldownKey, { count: 1, resetAt: now });
 
     return { allowed: true };
   }
@@ -349,7 +372,11 @@ export async function checkOtpRateLimit(phone: string): Promise<{ allowed: boole
     const lastGen = parseInt(cooldownTs);
     if (now - lastGen < 60_000) {
       const remaining = Math.ceil((60_000 - (now - lastGen)) / 1000);
-      return { allowed: false, message: `Please wait *${remaining}* more second(s) before requesting a new OTP.`, retryAfter: remaining };
+      return {
+        allowed: false,
+        message: `Please wait *${remaining}* more second(s) before requesting a new OTP.`,
+        retryAfter: remaining,
+      };
     }
   }
 
@@ -357,20 +384,29 @@ export async function checkOtpRateLimit(phone: string): Promise<{ allowed: boole
   const genAllowed = await checkRateLimit(genKey, 3, 600);
   if (!genAllowed.allowed) {
     const ttl = await client.ttl(genKey);
-    return { allowed: false, message: `You have reached the limit of 3 OTP codes per 10 minutes. Try again later.`, retryAfter: ttl > 0 ? ttl : 600 };
+    return {
+      allowed: false,
+      message: `You have reached the limit of 3 OTP codes per 10 minutes. Try again later.`,
+      retryAfter: ttl > 0 ? ttl : 600,
+    };
   }
 
   // 5 wrong verification attempts → lockout: use checkRateLimit with window 30 min
   const verifyAllowed = await checkRateLimit(verifyKey, 5, 30 * 60);
   if (!verifyAllowed.allowed) {
     const ttl = await client.ttl(verifyKey);
-    return { allowed: false, message: `Your OTP account is locked after 5 wrong attempts. Try again in *${Math.ceil(ttl / 60)}* minute(s).`, retryAfter: ttl > 0 ? ttl : 30 * 60 };
+    return {
+      allowed: false,
+      message: `Your OTP account is locked after 5 wrong attempts. Try again in *${Math.ceil(ttl / 60)}* minute(s).`,
+      retryAfter: ttl > 0 ? ttl : 30 * 60,
+    };
   }
 
   // On success, reset the wrong-attempt counter by removing the key
   // (the actual reset happens when OTP verification succeeds in the caller)
   // But we also need to update the cooldown timestamp.
   // We'll let the caller reset the cooldown via a separate function if needed.
+  await client.set(cooldownKey, String(now), "EX", 60);
 
   return { allowed: true };
 }
