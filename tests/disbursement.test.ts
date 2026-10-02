@@ -14,30 +14,12 @@ import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { approveLoan } from "../src/services/loans.js";
 import { namesMatch } from "../src/services/disbursements.js";
 import { resetMoneyRateLimit } from "../src/services/fraud.js";
+// The payments module is mocked in tests/setup.ts (registered before the app
+// import), so per-file mocking here would be inert. Arm the shared fixture
+// instead to control account-name resolution and payout outcomes.
+import { paymentState as state } from "./payment-state.js";
 
-// Mock the payment provider so we control account-name resolution + payouts.
-const state = {
-  resolveName: "ADA OBI",
-  resolveFails: false,
-  payoutFails: false,
-};
 
-vi.mock("../src/services/payments/index.js", () => ({
-  resolveProvider: () => ({
-    name: "paystack",
-    createVirtualAccount: vi.fn(),
-    payout: vi.fn(async () =>
-      state.payoutFails ? { ok: false, error: "insufficient balance" } : { ok: true, providerRef: "trx-1" },
-    ),
-    resolveAccount: vi.fn(async () =>
-      state.resolveFails
-        ? { ok: false, error: "account not found" }
-        : { ok: true, name: state.resolveName },
-    ),
-    verifyWebhook: () => true,
-    parseNotification: () => null,
-  }),
-}));
 
 const ADMIN_PHONE = "2348090000001";
 const PHONE = "2348010000001";
@@ -209,7 +191,7 @@ describe("loan disbursement", () => {
     const payout = await prisma.payout.findFirst({ where: { memberId: loan.memberId } });
     expect(payout).not.toBeNull();
     expect(payout!.status).toBe("successful");
-    expect(payout!.providerRef).toBe("pay-trx-1");
+    expect(payout!.providerRef).toBe("trx-1");
 
     // The member was notified.
     const texts = allTexts().join("\n");
@@ -248,9 +230,8 @@ describe("loan disbursement", () => {
   it("requires the super admin's approval before an admin-approved loan pays out", async () => {
     const { loan, coopId, super1Id, super2Id } = await getGuaranteedLoan("Ada Obi");
 
-    // Plain admin approval stops at admin_approved — no money moves.
-    const first = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId });
-    expect(first.ok).toBe(true);
+    // The helper already cleared the Account Officer and admin stages, so the
+    // loan sits at admin_approved — no money has moved yet.
     let updated = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(updated!.status).toBe("admin_approved");
     expect(await prisma.payout.count()).toBe(0);
@@ -283,7 +264,7 @@ describe("withdrawals", () => {
   it("creates a request, then pays out after admin approval + super admin finalization", async () => {
     const coop = await makeCoop("TEST22");
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
-    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" }); // the coop's super admin
+    await makeMember(ADMIN_PHONE, coop.id, { role: "superadmin" }); // approves, then finalizes
     await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000 } });
 
     await handleMessage(PHONE, "withdraw 20000");
@@ -304,8 +285,10 @@ describe("withdrawals", () => {
     expect(updated!.bankAccountNumber).toBe("0123456789");
     expect(updated!.bankCode).toBe("044");
 
-    // ADMIN_PHONE is the coop's registered super admin: one approval pays.
+// ADMIN_PHONE is the coop's registered super admin: it can approve and
+    // then finalize, which is what actually sends the money.
     await handleMessage(ADMIN_PHONE, `approvewdraw ${req!.id.slice(-6)}`);
+    await handleMessage(ADMIN_PHONE, `finalize ${req!.id.slice(-6)}`);
 
     updated = await prisma.member.findUnique({
       where: { id: member.id },
@@ -369,7 +352,7 @@ await handleMessage(PHONE, "withdraw 20000");
   it("enforces the 6-month rule and lets an admin override it", async () => {
     const coop = await makeCoop("TEST26");
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
-    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" }); // the coop's super admin
+    await makeMember(ADMIN_PHONE, coop.id, { role: "superadmin" }); // approves, then finalizes
     await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000 } });
     await prisma.member.update({
       where: { id: member.id },

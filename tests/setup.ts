@@ -52,16 +52,27 @@ vi.mock("../src/lib/messaging.js", async (importOriginal) => {
   };
 });
 
-// Mock payments module to avoid real API calls in tests
+// Mock payments module to avoid real API calls in tests. This mock is
+// registered before the app import below, so a per-file mock of the same
+// module would be inert — tests arm tests/payment-state.ts instead.
 vi.mock("../src/services/payments/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/services/payments/index.js")>();
+  const { paymentState } = await import("./payment-state.js");
   return {
     ...actual,
     resolveProvider: vi.fn(() => ({
       name: "monnify",
       createVirtualAccount: vi.fn(),
-      payout: vi.fn(async () => ({ ok: true, providerRef: "pay-trx-1" })),
-      resolveAccount: vi.fn(async () => ({ ok: true, name: "ADA OBI" })),
+      payout: vi.fn(async () =>
+        paymentState.payoutFails
+          ? { ok: false, error: "insufficient balance" }
+          : { ok: true, providerRef: "trx-1" },
+      ),
+      resolveAccount: vi.fn(async () =>
+        paymentState.resolveFails
+          ? { ok: false, error: "account not found" }
+          : { ok: true, name: paymentState.resolveName },
+      ),
       verifyWebhook: () => true,
       parseNotification: () => null,
     })),

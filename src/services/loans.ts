@@ -51,17 +51,19 @@ export const LOAN_TO_SAVINGS_RATIO = Number(process.env.LOAN_TO_SAVINGS_RATIO ??
 /** Flat admin charge deducted from every loan at disbursement (₦2,000 in kobo). */
 export const LOAN_ADMIN_CHARGE = Number(process.env.LOAN_ADMIN_CHARGE ?? "200000");
 /** Maximum allowed interest rate per CBN guidance on cooperative lending. */
-const MAX_ALLOWED_RATE = 15; // 15% max per CBN guidance
+const MAX_ALLOWED_RATE = 10; // 10% max per CBN guidance
 
 /**
  * Annual interest rates by tenure tier (declining balance / reducing balance).
  * These are annual percentage rates (APR) applied monthly on declining balance.
+ * 10% is the ceiling and belongs to the 10-month (longest) tier; shorter
+ * tenures price below it.
  */
 const ANNUAL_RATE_BY_TENURE: Record<string, number> = {
-  "1-3": 20.0,   // ~5% flat equivalent over 3 months
-  "4-6": 16.0,   // ~8% flat equivalent over 6 months
-  "7-9": 12.0,   // ~9% flat equivalent over 9 months
-  "10-12": 10.0, // ~10% flat equivalent over 12 months
+  "1-3": 6.0,
+  "4-6": 8.0,
+  "7-9": 9.0,
+  "10-12": 10.0,
 };
 
 /**
@@ -177,9 +179,8 @@ export async function applyForLoan(
   }
 
   // Interest is tiered by tenure and charged on declining balance (reducing balance).
-  // The short-tenure tiers sit above the CBN 15% ceiling that approveLoan enforces,
-  // which would leave every short-tenure loan permanently un-disbursable, so the
-  // quoted rate is capped here to keep pricing and the approval guard consistent.
+  // Clamped to MAX_ALLOWED_RATE so quoted pricing can never exceed the ceiling that
+  // approveLoan enforces at disbursement.
   const interestRate = Math.min(annualRateFor(tenureMonths), MAX_ALLOWED_RATE);
   const monthly = calculateMonthlyPayment(amount, tenureMonths);
   const total = totalRepayable(amount, tenureMonths);
