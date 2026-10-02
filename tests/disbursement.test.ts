@@ -77,15 +77,17 @@ async function getGuaranteedLoan(borrowerName?: string) {
   const super1 = await makeMember("2348070000001", coop.id, { role: "superadmin" });
   const super2 = await makeMember("2348070000002", coop.id, { role: "superadmin" });
 
-  // Loans are capped at 2x savings — give the borrower history first.
+  // Loans are capped at 2x savings and tier-1 members at N50,000 per transaction.
+  // Give the borrower enough history for the requested amount to be eligible.
   await prisma.wallet.update({
     where: { memberId: borrower.id },
-    data: { balance: 200000, totalSaved: 200000 },
+    data: { balance: 5000000, totalSaved: 5000000 },
   });
 
-  await handleMessage(PHONE, "loan 200000 2");
+  await handleMessage(PHONE, "loan 40000 2");
   await handleMessage(PHONE, "0123456789");
   await handleMessage(PHONE, "Access");
+  await handleMessage(PHONE, "yes"); // confirm the bank selection
 
   let loan = await prisma.loan.findFirst({ where: { memberId: borrower.id } });
   const g1 = await prisma.member.findFirst({ where: { phone: G1 } });
@@ -247,7 +249,8 @@ describe("withdrawals", () => {
 
     await handleMessage(PHONE, "withdraw 40000");
     await handleMessage(PHONE, "0123456789"); // account
-    await handleMessage(PHONE, "Access"); // bank
+    await handleMessage(PHONE, "Access");
+  await handleMessage(PHONE, "yes"); // confirm the bank selection // bank
     await handleMessage(PHONE, "1234"); // PIN
 
     // The request exists but no money has moved yet.
@@ -295,6 +298,7 @@ describe("withdrawals", () => {
     await handleMessage(PHONE, "withdraw 40000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
+  await handleMessage(PHONE, "yes"); // confirm the bank selection
     await handleMessage(PHONE, "1234");
 
     const req = await prisma.withdrawalRequest.findFirst({ where: { memberId: member.id } });
@@ -345,6 +349,7 @@ describe("withdrawals", () => {
     await handleMessage(PHONE, "withdraw 40000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
+  await handleMessage(PHONE, "yes"); // confirm the bank selection
     await handleMessage(PHONE, "1234");
 
     const req = await prisma.withdrawalRequest.findFirst({ where: { memberId: member.id } });
@@ -382,6 +387,7 @@ describe("withdrawals", () => {
     await handleMessage(PHONE, "withdraw 40000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
+  await handleMessage(PHONE, "yes"); // confirm the bank selection
     await handleMessage(PHONE, "1234");
 
     const req = await prisma.withdrawalRequest.findFirst({ where: { memberId: member.id } });

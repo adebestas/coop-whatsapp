@@ -188,46 +188,28 @@ export async function createTestMember(
 // ===== Database Helpers =====
 
 /**
- * Clean up test data
+ * Clean up test data.
+ *
+ * Deletes every table in the database rather than a hand-maintained list: the
+ * list silently drifted from the schema (it predates DataConsent, AccountOfficer,
+ * GuarantorVerification and others), so rows survived between test files and made
+ * unrelated tests fail depending on execution order. Foreign keys are disabled for
+ * the duration so the order does not matter.
  */
 export async function cleanupDatabase(): Promise<void> {
   clearMemberCache();
-  // Delete in reverse dependency order
-  const tables = [
-    "Posting",
-    "JournalEntry",
-    "WebhookEvent",
-    "AuditLog",
-    "VoteBallot",
-    "PollOption",
-    "PurchasePoll",
-    "DeathClaim",
-    "DeathValidation",
-    "DeathCertificate",
-    "Beneficiary",
-    "LoanRepayment",
-    "Loan",
-    "Guarantor",
-    "WithdrawalRequest",
-    "ExternalPayment",
-    "Contribution",
-    "DeductionItem",
-    "DeductionBatch",
-    "DeductionWaiver",
-    "Payout",
-    "Wallet",
-    "Session",
-    "Member",
-    "Unit",
-    "Cooperative",
-  ];
+  const tables = await prisma.$queryRawUnsafe<{ name: string }[]>(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_prisma%'`,
+  );
+  if (tables.length === 0) return;
 
-  for (const table of tables) {
-    try {
-      await prisma.$executeRawUnsafe(`DELETE FROM "${table}"`);
-    } catch {
-      // Table might not exist
+  await prisma.$executeRawUnsafe(`PRAGMA foreign_keys = OFF`);
+  try {
+    for (const table of tables) {
+      await prisma.$executeRawUnsafe(`DELETE FROM "${table.name}"`);
     }
+  } finally {
+    await prisma.$executeRawUnsafe(`PRAGMA foreign_keys = ON`);
   }
 }
 

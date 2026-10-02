@@ -11,11 +11,6 @@ import { approveLoan } from "../src/services/loans.js";
 import { setSalary, runPayroll } from "../src/services/payroll.js";
 import { approveClaim } from "../src/services/deathclaims.js";
 
-vi.mock("../src/lib/whatsapp.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendFlowMessage: vi.fn().mockResolvedValue(true),
-}));
-
 vi.mock("../src/lib/messaging.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/messaging.js")>();
   return {

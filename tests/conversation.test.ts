@@ -1,10 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../src/lib/whatsapp.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendFlowMessage: vi.fn().mockResolvedValue(true),
-}));
-
 vi.mock("../lib/messaging.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
   notifyMember: vi.fn().mockResolvedValue(true),

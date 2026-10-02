@@ -7,16 +7,6 @@ import { sendTelegramMessage, deleteTelegramMessage } from "../src/lib/telegram.
 import { runAutoSaveReminders } from "../src/services/scheduler.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
-vi.mock("../src/lib/whatsapp.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendFlowMessage: vi.fn().mockResolvedValue(true),
-}));
-
-vi.mock("../src/lib/telegram.js", () => ({
-  sendTelegramMessage: vi.fn().mockResolvedValue(true),
-  deleteTelegramMessage: vi.fn().mockResolvedValue(true),
-}));
-
 const PHONE = "2348012345678";
 
 async function makeCoop(code: string, name: string) {

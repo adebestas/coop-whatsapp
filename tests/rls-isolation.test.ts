@@ -18,11 +18,6 @@ import { hashPin, generateMemberCode } from "../src/lib/security.js";
  */
 const rlsEnabled = process.env.RLS_ENABLED === "1" && (process.env.DATABASE_URL ?? "").startsWith("postgres");
 
-vi.mock("../src/lib/whatsapp.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendFlowMessage: vi.fn().mockResolvedValue(true),
-}));
-
 vi.mock("../src/lib/messaging.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/messaging.js")>();
   return {

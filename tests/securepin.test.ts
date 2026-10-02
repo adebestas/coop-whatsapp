@@ -6,10 +6,6 @@ import { deleteTelegramMessage } from "../src/lib/telegram.js";
 import { extractWhatsAppMessages } from "../src/lib/inbound.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
-vi.mock("../src/lib/telegram.js", () => ({
-  deleteTelegramMessage: vi.fn().mockResolvedValue(true),
-}));
-
 const PHONE = "2348012345678";
 
 async function makeCoop(code: string, name: string) {
