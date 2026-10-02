@@ -176,7 +176,15 @@ export async function handleAdminCommand(
         await sendText({ to: phone, text: "Usage: *approve <loan id>*" });
         return true;
       }
-      const result = await approveLoan(id, { superAdmin: isSuper, actorId: admin.id, cooperativeId: coopId });
+      // isAdmin must be set even when the caller is not a super admin: approveLoan
+      // gates the account_officer_approved -> admin_approved stage on it, so
+      // without this a plain admin could never complete their own sign-off.
+      const result = await approveLoan(id, {
+        superAdmin: isSuper,
+        isAdmin: true,
+        actorId: admin.id,
+        cooperativeId: coopId,
+      });
       await sendText({ to: phone, text: result.message });
       await audit({
         cooperativeId: coopId,

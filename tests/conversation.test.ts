@@ -13,6 +13,26 @@ import * as messaging from "../lib/messaging.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
+import { approveLoan } from "../src/services/loans.js";
+
+/** Account Officer review is not chat-driven: assign an officer and approve directly. */
+async function approveAsAccountOfficer(coopId: string, loanId: string, assignedById: string): Promise<void> {
+  const officer = await prisma.accountOfficer.create({
+    data: { email: `ao-${loanId}@test.local`, name: "Test Officer", isActive: true },
+  });
+  await prisma.accountOfficerAssignment.create({
+    data: { accountOfficerId: officer.id, cooperativeId: coopId, assignedById, isActive: true },
+  });
+  const res = await approveLoan(loanId.slice(-6), { isAdmin: true, actorId: officer.id, cooperativeId: coopId });
+  expect(res.ok).toBe(true);
+}
+
+/** A cooperative needs 20 active members before it can disburse (Cooperative Societies Act). */
+async function padActiveMembers(coopId: string, count = 20): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    await makeMember(`23480${String(i).padStart(8, "0")}`, coopId);
+  }
+}
 
 const PHONE = "2348012345678";
 const ADMIN_PHONE = "2348099999999";
@@ -30,7 +50,7 @@ async function makeCoop(code: string, name: string, adminPhone?: string) {
 async function makeMember(
   phone: string,
   coopId: string,
-  opts: { role?: string; pin?: string; vaNumber?: string } = {},
+  opts: { role?: string; pin?: string; vaNumber?: string; name?: string } = {},
 ) {
   let code = generateMemberCode();
   while (await prisma.member.findUnique({ where: { code } })) {
@@ -40,7 +60,7 @@ async function makeMember(
     data: {
       code,
       phone,
-      name: `Member ${phone.slice(-4)}`,
+      name: opts.name ?? `Member ${phone.slice(-4)}`,
       cooperativeId: coopId,
       role: opts.role ?? "member",
       consentAt: new Date(),
@@ -144,7 +164,7 @@ describe("coop whatsapp bot", () => {
 
   it("records a contribution and updates the balance", async () => {
     const coop = await makeCoop("TEST02", "Test Coop");
-    await makeMember(PHONE, coop.id);
+    await makeMember(PHONE, coop.id, { name: "Ada Obi" });
 
     await handleMessage(PHONE, "save 10000");
     // Simulate the webhook that credits the wallet after a real payment
@@ -244,7 +264,7 @@ describe("coop whatsapp bot", () => {
   });
   it("requires guarantor confirmation and two-step admin approval for loans", async () => {
     const coop = await makeCoop("TEST04", "Test Coop");
-    await makeMember(PHONE, coop.id);
+    await makeMember(PHONE, coop.id, { name: "Ada Obi" });
     await makeMember(G1_PHONE, coop.id);
     await makeMember(G2_PHONE, coop.id);
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
@@ -253,11 +273,11 @@ describe("coop whatsapp bot", () => {
 
     await prisma.wallet.update({
       where: { memberId: (await prisma.member.findFirst({ where: { phone: PHONE } }))!.id },
-      data: { balance: 200000, totalSaved: 200000 },
+      data: { balance: 10000000, totalSaved: 10000000 },
     });
 
     // Step 1: Start loan application
-    await handleMessage(PHONE, "loan 100000 3");
+    await handleMessage(PHONE, "loan 40000 3");
     // Step 2: Provide bank account number
     await handleMessage(PHONE, "0123456789");
     // Step 3: Provide bank name
@@ -282,6 +302,8 @@ describe("coop whatsapp bot", () => {
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("guaranteed");
 
+    await padActiveMembers(coop.id);
+    await approveAsAccountOfficer(coop.id, loan!.id, (await prisma.member.findFirst({ where: { phone: SUPER_PHONE } }))!.id);
     await handleMessage(ADMIN_PHONE, `approve ${loan!.id.slice(-6)}`);
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("admin_approved");
@@ -298,18 +320,18 @@ describe("coop whatsapp bot", () => {
 
   it("lets an admin borrow with a single guarantor, finalized by the super admin", async () => {
     const coop = await makeCoop("TEST07", "Test Coop");
-    await makeMember(PHONE, coop.id, { role: "admin" });
+    await makeMember(PHONE, coop.id, { role: "admin", name: "Ada Obi" });
     await makeMember(G1_PHONE, coop.id);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
     await makeMember(SUPER2_PHONE, coop.id, { role: "superadmin" });
 
     await prisma.wallet.update({
       where: { memberId: (await prisma.member.findFirst({ where: { phone: PHONE } }))!.id },
-      data: { balance: 200000, totalSaved: 200000 },
+      data: { balance: 10000000, totalSaved: 10000000 },
     });
 
     // Step 1: Start loan application
-    await handleMessage(PHONE, "loan 100000 3");
+    await handleMessage(PHONE, "loan 40000 3");
     // Step 2: Provide bank account number
     await handleMessage(PHONE, "0123456789");
     // Step 3: Provide bank name
@@ -332,6 +354,11 @@ describe("coop whatsapp bot", () => {
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("guaranteed");
 
+    // The borrower is the admin, so the admin sign-off comes from someone else.
+    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    await padActiveMembers(coop.id);
+    await approveAsAccountOfficer(coop.id, loan!.id, (await prisma.member.findFirst({ where: { phone: SUPER_PHONE } }))!.id);
+    await handleMessage(ADMIN_PHONE, `approve ${loan!.id.slice(-6)}`);
     await handleMessage(SUPER_PHONE, `approve ${loan!.id.slice(-6)}`);
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("super_approved_1");

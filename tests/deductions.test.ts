@@ -89,7 +89,7 @@ describe("employer deduction remittance", () => {
 
     await handleMessage(ADMIN_PHONE, "newbatch");
     expect(texts()).toContain("Loan repayments: 1");
-    expect(texts()).toContain("NGN 13,000"); // 5000 + 3000 + 5000
+    expect(texts()).toContain("₦130.00"); // 5000 + 3000 + 5000 kobo
 
     const batch = await prisma.deductionBatch.findFirst({ include: { items: true } });
     expect(batch!.items.length).toBe(3);
@@ -151,7 +151,7 @@ describe("employer deduction remittance", () => {
 
     await handleMessage(ADMIN_PHONE, "newbatch");
     expect(texts()).not.toContain(waver.code);
-    expect(texts()).toContain("NGN 2,000");
+    expect(texts()).toContain("₦20.00");
 
     // Member sees their waived status.
     await handleMessage(M1, "mydeduction");

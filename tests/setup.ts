@@ -62,7 +62,7 @@ vi.mock("../src/services/payments/index.js", async (importOriginal) => {
     ...actual,
     resolveProvider: vi.fn(() => ({
       name: "monnify",
-      createVirtualAccount: vi.fn(),
+      createVirtualAccount: vi.fn(async () => ({ accountNumber: "1234567890" })),
       payout: vi.fn(async () =>
         paymentState.payoutFails
           ? { ok: false, error: "insufficient balance" }
