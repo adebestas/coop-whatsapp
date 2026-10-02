@@ -16,8 +16,9 @@ export default defineConfig({
     setupFiles: [path.resolve(__dirname, "tests/setup.ts")],
     env: {
       NODE_ENV: "test",
-      // Use local SQLite schema for tests
-      PRISMA_SCHEMA_PATH: path.resolve(__dirname, "prisma/schema.local.prisma"),
+      // Tests run on SQLite (prisma/dev.db). `npm test` runs `pretest`, which generates the
+      // Prisma client from prisma/schema.local.prisma. Running `vitest` directly after a
+      // PostgreSQL `prisma generate` will fail — use `npm test` or `npm run prisma:generate:local`.
     },
   },
 });

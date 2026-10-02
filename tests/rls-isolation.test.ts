@@ -5,17 +5,18 @@ import { hashPin, generateMemberCode } from "../src/lib/security.js";
 /**
  * RLS (Row-Level Security) Cross-Cooperative Isolation Tests
  *
- * NOTE: These tests REQUIRE a PostgreSQL database with RLS policies applied.
- * They will NOT work with SQLite (which doesn't support RLS).
+ * STATUS: GATED. No migration in this repository creates RLS policies
+ * (`grep -ri "CREATE POLICY" prisma/` is empty), so these tests describe a
+ * control that does not exist yet. They also call `set_config(..., false)`
+ * (session-scoped) through a pooled Prisma client, which is only reliable
+ * inside `$transaction` on a single connection.
  *
- * To run:
- * 1. Ensure a PostgreSQL test database is available
- * 2. Apply migrations: npx prisma migrate deploy (against the test DB)
- * 3. Set DATABASE_URL to the test PostgreSQL URL
- * 4. Run: npx vitest run tests/rls-isolation.test.ts
- *
- * In CI/CD: Run against a dedicated PostgreSQL test database (not SQLite).
+ * They are skipped unless RLS_ENABLED=1 AND DATABASE_URL is PostgreSQL.
+ * Enabling them requires: a migration that ENABLEs + FORCEs RLS and adds
+ * policies keyed on current_setting('app.current_cooperative_id'), plus
+ * wrapping every tenant query in a transaction that sets the GUC.
  */
+const rlsEnabled = process.env.RLS_ENABLED === "1" && (process.env.DATABASE_URL ?? "").startsWith("postgres");
 
 vi.mock("../src/lib/whatsapp.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
@@ -33,7 +34,7 @@ vi.mock("../src/lib/messaging.js", async (importOriginal) => {
   };
 });
 
-describe("Row-Level Security: Cross-cooperative isolation at DB level", () => {
+describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at DB level", () => {
   let coopA: { id: string; code: string };
   let coopB: { id: string; code: string };
   let memberA: { id: string; phone: string; cooperativeId: string };

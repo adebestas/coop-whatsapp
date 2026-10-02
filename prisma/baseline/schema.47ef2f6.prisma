@@ -1,6 +1,7 @@
-// PROD SCHEMA (PostgreSQL — Render/Neon). This is the source of truth for migrations.
-// prisma/schema.local.prisma is a SQLite mirror used ONLY by `npm test` and local dev.
-// KEEP IN SYNC: any model change must be made in BOTH files (tests/schema-sync.test.ts enforces it).
+// PROD SCHEMA (PostgreSQL — Render). KEEP IN SYNC with schema.local.prisma:
+// any model change must be made in BOTH files until local Postgres is installed.
+// NOTE: Both schemas MUST stay in sync — any model addition/removal/field change
+// must be mirrored in both files.
 
 generator client {
   provider = "prisma-client-js"
@@ -45,27 +46,26 @@ model Cooperative {
   coopPosts         CoopPost[]
   deductionBatches  DeductionBatch[]
   externalPayments   ExternalPayment[]
+  grievances         Grievance[]
   purchasePolls      PurchasePoll[]
   reconciliationLogs ReconciliationLog[]
   reserveAllocations   ReserveAllocation[]
   educationFunds      EducationFund[]
   developmentFunds    DevelopmentFund[]
   statusPosts         StatusPost[]
-  payeRecords          PAYERecord[]
   byelaws              Byelaw[]
   strs                 STR[]
+  payeRecords          PAYERecord[]
   adminAssistActions   AdminAssistAction[]
   manualCredits        ManualCredit[]
-  grievances           Grievance[]
   config             CooperativeConfig?
   branding            BrandingConfig?
-subscription       Subscription?
+  subscription       Subscription?
   dividendVotes       DividendVote[]
-  accountOfficerAssignments AccountOfficerAssignment[]
 
   @@index([status])
   @@index([code])
-  }
+}
 
 // ---- Wallet-bank reconciliation logs ----
 model ReconciliationLog {
@@ -187,11 +187,11 @@ model Member {
   loans                   Loan[]
   payouts                 Payout[]
   guarantorFor            Guarantor[]
-  guarantorVerifications GuarantorVerification[]
   dividendEntries         DividendEntry[]
   withdrawalRequests      WithdrawalRequest[]
   deathClaims             DeathClaim[]
   deathValidations        DeathValidation[]
+  deathClaimApprovals     DeathClaimApproval[] @relation("DeathClaimApprovals")
   ticketsOpened           SupportTicket[]     @relation("TicketMember")
   ticketsAssigned         SupportTicket[]     @relation("TicketAssignee")
   voteCandidates          VoteCandidate[]     @relation("VoteCandidates")
@@ -208,13 +208,11 @@ model Member {
   pollBallots             PollBallot[]        @relation("PollVoter")
   guarantorDeductions     GuarantorDeduction[]
   beneficiaries           Beneficiary[]
+  grievances              Grievance[]
+  grievancesResolved      Grievance[]         @relation("GrievanceResolver")
   postsHeld               CoopPost[]          @relation("PostIncumbent")
   monthlyDeduction        Int? // agreed salary deduction remitted by employer in kobo
   deductionItems          DeductionItem[]
-  deathClaimApprovals     DeathClaimApproval[] @relation("DeathClaimApprovals")
-  grievances              Grievance[]
-  grievancesResolved      Grievance[]         @relation("GrievanceResolver")
-  strs                    STR[]
   deductionWaivers        DeductionWaiver[]
   batchesCreated          DeductionBatch[]    @relation("DeductionBatchCreator")
   batchesApproved         DeductionBatch[]    @relation("DeductionBatchApprover")
@@ -223,6 +221,7 @@ model Member {
   dividendVoteBallots     DividendVoteBallot[] @relation("DividendVoteVoter")
   dataConsents            DataConsent[]
   dataConsentGiven        Boolean             @default(false)
+  strs                    STR[]
   payeRecords             PAYERecord[]
   adminAssistActions      AdminAssistAction[] @relation("AdminAssistTarget")
   adminAssistActionsInitiated AdminAssistAction[] @relation("AdminAssistInitiator")
@@ -230,40 +229,12 @@ model Member {
   manualCreditsInitiated  ManualCredit[]     @relation("ManualCreditInitiator")
   manualCreditsApproved   ManualCredit[]     @relation("ManualCreditApprover")
   sessionsRevokedAt       DateTime? // when the superadmin revoked this member's sessions
+  tier                    String              @default("tier1") // tier1 (no BVN) | tier2 (with BVN)
 
   @@unique([cooperativeId, phone])
   @@index([phone])
   @@index([cooperativeId, role])
   @@index([status])
-  @@index([cooperativeId, status, role])
-}
-
-// ---- Account Officers (platform staff for loan review) ----
-// Platform staff who can review loans for assigned cooperatives.
-// They are not tied to a single cooperative like elected executives.
-model AccountOfficer {
-  id            String    @id @default(cuid())
-  email         String    @unique
-  name          String
-  isActive      Boolean   @default(true)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  assignments   AccountOfficerAssignment[]
-}
-
-model AccountOfficerAssignment {
-  id              String    @id @default(cuid())
-  accountOfficerId String
-  accountOfficer  AccountOfficer @relation(fields: [accountOfficerId], references: [id], onDelete: Cascade)
-  cooperativeId   String
-  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
-  assignedAt      DateTime  @default(now())
-  assignedById    String    // super admin who made the assignment
-  isActive        Boolean   @default(true)
-
-  @@unique([accountOfficerId, cooperativeId])
-  @@index([accountOfficerId])
-  @@index([cooperativeId])
 }
 
 // ---- Units / workplaces ----
@@ -312,30 +283,27 @@ model Contribution {
 
   @@index([memberId, status])
   @@index([cooperativeId, createdAt])
-  @@index([cooperativeId, status, createdAt])
 }
 
 // ---- Loans ----
 model Loan {
-  id                    String          @id @default(cuid())
-  amount                Int // stored in kobo
-  interestRate          Float           @default(0) // annual % (APR)
-  tenureMonths          Int             @default(1)
-  status                String          @default("pending") // pending | guaranteed | admin_approved | super_approved_1 | approved | disbursed | rejected | paid | rejected_by_guarantor | rejected_by_officer | rejected_by_super_1 | rejected_by_super_2
-  balance               Int // stored in kobo
-  monthlyPayment        Int? // installment amount in kobo
-  bankAccountNumber     String? // member's bank account for disbursement
-  bankCode              String? // provider bank code
-  bankName              String? // bank display name
-  disbursementStatus    String? // pending | successful | failed | name_mismatch
-  disbursementError     String? // provider error or name-mismatch detail
-  adminCharge           Int   @default(200000) // flat admin charge in kobo (₦2,000)
-  disbursementAmount    Int? // amount actually sent in kobo = amount - adminCharge
-  adminApprovedById     String? // who gave the admin approval (Stage 3)
-  accountOfficerApprovedById String? // Account Officer who reviewed (Stage 3)
-  accountOfficerApprovedAt   DateTime? // when Account Officer approved
-  finalApprovedById     String? // first super admin approval (Stage 4)
-  superApproved2ById    String? // second super admin approval — triggers disbursement (Stage 5)
+  id                 String          @id @default(cuid())
+  amount             Int // stored in kobo
+  interestRate       Float           @default(0) // monthly % (percentage, not money)
+  tenureMonths       Int             @default(1)
+  status             String          @default("pending") // pending | guaranteed | approved | disbursed | rejected | paid
+  balance            Int // stored in kobo
+  monthlyPayment     Int? // installment amount in kobo
+  bankAccountNumber  String? // member's bank account for disbursement
+  bankCode           String? // provider bank code
+  bankName           String? // bank display name
+  disbursementStatus String? // pending | successful | failed | name_mismatch
+  disbursementError  String? // provider error or name-mismatch detail
+  adminCharge        Int   @default(200000) // flat admin charge in kobo (₦2,000)
+  disbursementAmount Int? // amount actually sent in kobo = amount - adminCharge
+  adminApprovedById  String? // who gave the first (admin) approval
+  finalApprovedById  String? // first super admin approval
+  superApproved2ById String? // second super admin approval — triggers disbursement
   disbursedAt        DateTime?
   dueDate            DateTime? // next installment due date
   queuePosition      Int? // position in the loan approval queue
@@ -348,14 +316,11 @@ model Loan {
   createdAt          DateTime        @default(now())
   approvedAt         DateTime?
   guarantors         Guarantor[]
-  guarantorVerifications GuarantorVerification[]
   repayments         LoanRepayment[]
 
   @@index([memberId, status])
   @@index([cooperativeId, status])
   @@index([status, createdAt])
-  @@index([cooperativeId, status, queuePosition])
-  @@index([accountOfficerApprovedById])
 }
 
 // ---- Guarantors ----
@@ -375,24 +340,6 @@ model Guarantor {
   @@unique([loanId, memberId])
   @@index([code])
   @@index([memberId, status])
-}
-
-// ---- Guarantor Verification (code-based) ----
-// 6-digit codes with 15-min expiry for guarantor confirmation
-model GuarantorVerification {
-  id          String    @id @default(cuid())
-  loanId      String
-  loan        Loan      @relation(fields: [loanId], references: [id], onDelete: Cascade)
-  guarantorId String
-  guarantor   Member    @relation(fields: [guarantorId], references: [id], onDelete: Restrict)
-  codeHash    String    // SHA256 hash of the 6-digit code
-  expiresAt   DateTime  // 15 minutes from creation
-  usedAt      DateTime? // when code was verified
-  createdAt   DateTime  @default(now())
-
-  @@unique([loanId, guarantorId])
-  @@index([loanId])
-  @@index([guarantorId])
 }
 
 model LoanRepayment {
@@ -425,7 +372,6 @@ model Payout {
   updatedAt     DateTime    @updatedAt
 
   @@index([status, createdAt])
-  @@index([cooperativeId, status, createdAt])
 }
 
 // ---- Provider webhook events (idempotency & duplicate protection) ----
@@ -644,6 +590,7 @@ model LedgerEntry {
   note          String?
   reference     String? // link to the source record (loan id, payout ref, ...)
   fundType      String      @default("operational") // member | operational | reserve
+  status        String      @default("posted") // posted | failed
   createdAt     DateTime    @default(now())
 
   @@index([cooperativeId, createdAt])
@@ -759,9 +706,9 @@ model SupportTicket {
   assignedToId  String? // customer-service/admin handling it
   resolution    String?
   priority      String   @default("normal") // low | normal | high | urgent
-  slaDeadline   DateTime?
-  firstResponseAt DateTime?
-  resolvedAt    DateTime?
+  slaDeadline   DateTime? // when the ticket must be resolved by
+  firstResponseAt DateTime? // when the first response was sent
+  resolvedAt    DateTime? // when the ticket was resolved
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -770,6 +717,26 @@ model SupportTicket {
   cooperative Cooperative @relation(fields: [cooperativeId], references: [id])
 
   @@index([cooperativeId, status])
+}
+
+// ---- Grievances (member complaints) ----
+model Grievance {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  memberId      String
+  member        Member   @relation(fields: [memberId], references: [id])
+  message       String
+  status        String   @default("open") // open | resolved
+  response      String? // admin response
+  resolvedById  String? // admin who resolved
+  resolvedBy    Member?  @relation("GrievanceResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([cooperativeId, status])
+  @@index([memberId])
 }
 
 // ---- Voting engine (unit admin + executive elections) ----
@@ -1054,6 +1021,48 @@ model DataConsent {
   @@index([memberId])
 }
 
+// ---- Byelaws (cooperative rules) ----
+model Byelaw {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  title         String
+  content       String
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId])
+}
+
+// ---- Death Claim multi-super-admin approvals ----
+model DeathClaimApproval {
+  id              String      @id @default(cuid())
+  deathClaimId    String
+  deathClaim      DeathClaim  @relation(fields: [deathClaimId], references: [id], onDelete: Cascade)
+  approvedById    String
+  approvedBy      Member      @relation("DeathClaimApprovals", fields: [approvedById], references: [id])
+  approvedAt      DateTime    @default(now())
+
+  @@unique([deathClaimId, approvedById])
+  @@index([deathClaimId])
+}
+
+// ---- Suspicious Transaction Reports (CBN filing) ----
+model STR {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  amount        Int         // total suspicious amount in kobo
+  reason        String      // human-readable reason for filing
+  status        String      @default("pending") // pending | filed
+  filedAt       DateTime?
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId, createdAt])
+  @@index([memberId, status])
+}
+
 // ---- PAYE (Pay As You Earn) records for state IRS remittance ----
 model PAYERecord {
   id            String      @id @default(cuid())
@@ -1072,64 +1081,6 @@ model PAYERecord {
 
   @@unique([cooperativeId, memberId, month, year])
   @@index([cooperativeId, year, month])
-}
-
-model Byelaw {
-  id            String      @id @default(cuid())
-  cooperativeId String
-  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
-  title         String
-  content       String
-  createdAt     DateTime    @default(now())
-
-  @@index([cooperativeId])
-}
-
-model DeathClaimApproval {
-  id              String      @id @default(cuid())
-  deathClaimId    String
-  deathClaim      DeathClaim  @relation(fields: [deathClaimId], references: [id], onDelete: Cascade)
-  approvedById    String
-  approvedBy      Member      @relation("DeathClaimApprovals", fields: [approvedById], references: [id])
-  approvedAt      DateTime    @default(now())
-
-  @@unique([deathClaimId, approvedById])
-  @@index([deathClaimId])
-}
-
-model STR {
-  id            String      @id @default(cuid())
-  cooperativeId String
-  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
-  memberId      String
-  member        Member      @relation(fields: [memberId], references: [id], onDelete: Restrict)
-  amount        Int
-  reason        String
-  status        String      @default("pending")
-  filedAt       DateTime?
-  createdAt     DateTime    @default(now())
-
-  @@index([cooperativeId, createdAt])
-  @@index([memberId, status])
-}
-
-model Grievance {
-  id            String   @id @default(cuid())
-  cooperativeId String
-  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
-  memberId      String
-  member        Member   @relation(fields: [memberId], references: [id])
-  message       String
-  status        String   @default("open")
-  response      String?
-  resolvedById  String?
-  resolvedBy    Member?  @relation("GrievanceResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
-  resolvedAt    DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-
-  @@index([cooperativeId, status])
-  @@index([memberId])
 }
 
 // ---- Admin-assisted member actions (Maker-Checker style) ----
