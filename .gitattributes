@@ -1,0 +1,10 @@
+# Normalize line endings so prettier's `endOfLine: "lf"` is enforced by git,
+# not just by each developer's local core.autocrlf setting. Without this, a
+# Windows clone (autocrlf=true) checks out CRLF and `npm run format:check`
+# fails even though the committed content is correct.
+* text=auto eol=lf
+
+# Keep generated/vendored paths as-is.
+package-lock.json -diff
+prisma/migrations/** -diff
+backups/** -diff -text
