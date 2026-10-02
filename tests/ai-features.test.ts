@@ -30,6 +30,8 @@ beforeEach(async () => {
   try { await prisma.$executeRaw`DELETE FROM posting`; } catch {}
   try { await prisma.$executeRaw`DELETE FROM "JournalEntry"`; } catch {}
   try { await prisma.$executeRaw`DELETE FROM contribution`; } catch {}
+  try { await prisma.$executeRaw`DELETE FROM repayment`; } catch {}
+  try { await prisma.$executeRaw`DELETE FROM loan`; } catch {}
   try { await prisma.$executeRaw`DELETE FROM wallet`; } catch {}
   try { await prisma.$executeRaw`DELETE FROM member`; } catch {}
   try { await prisma.$executeRaw`DELETE FROM cooperative`; } catch {}
@@ -116,7 +118,7 @@ describe("AI Financial Insights", () => {
 
   it("generateLoanRiskAssessment returns assessment", async () => {
     const { coop } = await makeCoopAndMember();
-    const assessment = await generateLoanRiskAssessment(coop.id);
+    const assessment = await generateLoanRiskAssessment(coop.id, "superadmin");
     expect(assessment).toContain("Risk Level");
     expect(assessment).toContain("Repayment Rate");
   });
@@ -239,6 +241,9 @@ describe("AI Integration in Conversation", () => {
   });
 
   it("contexthelp returns personalized help", async () => {
+    // Self-sufficient: beforeEach clears members, so register Alice here rather
+    // than relying on state left behind by an earlier test.
+    await makeCoopAndMember();
     await handleMessage(PHONE, "contexthelp");
     expect(sendText).toHaveBeenCalled();
     const lastCall = (sendText as any).mock.calls[(sendText as any).mock.calls.length - 1];
