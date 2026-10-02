@@ -4,13 +4,6 @@ import { handleMessage } from "../src/services/conversation.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-  notifyMember: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-}));
-
 const ADMIN_PHONE = "2348011111111";
 const SUPER_PHONE = "2348022222222";
 const M1 = "2348033333333";
@@ -33,6 +26,7 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string }
       role: opts.role ?? "member",
       pin: hashPin("1234"),
       wallet: { create: {} },
+      consentAt: new Date(),
     },
     include: { wallet: true },
   });

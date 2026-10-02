@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { sendText, platformOf } from "../lib/messaging.js";
-import { getMemberByPhone } from "./cooperative.js";
+import { MESSAGE_CONSENT_PROMPT } from "../lib/consent.js";
+import { getMemberByPhone, invalidateMemberCache } from "./cooperative.js";
 import { handleAdminCommand } from "./admin.js";
 import { checkMoneyRateLimit, checkAIRateLimit } from "./fraud.js";
 import { aiEnabled, suggestCommand } from "../lib/ai.js";
@@ -247,14 +248,20 @@ export async function handleMessage(
 
   const member = await getMemberByPhone(phone);
 
-  // Opt-out: skip all processing for opted-out members (except opt-in command)
   const { cmd: preCmd } = parseCommand(text);
-  if (member?.optedOut && preCmd !== "optin") {
-    return;
-  }
 
-  // Consent check: skip messages for members who haven't consented (except opt-in command)
-  if (member && member.consentAt === null && preCmd !== "optin") {
+  // Message consent (NDPR). Members created outside the chat `join` flow — the
+  // founding superadmin, bulk-imported members, seeds — have never been asked.
+  // Ask now instead of silently ignoring them: put the session into the same
+  // `awaiting_optin` state the join flow uses, so their next YES/NO is recorded.
+  // Members who already answered NO (optedOut=true, consentAt=null) are not re-asked.
+  if (member && member.consentAt === null && !member.optedOut && preCmd !== "optin") {
+    await prisma.session.upsert({
+      where: { phone },
+      create: { phone, state: "awaiting_optin", data: JSON.stringify({ memberId: member.id }) },
+      update: { state: "awaiting_optin", data: JSON.stringify({ memberId: member.id }) },
+    });
+    await sendText({ to: phone, text: MESSAGE_CONSENT_PROMPT });
     return;
   }
 
@@ -262,6 +269,7 @@ export async function handleMessage(
   if (preCmd === "stop" || preCmd === "unsubscribe" || preCmd === "optout") {
     if (member) {
       await prisma.member.update({ where: { id: member.id }, data: { optedOut: true } });
+      invalidateMemberCache(phone, member.cooperativeId);
       await sendText({ to: phone, text: "You have been opted out of all messages. Reply *optin* to re-enable." });
     } else {
       await sendText({ to: phone, text: "You are not a registered member." });
@@ -271,6 +279,7 @@ export async function handleMessage(
   if (preCmd === "optin") {
     if (member) {
       await prisma.member.update({ where: { id: member.id }, data: { optedOut: false, consentAt: member.consentAt ?? new Date() } });
+      invalidateMemberCache(phone, member.cooperativeId);
       await sendText({ to: phone, text: "Welcome back! You have been re-enabled for messages. Reply *menu* to see your options." });
     } else {
       await sendText({ to: phone, text: "You are not a registered member. Reply *join* to get started." });

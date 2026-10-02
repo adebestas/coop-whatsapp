@@ -136,6 +136,16 @@ export function clearMemberCache(): void {
 }
 
 /**
+ * Drop the cached member for a phone after a write that changes consent,
+ * role or status fields. The consent gate in conversation.ts reads
+ * `consentAt`/`optedOut` from this cache, so a stale entry makes the bot
+ * re-prompt (or ignore) a member who just answered.
+ */
+export function invalidateMemberCache(phone: string, cooperativeId?: string): void {
+  memberCache.delete(cooperativeId ? `${cooperativeId}:${phone}` : phone);
+}
+
+/**
  * Resolve a member by phone — always scoped to a cooperative when one is
  * known, using the `@@unique([cooperativeId, phone])` constraint.
  *

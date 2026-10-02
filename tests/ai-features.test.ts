@@ -21,13 +21,6 @@ import {
   sendLowBalanceWarnings,
 } from "../src/lib/ai-alerts.js";
 
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-  notifyMember: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-}));
-
 const PHONE = "2348012345678";
 
 beforeEach(async () => {
@@ -66,6 +59,7 @@ async function makeCoopAndMember() {
         code: generateMemberCode(),
         role: "member",
         status: "active",
+        consentAt: new Date(),
         pin: hashPin("1234"),
         wallet: { create: {} },
       },

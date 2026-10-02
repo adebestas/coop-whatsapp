@@ -20,27 +20,35 @@ export const prisma = new PrismaClient({
 });
 
 // ===== Global Mocks =====
-// Mock WhatsApp API to prevent real API calls during tests
+// Mock only the TRANSPORT layer, never src/lib/messaging.js itself.
+// The messaging module is wrapped in vi.fn() instead of replaced, so real behaviour
+// runs (opt-out suppression, WhatsApp 24h session window, channel selection) while
+// existing `vi.mocked(sendText).mock.calls` assertions keep working. Replacing it
+// with a pass-through stub — which is what this file used to do — silently hid all
+// of that from the suite, and left console.log noise in the output.
 vi.mock("../src/lib/whatsapp.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
   sendFlowMessage: vi.fn().mockResolvedValue(true),
 }));
 
-// Mock messaging to use mocked WhatsApp
+vi.mock("../src/lib/telegram.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/telegram.js")>();
+  return {
+    ...actual,
+    sendTelegramMessage: vi.fn().mockResolvedValue(true),
+    sendTelegramKeyboard: vi.fn().mockResolvedValue(1),
+    deleteTelegramMessage: vi.fn().mockResolvedValue(true),
+    getTelegramUpdates: vi.fn().mockResolvedValue([]),
+  };
+});
+
 vi.mock("../src/lib/messaging.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/messaging.js")>();
   return {
     ...actual,
-    sendText: vi.fn().mockImplementation(async (params) => {
-      console.log('[GLOBAL MOCK sendText]', params);
-      return true;
-    }),
-    notifyMember: vi.fn().mockImplementation(async (member, text) => {
-      console.log('[GLOBAL MOCK notifyMember]', member?.phone, text?.slice(0, 30));
-      return true;
-    }),
-    platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-    sendSecurePrompt: vi.fn().mockResolvedValue(true),
+    sendText: vi.fn(actual.sendText),
+    sendSecurePrompt: vi.fn(actual.sendSecurePrompt),
+    notifyMember: vi.fn(actual.notifyMember),
   };
 });
 
@@ -66,6 +74,17 @@ vi.mock("../src/services/payments/index.js", async (importOriginal) => {
 
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
+import { beforeEach } from "vitest";
+
+// ===== Global Fixtures =====
+// getMemberByPhone() memoises member rows for 30s and tests reuse the same phone
+// numbers across cases, so a cached row from the previous test survives its own
+// beforeEach DELETE and later writes fail with "No record was found for an update".
+// Clearing the cache before every test isolates cases regardless of which cleanup
+// helper the file happens to use.
+beforeEach(() => {
+  clearMemberCache();
+});
 
 // ===== Test App =====
 

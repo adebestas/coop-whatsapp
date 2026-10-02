@@ -4,13 +4,6 @@ import { handleMessage } from "../src/services/conversation.js";
 import { sendText } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-  notifyMember: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-}));
-
 const PHONE = "2348070000001";
 
 function groqReply(content: string) {
@@ -48,12 +41,15 @@ async function makeCoopAndMember() {
       role: "member",
       pin: hashPin("1234"),
       wallet: { create: {} },
+      consentAt: new Date(),
     },
   });
 }
 
 function texts(): string[] {
-  return vi.mocked(sendText).mock.calls.map((c) => c[0].text);
+  const t = vi.mocked(sendText).mock.calls.map((c) => c[0].text);
+  console.log('TEXTS>>>', JSON.stringify(t));
+  return t;
 }
 
 describe("AI fallback translator", () => {
@@ -133,3 +129,4 @@ describe("AI fallback translator", () => {
     expect(texts().some((t) => t.includes("didn't quite get that"))).toBe(true);
   });
 });
+

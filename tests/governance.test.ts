@@ -18,13 +18,6 @@ import { applyForLoan, repayLoan } from "../src/services/loans.js";
 import { resolveProvider, markProviderDown, isProviderAvailable } from "../src/services/payments/index.js";
 import { createTicket, listTickets, resolveTicket } from "../src/services/support.js";
 
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  notifyMember: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-}));
-
 const ADMIN_PHONE = "2348090000001";
 const SUPER_PHONE = "2348090000099";
 const PHONE = "2348010000001";
@@ -57,6 +50,7 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
       role: opts.role ?? "member",
       pin: hashPin(opts.pin ?? "1234"),
       wallet: { create: {} },
+      consentAt: new Date(),
     },
   });
 }

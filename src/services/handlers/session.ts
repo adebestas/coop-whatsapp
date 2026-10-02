@@ -4,10 +4,12 @@ import { deleteTelegramMessage } from "../../lib/telegram.js";
 import { randomBytes, randomInt } from "node:crypto";
 import { hashOtp, verifyOtp } from "../../lib/security.js";
 import { normalizePhone } from "../../lib/phones.js";
+import { MESSAGE_CONSENT_REASK } from "../../lib/consent.js";
 import {
   findOrCreateMember,
   formatBalance,
   getMemberByPhone,
+  invalidateMemberCache,
 } from "../cooperative.js";
 import { toKobo } from "../../lib/money.js";
 import { provisionVirtualAccount } from "../payments/topup.js";
@@ -883,29 +885,41 @@ export async function handleAwaitingInput(
     case "awaiting_optin": {
       const answer = text.trim().toLowerCase();
       const memberId = data.memberId as string | undefined;
-      if (memberId) {
-        if (answer === "yes" || answer === "y") {
-          await prisma.member.update({
-            where: { id: memberId },
-            data: { optedOut: false, consentAt: new Date() },
-          });
-          await prisma.dataConsent.create({
-            data: {
-              memberId,
-              consentType: "registration",
-              granted: true,
-            },
-          });
-          await sendText({ to: phone, text: "✅ You're all set! You'll receive messages from your cooperative. Reply *menu* to see your options." });
-        } else {
-          await prisma.member.update({
-            where: { id: memberId },
-            data: { optedOut: true },
-          });
-          await sendText({ to: phone, text: "You've been opted out of messages. Reply *optin* at any time to re-enable." });
-        }
+      if (!memberId) {
+        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle", data: "{}" }, update: { state: "idle", data: "{}" } });
+        break;
       }
-      await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle", data: "{}" }, update: { state: "idle", data: "{}" } });
+      if (answer === "yes" || answer === "y") {
+        await prisma.member.update({
+          where: { id: memberId },
+          data: { optedOut: false, consentAt: new Date() },
+        });
+        invalidateMemberCache(phone);
+        await prisma.dataConsent.create({
+          data: {
+            memberId,
+            consentType: "registration",
+            granted: true,
+          },
+        });
+        await sendText({ to: phone, text: "✅ You're all set! You'll receive messages from your cooperative. Reply *menu* to see your options." });
+        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle", data: "{}" }, update: { state: "idle", data: "{}" } });
+      } else if (answer === "no" || answer === "n") {
+        await prisma.member.update({
+          where: { id: memberId },
+          data: { optedOut: true },
+        });
+        invalidateMemberCache(phone);
+        await sendText({
+          to: phone,
+          text: "You've been opted out of messages. You can still use *balance*, *statement* and the rest of the menu — reply *optin* any time to receive messages again.",
+        });
+        await prisma.session.upsert({ where: { phone }, create: { phone, state: "idle", data: "{}" }, update: { state: "idle", data: "{}" } });
+      } else {
+        // Anything else (including the founder re-sending "menu") is not an answer.
+        // Re-ask instead of silently recording a NO the member never gave.
+        await sendText({ to: phone, text: MESSAGE_CONSENT_REASK });
+      }
       break;
     }
 

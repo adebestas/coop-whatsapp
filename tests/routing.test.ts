@@ -47,6 +47,7 @@ async function makeMember(
       name: `Member ${phone.slice(-4)}`,
       cooperativeId: coopId,
       pin: hashPin("1234"),
+      consentAt: new Date(),
       ...(opts.autosave
         ? {
             autoSaveEnabled: true,

@@ -29,6 +29,7 @@ async function makeCoopAndMember() {
         code: generateMemberCode(),
         role: "member",
         status: "active",
+        consentAt: new Date(),
         pin: hashPin("1234"),
         wallet: { create: {} },
       },

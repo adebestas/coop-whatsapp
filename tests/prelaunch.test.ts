@@ -14,13 +14,6 @@ import { checkDailyPayoutLimit, checkMoneyRateLimit, resetMoneyRateLimit } from 
 import { validateEnvironment } from "../src/lib/envcheck.js";
 import { resolveProvider } from "../src/services/payments/index.js";
 
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  notifyMember: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-}));
-
 // Configurable fake provider so poller tests can script transfer outcomes.
 const fakeProvider = {
   name: "monnify",
@@ -86,8 +79,9 @@ async function makeMember(
     phone,
     name: opts.name ?? `Member ${phone.slice(-4)}`,
     cooperativeId: coopId,
-    role: opts.role ?? "member",
+role: opts.role ?? "member",
     pin: hashPin(opts.pin === false ? "" : "1234"),
+    consentAt: new Date(),
     wallet: { create: { balance: opts.balance ?? 0 } },
   };
   if (opts.bank) {

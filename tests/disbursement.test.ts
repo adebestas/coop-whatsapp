@@ -16,13 +16,6 @@ import { namesMatch } from "../src/services/disbursements.js";
 import { resetMoneyRateLimit } from "../src/services/fraud.js";
 
 // Mock the payment provider so we control account-name resolution + payouts.
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  notifyMember: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-}));
-
 const state = {
   resolveName: "ADA OBI",
   resolveFails: false,
@@ -69,6 +62,7 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
       role: opts.role ?? "member",
       pin: hashPin("1234"),
       wallet: { create: {} },
+      consentAt: new Date(),
     },
   });
 }

@@ -6,12 +6,6 @@ import { deleteTelegramMessage } from "../src/lib/telegram.js";
 import { extractWhatsAppMessages } from "../src/lib/inbound.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-}));
-
 vi.mock("../src/lib/telegram.js", () => ({
   deleteTelegramMessage: vi.fn().mockResolvedValue(true),
 }));
@@ -38,6 +32,7 @@ async function makeMember(
       name: `Member ${phone.slice(-4)}`,
       cooperativeId: coopId,
       role: opts.role ?? "member",
+      consentAt: new Date(),
       pin: hashPin("1234"),
       ...(opts.bank
         ? { bankAccountNumber: "0123456789", bankCode: "044", bankName: "Access Bank" }

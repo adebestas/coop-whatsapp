@@ -48,6 +48,7 @@ async function makeMember(
       name: `Member ${phone.slice(-4)}`,
       cooperativeId: coopId,
       role: opts.role ?? "member",
+      consentAt: new Date(),
       pin: opts.pin ? hashPin(opts.pin) : hashPin("1234"),
       ...(opts.vaNumber ? { virtualAccountNumber: opts.vaNumber } : {}),
       wallet: { create: {} },

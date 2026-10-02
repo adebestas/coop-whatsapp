@@ -4,6 +4,8 @@ import { config } from "../config.js";
 import { prisma } from "./prisma.js";
 
 const WHATSAPP_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Human pacing before a WhatsApp send. Skipped under NODE_ENV=test so the suite stays fast. */
+const WHATSAPP_PACING_MS = process.env.NODE_ENV === "test" ? 0 : 1500;
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -36,7 +38,7 @@ export async function sendText(params: { to: string; text: string }): Promise<bo
   if (to.startsWith("tg:")) {
     return sendTelegramMessage(to.slice(3), text);
   }
-  await sleep(1500);
+  if (WHATSAPP_PACING_MS > 0) await sleep(WHATSAPP_PACING_MS);
   return sendWhatsApp({ to, text });
 }
 
@@ -94,9 +96,15 @@ export async function notifyMember(
     phone: string;
     altChannelId?: string | null;
     preferredChannel?: string | null;
+    optedOut?: boolean | null;
   },
   text: string,
 ): Promise<boolean> {
+  // Consent (NDPR): a member who answered NO must not receive outbound messages.
+  // Inbound commands still work — the consent gate in conversation.ts only asks
+  // un-asked members (consentAt === null && !optedOut).
+  if (member.optedOut === true) return false;
+
   const preferred = member.preferredChannel ?? platformOf(member.phone);
   if (preferred !== platformOf(member.phone) && member.altChannelId) {
     return sendText({ to: member.altChannelId, text });
