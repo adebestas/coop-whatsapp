@@ -10,6 +10,7 @@ vi.mock("../lib/messaging.js", () => ({
 import { prisma } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { sendText } from "../src/lib/messaging.js";
+import { buildFullMenu } from "../src/services/handlers/session.js";
 
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
@@ -418,5 +419,22 @@ describe("cooperative selection for multi-coop phones", () => {
     expect(menu).not.toContain("more than one cooperative");
     expect(menu).not.toContain("reply *join <code>*");
     expect(menu).toContain("balance");
+  });
+});
+
+describe("full menu", () => {
+  it("groups commands into scannable categories", () => {
+    const menu = buildFullMenu({
+      name: "Ada",
+      cooperative: { name: "Coop" },
+      wallet: { balance: 0 },
+      role: "member",
+      createdAt: new Date(0),
+    });
+    expect(menu).toContain("💰 Money");
+    expect(menu).toContain("📄 Loans");
+    expect(menu).toContain("📊 Account");
+    expect(menu).toContain("🗳️ Governance");
+    expect(menu).toContain("ask a question");
   });
 });

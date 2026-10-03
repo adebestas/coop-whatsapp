@@ -122,46 +122,41 @@ export function buildFullMenu(
     );
   }
   let menu =
-    `Hi *${member.name}* from *${member.cooperative.name}* 🏦\n\n` +
-    `Commands:\n` +
-    `• *balance* — check your savings balance\n` +
-    `• *save <amount>* — make a contribution (e.g. *save 2000*)\n` +
-    `• *withdraw <amount>* — request a withdrawal (up to 45% of savings)\n` +
-    `• *plan <amount> <weekly|monthly>* — set a recurring contribution\n` +
-    `• *fund* — get your personal top-up account number\n` +
-    `• *loan <amount> <months>* — apply for a loan (e.g. *loan 50000 3*)\n` +
-    `• *repay* — repay your loan monthly installment\n` +
-    `• *validate <claim id>* — validate a death claim (guarantors)\n` +
-    `• *history* — your transaction statement\n` +
+    `Hi *${member.name}* from *${member.cooperative.name}* 👋\n\n` +
+    `*💰 Money*\n` +
+    `• *balance* — check your savings\n` +
+    `• *save <amount>* — contribute (e.g. *save 2000*)\n` +
+    `• *withdraw <amount>* — request a withdrawal (up to 45%)\n` +
+    `• *plan <amount> <weekly|monthly>* — recurring contribution\n` +
+    `• *fund* — your personal top-up account\n\n` +
+    `*📄 Loans*\n` +
+    `• *loan <amount> <months>* — apply (e.g. *loan 50000 3*)\n` +
+    `• *repay* — pay your monthly installment\n` +
+    `• *validate <claim id>* — validate a death claim (guarantors)\n\n` +
+    `*📊 Account*\n` +
+    `• *history* / *statement <month|year>* — transactions\n` +
+    `• *analytics* — savings analytics\n` +
     `• *ledger* — cooperative ledger (transparency)\n` +
-    `• *dividend <rate>* — dividend calculator (real-time)\n` +
-    `• *joinunit <code>* — join your workplace/unit\n` +
-    `• *code* — see your member code (share it for guarantor requests)\n` +
-    `• *confirm <code>* — accept a guarantor request\n` +
-    `• *phone <number>* — add/update your real phone number\n` +
-    `• *support <issue>* — open a support ticket\n` +
-    `• *vote <election id> <member code>* — vote in an election\n` +
-    `• *pollresults <election id>* — see live election results\n` +
-    `• *buypolls* — see what the coop is voting to buy\n` +
-    `• *votebuy <poll id> <option #>* — vote for what the coop should buy\n` +
-    `• *contexthelp* — personalized help based on your account\n` +
-    `• *class* — start/resume financial literacy (5 lessons)\n` +
-    `• *next* — complete current lesson and get next one\n` +
-    `• *class progress* — see your lesson progress\n` +
-    `• *reserveinfo* — view Reserve Fund dashboard\n` +
-    `• *mydata* — view personal data (NDPR right of access)\n` +
-    `• *deleteaccount* — delete your account\n` +
-    `• *grievance <msg>* — submit a complaint to admin\n` +
-    `• *byelaws* — view cooperative byelaws\n` +
-    `• *statement <month|year>* — monthly/yearly statement\n` +
-    `• *payees* — your saved payout accounts\n` +
-    `• *analytics* — personal savings analytics\n` +
-    `• *votediv <yes|no>* — vote on a dividend-rate change\n` +
-    `• *freeze* — freeze your account (money can't leave)\n` +
-    `• *menu* — show this menu\n`;
+    `• *code* — your member code\n` +
+    `• *phone <number>* — add/update your phone\n` +
+    `• *mydata* / *deleteaccount* — your data (NDPR)\n\n` +
+    `*🗳️ Governance*\n` +
+    `• *vote <election id> <member code>* / *pollresults <id>*\n` +
+    `• *buypolls* / *votebuy <poll id> <option #>*\n` +
+    `• *votediv <yes|no>* — dividend-rate vote\n` +
+    `• *dividend <rate>* — dividend calculator\n` +
+    `• *byelaws* / *grievance <msg>* / *reserveinfo*\n\n` +
+    `*🎓 Learn*\n` +
+    `• *class* / *next* — financial literacy lessons\n\n` +
+    `*⚙️ Settings & help*\n` +
+    `• *freeze* / *unfreeze* — lock your account\n` +
+    `• *payees* / *addpayee* / *delpayee* — saved payout accounts\n` +
+    `• *joinunit <code>* / *confirm <code>*\n` +
+    `• *support <issue>* / *contexthelp*\n\n` +
+    `🤖 You can also just *ask a question* in plain English or Pidgin.\n`;
 
   if (member.role === "admin" || member.role === "superadmin") {
-    menu += `\n*Admin commands:* *admin*\n`;
+    menu += `\n*Admin commands:* reply *admin*\n`;
   }
 
   return menu;
