@@ -75,6 +75,7 @@ vi.mock("../src/services/payments/index.js", async (importOriginal) => {
           ? { ok: false, error: "account not found" }
           : { ok: true, name: paymentState.resolveName },
       ),
+      getTransferStatus: vi.fn(async () => ({ status: paymentState.transferStatus })),
       verifyWebhook: () => true,
       parseNotification: () => null,
     })),
@@ -87,9 +88,18 @@ vi.mock("../src/services/payments/index.js", async (importOriginal) => {
 
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
-import { beforeEach } from "vitest";
+import { beforeAll, beforeEach } from "vitest";
 
 // ===== Global Fixtures =====
+// Wipe the DB ONCE before each test file. Many files clean up only a subset of
+// tables by hand; without this, a row left behind by a previous file (e.g. a
+// Payout/VoteBallot) makes the next file's `member.deleteMany()` fail with a
+// foreign-key/unique-constraint error. cleanupDatabase() disables FK checks and
+// deletes every table, so this makes the suite order-independent.
+beforeAll(async () => {
+  await cleanupDatabase();
+});
+
 // getMemberByPhone() memoises member rows for 30s and tests reuse the same phone
 // numbers across cases, so a cached row from the previous test survives its own
 // beforeEach DELETE and later writes fail with "No record was found for an update".

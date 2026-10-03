@@ -16,14 +16,22 @@ import { clearMemberCache } from "../src/services/cooperative.js";
 import { approveLoan } from "../src/services/loans.js";
 
 /** Account Officer review is not chat-driven: assign an officer and approve directly. */
-async function approveAsAccountOfficer(coopId: string, loanId: string, assignedById: string): Promise<void> {
+async function approveAsAccountOfficer(
+  coopId: string,
+  loanId: string,
+  assignedById: string,
+): Promise<void> {
   const officer = await prisma.accountOfficer.create({
     data: { email: `ao-${loanId}@test.local`, name: "Test Officer", isActive: true },
   });
   await prisma.accountOfficerAssignment.create({
     data: { accountOfficerId: officer.id, cooperativeId: coopId, assignedById, isActive: true },
   });
-  const res = await approveLoan(loanId.slice(-6), { isAdmin: true, actorId: officer.id, cooperativeId: coopId });
+  const res = await approveLoan(loanId.slice(-6), {
+    isAdmin: true,
+    actorId: officer.id,
+    cooperativeId: coopId,
+  });
   expect(res.ok).toBe(true);
 }
 
@@ -101,8 +109,8 @@ beforeEach(async () => {
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
-  await prisma.payout.deleteMany();
   await prisma.dividendEntry.deleteMany();
+  await prisma.payout.deleteMany();
   await prisma.dividend.deleteMany();
   await prisma.broadcast.deleteMany();
   await prisma.wallet.deleteMany();
@@ -285,7 +293,9 @@ describe("coop whatsapp bot", () => {
     // Step 4: Confirm bank details
     await handleMessage(PHONE, "yes");
 
-    let loan = await prisma.loan.findFirst({ where: { memberId: (await prisma.member.findFirst({ where: { phone: PHONE } }))!.id } });
+    let loan = await prisma.loan.findFirst({
+      where: { memberId: (await prisma.member.findFirst({ where: { phone: PHONE } }))!.id },
+    });
     const g1 = await prisma.member.findFirst({ where: { phone: G1_PHONE } });
     const g2 = await prisma.member.findFirst({ where: { phone: G2_PHONE } });
     await handleMessage(PHONE, g1!.code);
@@ -303,7 +313,11 @@ describe("coop whatsapp bot", () => {
     expect(loan!.status).toBe("guaranteed");
 
     await padActiveMembers(coop.id);
-    await approveAsAccountOfficer(coop.id, loan!.id, (await prisma.member.findFirst({ where: { phone: SUPER_PHONE } }))!.id);
+    await approveAsAccountOfficer(
+      coop.id,
+      loan!.id,
+      (await prisma.member.findFirst({ where: { phone: SUPER_PHONE } }))!.id,
+    );
     await handleMessage(ADMIN_PHONE, `approve ${loan!.id.slice(-6)}`);
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("admin_approved");
@@ -339,7 +353,9 @@ describe("coop whatsapp bot", () => {
     // Step 4: Confirm bank details
     await handleMessage(PHONE, "yes");
 
-    let loan = await prisma.loan.findFirst({ where: { memberId: (await prisma.member.findFirst({ where: { phone: PHONE } }))!.id } });
+    let loan = await prisma.loan.findFirst({
+      where: { memberId: (await prisma.member.findFirst({ where: { phone: PHONE } }))!.id },
+    });
     const g1 = await prisma.member.findFirst({ where: { phone: G1_PHONE } });
     await handleMessage(PHONE, g1!.code);
 
@@ -357,7 +373,11 @@ describe("coop whatsapp bot", () => {
     // The borrower is the admin, so the admin sign-off comes from someone else.
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     await padActiveMembers(coop.id);
-    await approveAsAccountOfficer(coop.id, loan!.id, (await prisma.member.findFirst({ where: { phone: SUPER_PHONE } }))!.id);
+    await approveAsAccountOfficer(
+      coop.id,
+      loan!.id,
+      (await prisma.member.findFirst({ where: { phone: SUPER_PHONE } }))!.id,
+    );
     await handleMessage(ADMIN_PHONE, `approve ${loan!.id.slice(-6)}`);
     await handleMessage(SUPER_PHONE, `approve ${loan!.id.slice(-6)}`);
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });

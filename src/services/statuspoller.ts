@@ -5,6 +5,7 @@ import { formatBalance } from "./cooperative.js";
 import { recordLedger } from "./ledger.js";
 import { audit } from "./audit.js";
 import { notifySupers } from "./payanyone.js";
+import { applyDividendPayoutUpdate } from "./dividends.js";
 
 /**
  * Transfer status polling — the safety net for the "crash after the provider
@@ -308,6 +309,40 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
       await notifySupers(
         p.cooperativeId,
         `↩️ Poller: pay-anyone *${p.id.slice(-6)}* failed at the provider — reverted so a super can retry the final approval.`,
+      );
+    }
+  }
+
+  // ---- Dividend payouts (bank-out journal is posted at initiation; settle or
+  // reverse it here if the transfer callback was missed) ----
+  const stuckDividends = await prisma.dividendEntry.findMany({
+    where: { status: "processing", createdAt: { lt: cutoff }, payoutId: { not: null } },
+    include: { payout: true },
+  });
+  for (const entry of stuckDividends) {
+    const payout = entry.payout;
+    if (!payout?.provider) continue;
+    const reference = payout.idempotencyKey ?? payout.reference;
+    const st = await statusFor(reference);
+    if (st.status === "successful") {
+      await applyDividendPayoutUpdate({
+        provider: payout.provider,
+        reference,
+        status: "successful",
+      });
+      actions.push(`Dividend payout ${reference.slice(-10)} confirmed by provider — settled.`);
+      await notifySupers(
+        payout.cooperativeId,
+        `✅ Poller: dividend payout *${reference.slice(-10)}* was confirmed by the provider and settled.`,
+      );
+    } else if (st.status === "failed") {
+      await applyDividendPayoutUpdate({ provider: payout.provider, reference, status: "failed" });
+      actions.push(
+        `Dividend payout ${reference.slice(-10)} FAILED at provider — journal reversed.`,
+      );
+      await notifySupers(
+        payout.cooperativeId,
+        `↩️ Poller: dividend payout *${reference.slice(-10)}* failed at the provider. The bank-out journal was reversed.`,
       );
     }
   }

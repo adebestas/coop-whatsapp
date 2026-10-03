@@ -3,16 +3,16 @@ import { prisma } from "../tests/setup.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { totpAt } from "../src/lib/totp.js";
-import {
-  assertMoneyAuthorized,
-  enable2fa,
-} from "../src/services/auth2fa.js";
+import { assertMoneyAuthorized, enable2fa } from "../src/services/auth2fa.js";
 import { ensureBeneficiaryAllowed } from "../src/services/beneficiaries.js";
 import { runTransferPolling } from "../src/services/statuspoller.js";
 import { runDailyDigest } from "../src/services/scheduler.js";
-import { checkDailyPayoutLimit, checkMoneyRateLimit, resetMoneyRateLimit } from "../src/services/fraud.js";
+import {
+  checkDailyPayoutLimit,
+  checkMoneyRateLimit,
+  resetMoneyRateLimit,
+} from "../src/services/fraud.js";
 import { validateEnvironment } from "../src/lib/envcheck.js";
-
 
 // Configurable fake provider so poller tests can script transfer outcomes.
 const fakeProvider = {
@@ -79,7 +79,7 @@ async function makeMember(
     phone,
     name: opts.name ?? `Member ${phone.slice(-4)}`,
     cooperativeId: coopId,
-role: opts.role ?? "member",
+    role: opts.role ?? "member",
     pin: hashPin(opts.pin === false ? "" : "1234"),
     consentAt: new Date(),
     wallet: { create: { balance: opts.balance ?? 0 } },
@@ -96,10 +96,14 @@ beforeEach(async () => {
   for (const m of [
     "posting",
     "journalEntry",
-    "coopPost",
-    "deductionItem",
-    "deductionWaiver",
-    "deductionBatch",
+    "coopPost",
+
+    "deductionItem",
+
+    "deductionWaiver",
+
+    "deductionBatch",
+
     "webhookEvent",
     "beneficiary",
     "pollBallot",
@@ -120,8 +124,8 @@ beforeEach(async () => {
     "loanRepayment",
     "guarantor",
     "loan",
-    "payout",
     "dividendEntry",
+    "payout",
     "dividend",
     "broadcast",
     "wallet",
@@ -233,7 +237,10 @@ describe("transfer status polling", () => {
       },
     });
 
-    fakeProvider.getTransferStatus.mockResolvedValueOnce({ status: "successful", providerRef: "pr-9" });
+    fakeProvider.getTransferStatus.mockResolvedValueOnce({
+      status: "successful",
+      providerRef: "pr-9",
+    });
     const actions = await runTransferPolling(new Date(Date.now() + 60 * 60 * 1000));
 
     const settled = await prisma.externalPayment.findUnique({ where: { id: payment.id } });
@@ -260,7 +267,10 @@ describe("transfer status polling", () => {
       },
     });
 
-    fakeProvider.getTransferStatus.mockResolvedValueOnce({ status: "failed", error: "insufficient funds at bank" });
+    fakeProvider.getTransferStatus.mockResolvedValueOnce({
+      status: "failed",
+      error: "insufficient funds at bank",
+    });
     const actions = await runTransferPolling(new Date());
 
     const after = await prisma.withdrawalRequest.findUnique({ where: { id: request.id } });

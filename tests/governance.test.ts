@@ -37,7 +37,11 @@ async function makeCoop(code: string) {
   return coop;
 }
 
-async function makeMember(phone: string, coopId: string, opts: { role?: string; pin?: string } = {}) {
+async function makeMember(
+  phone: string,
+  coopId: string,
+  opts: { role?: string; pin?: string } = {},
+) {
   let code = generateMemberCode();
   while (await prisma.member.findUnique({ where: { code } })) {
     code = generateMemberCode();
@@ -59,14 +63,43 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
 beforeEach(async () => {
   vi.clearAllMocks();
   for (const m of [
-    "dataConsent", "coopPost", "deductionItem", "deductionWaiver", "deductionBatch",
-    "posting", "journalEntry", "webhookEvent",
-    "beneficiary", "pollBallot", "pollOption", "purchasePoll", "externalPayment",
-    "guarantorDeduction", "reserveAllocation", "ledgerEntry",
-    "voteBallot", "voteCandidate", "vote", "supportTicket", "auditLog",
-    "deathValidation", "deathClaim", "withdrawalRequest", "contribution",
-    "loanRepayment", "guarantor", "loan", "payout", "dividendEntry",
-    "dividend", "broadcast", "wallet", "member", "unit", "cooperative", "session",
+    "dataConsent",
+    "coopPost",
+    "deductionItem",
+    "deductionWaiver",
+    "deductionBatch",
+    "posting",
+    "journalEntry",
+    "webhookEvent",
+    "beneficiary",
+    "pollBallot",
+    "pollOption",
+    "purchasePoll",
+    "externalPayment",
+    "guarantorDeduction",
+    "reserveAllocation",
+    "ledgerEntry",
+    "voteBallot",
+    "voteCandidate",
+    "vote",
+    "supportTicket",
+    "auditLog",
+    "deathValidation",
+    "deathClaim",
+    "withdrawalRequest",
+    "contribution",
+    "loanRepayment",
+    "guarantor",
+    "loan",
+    "dividendEntry",
+    "payout",
+    "dividend",
+    "broadcast",
+    "wallet",
+    "member",
+    "unit",
+    "cooperative",
+    "session",
   ] as any[]) {
     await prisma[m].deleteMany();
   }
@@ -91,7 +124,10 @@ describe("fraud hardening", () => {
 
     // After the lock window passes, the correct PIN works again.
     await resetRateLimit(`pin:${member.id}`);
-    const unlocked = await verifyMemberPin(await prisma.member.findUnique({ where: { id: member.id } }), "1234");
+    const unlocked = await verifyMemberPin(
+      await prisma.member.findUnique({ where: { id: member.id } }),
+      "1234",
+    );
     expect(unlocked.ok).toBe(true);
   });
 
@@ -99,7 +135,11 @@ describe("fraud hardening", () => {
     const coop = await makeCoop("TEST32");
     await makeMember(PHONE, coop.id);
     await prisma.session.create({
-      data: { phone: PHONE, state: "awaiting_withdraw_pin", data: JSON.stringify({ withdrawAmount: 4000 }) },
+      data: {
+        phone: PHONE,
+        state: "awaiting_withdraw_pin",
+        data: JSON.stringify({ withdrawAmount: 4000 }),
+      },
     });
     await prisma.$executeRawUnsafe(
       `UPDATE Session SET updatedAt = datetime('now', '-40 minutes') WHERE phone = ?`,
@@ -107,7 +147,10 @@ describe("fraud hardening", () => {
     );
 
     await handleMessage(PHONE, "1234"); // stale PIN prompt must not process
-    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
     expect(texts).toContain("expired");
 
     const session = await prisma.session.findUnique({ where: { phone: PHONE } });
@@ -193,7 +236,9 @@ describe("nigeria cooperative rules", () => {
     const wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
     expect(wallet!.balance).toBe(20000 - 5100 - 204);
 
-    const fines = await prisma.contribution.findFirst({ where: { memberId: member.id, type: "fine" } });
+    const fines = await prisma.contribution.findFirst({
+      where: { memberId: member.id, type: "fine" },
+    });
     expect(fines!.amount).toBe(204);
     void loan;
   });
@@ -208,20 +253,35 @@ describe("nigeria cooperative rules", () => {
     for (const borrower of [a, b]) {
       const loan = await prisma.loan.create({
         data: {
-          amount: 5000, interestRate: 2, tenureMonths: 2, status: "approved",
-          balance: 5200, memberId: borrower.id, cooperativeId: coop.id,
+          amount: 5000,
+          interestRate: 2,
+          tenureMonths: 2,
+          status: "approved",
+          balance: 5200,
+          memberId: borrower.id,
+          cooperativeId: coop.id,
         },
       });
       await prisma.guarantor.create({
-        data: { loanId: loan.id, memberId: guarantor.id, code: `G${borrower.id.slice(-4).toUpperCase()}`, status: "confirmed" },
+        data: {
+          loanId: loan.id,
+          memberId: guarantor.id,
+          code: `G${borrower.id.slice(-4).toUpperCase()}`,
+          status: "confirmed",
+        },
       });
     }
 
     // A third request must be refused.
     const cLoan = await prisma.loan.create({
       data: {
-        amount: 5000, interestRate: 2, tenureMonths: 2, status: "pending",
-        balance: 5000, memberId: a.id, cooperativeId: coop.id,
+        amount: 5000,
+        interestRate: 2,
+        tenureMonths: 2,
+        status: "pending",
+        balance: 5000,
+        memberId: a.id,
+        cooperativeId: coop.id,
       },
     });
     const result = await addGuarantor(a.phone, cLoan.id, guarantor.code);
@@ -243,7 +303,11 @@ describe("support tickets", () => {
     expect(listed.ok).toBe(true);
     expect(listed.message).toContain(created.ticketId!.slice(-6));
 
-    const resolved = await resolveTicket("2348090000077", created.ticketId!.slice(-6), "Wallet credited manually");
+    const resolved = await resolveTicket(
+      "2348090000077",
+      created.ticketId!.slice(-6),
+      "Wallet credited manually",
+    );
     expect(resolved.ok).toBe(true);
 
     const ticket = await prisma.supportTicket.findUnique({ where: { id: created.ticketId! } });
@@ -335,7 +399,10 @@ describe("voting engine", () => {
     const closed = await prisma.vote.findUnique({ where: { id: vote!.id } });
     expect(closed!.status).toBe("closed");
     expect(closed!.winnerId).toBe(b.id);
-    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
     expect(texts).toContain("is elected *president*");
   });
 });
@@ -361,8 +428,3 @@ describe("provider failover", () => {
     actual.markProviderUp("paystack");
   });
 });
-
-
-
-
-

@@ -16,4 +16,6 @@ export const paymentState = {
   /** When true the provider accepted the transfer but it is not yet confirmed
    *  (e.g. Monnify awaiting OTP authorization) — must map to "unsure". */
   payoutPending: false,
+  /** What the provider's getTransferStatus() reports during polling. */
+  transferStatus: "unknown" as "successful" | "failed" | "pending" | "unknown",
 };

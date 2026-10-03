@@ -11,6 +11,7 @@ import {
   previewDividendRun,
 } from "../src/services/dividends.js";
 import { handleAwaitingInput } from "../src/services/handlers/session.js";
+import { runTransferPolling } from "../src/services/statuspoller.js";
 
 async function makeCoop(code: string) {
   return prisma.cooperative.create({ data: { name: `Div Coop ${code}`, code } });
@@ -59,6 +60,7 @@ beforeEach(async () => {
   paymentState.resolveFails = false;
   paymentState.payoutFails = false;
   paymentState.payoutPending = false;
+  paymentState.transferStatus = "unknown";
 });
 
 // Leave no Payout/DividendEntry rows behind for the next file's manual cleanup
@@ -318,6 +320,59 @@ describe("dividend direct-to-bank distribution", () => {
     });
     expect(rev).toBeNull();
     expect((await trialBalance(coop.id)).balanced).toBe(true);
+  });
+
+  it("settles or reverses a stuck processing payout via the transfer poller", async () => {
+    const coop = await makeCoop("DIV9");
+    const member = await makeMember(coop.id, { totalSaved: 100_000 });
+    const old = new Date(Date.now() - 60 * 60 * 1000); // older than the 10-min cutoff
+
+    async function seedProcessingEntry(tag: string) {
+      const div = await prisma.dividend.create({
+        data: {
+          cooperativeId: coop.id,
+          reference: `DIV-POLL-${tag}-${Date.now()}-${Math.random()}`,
+          rate: 20,
+          totalPool: 10_000,
+          status: "distributing",
+          entries: {
+            create: [{ memberId: member.id, amount: 10_000, status: "processing", createdAt: old }],
+          },
+        },
+        include: { entries: true },
+      });
+      const ref = dividendPayoutRef(div.id, member.id);
+      await prisma.payout.create({
+        data: {
+          amount: 10_000,
+          reference: ref,
+          idempotencyKey: ref,
+          status: "pending",
+          provider: "monnify",
+          memberId: member.id,
+          cooperativeId: coop.id,
+          dividendEntry: { connect: { id: div.entries[0].id } },
+        },
+      });
+      return div.entries[0].id;
+    }
+
+    // Provider confirms success -> settle.
+    const okEntryId = await seedProcessingEntry("ok");
+    paymentState.transferStatus = "successful";
+    const actions = await runTransferPolling();
+    expect(actions.some((a) => a.includes("Dividend payout"))).toBe(true);
+    expect(
+      (await prisma.dividendEntry.findUniqueOrThrow({ where: { id: okEntryId } })).status,
+    ).toBe("settled");
+
+    // Provider confirms failure -> reversed.
+    const failEntryId = await seedProcessingEntry("fail");
+    paymentState.transferStatus = "failed";
+    await runTransferPolling();
+    expect(
+      (await prisma.dividendEntry.findUniqueOrThrow({ where: { id: failEntryId } })).status,
+    ).toBe("failed");
   });
 
   it("reduces the journal-derived bank float by the amount paid", async () => {

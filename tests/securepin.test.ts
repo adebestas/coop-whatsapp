@@ -67,8 +67,8 @@ beforeEach(async () => {
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
-  await prisma.payout.deleteMany();
   await prisma.dividendEntry.deleteMany();
+  await prisma.payout.deleteMany();
   await prisma.dividend.deleteMany();
   await prisma.broadcast.deleteMany();
   await prisma.wallet.deleteMany();
@@ -83,9 +83,7 @@ describe("whatsapp inbound extraction", () => {
     const value = {
       messages: [{ type: "text", from: "234801", text: { body: "menu" } }],
     };
-    expect(extractWhatsAppMessages(value)).toEqual([
-      { from: "234801", text: "menu" },
-    ]);
+    expect(extractWhatsAppMessages(value)).toEqual([{ from: "234801", text: "menu" }]);
   });
 
   it("extracts flow (nfm_reply) submissions with the echoed flow token", () => {
@@ -143,7 +141,10 @@ describe("secure PIN challenges", () => {
   it("rejects a flow submission whose token does not match the outstanding challenge", async () => {
     const coop = await makeCoop("TESTSP2", "Test Coop");
     const member = await makeMember(PHONE, coop.id, { bank: true });
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000, totalSaved: 5000000 } });
+    await prisma.wallet.update({
+      where: { memberId: member.id },
+      data: { balance: 5000000, totalSaved: 5000000 },
+    });
     await prisma.session.create({
       data: {
         phone: PHONE,
@@ -163,7 +164,10 @@ describe("secure PIN challenges", () => {
   it("accepts a flow submission with the matching token", async () => {
     const coop = await makeCoop("TESTSP3", "Test Coop");
     const member = await makeMember(PHONE, coop.id, { bank: true });
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000, totalSaved: 5000000 } });
+    await prisma.wallet.update({
+      where: { memberId: member.id },
+      data: { balance: 5000000, totalSaved: 5000000 },
+    });
     await prisma.session.create({
       data: {
         phone: PHONE,
@@ -188,7 +192,10 @@ describe("secure PIN challenges", () => {
   it("still accepts typed PIN text when a flow challenge is outstanding", async () => {
     const coop = await makeCoop("TESTSP4", "Test Coop");
     const member = await makeMember(PHONE, coop.id, { bank: true });
-    await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000, totalSaved: 5000000 } });
+    await prisma.wallet.update({
+      where: { memberId: member.id },
+      data: { balance: 5000000, totalSaved: 5000000 },
+    });
     await prisma.session.create({
       data: {
         phone: PHONE,

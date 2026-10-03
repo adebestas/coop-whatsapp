@@ -80,8 +80,8 @@ beforeEach(async () => {
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
-  await prisma.payout.deleteMany();
   await prisma.dividendEntry.deleteMany();
+  await prisma.payout.deleteMany();
   await prisma.dividend.deleteMany();
   await prisma.broadcast.deleteMany();
   await prisma.wallet.deleteMany();
@@ -171,9 +171,7 @@ describe("notifyMember routing", () => {
 
   it("falls back to the primary channel when no alternate exists", async () => {
     await notifyMember({ phone: PHONE, preferredChannel: "telegram" }, "Loan approved 🎉");
-    expect(vi.mocked(sendWhatsApp)).toHaveBeenCalledWith(
-      { to: PHONE, text: "Loan approved 🎉" },
-    );
+    expect(vi.mocked(sendWhatsApp)).toHaveBeenCalledWith({ to: PHONE, text: "Loan approved 🎉" });
     expect(vi.mocked(sendTelegramMessage)).not.toHaveBeenCalled();
   });
 

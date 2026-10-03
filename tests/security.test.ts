@@ -103,9 +103,12 @@ beforeEach(async () => {
     "posting",
     "journalEntry",
     "coopPost",
-    "deductionItem",
-    "deductionWaiver",
-    "deductionBatch",
+    "deductionItem",
+
+    "deductionWaiver",
+
+    "deductionBatch",
+
     "webhookEvent",
     "beneficiary",
     "pollBallot",
@@ -127,8 +130,8 @@ beforeEach(async () => {
     "loanRepayment",
     "guarantor",
     "loan",
-    "payout",
     "dividendEntry",
+    "payout",
     "dividend",
     "broadcast",
     "wallet",
@@ -153,7 +156,9 @@ describe("cryptographic webhook verification", () => {
     expect(paystackAdapter.verifyWebhook(rawBody, { "x-paystack-signature": validSig })).toBe(true);
     // Same JSON re-serialized differently must NOT pass.
     const reserialized = '{"data":{"id":123},"event":"charge.success"}';
-    expect(paystackAdapter.verifyWebhook(reserialized, { "x-paystack-signature": validSig })).toBe(false);
+    expect(paystackAdapter.verifyWebhook(reserialized, { "x-paystack-signature": validSig })).toBe(
+      false,
+    );
   });
 });
 
@@ -161,11 +166,20 @@ describe("webhook replay protection", () => {
   it("credits once and marks the second identical delivery as duplicate", async () => {
     process.env.PAYSTACK_SECRET_KEY = "sk_test_key";
     const coop = await makeCoop();
-    const member = await makeMember("2348010000042", coop.id, { virtual: "VA-SEC-001", balance: 0 });
+    const member = await makeMember("2348010000042", coop.id, {
+      virtual: "VA-SEC-001",
+      balance: 0,
+    });
 
     const rawBody = JSON.stringify({
       event: "charge.success",
-      data: { id: "SECTX-777", status: "success", amount: 500, account: { number: "VA-SEC-001" }, currency: "NGN" },
+      data: {
+        id: "SECTX-777",
+        status: "success",
+        amount: 500,
+        account: { number: "VA-SEC-001" },
+        currency: "NGN",
+      },
     });
     const rawBodyStr = JSON.stringify(JSON.parse(rawBody));
     const sig = createHmac("sha512", "sk_test_key").update(rawBodyStr).digest("hex");
@@ -193,11 +207,20 @@ describe("webhook replay protection", () => {
   it("rejects forged deliveries with 401 before touching any state", async () => {
     process.env.PAYSTACK_SECRET_KEY = "sk_test_key";
     const coop = await makeCoop();
-    const member = await makeMember("2348010000043", coop.id, { virtual: "VA-SEC-002", balance: 0 });
+    const member = await makeMember("2348010000043", coop.id, {
+      virtual: "VA-SEC-002",
+      balance: 0,
+    });
 
     const rawBody = JSON.stringify({
       event: "charge.success",
-      data: { id: "EVIL-TX", status: "success", amount: 999999, account: { number: "VA-SEC-002" }, currency: "NGN" },
+      data: {
+        id: "EVIL-TX",
+        status: "success",
+        amount: 999999,
+        account: { number: "VA-SEC-002" },
+        currency: "NGN",
+      },
     });
 
     const result = await processPaymentWebhook(rawBody, { "x-paystack-signature": "forged" });
@@ -288,7 +311,7 @@ describe("atomic double-spend protection", () => {
     // Wallet should be debited at most once
     const wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
     expect(wallet!.balance).toBeGreaterThanOrEqual(6000); // debited at most once (4000)
-    
+
     // Request status should be consistent (not processed twice)
     const finalRequest = await prisma.withdrawalRequest.findUnique({ where: { id: request.id } });
     expect(["paid", "pending", "admin_approved"]).toContain(finalRequest!.status);
@@ -298,7 +321,11 @@ describe("atomic double-spend protection", () => {
 describe("dual-control blocks", () => {
   it("blocks approving your own withdrawal", async () => {
     const coop = await makeCoop();
-    const superA = await makeMember("2348090000078", coop.id, { role: "superadmin", bank: true, balance: 5000 });
+    const superA = await makeMember("2348090000078", coop.id, {
+      role: "superadmin",
+      bank: true,
+      balance: 5000,
+    });
     const request = await prisma.withdrawalRequest.create({
       data: {
         amount: 1000,
@@ -341,10 +368,18 @@ describe("dual-control blocks", () => {
     expect(after!.status).toBe("guaranteed");
   });
 
-it("blocks setting your own salary (dual-control)", async () => {
+  it("blocks setting your own salary (dual-control)", async () => {
     const coop = await makeCoop();
-    const superA = await makeMember("2348090000080", coop.id, { role: "superadmin", name: "ADA OBI", bank: true });
-    const superB = await makeMember("2348090000081", coop.id, { role: "superadmin", name: "ADA OBI", bank: true });
+    const superA = await makeMember("2348090000080", coop.id, {
+      role: "superadmin",
+      name: "ADA OBI",
+      bank: true,
+    });
+    const superB = await makeMember("2348090000081", coop.id, {
+      role: "superadmin",
+      name: "ADA OBI",
+      bank: true,
+    });
 
     // A can't set their own salary...
     const selfSet = await setSalary(
@@ -368,21 +403,34 @@ it("blocks setting your own salary (dual-control)", async () => {
     );
 
     // Verify salaries are set in DB (dual-control enforced at setSalary level)
-    const aSalary = await prisma.member.findUnique({ where: { id: superA.id }, select: { salaryAmount: true } });
-    const bSalary = await prisma.member.findUnique({ where: { id: superB.id }, select: { salaryAmount: true } });
+    const aSalary = await prisma.member.findUnique({
+      where: { id: superA.id },
+      select: { salaryAmount: true },
+    });
+    const bSalary = await prisma.member.findUnique({
+      where: { id: superB.id },
+      select: { salaryAmount: true },
+    });
     expect(aSalary!.salaryAmount).toBe(30000);
     expect(bSalary!.salaryAmount).toBe(25000);
 
     // Payroll execution tests payment provider which is not configured in test env
     // The dual-control check (can't pay yourself) is in runPayroll logic
-    const run = await runPayroll(coop.id, { id: superB.id, phone: superB.phone, role: "superadmin" }, "March stipends");
+    const run = await runPayroll(
+      coop.id,
+      { id: superB.id, phone: superB.phone, role: "superadmin" },
+      "March stipends",
+    );
     // run.ok may be false if provider fails, but the self-pay check should be in the message
     expect(run.message).toContain("pays yourself");
   });
 
   it("blocks approving a death claim on your own account", async () => {
     const coop = await makeCoop();
-    const superA = await makeMember("2348090000082", coop.id, { role: "superadmin", balance: 8000 });
+    const superA = await makeMember("2348090000082", coop.id, {
+      role: "superadmin",
+      balance: 8000,
+    });
     const claim = await prisma.deathClaim.create({
       data: {
         status: "validated",
@@ -397,5 +445,3 @@ it("blocks setting your own salary (dual-control)", async () => {
     expect(after!.status).toBe("validated");
   });
 });
-
-

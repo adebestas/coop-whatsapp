@@ -19,8 +19,6 @@ import { resetMoneyRateLimit } from "../src/services/fraud.js";
 // instead to control account-name resolution and payout outcomes.
 import { paymentState as state } from "./payment-state.js";
 
-
-
 const ADMIN_PHONE = "2348090000001";
 const PHONE = "2348010000001";
 const G1 = "2348010000002";
@@ -30,7 +28,11 @@ async function makeCoop(code: string) {
   return prisma.cooperative.create({ data: { name: "Test Coop", code, adminPhone: ADMIN_PHONE } });
 }
 
-async function makeMember(phone: string, coopId: string, opts: { role?: string; name?: string } = {}) {
+async function makeMember(
+  phone: string,
+  coopId: string,
+  opts: { role?: string; name?: string } = {},
+) {
   let code = generateMemberCode();
   while (await prisma.member.findUnique({ where: { code } })) {
     code = generateMemberCode();
@@ -50,7 +52,11 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string; 
 }
 
 /** Run the full loan flow up to approval. Returns the loan + two super admin ids. */
-async function getGuaranteedLoan(borrowerName?: string, resolveName = "ADA OBI", resolveFails = false) {
+async function getGuaranteedLoan(
+  borrowerName?: string,
+  resolveName = "ADA OBI",
+  resolveFails = false,
+) {
   const coop = await makeCoop("TEST21");
   const borrower = await makeMember(PHONE, coop.id, { name: borrowerName });
   await makeMember(G1, coop.id);
@@ -88,9 +94,9 @@ async function getGuaranteedLoan(borrowerName?: string, resolveName = "ADA OBI",
   await handleMessage(PHONE, g2!.code);
 
   const guarantors = await prisma.guarantor.findMany({
-      where: { loanId: loan!.id },
-      include: { member: true },
-    });
+    where: { loanId: loan!.id },
+    include: { member: true },
+  });
   for (const g of guarantors) {
     await handleMessage(g.member.phone, `confirm ${g.code}`);
   }
@@ -136,7 +142,7 @@ beforeEach(async () => {
   state.resolveName = "ADA OBI";
   state.resolveFails = false;
   state.payoutFails = false;
-    await prisma.posting.deleteMany();
+  await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
   await prisma.coopPost.deleteMany();
   await prisma.deductionItem.deleteMany();
@@ -162,8 +168,8 @@ beforeEach(async () => {
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
-  await prisma.payout.deleteMany();
   await prisma.dividendEntry.deleteMany();
+  await prisma.payout.deleteMany();
   await prisma.dividend.deleteMany();
   await prisma.broadcast.deleteMany();
   await prisma.wallet.deleteMany();
@@ -178,9 +184,17 @@ describe("loan disbursement", () => {
     const { loan, coopId, super1Id, super2Id } = await getGuaranteedLoan("Ada Obi");
 
     // Two distinct super admins must approve; the second auto-disburses.
-    const one = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super1Id });
+    const one = await approveLoan(loan.id.slice(-6), {
+      cooperativeId: coopId,
+      superAdmin: true,
+      actorId: super1Id,
+    });
     expect(one.ok).toBe(true);
-    const result = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super2Id });
+    const result = await approveLoan(loan.id.slice(-6), {
+      cooperativeId: coopId,
+      superAdmin: true,
+      actorId: super2Id,
+    });
     expect(result.ok).toBe(true);
 
     const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
@@ -200,10 +214,21 @@ describe("loan disbursement", () => {
 
   it("blocks disbursement when the account name does not match the registered name", async () => {
     // Registered under a different name than the bank account owner.
-    const { loan, coopId, super1Id, super2Id } = await getGuaranteedLoan("Chinedu Eze", "SADE BALOGUN");
+    const { loan, coopId, super1Id, super2Id } = await getGuaranteedLoan(
+      "Chinedu Eze",
+      "SADE BALOGUN",
+    );
 
-    await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super1Id });
-    const result = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super2Id });
+    await approveLoan(loan.id.slice(-6), {
+      cooperativeId: coopId,
+      superAdmin: true,
+      actorId: super1Id,
+    });
+    const result = await approveLoan(loan.id.slice(-6), {
+      cooperativeId: coopId,
+      superAdmin: true,
+      actorId: super2Id,
+    });
     expect(result.ok).toBe(true); // approved, but NOT paid out
 
     const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
@@ -216,10 +241,22 @@ describe("loan disbursement", () => {
   });
 
   it("marks a failed disbursement without paying when the provider can't resolve", async () => {
-    const { loan, coopId, super1Id, super2Id } = await getGuaranteedLoan(undefined, "ADA OBI", true);
+    const { loan, coopId, super1Id, super2Id } = await getGuaranteedLoan(
+      undefined,
+      "ADA OBI",
+      true,
+    );
 
-    await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super1Id });
-    await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super2Id });
+    await approveLoan(loan.id.slice(-6), {
+      cooperativeId: coopId,
+      superAdmin: true,
+      actorId: super1Id,
+    });
+    await approveLoan(loan.id.slice(-6), {
+      cooperativeId: coopId,
+      superAdmin: true,
+      actorId: super2Id,
+    });
 
     const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(updated!.status).toBe("approved");
@@ -237,14 +274,22 @@ describe("loan disbursement", () => {
     expect(await prisma.payout.count()).toBe(0);
 
     // Two distinct super admins must sign off; the second releases the money.
-    const second = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super1Id });
+    const second = await approveLoan(loan.id.slice(-6), {
+      cooperativeId: coopId,
+      superAdmin: true,
+      actorId: super1Id,
+    });
     expect(second.ok).toBe(true);
     updated = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(updated!.status).toBe("super_approved_1");
     expect(updated!.finalApprovedById).not.toBeNull();
     expect(await prisma.payout.count()).toBe(0);
 
-    const third = await approveLoan(loan.id.slice(-6), { cooperativeId: coopId,  superAdmin: true, actorId: super2Id });
+    const third = await approveLoan(loan.id.slice(-6), {
+      cooperativeId: coopId,
+      superAdmin: true,
+      actorId: super2Id,
+    });
     expect(third.ok).toBe(true);
     updated = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(updated!.status).toBe("disbursed");
@@ -270,7 +315,7 @@ describe("withdrawals", () => {
     await handleMessage(PHONE, "withdraw 20000");
     await handleMessage(PHONE, "0123456789"); // account
     await handleMessage(PHONE, "Access");
-  await handleMessage(PHONE, "yes"); // confirm the bank selection
+    await handleMessage(PHONE, "yes"); // confirm the bank selection
     await handleMessage(PHONE, "1234"); // PIN
 
     // The request exists but no money has moved yet.
@@ -285,7 +330,7 @@ describe("withdrawals", () => {
     expect(updated!.bankAccountNumber).toBe("0123456789");
     expect(updated!.bankCode).toBe("044");
 
-// ADMIN_PHONE is the coop's registered super admin: it can approve and
+    // ADMIN_PHONE is the coop's registered super admin: it can approve and
     // then finalize, which is what actually sends the money.
     await handleMessage(ADMIN_PHONE, `approvewdraw ${req!.id.slice(-6)}`);
     await handleMessage(ADMIN_PHONE, `finalize ${req!.id.slice(-6)}`);
@@ -306,7 +351,10 @@ describe("withdrawals", () => {
     expect(payout!.amount).toBe(2000000);
     expect(payout!.status).toBe("successful");
 
-    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
     expect(texts).toContain("sent to");
   });
 
@@ -317,10 +365,10 @@ describe("withdrawals", () => {
     await prisma.cooperative.update({ where: { id: coop.id }, data: { adminPhone: null } });
     await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000 } });
 
-await handleMessage(PHONE, "withdraw 20000");
+    await handleMessage(PHONE, "withdraw 20000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
-  await handleMessage(PHONE, "yes"); // confirm the bank selection
+    await handleMessage(PHONE, "yes"); // confirm the bank selection
     await handleMessage(PHONE, "1234");
 
     const req = await prisma.withdrawalRequest.findFirst({ where: { memberId: member.id } });
@@ -330,7 +378,7 @@ await handleMessage(PHONE, "withdraw 20000");
     let after = await prisma.withdrawalRequest.findUnique({ where: { id: req!.id } });
     expect(after!.status).toBe("admin_approved");
     expect(after!.adminApprovedById).not.toBeNull();
-    expect((await prisma.payout.count())).toBe(0);
+    expect(await prisma.payout.count()).toBe(0);
 
     // Plain admin can't finalize.
     await handleMessage(ADMIN_PHONE, `finalize ${req!.id.slice(-6)}`);
@@ -344,7 +392,10 @@ await handleMessage(PHONE, "withdraw 20000");
 
     after = await prisma.withdrawalRequest.findUnique({ where: { id: req!.id } });
     expect(after!.status).toBe("paid");
-    const updated = await prisma.member.findUnique({ where: { id: member.id }, include: { wallet: true } });
+    const updated = await prisma.member.findUnique({
+      where: { id: member.id },
+      include: { wallet: true },
+    });
     expect(updated!.wallet!.balance).toBe(3000000);
     void plainAdmin;
   });
@@ -360,7 +411,10 @@ await handleMessage(PHONE, "withdraw 20000");
     });
 
     await handleMessage(PHONE, "withdraw 20000");
-    let texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    let texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
     expect(texts).toContain("once every 6 months");
     expect(await prisma.withdrawalRequest.count()).toBe(0);
 
@@ -368,16 +422,19 @@ await handleMessage(PHONE, "withdraw 20000");
     await handleMessage(ADMIN_PHONE, `overridewithdrawal ${PHONE}`);
     vi.mocked(sendText).mock.calls.length = 0;
 
-await handleMessage(PHONE, "withdraw 20000");
+    await handleMessage(PHONE, "withdraw 20000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
-  await handleMessage(PHONE, "yes"); // confirm the bank selection
+    await handleMessage(PHONE, "yes"); // confirm the bank selection
     await handleMessage(PHONE, "1234");
 
     const req = await prisma.withdrawalRequest.findFirst({ where: { memberId: member.id } });
     expect(req).not.toBeNull();
     expect(req!.status).toBe("pending");
-    texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
     expect(texts).toContain("requested");
   });
 
@@ -396,7 +453,10 @@ await handleMessage(PHONE, "withdraw 20000");
     expect(await prisma.payout.count()).toBe(0);
     expect(await prisma.withdrawalRequest.count()).toBe(0);
 
-    const texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
     expect(texts).toContain("45%");
   });
 
@@ -406,10 +466,10 @@ await handleMessage(PHONE, "withdraw 20000");
     await prisma.wallet.update({ where: { memberId: member.id }, data: { balance: 5000000 } });
     state.resolveName = "SADE BALOGUN";
 
-await handleMessage(PHONE, "withdraw 20000");
+    await handleMessage(PHONE, "withdraw 20000");
     await handleMessage(PHONE, "0123456789");
     await handleMessage(PHONE, "Access");
-  await handleMessage(PHONE, "yes"); // confirm the bank selection
+    await handleMessage(PHONE, "yes"); // confirm the bank selection
     await handleMessage(PHONE, "1234");
 
     const req = await prisma.withdrawalRequest.findFirst({ where: { memberId: member.id } });
@@ -429,5 +489,3 @@ await handleMessage(PHONE, "withdraw 20000");
     expect(after!.status).not.toBe("paid");
   });
 });
-
-
