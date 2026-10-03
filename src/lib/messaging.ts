@@ -2,6 +2,7 @@ import { sendText as sendWhatsApp, sendFlowMessage } from "./whatsapp.js";
 import { sendTelegramMessage, sendTelegramKeyboard, buildPinKeyboard } from "./telegram.js";
 import { config } from "../config.js";
 import { prisma } from "./prisma.js";
+import { enqueueDeferredSend } from "./deferred.js";
 
 const WHATSAPP_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Human pacing before a WhatsApp send. Skipped under NODE_ENV=test so the suite stays fast. */
@@ -19,8 +20,17 @@ function sleep(ms: number): Promise<void> {
  *   - Telegram: "tg:<chatId>", e.g. "tg:123456789"
  *
  * All bot services call sendText() and never need to know the channel.
+ *
+ * Inside a deferred-send scope (see src/lib/deferred.ts) the send is queued and
+ * flushed after the surrounding transaction commits, so the transaction never
+ * spans network I/O. Returns true optimistically in that case.
  */
 export async function sendText(params: { to: string; text: string }): Promise<boolean> {
+  if (enqueueDeferredSend(() => sendTextNow(params))) return true;
+  return sendTextNow(params);
+}
+
+async function sendTextNow(params: { to: string; text: string }): Promise<boolean> {
   const { to, text } = params;
 
   // WhatsApp 24-hour session window check

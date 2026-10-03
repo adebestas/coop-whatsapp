@@ -7,6 +7,7 @@ import {
   resolveCoopsByPhone,
   withCoopContext,
 } from "../src/lib/tenant-context.js";
+import { withDeferredSends, enqueueDeferredSend } from "../src/lib/deferred.js";
 
 /**
  * Tenant-context helpers.
@@ -75,6 +76,33 @@ describe("tenant-context resolvers (SQLite fallback)", () => {
       return count;
     });
     expect(result).toBe(0);
+  });
+
+  it("withDeferredSends queues sends and flushes them after fn resolves", async () => {
+    const order: string[] = [];
+    await withDeferredSends(async () => {
+      order.push("start");
+      enqueueDeferredSend(async () => {
+        order.push("send");
+      });
+      order.push("end");
+    });
+    order.push("after");
+    expect(order).toEqual(["start", "end", "send", "after"]);
+  });
+
+  it("withCoopContext does not hold the transaction during a slow send", async () => {
+    const coop = await createTestCoop("DEFER2");
+    let txDone = false;
+    const start = Date.now();
+    // The deferred send outlives Prisma's 5s interactive-transaction timeout.
+    // If the transaction spanned it, withCoopContext would reject with P2028.
+    await withCoopContext(coop.id, async () => {
+      enqueueDeferredSend(() => new Promise((r) => setTimeout(r, 5500)));
+      txDone = true;
+    });
+    expect(txDone).toBe(true);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(5500);
   });
 
   it("routes prisma.* through the transaction inside withCoopContext (rolls back on throw)", async () => {

@@ -1,4 +1,5 @@
 import { prisma, withTx } from "./prisma.js";
+import { withDeferredSends } from "./deferred.js";
 
 /**
  * Set the Row-Level-Security tenant GUC on the CURRENT transaction.
@@ -32,10 +33,14 @@ export async function withCoopContext<T>(
   cooperativeId: string,
   fn: (tx: typeof prisma) => Promise<T>,
 ): Promise<T> {
-  return withTx(async (tx) => {
-    await setCoopContext(tx as never, cooperativeId);
-    return fn(tx as unknown as typeof prisma);
-  });
+  // Sends are deferred until after the transaction commits, so the transaction
+  // covers only DB work (never the WhatsApp/Telegram network calls or pacing).
+  return withDeferredSends(() =>
+    withTx(async (tx) => {
+      await setCoopContext(tx as never, cooperativeId);
+      return fn(tx as unknown as typeof prisma);
+    }),
+  );
 }
 
 /**
