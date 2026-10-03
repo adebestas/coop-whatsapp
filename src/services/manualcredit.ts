@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
 import { recordLedger } from "./ledger.js";
@@ -158,7 +158,7 @@ export async function approveManualCredit(
   try {
     // Atomic claim: only ONE concurrent approver moves pending → approved, so a
     // racing second approver can never double-credit the wallet.
-    newBalance = await prisma.$transaction(async (tx) => {
+    newBalance = await withTx(async (tx) => {
       const claimed = await tx.manualCredit.updateMany({
         where: { id: credit.id, status: "pending" },
         data: { status: "approved", approvedById: actor.id, approvedAt: new Date() },

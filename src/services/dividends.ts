@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { computePnl } from "./ledger.js";
 import { postJournal, getBankAccountBalance } from "./journal.js";
@@ -406,7 +406,7 @@ export async function distributeDividend(phone: string, rate: number): Promise<D
   // =====================================================================
   // SAGA STEP 1 — ATOMIC DB CLAIM + BALANCED JOURNALS. NO network call here.
   // =====================================================================
-  const dividend = await prisma.$transaction(async (tx) => {
+  const dividend = await withTx(async (tx) => {
     // Scope the transaction to this cooperative's RLS context. No-op on SQLite;
     // with the RLS policies applied this restricts every query below.
     await setCoopContext(tx as never, admin.cooperativeId);
@@ -687,7 +687,7 @@ export async function applyDividendPayoutUpdate(
 
   if (update.status === "successful") {
     if (entry.status !== "settled") {
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.dividendEntry.update({
           where: { id: entry.id },
           data: { status: "settled", paidAt: new Date() },
@@ -711,7 +711,7 @@ export async function applyDividendPayoutUpdate(
     entry.memberId,
     entry.amount,
   );
-  await prisma.$transaction([
+  await withTxBatch([
     prisma.dividendEntry.update({
       where: { id: entry.id },
       data: { status: "failed", failureReason: "Provider reported transfer.failed" },

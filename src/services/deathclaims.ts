@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { sendText } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
 import { sendToBank } from "./disbursements.js";
@@ -82,7 +82,7 @@ export async function startDeathClaim(
 
   const waitingPeriodEnd = new Date(Date.now() + WAITING_PERIOD_MS);
 
-  const claim = await prisma.$transaction(async (tx) => {
+  const claim = await withTx(async (tx) => {
     await tx.member.update({ where: { id: deceased.id }, data: { status: "deceased" } });
     return tx.deathClaim.create({
       data: {
@@ -525,7 +525,7 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     if (!result.ok) {
       // Refund and hand back for retry — only reached when the provider
       // CONFIRMED the transfer did not go out.
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.wallet.update({
           where: { id: wallet!.id },
           data: { balance: { increment: balance } },

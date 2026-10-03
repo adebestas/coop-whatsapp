@@ -1,4 +1,4 @@
-import { prisma } from "./prisma.js";
+import { prisma, withTx } from "./prisma.js";
 
 /**
  * Set the Row-Level-Security tenant GUC on the CURRENT transaction.
@@ -24,12 +24,15 @@ export async function setCoopContext(
  * Run `fn` inside a transaction scoped to a single cooperative's RLS context.
  * This is the reference integration point for the staged RLS activation: wire
  * tenant-scoped service work through this helper, then flip the policies on.
+ *
+ * Inside `fn`, the exported `prisma` proxy routes every query to this
+ * transaction (see src/lib/prisma.ts), so callers do not need to thread `tx`.
  */
 export async function withCoopContext<T>(
   cooperativeId: string,
   fn: (tx: typeof prisma) => Promise<T>,
 ): Promise<T> {
-  return prisma.$transaction(async (tx) => {
+  return withTx(async (tx) => {
     await setCoopContext(tx as never, cooperativeId);
     return fn(tx as unknown as typeof prisma);
   });

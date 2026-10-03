@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { sendText, sendLongText, notifyMember } from "../lib/messaging.js";
 import { cacheDel } from "../lib/cache.js";
 import { normalizeTitle, displayTitle } from "./posts.js";
@@ -2137,7 +2137,7 @@ export async function handleAdminCommand(
           return true;
         }
         const oldPhone = target.phone;
-        await prisma.$transaction([
+        await withTxBatch([
           prisma.member.update({
             where: { id: target.id },
             data: { phone: newChannel, preferredChannel: null },
@@ -2934,7 +2934,7 @@ async function handlePayout(
   // STEP 1 — atomic claim: create the request in "processing" state so concurrent
   // calls for the same member are rejected. Also debits the wallet in the same
   // transaction so the debit and claim are inseparable.
-  const claimed = await prisma.$transaction(async (tx) => {
+  const claimed = await withTx(async (tx) => {
     const wallet = await tx.wallet.findUnique({ where: { memberId: target.id } });
     if (!wallet || wallet.balance < amount) {
       return { ok: false as const, message: "Insufficient balance. No money moved." };
@@ -3008,7 +3008,7 @@ async function handlePayout(
 
     if (!result.ok) {
       // STEP 3b — refund on CONFIRMED failure and hand back for retry.
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.wallet.update({
           where: { id: claimed.wallet.id },
           data: { balance: { increment: amount } },

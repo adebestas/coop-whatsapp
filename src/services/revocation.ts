@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { audit } from "./audit.js";
 
@@ -24,7 +24,7 @@ export async function revokeMemberSessions(
   if (!member)
     return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
 
-  await prisma.$transaction([
+  await withTxBatch([
     prisma.member.update({
       where: { id: member.id },
       data: { sessionsRevokedAt: new Date(), altChannelId: null },

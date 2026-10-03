@@ -1,4 +1,4 @@
-import { prisma } from "../../lib/prisma.js";
+import { prisma, withTx } from "../../lib/prisma.js";
 import { resolveProvider, markProviderDown, markProviderUp } from "./index.js";
 import type { PaymentNotification } from "./index.js";
 import { notifyMember } from "../../lib/messaging.js";
@@ -126,7 +126,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
   if (amount <= 0) return;
   const reference = `${n.provider}-${n.transactionId}`;
 
-  await prisma.$transaction(async (tx) => {
+  await withTx(async (tx) => {
     // Idempotency gate FIRST: duplicate delivery throws P2002 here, which
     // rolls back everything � the wallet is never credited twice.
     try {

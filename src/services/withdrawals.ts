@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { sendText, notifyMember } from "../lib/messaging.js";
 import { sendToBank } from "./disbursements.js";
@@ -143,7 +143,7 @@ export async function requestWithdrawal(
 
   // Atomic eligibility check + request creation inside a transaction.
   // SELECT ... FOR UPDATE locks the member row so concurrent requests queue.
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await withTx(async (tx) => {
     const member = await tx.member.findFirst({
       where: { phone },
       include: { wallet: true },
@@ -424,7 +424,7 @@ export async function finalizeWithdrawal(
       // The provider may have submitted the transfer. NEVER auto-refund here or
       // the member keeps their money AND the payout lands → double payment.
       // Flag for manual reconciliation.
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.withdrawalRequest.updateMany({
           where: { id: request.id },
           data: { status: "investigating" },
@@ -444,7 +444,7 @@ export async function finalizeWithdrawal(
       // STEP 4b — refund and hand back for retry/rejection by humans.
       // Only reached when the provider CONFIRMED the transfer did not go out,
       // so the refund is safe.
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.wallet.update({
           where: { id: wallet.id },
           data: { balance: { increment: request.amount } },
@@ -459,7 +459,7 @@ export async function finalizeWithdrawal(
     }
 
     // STEP 4a — success.
-    await prisma.$transaction([
+    await withTxBatch([
       prisma.withdrawalRequest.updateMany({
         where: { id: request.id, status: "processing" },
         data: { status: "paid", finalizedAt: new Date(), finalizedById: actor.id },

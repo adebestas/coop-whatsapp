@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { prisma, createTestCoop, createTestMember } from "./setup.js";
+import { prisma as appPrisma } from "../src/lib/prisma.js";
 import {
   resolveCoopByPhone,
   resolveCoopByAltChannel,
@@ -59,5 +60,26 @@ describe("tenant-context resolvers (SQLite fallback)", () => {
       return count;
     });
     expect(result).toBe(0);
+  });
+
+  it("routes prisma.* through the transaction inside withCoopContext (rolls back on throw)", async () => {
+    const coop = await createTestCoop("RESOLVE5");
+    const phone = "2348090000005";
+
+    await expect(
+      withCoopContext(coop.id, async () => {
+        // Uses the app's `prisma` proxy, NOT the tx argument. If the proxy did
+        // not route to the transaction, this write would commit and survive.
+        await appPrisma.member.create({
+          data: { name: "Tx Member", phone, code: "TXROLLBACK", cooperativeId: coop.id },
+        });
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+
+    const found = await appPrisma.member.findUnique({
+      where: { cooperativeId_phone: { cooperativeId: coop.id, phone } },
+    });
+    expect(found).toBeNull();
   });
 });

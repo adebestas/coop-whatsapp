@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
 import { requestExternalPayment } from "./payanyone.js";
@@ -182,7 +182,7 @@ export async function closeBuyPoll(
     if (opt.ballots.length > winner.ballots.length) winner = opt;
   }
 
-  await prisma.$transaction([
+  await withTxBatch([
     prisma.purchasePoll.update({
       where: { id: poll.id },
       data: { status: "closed", winnerOptionId: winner.id, closedAt: new Date() },

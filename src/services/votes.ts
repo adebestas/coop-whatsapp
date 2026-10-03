@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { audit } from "./audit.js";
 import { checkVoteRateLimit } from "./fraud.js";
@@ -408,7 +408,7 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
   ) {
     const unit = await prisma.unit.findUnique({ where: { id: vote.unitId } });
     if (unit) {
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.unit.update({ where: { id: unit.id }, data: { adminMemberId: winner.memberId } }),
         prisma.member.update({ where: { id: winner.memberId }, data: { role: "admin" } }),
       ]);

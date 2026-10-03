@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 
 /** Coop admin creates a workplace/unit. */
@@ -57,7 +57,7 @@ export async function setUnitAdmin(
   if (!member)
     return { ok: false, message: `No member with code *${memberCode}* in your cooperative.` };
 
-  await prisma.$transaction([
+  await withTxBatch([
     prisma.unit.update({ where: { id: unit.id }, data: { adminMemberId: member.id } }),
     prisma.member.update({ where: { id: member.id }, data: { role: "admin" } }),
   ]);

@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { postJournal } from "./journal.js";
 import { roundMoney } from "./money.js";
 
@@ -95,7 +95,7 @@ export async function recordLedger(input: {
     });
   } else {
     // Standalone call — wrap in its own batch transaction
-    await prisma.$transaction([
+    await withTxBatch([
       prisma.ledgerEntry.create({
         data: {
           cooperativeId: input.cooperativeId,

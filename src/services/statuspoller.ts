@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { resolveProvider } from "./payments/index.js";
 import type { TransferStatus } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
@@ -57,7 +57,7 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
   for (const w of stuckWithdrawals) {
     const st = await statusFor(`TFR-WDR-${w.id}`);
     if (st.status === "successful") {
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.withdrawalRequest.updateMany({
           where: { id: w.id, status: "processing" },
           data: { status: "paid", finalizedAt: now },
@@ -96,7 +96,7 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
       );
     } else if (st.status === "failed") {
       const wallet = await prisma.wallet.findUnique({ where: { memberId: w.memberId } });
-      await prisma.$transaction([
+      await withTxBatch([
         ...(wallet
           ? [
               prisma.wallet.update({
@@ -149,7 +149,7 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
     } else if (st.status === "failed") {
       const wallet = await prisma.wallet.findUnique({ where: { memberId: c.memberId } });
       if (amount > 0 && wallet) {
-        await prisma.$transaction([
+        await withTxBatch([
           prisma.wallet.update({
             where: { id: wallet.id },
             data: { balance: { increment: amount } },
@@ -256,7 +256,7 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
     const st = await statusFor(reference);
     if (st.status === "successful") {
       const provider = await resolveProvider();
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.externalPayment.updateMany({
           where: { id: p.id, status: "processing" },
           data: { status: "paid", payoutReference: reference },

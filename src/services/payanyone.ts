@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { resolveProvider, markProviderDown } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
@@ -328,7 +328,7 @@ async function payExternal(
     }
 
     try {
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.externalPayment.updateMany({
           where: { id: payment.id, status: "processing" },
           data: { status: "paid", payoutReference: reference },

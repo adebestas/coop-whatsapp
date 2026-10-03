@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { disburseLoan } from "./disbursements.js";
 import { requiredGuarantors } from "./guarantors.js";
@@ -778,7 +778,7 @@ export async function repayLoan(
   // transaction so a mid-way failure rolls everything back — money can never
   // leave the wallet without the matching loan/repayment record.
   try {
-    await prisma.$transaction(async (tx) => {
+    await withTx(async (tx) => {
       // Conditional debit — only succeeds if the balance still covers totalDue.
       const debited = await tx.wallet.updateMany({
         where: { id: walletId, balance: { gte: totalDue } },

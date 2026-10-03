@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { hashPin } from "../lib/security.js";
 import { audit } from "./audit.js";
 import { LIMITS, formatBalance } from "../lib/money.js";
@@ -231,7 +231,7 @@ export async function createContribution(
   const reference = `CON-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
   // ✅ Wrapped in transaction — both succeed or both fail (prevents money loss)
-  await prisma.$transaction([
+  await withTxBatch([
     prisma.contribution.create({
       data: {
         amount,

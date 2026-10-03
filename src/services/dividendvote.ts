@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { audit } from "./audit.js";
 import { getCoopConfig, updateCoopConfig } from "./coop-config.js";
 
@@ -105,7 +105,7 @@ export async function castDividendVote(
         "You've already voted in this dividend-rate ballot. Reply *votedivstatus* to see the tally.",
     };
   }
-  await prisma.$transaction([
+  await withTxBatch([
     prisma.dividendVoteBallot.create({
       data: { voteId: vote.id, memberId: member.id, choice: choice === "yes" },
     }),
@@ -160,7 +160,7 @@ export async function closeDividendVote(
   const action = decision?.toLowerCase();
 
   if (action === "reject") {
-    await prisma.$transaction([
+    await withTxBatch([
       prisma.dividendVote.update({
         where: { id: vote.id },
         data: { status: "rejected", closedById: actor.id, closedAt: new Date() },
@@ -190,7 +190,7 @@ export async function closeDividendVote(
   const yesPct = activeCount > 0 ? Math.round((vote.yesVotes / activeCount) * 100) : 0;
   const passed = action === "approve" || (vote.yesVotes > 0 && yesPct >= vote.requiredYesPct);
 
-  await prisma.$transaction([
+  await withTxBatch([
     prisma.dividendVote.update({
       where: { id: vote.id },
       data: {
