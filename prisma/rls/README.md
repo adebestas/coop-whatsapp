@@ -57,10 +57,12 @@ queries in that context — flipping FORCE on today would silently blank the app
 5. **Apply Stage 2 (FORCE)** by copying `recommended_policies.sql` into a new
    `prisma/migrations/<timestamp>_rls_force/migration.sql`, and point the app at
    a **non-owner** role so enforcement actually bites.
-6. **Enable the tests** by setting `RLS_ENABLED=1` with a Postgres `DATABASE_URL`
-   in CI; `tests/rls-isolation.test.ts` stops skipping. Note: the isolation
-   cases must connect as a **non-owner** role — the owner bypasses RLS even with
-   FORCE off, so a second Prisma client on the `coop_app` role is required.
+6. **Enable the tests.** ✅ DONE — `tests/rls-isolation.test.ts` now provisions a
+   non-owner `coop_app` role, connects a second Prisma client as it, and runs
+   every isolation assertion inside a transaction that sets the GUC. The CI
+   `postgres-migrations` job runs it with `RLS_ENABLED=1` against a fresh
+   Postgres. (The owner bypasses RLS, so a non-owner client is required — the
+   previous version connected as the owner and could never pass.)
 7. **Audit fail-closed behavior** with the "no context" test (last case in the
    RLS suite) to confirm cross-tenant reads return zero rows.
 

@@ -97,6 +97,10 @@ import { beforeAll, beforeEach } from "vitest";
 // foreign-key/unique-constraint error. cleanupDatabase() disables FK checks and
 // deletes every table, so this makes the suite order-independent.
 beforeAll(async () => {
+  // The RLS isolation suite runs against PostgreSQL with the PostgreSQL-generated
+  // client (see .github/workflows/ci.yml). The SQLite cleanup below would fail
+  // there, so skip it — that suite manages its own fixtures.
+  if ((process.env.DATABASE_URL ?? "").startsWith("postgres")) return;
   await cleanupDatabase();
 });
 

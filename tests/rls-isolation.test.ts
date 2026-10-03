@@ -1,22 +1,36 @@
-import { beforeAll, afterAll, describe, expect, it, vi } from "vitest";
-import { prisma } from "../tests/setup.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { PrismaClient, type Prisma } from "@prisma/client";
 import { hashPin, generateMemberCode } from "../src/lib/security.js";
 
 /**
- * RLS (Row-Level Security) Cross-Cooperative Isolation Tests
+ * RLS (Row-Level Security) cross-cooperative isolation tests.
  *
- * STATUS: GATED. No migration in this repository creates RLS policies
- * (`grep -ri "CREATE POLICY" prisma/` is empty), so these tests describe a
- * control that does not exist yet. They also call `set_config(..., false)`
- * (session-scoped) through a pooled Prisma client, which is only reliable
- * inside `$transaction` on a single connection.
+ * These run ONLY when RLS_ENABLED=1 AND DATABASE_URL is PostgreSQL.
  *
- * They are skipped unless RLS_ENABLED=1 AND DATABASE_URL is PostgreSQL.
- * Enabling them requires: a migration that ENABLEs + FORCEs RLS and adds
- * policies keyed on current_setting('app.current_cooperative_id'), plus
- * wrapping every tenant query in a transaction that sets the GUC.
+ * They MUST connect as a NON-OWNER role: the table owner bypasses RLS even with
+ * policies enabled, so a test connecting as the owner would assert nothing (the
+ * previous version of this file did exactly that, and also used the SQLite test
+ * client — so it could never pass). This suite provisions a `coop_app` role,
+ * connects a second Prisma client as it, and runs every isolation assertion
+ * inside a transaction that sets `app.current_cooperative_id`.
+ *
+ * Fixtures are created as the owner (which bypasses RLS); assertions run as the
+ * non-owner, where the policies actually bite.
  */
-const rlsEnabled = process.env.RLS_ENABLED === "1" && (process.env.DATABASE_URL ?? "").startsWith("postgres");
+
+const ownerUrl = process.env.DATABASE_URL ?? "";
+const rlsEnabled = process.env.RLS_ENABLED === "1" && ownerUrl.startsWith("postgres");
+
+const APP_ROLE = "coop_app";
+const APP_PASSWORD = "coop_app_test";
+
+/** Derive the non-owner connection URL from the owner URL. */
+function appUrlFrom(owner: string): string {
+  const u = new URL(owner);
+  u.username = APP_ROLE;
+  u.password = APP_PASSWORD;
+  return u.toString();
+}
 
 vi.mock("../src/lib/messaging.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/messaging.js")>();
@@ -29,26 +43,59 @@ vi.mock("../src/lib/messaging.js", async (importOriginal) => {
   };
 });
 
-describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at DB level", () => {
+describe.skipIf(!rlsEnabled)("Row-Level Security: cross-cooperative isolation at DB level", () => {
+  let owner: PrismaClient;
+  let app: PrismaClient;
   let coopA: { id: string; code: string };
   let coopB: { id: string; code: string };
   let memberA: { id: string; phone: string; cooperativeId: string };
   let memberB: { id: string; phone: string; cooperativeId: string };
 
-  beforeAll(async () => {
-    // Create two cooperatives
-    coopA = await prisma.cooperative.create({
-      data: { name: "Coop A", code: "COOPA" },
+  /** Run `fn` as the non-owner role inside a transaction scoped to `coopId`. */
+  function asCoop<T>(coopId: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+    return app.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.current_cooperative_id', ${coopId}, true)`;
+      return fn(tx);
     });
-    coopB = await prisma.cooperative.create({
-      data: { name: "Coop B", code: "COOPB" },
-    });
+  }
 
-    // Create a member in each cooperative
-    const codeA = generateMemberCode();
-    memberA = await prisma.member.create({
+  /** Run `fn` as the non-owner role with NO tenant context (fail-closed). */
+  function asNoContext<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+    return app.$transaction((tx) => fn(tx));
+  }
+
+  beforeAll(async () => {
+    owner = new PrismaClient({ datasources: { db: { url: ownerUrl } } });
+    app = new PrismaClient({ datasources: { db: { url: appUrlFrom(ownerUrl) } } });
+
+    // Provision the non-owner role + grants (idempotent).
+    await owner.$executeRawUnsafe(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${APP_ROLE}') THEN
+          CREATE ROLE ${APP_ROLE} LOGIN PASSWORD '${APP_PASSWORD}';
+        ELSE
+          ALTER ROLE ${APP_ROLE} LOGIN PASSWORD '${APP_PASSWORD}';
+        END IF;
+      END $$;
+    `);
+    await owner.$executeRawUnsafe(`GRANT USAGE ON SCHEMA public, app TO ${APP_ROLE}`);
+    await owner.$executeRawUnsafe(
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`,
+    );
+    await owner.$executeRawUnsafe(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA app TO ${APP_ROLE}`);
+
+    // Defensive: remove leftovers from a previous run against a DB that wasn't
+    // wiped (e.g. a local container). CI runs against a fresh database.
+    const testPhones = ["2348010000001", "2348010000002"];
+    await owner.wallet.deleteMany({ where: { member: { phone: { in: testPhones } } } });
+    await owner.member.deleteMany({ where: { phone: { in: testPhones } } });
+
+    coopA = await owner.cooperative.create({ data: { name: "Coop A", code: "COOPA" } });
+    coopB = await owner.cooperative.create({ data: { name: "Coop B", code: "COOPB" } });
+
+    memberA = await owner.member.create({
       data: {
-        code: codeA,
+        code: generateMemberCode(),
         phone: "2348010000001",
         name: "Member A",
         cooperativeId: coopA.id,
@@ -57,11 +104,9 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
       },
       select: { id: true, phone: true, cooperativeId: true },
     });
-
-    const codeB = generateMemberCode();
-    memberB = await prisma.member.create({
+    memberB = await owner.member.create({
       data: {
-        code: codeB,
+        code: generateMemberCode(),
         phone: "2348010000002",
         name: "Member B",
         cooperativeId: coopB.id,
@@ -73,61 +118,37 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
   });
 
   afterAll(async () => {
-    // Cleanup
-    await prisma.member.deleteMany({ where: { id: { in: [memberA.id, memberB.id] } } });
-    await prisma.cooperative.deleteMany({ where: { id: { in: [coopA.id, coopB.id] } } });
+    if (owner && memberA && memberB && coopA && coopB) {
+      await owner.member.deleteMany({ where: { id: { in: [memberA.id, memberB.id] } } });
+      await owner.cooperative.deleteMany({ where: { id: { in: [coopA.id, coopB.id] } } });
+    }
+    if (owner) await owner.$disconnect();
+    if (app) await app.$disconnect();
   });
 
-  function setCoopContext(cooperativeId: string) {
-    return prisma.$executeRaw`SELECT set_config('app.current_cooperative_id', ${cooperativeId}, false)`;
-  }
+  it("isolates Member reads", async () => {
+    const a = await asCoop(coopA.id, (tx) =>
+      tx.member.findMany({ where: { cooperativeId: coopA.id } }),
+    );
+    expect(a.length).toBe(1);
+    expect(a[0].id).toBe(memberA.id);
 
-  function clearCoopContext() {
-    return prisma.$executeRaw`SELECT set_config('app.current_cooperative_id', '', false)`;
-  }
-
-  it("blocks Member reads across cooperatives when RLS is active", async () => {
-    // Set context to Coop A
-    await setCoopContext(coopA.id);
-
-    // Should see member A
-    const visibleA = await prisma.member.findMany({
-      where: { cooperativeId: coopA.id },
-    });
-    expect(visibleA.length).toBe(1);
-    expect(visibleA[0].id).toBe(memberA.id);
-
-    // Should NOT see member B (RLS blocks cross-coop read)
-    const visibleB = await prisma.member.findMany({
-      where: { cooperativeId: coopB.id },
-    });
-    expect(visibleB.length).toBe(0);
-
-    // Clear context
-    await clearCoopContext();
+    const b = await asCoop(coopA.id, (tx) =>
+      tx.member.findMany({ where: { cooperativeId: coopB.id } }),
+    );
+    expect(b.length).toBe(0);
   });
 
-  it("blocks Wallet reads across cooperatives when RLS is active", async () => {
-    await setCoopContext(coopA.id);
+  it("isolates Wallet reads (reached via the Member parent)", async () => {
+    const a = await asCoop(coopA.id, (tx) => tx.wallet.findMany({ where: { memberId: memberA.id } }));
+    expect(a.length).toBe(1);
 
-    const walletA = await prisma.wallet.findMany({
-      where: { memberId: memberA.id },
-    });
-    expect(walletA.length).toBe(1);
-
-    const walletB = await prisma.wallet.findMany({
-      where: { memberId: memberB.id },
-    });
-    expect(walletB.length).toBe(0);
-
-    await clearCoopContext();
+    const b = await asCoop(coopA.id, (tx) => tx.wallet.findMany({ where: { memberId: memberB.id } }));
+    expect(b.length).toBe(0);
   });
 
-  it("blocks Loan reads across cooperatives when RLS is active", async () => {
-    await setCoopContext(coopA.id);
-
-    // Create a loan for member A
-    await prisma.loan.create({
+  it("isolates Loan reads", async () => {
+    await owner.loan.create({
       data: {
         amount: 100000,
         interestRate: 5,
@@ -138,9 +159,7 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
         cooperativeId: coopA.id,
       },
     });
-
-    // Create a loan for member B (in different cooperative)
-    await prisma.loan.create({
+    await owner.loan.create({
       data: {
         amount: 200000,
         interestRate: 5,
@@ -152,28 +171,18 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
       },
     });
 
-    // With Coop A context, should only see A's loan
-    const loansA = await prisma.loan.findMany({
-      where: { cooperativeId: coopA.id },
-    });
-    expect(loansA.length).toBe(1);
-    expect(loansA[0].memberId).toBe(memberA.id);
+    const a = await asCoop(coopA.id, (tx) => tx.loan.findMany({ where: { cooperativeId: coopA.id } }));
+    expect(a.length).toBe(1);
+    expect(a[0].memberId).toBe(memberA.id);
 
-    // Should NOT see B's loan
-    const loansB = await prisma.loan.findMany({
-      where: { cooperativeId: coopB.id },
-    });
-    expect(loansB.length).toBe(0);
+    const b = await asCoop(coopA.id, (tx) => tx.loan.findMany({ where: { cooperativeId: coopB.id } }));
+    expect(b.length).toBe(0);
 
-    // Cleanup
-    await prisma.loan.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
-    await clearCoopContext();
+    await owner.loan.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
   });
 
-  it("blocks Payout reads across cooperatives when RLS is active", async () => {
-    await setCoopContext(coopA.id);
-
-    await prisma.payout.create({
+  it("isolates Payout reads", async () => {
+    await owner.payout.create({
       data: {
         amount: 50000,
         reference: "TFR-TEST-A",
@@ -184,8 +193,7 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
         cooperativeId: coopA.id,
       },
     });
-
-    await prisma.payout.create({
+    await owner.payout.create({
       data: {
         amount: 50000,
         reference: "TFR-TEST-B",
@@ -197,25 +205,22 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
       },
     });
 
-    const payoutsA = await prisma.payout.findMany({
-      where: { cooperativeId: coopA.id },
-    });
-    expect(payoutsA.length).toBe(1);
-    expect(payoutsA[0].memberId).toBe(memberA.id);
+    const a = await asCoop(coopA.id, (tx) =>
+      tx.payout.findMany({ where: { cooperativeId: coopA.id } }),
+    );
+    expect(a.length).toBe(1);
+    expect(a[0].memberId).toBe(memberA.id);
 
-    const payoutsB = await prisma.payout.findMany({
-      where: { cooperativeId: coopB.id },
-    });
-    expect(payoutsB.length).toBe(0);
+    const b = await asCoop(coopA.id, (tx) =>
+      tx.payout.findMany({ where: { cooperativeId: coopB.id } }),
+    );
+    expect(b.length).toBe(0);
 
-    await prisma.payout.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
-    await clearCoopContext();
+    await owner.payout.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
   });
 
-  it("blocks Contribution reads across cooperatives when RLS is active", async () => {
-    await setCoopContext(coopA.id);
-
-    await prisma.contribution.create({
+  it("isolates Contribution reads", async () => {
+    await owner.contribution.create({
       data: {
         amount: 10000,
         type: "savings",
@@ -225,8 +230,7 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
         cooperativeId: coopA.id,
       },
     });
-
-    await prisma.contribution.create({
+    await owner.contribution.create({
       data: {
         amount: 20000,
         type: "savings",
@@ -237,24 +241,21 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
       },
     });
 
-    const contribsA = await prisma.contribution.findMany({
-      where: { cooperativeId: coopA.id },
-    });
-    expect(contribsA.length).toBe(1);
+    const a = await asCoop(coopA.id, (tx) =>
+      tx.contribution.findMany({ where: { cooperativeId: coopA.id } }),
+    );
+    expect(a.length).toBe(1);
 
-    const contribsB = await prisma.contribution.findMany({
-      where: { cooperativeId: coopB.id },
-    });
-    expect(contribsB.length).toBe(0);
+    const b = await asCoop(coopA.id, (tx) =>
+      tx.contribution.findMany({ where: { cooperativeId: coopB.id } }),
+    );
+    expect(b.length).toBe(0);
 
-    await prisma.contribution.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
-    await clearCoopContext();
+    await owner.contribution.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
   });
 
-  it("blocks WithdrawalRequest reads across cooperatives when RLS is active", async () => {
-    await setCoopContext(coopA.id);
-
-    await prisma.withdrawalRequest.create({
+  it("isolates WithdrawalRequest reads", async () => {
+    await owner.withdrawalRequest.create({
       data: {
         amount: 10000,
         status: "pending",
@@ -264,8 +265,7 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
         cooperativeId: coopA.id,
       },
     });
-
-    await prisma.withdrawalRequest.create({
+    await owner.withdrawalRequest.create({
       data: {
         amount: 20000,
         status: "pending",
@@ -276,24 +276,23 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
       },
     });
 
-    const wdA = await prisma.withdrawalRequest.findMany({
-      where: { cooperativeId: coopA.id },
-    });
-    expect(wdA.length).toBe(1);
+    const a = await asCoop(coopA.id, (tx) =>
+      tx.withdrawalRequest.findMany({ where: { cooperativeId: coopA.id } }),
+    );
+    expect(a.length).toBe(1);
 
-    const wdB = await prisma.withdrawalRequest.findMany({
-      where: { cooperativeId: coopB.id },
-    });
-    expect(wdB.length).toBe(0);
+    const b = await asCoop(coopA.id, (tx) =>
+      tx.withdrawalRequest.findMany({ where: { cooperativeId: coopB.id } }),
+    );
+    expect(b.length).toBe(0);
 
-    await prisma.withdrawalRequest.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
-    await clearCoopContext();
+    await owner.withdrawalRequest.deleteMany({
+      where: { cooperativeId: { in: [coopA.id, coopB.id] } },
+    });
   });
 
-  it("blocks AuditLog reads across cooperatives when RLS is active", async () => {
-    await setCoopContext(coopA.id);
-
-    await prisma.auditLog.create({
+  it("isolates AuditLog reads", async () => {
+    await owner.auditLog.create({
       data: {
         cooperativeId: coopA.id,
         actorPhone: memberA.phone,
@@ -303,8 +302,7 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
         detail: "test",
       },
     });
-
-    await prisma.auditLog.create({
+    await owner.auditLog.create({
       data: {
         cooperativeId: coopB.id,
         actorPhone: memberB.phone,
@@ -315,24 +313,21 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
       },
     });
 
-    const auditA = await prisma.auditLog.findMany({
-      where: { cooperativeId: coopA.id },
-    });
-    expect(auditA.length).toBe(1);
+    const a = await asCoop(coopA.id, (tx) =>
+      tx.auditLog.findMany({ where: { cooperativeId: coopA.id } }),
+    );
+    expect(a.length).toBe(1);
 
-    const auditB = await prisma.auditLog.findMany({
-      where: { cooperativeId: coopB.id },
-    });
-    expect(auditB.length).toBe(0);
+    const b = await asCoop(coopA.id, (tx) =>
+      tx.auditLog.findMany({ where: { cooperativeId: coopB.id } }),
+    );
+    expect(b.length).toBe(0);
 
-    await prisma.auditLog.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
-    await clearCoopContext();
+    await owner.auditLog.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
   });
 
-  it("blocks JournalEntry reads across cooperatives when RLS is active", async () => {
-    await setCoopContext(coopA.id);
-
-    const journalA = await prisma.journalEntry.create({
+  it("isolates JournalEntry reads (and its Posting children)", async () => {
+    await owner.journalEntry.create({
       data: {
         cooperativeId: coopA.id,
         txRef: "JE-TEST-A",
@@ -345,8 +340,7 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
         },
       },
     });
-
-    const journalB = await prisma.journalEntry.create({
+    await owner.journalEntry.create({
       data: {
         cooperativeId: coopB.id,
         txRef: "JE-TEST-B",
@@ -360,24 +354,25 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
       },
     });
 
-    const journalsA = await prisma.journalEntry.findMany({
-      where: { cooperativeId: coopA.id },
-    });
-    expect(journalsA.length).toBe(1);
+    const a = await asCoop(coopA.id, (tx) =>
+      tx.journalEntry.findMany({ where: { cooperativeId: coopA.id } }),
+    );
+    expect(a.length).toBe(1);
 
-    const journalsB = await prisma.journalEntry.findMany({
-      where: { cooperativeId: coopB.id },
-    });
-    expect(journalsB.length).toBe(0);
+    const b = await asCoop(coopA.id, (tx) =>
+      tx.journalEntry.findMany({ where: { cooperativeId: coopB.id } }),
+    );
+    expect(b.length).toBe(0);
 
-    await prisma.journalEntry.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
-    await clearCoopContext();
+    // Posting has no cooperativeId; its policy reaches through JournalEntry.
+    const postings = await asCoop(coopA.id, (tx) => tx.posting.findMany());
+    expect(postings.length).toBe(2);
+
+    await owner.journalEntry.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
   });
 
-  it("blocks LedgerEntry reads across cooperatives when RLS is active", async () => {
-    await setCoopContext(coopA.id);
-
-    await prisma.ledgerEntry.create({
+  it("isolates LedgerEntry reads", async () => {
+    await owner.ledgerEntry.create({
       data: {
         cooperativeId: coopA.id,
         type: "income",
@@ -387,8 +382,7 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
         fundType: "operational",
       },
     });
-
-    await prisma.ledgerEntry.create({
+    await owner.ledgerEntry.create({
       data: {
         cooperativeId: coopB.id,
         type: "income",
@@ -399,45 +393,56 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
       },
     });
 
-    const ledgerA = await prisma.ledgerEntry.findMany({
-      where: { cooperativeId: coopA.id },
-    });
-    expect(ledgerA.length).toBe(1);
+    const a = await asCoop(coopA.id, (tx) =>
+      tx.ledgerEntry.findMany({ where: { cooperativeId: coopA.id } }),
+    );
+    expect(a.length).toBe(1);
 
-    const ledgerB = await prisma.ledgerEntry.findMany({
-      where: { cooperativeId: coopB.id },
-    });
-    expect(ledgerB.length).toBe(0);
+    const b = await asCoop(coopA.id, (tx) =>
+      tx.ledgerEntry.findMany({ where: { cooperativeId: coopB.id } }),
+    );
+    expect(b.length).toBe(0);
 
-    await prisma.ledgerEntry.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
-    await clearCoopContext();
+    await owner.ledgerEntry.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
+  });
+
+  it("fails closed when no tenant context is set (zero rows)", async () => {
+    const members = await asNoContext((tx) => tx.member.findMany());
+    expect(members.length).toBe(0);
+
+    const wallets = await asNoContext((tx) => tx.wallet.findMany());
+    expect(wallets.length).toBe(0);
+
+    const loans = await asNoContext((tx) => tx.loan.findMany());
+    expect(loans.length).toBe(0);
+  });
+
+  it("blocks cross-tenant writes via WITH CHECK", async () => {
+    await expect(
+      asCoop(coopA.id, (tx) =>
+        tx.member.create({
+          data: {
+            code: generateMemberCode(),
+            phone: "2348010000099",
+            name: "Sneaky",
+            cooperativeId: coopB.id,
+          },
+        }),
+      ),
+    ).rejects.toThrow();
   });
 
   it("resolves a cooperative by phone via the SECURITY DEFINER resolver", async () => {
     // The resolver bypasses RLS by design, so it works with no GUC set — this
     // is what lets the app discover the tenant before it can set the context.
-    const unique = await prisma.$queryRaw<{ coop: string | null }[]>`
+    const unique = await app.$queryRaw<{ coop: string | null }[]>`
       SELECT app.resolve_coop_by_phone(${memberA.phone}) AS coop
     `;
     expect(unique[0].coop).toBe(coopA.id);
 
-    const unknown = await prisma.$queryRaw<{ coop: string | null }[]>`
+    const unknown = await app.$queryRaw<{ coop: string | null }[]>`
       SELECT app.resolve_coop_by_phone('0000000000') AS coop
     `;
     expect(unknown[0].coop).toBeNull();
-  });
-
-  it("fails closed when session variable is not set (no rows visible)", async () => {
-    await clearCoopContext();
-
-    // With no context set, RLS should deny all access (fail-closed)
-    const members = await prisma.member.findMany();
-    expect(members.length).toBe(0);
-
-    const wallets = await prisma.wallet.findMany();
-    expect(wallets.length).toBe(0);
-
-    const loans = await prisma.loan.findMany();
-    expect(loans.length).toBe(0);
   });
 });

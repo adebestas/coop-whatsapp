@@ -97,10 +97,11 @@ jobs:
 
   # ---------- PostgreSQL migrations ----------
   # Proves the production migration path on a real PostgreSQL: scripts/db-migrate.mjs
-  # must bring a fresh database to the current schema. RLS tests are gated behind
-  # RLS_ENABLED=1 (no RLS policies exist in the migrations yet — see tests/rls-isolation.test.ts).
+  # must bring a fresh database to the current schema. The RLS isolation suite then
+  # runs as a NON-OWNER role (the owner bypasses RLS), so the policies are actually
+  # exercised — see tests/rls-isolation.test.ts.
   postgres-migrations:
-    name: PostgreSQL migrations (+ RLS when enabled)
+    name: PostgreSQL migrations + RLS isolation
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -142,11 +143,11 @@ jobs:
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/coop_test
 
-      - name: Run RLS isolation tests (skipped unless RLS_ENABLED=1)
+      - name: Run RLS isolation tests (non-owner role, PostgreSQL)
         run: npx vitest run tests/rls-isolation.test.ts
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/coop_test
-          RLS_ENABLED: ${{ vars.RLS_ENABLED || '0' }}
+          RLS_ENABLED: "1"
 
   # ---------- Build Verification ----------
   build:
