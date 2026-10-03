@@ -21,7 +21,7 @@ import { runTransferPolling, transferPollIntervalMs } from "./services/statuspol
 import { validateEnvironment } from "./lib/envcheck.js";
 import { prisma } from "./lib/prisma.js";
 import { closeQueues, initQueueProcessors } from "./lib/queue.js";
-import { initRedis, closeRedis, isRedisConnected } from "./lib/cache.js";
+import { initRedis, closeRedis, isRedisConnected, withDistributedLock } from "./lib/cache.js";
 import { AlertSeverity, logAndAlert } from "./lib/alerting.js";
 import { log } from "./lib/logger.js";
 
@@ -132,51 +132,54 @@ async function main() {
       }
       schedulerRunning = true;
       try {
-        await runAutoSaveReminders().catch((err) =>
-          app.log.error("[scheduler] auto-save reminders failed", err),
-        );
-        await runMonthlyStatements().catch((err) =>
-          app.log.error("[scheduler] monthly statements failed", err),
-        );
-        await runBirthdayGreetings().catch((err) =>
-          app.log.error("[scheduler] birthday greetings failed", err),
-        );
-        await checkAnniversaries().catch((err) =>
-          app.log.error("[scheduler] anniversary greetings failed", err),
-        );
-        await scanGuarantorDefaults()
-          .then(async (n) => {
-            if (n > 0) {
-              // Critical: guarantor default deductions move money — alert on failure
-              await logAndAlert(
-                "system",
-                "executeDueDeductions (guarantor default deductions)",
-                async () => {
-                  await executeDueDeductions();
-                },
-                AlertSeverity.CRITICAL,
-              );
-            }
-          })
-          .catch((err) => app.log.error("[scheduler] guarantor default scan failed", err));
-        await postAutoStatus().catch((err) =>
-          app.log.error("[scheduler] status auto-post failed", err),
-        );
-        await cleanupExpiredVirtualAccounts().catch((err) =>
-          app.log.error("[scheduler] virtual account cleanup failed", err),
-        );
-        await runDataRetention().catch((err) =>
-          app.log.error("[scheduler] data retention failed", err),
-        );
-        await escalateOverdueSTRs().catch((err) =>
-          app.log.error("[scheduler] STR deadline escalation failed", err),
-        );
-        await runProactiveAlerts().catch((err) =>
-          app.log.error("[scheduler] proactive alerts failed", err),
-        );
-        await runBackupVerificationJob().catch((err) =>
-          app.log.error("[scheduler] backup verification failed", err),
-        );
+        // Distributed lock: with multiple instances, exactly one runs the tick.
+        await withDistributedLock("scheduler:tick", SCHEDULER_INTERVAL_MS, async () => {
+          await runAutoSaveReminders().catch((err) =>
+            app.log.error("[scheduler] auto-save reminders failed", err),
+          );
+          await runMonthlyStatements().catch((err) =>
+            app.log.error("[scheduler] monthly statements failed", err),
+          );
+          await runBirthdayGreetings().catch((err) =>
+            app.log.error("[scheduler] birthday greetings failed", err),
+          );
+          await checkAnniversaries().catch((err) =>
+            app.log.error("[scheduler] anniversary greetings failed", err),
+          );
+          await scanGuarantorDefaults()
+            .then(async (n) => {
+              if (n > 0) {
+                // Critical: guarantor default deductions move money — alert on failure
+                await logAndAlert(
+                  "system",
+                  "executeDueDeductions (guarantor default deductions)",
+                  async () => {
+                    await executeDueDeductions();
+                  },
+                  AlertSeverity.CRITICAL,
+                );
+              }
+            })
+            .catch((err) => app.log.error("[scheduler] guarantor default scan failed", err));
+          await postAutoStatus().catch((err) =>
+            app.log.error("[scheduler] status auto-post failed", err),
+          );
+          await cleanupExpiredVirtualAccounts().catch((err) =>
+            app.log.error("[scheduler] virtual account cleanup failed", err),
+          );
+          await runDataRetention().catch((err) =>
+            app.log.error("[scheduler] data retention failed", err),
+          );
+          await escalateOverdueSTRs().catch((err) =>
+            app.log.error("[scheduler] STR deadline escalation failed", err),
+          );
+          await runProactiveAlerts().catch((err) =>
+            app.log.error("[scheduler] proactive alerts failed", err),
+          );
+          await runBackupVerificationJob().catch((err) =>
+            app.log.error("[scheduler] backup verification failed", err),
+          );
+        });
       } finally {
         schedulerRunning = false;
       }
@@ -189,14 +192,16 @@ async function main() {
   async function runBackupLoop() {
     while (true) {
       await new Promise((r) => setTimeout(r, BACKUP_INTERVAL_MS));
-      await logAndAlert(
-        "system",
-        "runBackup (daily backup)",
-        async () => {
-          await runBackup();
-        },
-        AlertSeverity.CRITICAL,
-      );
+      await withDistributedLock("scheduler:backup", 60 * 60 * 1000, async () => {
+        await logAndAlert(
+          "system",
+          "runBackup (daily backup)",
+          async () => {
+            await runBackup();
+          },
+          AlertSeverity.CRITICAL,
+        );
+      });
     }
   }
   void runBackupLoop();
@@ -205,14 +210,16 @@ async function main() {
   async function runReconcileLoop() {
     while (true) {
       await new Promise((r) => setTimeout(r, RECONCILE_INTERVAL_MS));
-      await logAndAlert(
-        "system",
-        "runReconciliation (nightly reconciliation)",
-        async () => {
-          await runReconciliation();
-        },
-        AlertSeverity.CRITICAL,
-      );
+      await withDistributedLock("scheduler:reconcile", 60 * 60 * 1000, async () => {
+        await logAndAlert(
+          "system",
+          "runReconciliation (nightly reconciliation)",
+          async () => {
+            await runReconciliation();
+          },
+          AlertSeverity.CRITICAL,
+        );
+      });
     }
   }
   void runReconcileLoop();
@@ -223,14 +230,16 @@ async function main() {
     async function runPollerLoop() {
       while (true) {
         await new Promise((r) => setTimeout(r, pollMs));
-        await logAndAlert(
-          "system",
-          "runTransferPolling (payout status polling)",
-          async () => {
-            await runTransferPolling();
-          },
-          AlertSeverity.CRITICAL,
-        );
+        await withDistributedLock("scheduler:poller", pollMs, async () => {
+          await logAndAlert(
+            "system",
+            "runTransferPolling (payout status polling)",
+            async () => {
+              await runTransferPolling();
+            },
+            AlertSeverity.CRITICAL,
+          );
+        });
       }
     }
     void runPollerLoop();
@@ -240,14 +249,16 @@ async function main() {
   async function runDigestLoop() {
     while (true) {
       await new Promise((r) => setTimeout(r, SCHEDULER_INTERVAL_MS));
-      await logAndAlert(
-        "system",
-        "runDailyDigest (daily movement digest)",
-        async () => {
-          await runDailyDigest();
-        },
-        AlertSeverity.CRITICAL,
-      );
+      await withDistributedLock("scheduler:digest", SCHEDULER_INTERVAL_MS, async () => {
+        await logAndAlert(
+          "system",
+          "runDailyDigest (daily movement digest)",
+          async () => {
+            await runDailyDigest();
+          },
+          AlertSeverity.CRITICAL,
+        );
+      });
     }
   }
   void runDigestLoop();

@@ -410,3 +410,34 @@ export async function checkOtpRateLimit(
 
   return { allowed: true };
 }
+
+/**
+ * Run `fn` only if this process can acquire a Redis lock for `key`.
+ *
+ * Returns false when another instance already holds the lock, so scheduled jobs
+ * run on exactly one instance. The lock is released in `finally`; `ttlMs` is a
+ * crash safety net. When Redis is unavailable, `fn` runs locally (single-
+ * instance fallback) and returns true.
+ */
+export async function withDistributedLock(
+  key: string,
+  ttlMs: number,
+  fn: () => Promise<void>,
+): Promise<boolean> {
+  const client = getRedis();
+  if (!client) {
+    await fn();
+    return true;
+  }
+  const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  const acquired = await client.set(key, token, "PX", ttlMs, "NX");
+  if (acquired !== "OK") return false;
+  try {
+    await fn();
+    return true;
+  } finally {
+    // Release only if we still own the lock (it may have expired and been taken).
+    const current = await client.get(key).catch(() => null);
+    if (current === token) await client.del(key).catch(() => {});
+  }
+}
