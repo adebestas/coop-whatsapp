@@ -92,6 +92,7 @@ import {
   handleInsights,
   handleContextHelp,
   handleRisk,
+  handleAnomalies,
   handleTickets,
   handleResolve,
   handleDeleteAccount,
@@ -719,6 +720,10 @@ async function handleMessageInner(
 
     case "risk":
       await handleRisk(phone, member);
+      break;
+
+    case "anomalies":
+      await handleAnomalies(phone, member);
       break;
 
     case "startvote":

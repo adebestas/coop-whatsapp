@@ -114,6 +114,7 @@ export const KNOWN_COMMANDS = [
   // ai-powered
   "insights",
   "risk",
+  "anomalies",
 ] as const;
 
 export interface Suggestion {

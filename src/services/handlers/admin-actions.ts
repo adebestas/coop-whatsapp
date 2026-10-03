@@ -270,6 +270,19 @@ export async function handleRisk(
   await sendText({ to: phone, text: risk });
 }
 
+export async function handleAnomalies(
+  phone: string,
+  member: { role: string; cooperativeId: string } | null,
+): Promise<void> {
+  if (!member || (member.role !== "admin" && member.role !== "superadmin")) {
+    await sendText({ to: phone, text: "Only admins can run the anomaly scan." });
+    return;
+  }
+  const { detectAnomalies, formatAnomalies } = await import("../../lib/ai-anomaly.js");
+  const anomalies = await detectAnomalies(member.cooperativeId);
+  await sendText({ to: phone, text: formatAnomalies(anomalies) });
+}
+
 export async function handleDeleteAccount(phone: string, cooperativeId?: string): Promise<void> {
   const member = await getMemberByPhone(phone, cooperativeId);
   if (!member) {
