@@ -495,22 +495,45 @@ export async function autoFileSTR(
 }
 
 /**
+ * Repeat-alert suppression window for the STR filing deadline. The escalation
+ * job runs every 15 minutes, so without a durable marker a single unfiled STR
+ * would ping every super admin ~96 times a day.
+ */
+export const STR_ESCALATION_REPEAT_MS = 24 * 60 * 60 * 1000;
+
+/**
  * CBN filing deadline: a Suspicious Transaction Report must be filed within 72
  * hours of detection. This job finds PENDING STRs older than that window and
  * alerts every super admin to file immediately. Returns the count escalated.
+ *
+ * Idempotent and restart-safe: `escalatedAt` is claimed with a conditional
+ * UPDATE, so concurrent scheduler instances cannot double-alert, and each STR
+ * is alerted at most once per STR_ESCALATION_REPEAT_MS window.
  */
 export async function escalateOverdueSTRs(now = new Date()): Promise<number> {
   const SIXTY_ENDING_HOURS_MS = 72 * 60 * 60 * 1000;
+  const resendBefore = new Date(now.getTime() - STR_ESCALATION_REPEAT_MS);
+
   const overdue = await prisma.sTR.findMany({
     where: {
       status: "pending",
       createdAt: { lt: new Date(now.getTime() - SIXTY_ENDING_HOURS_MS) },
+      OR: [{ escalatedAt: null }, { escalatedAt: { lt: resendBefore } }],
     },
     select: { id: true, cooperativeId: true, member: { select: { name: true, code: true } } },
   });
 
   let escalated = 0;
   for (const str of overdue) {
+    // Atomically claim the alert for this STR. Only the caller whose UPDATE
+    // matched a row proceeds, so a second instance (or a restart mid-loop)
+    // cannot duplicate the alert.
+    const claimed = await prisma.sTR.updateMany({
+      where: { id: str.id, OR: [{ escalatedAt: null }, { escalatedAt: { lt: resendBefore } }] },
+      data: { escalatedAt: now },
+    });
+    if (claimed.count === 0) continue;
+
     const supers = await prisma.member.findMany({
       where: { cooperativeId: str.cooperativeId, role: "superadmin", status: "active" },
     });

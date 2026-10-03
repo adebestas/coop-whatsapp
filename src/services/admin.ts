@@ -15,7 +15,7 @@ import { formatBalance } from "./cooperative.js";
 import { toKobo } from "../lib/money.js";
 import { sendToBank } from "./disbursements.js";
 import { broadcastToScope, createUnit, listUnits, setUnitAdmin, unitAdminOf } from "./units.js";
-import { distributeDividend, getFundBalances } from "./dividends.js";
+import { previewDividendRun, getFundBalances } from "./dividends.js";
 import {
   approveWithdrawal,
   finalizeWithdrawal,
@@ -1892,28 +1892,27 @@ export async function handleAdminCommand(
           });
           return true;
         }
-        const result = await distributeDividend(phone, rate);
-        await sendText({ to: phone, text: result.message });
-        if (result.ok) {
-          await updateCoopConfig(coopId, {
-            lastDividendRate: rate,
-            pendingDividendRate: null,
-          } as any);
-          if (approvedVote) {
-            await prisma.dividendVote.updateMany({
-              where: { id: approvedVote.id },
-              data: { status: "closed", closedById: admin.id, closedAt: new Date() },
-            });
-          }
+        // GUARDRAIL: never move money off a single casual message. Show the
+        // numbers and require an explicit `CONFIRM <rate>` inside the session
+        // TTL. The actual run happens in the awaiting_dividend_confirm handler.
+        const preview = await previewDividendRun(phone, rate);
+        if (!preview.ok || !preview.confirmToken) {
+          await sendText({ to: phone, text: preview.message });
+          return true;
         }
-        await audit({
-          cooperativeId: coopId,
-          actorPhone: phone,
-          actorId: admin.id,
-          actorRole: "superadmin",
-          action: "dividend.distribute",
-          detail: result.message,
+        await prisma.session.upsert({
+          where: { phone },
+          create: {
+            phone,
+            state: "awaiting_dividend_confirm",
+            data: JSON.stringify({ dividendRate: rate }),
+          },
+          update: {
+            state: "awaiting_dividend_confirm",
+            data: JSON.stringify({ dividendRate: rate }),
+          },
         });
+        await sendText({ to: phone, text: preview.message });
         return true;
       }
 

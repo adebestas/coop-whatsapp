@@ -5,6 +5,7 @@ import type {
   CreateVirtualAccountParams,
   VirtualAccountData,
   PaymentNotification,
+  PayoutNotification,
   ResolveAccountParams,
   ResolveAccountResult,
   PayoutParams,
@@ -29,6 +30,20 @@ const PaystackChargeSchema = z
         status: z.string(),
         account: z.object({ number: z.string().optional() }).passthrough().optional(),
         currency: z.string().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+/** Shape contract for a transfer.* webhook (payout we initiated settling). */
+const PaystackTransferSchema = z
+  .object({
+    event: z.string(),
+    data: z
+      .object({
+        reference: z.string(),
+        transfer_code: z.string().optional(),
+        status: z.string().optional(),
       })
       .passthrough(),
   })
@@ -199,6 +214,26 @@ export const paystackAdapter: ProviderAdapter = {
       amount: amountKobo, // Keep in kobo — wallet stores kobo
       currency: d.currency ?? "NGN",
       status: "successful",
+      provider: "paystack",
+      raw: body,
+    };
+  },
+
+  parsePayoutNotification(body: any): PayoutNotification | null {
+    const parsed = PaystackTransferSchema.safeParse(body);
+    if (!parsed.success) return null;
+    const event = parsed.data.event.toLowerCase();
+    const status: PayoutNotification["status"] | null =
+      event === "transfer.success"
+        ? "successful"
+        : event === "transfer.failed" || event === "transfer.reversed"
+          ? "failed"
+          : null;
+    if (!status) return null;
+    return {
+      reference: parsed.data.data.reference,
+      status,
+      providerRef: parsed.data.data.transfer_code,
       provider: "paystack",
       raw: body,
     };

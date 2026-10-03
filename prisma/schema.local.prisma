@@ -158,6 +158,10 @@ model Member {
   bankAccountNumber       String? // member's bank account for withdrawals
   bankCode                String?
   bankName                String?
+  // Account-holder name returned by the provider's resolveAccount API and
+  // confirmed to match the member. Persisted once so future payouts can trust
+  // the destination without re-resolving (Zero-BVN identity assurance).
+  bankAccountName         String?
   lastWithdrawalAt        DateTime? // when the member last withdrew (6-month rule)
   withdrawalOverride      Boolean @default(false) // admin granted an early-withdrawal override
   frozenAt                DateTime? // when the member self-froze their wallet (money-out blocked); null = not frozen
@@ -422,6 +426,7 @@ model Payout {
   member        Member      @relation(fields: [memberId], references: [id])
   cooperativeId String
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  dividendEntry DividendEntry?
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
 
@@ -885,8 +890,18 @@ model DividendEntry {
   memberId   String
   member     Member    @relation(fields: [memberId], references: [id], onDelete: Cascade)
   amount     Int // stored in kobo
-  status     String    @default("pending") // pending | paid
+  // pending  -> computed, not yet paid (e.g. member has no verified bank account)
+  // processing -> bank transfer submitted, awaiting provider settlement
+  // settled  -> provider confirmed the money left
+  // failed   -> provider confirmed no money moved; journal reversed
+  // reversed -> counter-balancing journal posted
+  status     String    @default("pending")
   paidAt     DateTime?
+  // Bank payout audit trail. Reuses Payout (unique idempotencyKey) instead of a
+  // separate DividendLog table. Deterministic key: DIV-PAY-<dividendId>-<memberId>.
+  payoutId      String?  @unique
+  payout        Payout?  @relation(fields: [payoutId], references: [id])
+  failureReason String?
   createdAt  DateTime  @default(now())
 
   @@unique([dividendId, memberId])
@@ -1108,10 +1123,14 @@ model STR {
   reason        String
   status        String      @default("pending")
   filedAt       DateTime?
+  // Last time the 72h filing-deadline escalation alerted super admins about
+  // this STR. Used to suppress repeat alerts (the job runs every 15 minutes).
+  escalatedAt   DateTime?
   createdAt     DateTime    @default(now())
 
   @@index([cooperativeId, createdAt])
   @@index([memberId, status])
+  @@index([status, escalatedAt])
 }
 
 model Grievance {

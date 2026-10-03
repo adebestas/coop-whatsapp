@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../tests/setup.js";
+import { paymentState } from "./payment-state.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { createUnit, joinUnit, setUnitAdmin, broadcastToScope } from "../src/services/units.js";
@@ -7,7 +8,13 @@ import { computeDividendPreview, distributeDividend } from "../src/services/divi
 import { recordLedger } from "../src/services/ledger.js";
 import { createContribution } from "../src/services/cooperative.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
-import { runAutoSaveReminders, runMonthlyStatements, runBirthdayGreetings, setAutoSave, setInterestRate } from "../src/services/scheduler.js";
+import {
+  runAutoSaveReminders,
+  runMonthlyStatements,
+  runBirthdayGreetings,
+  setAutoSave,
+  setInterestRate,
+} from "../src/services/scheduler.js";
 
 /** Union of chat texts from both channels-aware senders. */
 function allTexts(): string[] {
@@ -46,7 +53,7 @@ async function makeMember(phone: string, coopId: string, opts: { role?: string }
 
 beforeEach(async () => {
   vi.clearAllMocks();
-    await prisma.posting.deleteMany();
+  await prisma.posting.deleteMany();
   await prisma.journalEntry.deleteMany();
   await prisma.coopPost.deleteMany();
   await prisma.deductionItem.deleteMany();
@@ -58,7 +65,7 @@ beforeEach(async () => {
   await prisma.pollOption.deleteMany();
   await prisma.purchasePoll.deleteMany();
   await prisma.externalPayment.deleteMany();
-await prisma.guarantorDeduction.deleteMany();
+  await prisma.guarantorDeduction.deleteMany();
   await prisma.ledgerEntry.deleteMany();
   await prisma.voteBallot.deleteMany();
   await prisma.voteCandidate.deleteMany();
@@ -72,11 +79,11 @@ await prisma.guarantorDeduction.deleteMany();
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
+  await prisma.dividendEntry.deleteMany();
   await prisma.payout.deleteMany();
   await prisma.developmentFund.deleteMany();
   await prisma.educationFund.deleteMany();
   await prisma.reserveAllocation.deleteMany();
-  await prisma.dividendEntry.deleteMany();
   await prisma.dividend.deleteMany();
   await prisma.broadcast.deleteMany();
   await prisma.wallet.deleteMany();
@@ -109,7 +116,9 @@ describe("workplaces (units)", () => {
 
     // Unit admin broadcasts -> only unit members receive it.
     await broadcastToScope({ senderPhone: PHONE, message: "Meeting Friday", scope: "unit" });
-    const calls = vi.mocked(sendText).mock.calls.map((c) => c[0].to)
+    const calls = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].to)
       .concat(vi.mocked(notifyMember).mock.calls.map((c) => String(c[0].phone ?? c[0])));
     expect(calls).toContain(PHONE);
     expect(calls).toContain(OTHER_PHONE);
@@ -118,7 +127,9 @@ describe("workplaces (units)", () => {
     // Coop admin broadcasts -> everyone in the coop receives it.
     vi.clearAllMocks();
     await broadcastToScope({ senderPhone: ADMIN_PHONE, message: "All hands", scope: "coop" });
-    const all = vi.mocked(sendText).mock.calls.map((c) => c[0].to)
+    const all = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].to)
       .concat(vi.mocked(notifyMember).mock.calls.map((c) => String(c[0].phone ?? c[0])));
     expect(all).toContain(PHONE);
     expect(all).toContain(OTHER_PHONE);
@@ -135,14 +146,20 @@ describe("ledger + statement", () => {
     await createContribution(PHONE, 1000000);
     await handleMessage(PHONE, "ledger");
 
-    let texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    let texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
     expect(texts).toContain("Ledger");
     expect(texts).toContain("Total savings in");
     expect(texts).toContain("₦10,000.00");
 
     vi.clearAllMocks();
     await handleMessage(PHONE, "history");
-    texts = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
     expect(texts).toContain("statement");
     expect(texts).toContain("Deposits");
     expect(texts).toContain("₦10,000.00");
@@ -203,19 +220,42 @@ describe("recurring contributions + interest", () => {
 });
 
 describe("dividends", () => {
-  it("computes a real-time dividend preview from net profit and distributes to wallets", async () => {
+  it("computes a real-time dividend preview from net profit and pays members directly to their bank", async () => {
     const coop = await makeCoop("TEST16", "Test Coop", ADMIN_PHONE);
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const member1 = await makeMember("2348011111111", coop.id);
     const member2 = await makeMember("2348012222222", coop.id);
+
+    // Give both members a verified bank destination. The provider resolves the
+    // account name to the member's registered name (Zero-BVN name match).
+    const NAME = "Div Test Member";
+    await prisma.member.updateMany({
+      where: { id: { in: [member1.id, member2.id] } },
+      data: { name: NAME, bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
+    });
+    paymentState.resolveName = NAME;
+    paymentState.resolveFails = false;
+    paymentState.payoutFails = false;
 
     // Use amounts >= minContribution (200000)
     await createContribution(member1.phone, 400000);
     await createContribution(member2.phone, 600000);
 
     // Profit comes from the books now: 1,200,000 income - 200,000 expenses = 1,000,000.
-    await recordLedger({ cooperativeId: coop.id, type: "income", category: "interest", amount: 1200000, note: "loan interest" });
-    await recordLedger({ cooperativeId: coop.id, type: "expense", category: "operating_cost", amount: 200000, note: "stationery + logistics" });
+    await recordLedger({
+      cooperativeId: coop.id,
+      type: "income",
+      category: "interest",
+      amount: 1200000,
+      note: "loan interest",
+    });
+    await recordLedger({
+      cooperativeId: coop.id,
+      type: "expense",
+      category: "operating_cost",
+      amount: 200000,
+      note: "stationery + logistics",
+    });
     const superAdmin = await makeMember("2348075555555", coop.id, { role: "superadmin" });
 
     const preview = await computeDividendPreview(member1.phone, 5);
@@ -227,13 +267,20 @@ describe("dividends", () => {
 
     const result = await distributeDividend(superAdmin.phone, 5);
     expect(result.ok).toBe(true);
+    expect(result.settled).toBe(2);
 
-    const phoneMember = await prisma.member.findFirst({ where: { phone: member1.phone }, include: { wallet: true } });
-    expect(phoneMember!.wallet!.balance).toBe(414600); // 400,000 saved + 14,600 dividend
-    expect(phoneMember!.wallet!.totalSaved).toBe(400000); // dividend doesn't inflate savings base
+    // Direct-to-bank: the wallet is NOT credited; a payout + settled entry is.
+    const phoneMember = await prisma.member.findFirst({
+      where: { phone: member1.phone },
+      include: { wallet: true },
+    });
+    expect(phoneMember!.wallet!.balance).toBe(400000); // unchanged by the payout
+    expect(phoneMember!.wallet!.totalSaved).toBe(400000);
 
-    const entries = await prisma.dividendEntry.count();
-    expect(entries).toBe(2); // both members got an entry (admin has no savings -> 0, skipped)
+    const entries = await prisma.dividendEntry.findMany();
+    expect(entries).toHaveLength(2);
+    expect(entries.every((e) => e.status === "settled" && e.payoutId)).toBe(true);
+    expect(await prisma.payout.count()).toBe(2);
 
     const dividend = await prisma.dividend.findFirst();
     expect(dividend!.status).toBe("distributed");
@@ -263,7 +310,7 @@ describe("monthly statements + birthday greetings", () => {
     expect(again).toBe(0);
   });
 
-it("does nothing outside the 1st of the month", async () => {
+  it("does nothing outside the 1st of the month", async () => {
     const coop = await makeCoop("TEST18", "Test Coop");
     await makeMember("2348018888888", coop.id);
 
@@ -306,5 +353,3 @@ it("does nothing outside the 1st of the month", async () => {
     expect(sent).toBe(0);
   });
 });
-
-

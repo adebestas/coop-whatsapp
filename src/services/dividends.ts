@@ -1,15 +1,121 @@
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
-import { computePnl, recordLedger } from "./ledger.js";
+import { computePnl } from "./ledger.js";
+import { postJournal, getBankAccountBalance } from "./journal.js";
+import { sendToBank } from "./disbursements.js";
+import { roundMoney } from "./money.js";
+import { updateCoopConfig } from "./coop-config.js";
+import { notifyMember } from "../lib/messaging.js";
+import { notifySuperAdmins } from "./withdrawals.js";
+import { alertSupers, AlertSeverity } from "../lib/alerting.js";
+import { audit } from "./audit.js";
 
-// Nigerian cooperative standard deduction rates
+// ---------------------------------------------------------------------------
+// Dividend engine — DIRECT-TO-BANK payouts.
+//
+// Accounting model (strict double-entry, all amounts in kobo):
+//   1. Statutory appropriation  DEBIT  appropriation:statutory_funds
+//                               CREDIT liabilities:reserve_fund
+//   2. Declaration to members   DEBIT  appropriation:dividend
+//                               CREDIT liabilities:dividend_payable
+//   3. Bank payout of a share   DEBIT  liabilities:dividend_payable
+//                               CREDIT assets:bank
+//   4. Reversal (confirmed fail)DEBIT  assets:bank
+//                               CREDIT liabilities:dividend_payable
+//
+// NOTE on the original spec wording ("Debit the corporate payout asset pool /
+// Credit the member's yield account"): that phrasing is not a balanced pair and
+// would re-introduce Finding F. The correct pairs above settle the member
+// dividend PAYABLE against the BANK ASSET — the two legs that actually move.
+//
+// Payout is a SAGA, never an in-transaction HTTP call:
+//   DB claim + journals commit first, then the provider is called, then the
+//   entry is settled or the journal is reversed. External calls inside a
+//   transaction would hold locks and could send money while the tx rolls back.
+// ---------------------------------------------------------------------------
+
+// Nigerian cooperative statutory deductions, applied to NET PROFIT.
 const RESERVE_FUND_RATE = 0.2; // 20%
 const EDUCATION_FUND_RATE = 0.02; // 2%
 const DEVELOPMENT_FUND_RATE = 0.05; // 5%
+const MAX_DIVIDEND_RATE = 25; // per Nigerian Cooperative Societies Act
 
-/** Compute an instant dividend preview for any caller (real-time).
- *  Standard cooperative formula: a percentage of the accumulated NET PROFIT,
- *  shared proportionally to each member's lifetime savings. */
+/** Maximum number of bank payouts a single run may initiate (drain guard). */
+export const DIVIDEND_MAX_PAYOUTS_PER_RUN = Math.max(
+  1,
+  Number(process.env.DIVIDEND_MAX_PAYOUTS ?? 500) || 500,
+);
+/** Parallel bank transfers per run — bounded so we never hammer the gateway. */
+export const DIVIDEND_PAYOUT_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.DIVIDEND_PAYOUT_CONCURRENCY ?? 5) || 5,
+);
+
+/** Deterministic idempotency key for a member's dividend payout (Payout + journal). */
+export function dividendPayoutRef(dividendId: string, memberId: string): string {
+  return `DIV-PAY-${dividendId}-${memberId}`;
+}
+
+export interface DividendRunResult {
+  ok: boolean;
+  message: string;
+  dividendId?: string;
+  /** Entries whose bank transfer was confirmed. */
+  settled?: number;
+  /** Entries held because the member has no verified bank account. */
+  held?: number;
+  /** Entries whose transfer failed (journal reversed). */
+  failed?: number;
+  totalPool?: number;
+}
+
+/** Largest-remainder (Hamilton) allocation of `pool` kobo across weighted members. */
+function allocateShares(
+  members: { id: string; wallet: { totalSaved: number } | null }[],
+  pool: number,
+): Map<string, number> {
+  const eligible = members.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
+  const totalSaved = eligible.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
+  const shares = new Map<string, number>();
+  if (totalSaved <= 0 || pool <= 0) return shares;
+
+  const raw = eligible.map((m) => {
+    const exact = ((m.wallet?.totalSaved ?? 0) / totalSaved) * pool;
+    const kobo = Math.floor(exact);
+    return { id: m.id, kobo, remainder: exact - kobo };
+  });
+  let leftover = pool - raw.reduce((sum, r) => sum + r.kobo, 0);
+  raw.sort((a, b) => b.remainder - a.remainder);
+  for (const r of raw) {
+    if (leftover <= 0) break;
+    r.kobo += 1;
+    leftover -= 1;
+  }
+  for (const r of raw) shares.set(r.id, r.kobo);
+  return shares;
+}
+
+/** Bounded-concurrency runner (no external dependency). */
+async function runPool<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++];
+      await worker(item);
+    }
+  });
+  await Promise.all(runners);
+}
+
+// ---------------------------------------------------------------------------
+// Statutory / preview helpers
+// ---------------------------------------------------------------------------
+
+/** Compute an instant dividend preview for any caller (real-time). */
 export async function computeDividendPreview(
   phone: string,
   rate: number,
@@ -34,45 +140,15 @@ export async function computeDividendPreview(
     where: { cooperativeId: member.cooperativeId },
     select: { id: true, name: true, wallet: { select: { totalSaved: true, balance: true } } },
   });
-  // NOTE: totalSaved is computed here independently from distributeDividend.
-  // This is intentional — savings can change between preview and distribution,
-  // so each call must reflect the current state at invocation time.
-  const totalSaved = entries.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
-  // pnl.netProfit is kobo; pool stays in kobo
-  // Statutory deductions: 20% of NET PROFIT (not dividend pool) per Nigerian Cooperative Societies Act
   const reserveAmount = Math.floor(pnl.netProfit * RESERVE_FUND_RATE);
   const educationAmount = Math.floor(pnl.netProfit * EDUCATION_FUND_RATE);
   const developmentAmount = Math.floor(pnl.netProfit * DEVELOPMENT_FUND_RATE);
   const totalDeductions = reserveAmount + educationAmount + developmentAmount;
   const distributableProfit = Math.max(0, pnl.netProfit - totalDeductions);
   const pool = Math.max(0, Math.round(distributableProfit * (rate / 100)));
-  const memberPoolKobo = pool;
 
-  // Compute shares as kobo integers to avoid rounding drift
-  const eligible = entries.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
-  const rawShares = eligible.map((m) => ({
-    memberId: m.id,
-    name: m.name,
-    raw: totalSaved > 0 ? ((m.wallet?.totalSaved ?? 0) / totalSaved) * memberPoolKobo : 0,
-    kobo: 0,
-    remainder: 0,
-  }));
-  for (const s of rawShares) {
-    s.kobo = Math.floor(s.raw);
-    s.remainder = s.raw - s.kobo;
-  }
-  const assigned = rawShares.reduce((sum, s) => sum + s.kobo, 0);
-  let leftover = memberPoolKobo - assigned;
-  // Distribute leftover kobo to members with largest fractional remainders
-  rawShares.sort((a, b) => b.remainder - a.remainder);
-  for (const s of rawShares) {
-    if (leftover <= 0) break;
-    s.kobo += 1;
-    leftover -= 1;
-  }
-
-  const myRaw = rawShares.find((s) => s.memberId === member.id);
-  const myShare = myRaw ? myRaw.kobo : 0;
+  const shares = allocateShares(entries, pool);
+  const myShare = shares.get(member.id) ?? 0;
 
   const lines = [
     `*🎉 Dividend calculator (real-time)*`,
@@ -87,7 +163,7 @@ export async function computeDividendPreview(
     `• Development Fund (5%): *${formatBalance(developmentAmount)}*`,
     `• Total deductions: *${formatBalance(totalDeductions)}*`,
     ``,
-    `Member pool: *${formatBalance(memberPoolKobo)}*`,
+    `Member pool: *${formatBalance(pool)}*`,
     ``,
     `Your share: *${formatBalance(myShare)}* (based on your savings share)`,
   ];
@@ -95,35 +171,162 @@ export async function computeDividendPreview(
   if (entries.length <= 5 && pool > 0) {
     lines.push(``, `*Shares:*`);
     for (const m of entries) {
-      const s = rawShares.find((r) => r.memberId === m.id);
-      const share = s ? s.kobo : 0;
-      lines.push(`• ${m.name} — ${formatBalance(share)}`);
+      lines.push(`• ${m.name} — ${formatBalance(shares.get(m.id) ?? 0)}`);
     }
   }
 
-  lines.push(``, `Super admin: reply *paydividend ${rate}* to pay everyone now.`);
+  lines.push(
+    ``,
+    `Super admin: reply *paydividend ${rate}* to pay everyone directly to their bank.`,
+  );
   return { ok: true, message: lines.join("\n") };
 }
 
-/** Super admin distributes a dividend run — % of actual net profit. */
-export async function distributeDividend(
+// ---------------------------------------------------------------------------
+// Direct-to-bank distribution (saga)
+// ---------------------------------------------------------------------------
+
+/**
+ * Super admin distributes a dividend run — % of actual net profit, paid
+ * DIRECTLY to each member's bank account.
+ *
+ * Safety:
+ *  - Kobo integers only (no float drift).
+ *  - Journal-derived bank-float check BEFORE any transfer.
+ *  - Bulk guards: max payouts/run + bounded concurrency.
+ *  - Members without a verified bank account are HELD as a payable, not paid.
+ *  - Idempotent per (dividend, member) via deterministic Payout keys.
+ */
+export interface DividendRunPreview {
+  ok: boolean;
+  message: string;
+  /** The exact token the super admin must send to execute the run. */
+  confirmToken?: string;
+  pool?: number;
+  payoutCount?: number;
+  heldCount?: number;
+  bankFloat?: number;
+}
+
+/**
+ * Dry-run a dividend distribution and return the numbers a super admin must
+ * see BEFORE any money moves. This is the first half of the two-step guardrail:
+ * `paydividend <rate>` shows this preview and stores an `awaiting_dividend_confirm`
+ * state; only an explicit `CONFIRM <rate>` executes it.
+ */
+export async function previewDividendRun(phone: string, rate: number): Promise<DividendRunPreview> {
+  const admin = await prisma.member.findFirst({ where: { phone, role: "superadmin" } });
+  if (!admin) return { ok: false, message: "Only the super admin can distribute dividends." };
+  if (!Number.isFinite(rate) || rate <= 0 || rate > MAX_DIVIDEND_RATE) {
+    return { ok: false, message: `Rate must be between 0 and ${MAX_DIVIDEND_RATE}.` };
+  }
+
+  const pnl = await computePnl(admin.cooperativeId);
+  if (pnl.netProfit <= 0) {
+    return {
+      ok: false,
+      message: `There's no profit to share yet (net: ${formatBalance(pnl.netProfit)}).`,
+    };
+  }
+
+  const members = await prisma.member.findMany({
+    where: { cooperativeId: admin.cooperativeId },
+    select: {
+      id: true,
+      bankAccountNumber: true,
+      bankCode: true,
+      wallet: { select: { totalSaved: true } },
+    },
+  });
+  const totalSaved = members.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
+  if (totalSaved <= 0) {
+    return { ok: false, message: "No savings yet — nothing to distribute against." };
+  }
+
+  const totalDeductions = roundMoney(
+    Math.floor(pnl.netProfit * RESERVE_FUND_RATE) +
+      Math.floor(pnl.netProfit * EDUCATION_FUND_RATE) +
+      Math.floor(pnl.netProfit * DEVELOPMENT_FUND_RATE),
+  );
+  const distributable = Math.max(0, roundMoney(pnl.netProfit - totalDeductions));
+  const pool = Math.max(0, Math.round(distributable * (rate / 100)));
+  if (pool <= 0) {
+    return {
+      ok: false,
+      message: `After statutory deductions there's no distributable profit left.`,
+    };
+  }
+
+  const shares = allocateShares(members, pool);
+  const payable = members.filter((m) => (shares.get(m.id) ?? 0) > 0);
+  const withBank = payable.filter((m) => Boolean(m.bankAccountNumber && m.bankCode));
+  const payoutCount = withBank.length;
+  const heldCount = payable.length - payoutCount;
+  const totalPayout = roundMoney(withBank.reduce((sum, m) => sum + (shares.get(m.id) ?? 0), 0));
+
+  const bankFloat = await getBankAccountBalance(admin.cooperativeId);
+  if (totalPayout > bankFloat) {
+    return {
+      ok: false,
+      message: `🛑 Insufficient bank float. This run needs ${formatBalance(totalPayout)} but the bank account holds ${formatBalance(bankFloat)} (per the books).`,
+    };
+  }
+
+  const confirmToken = `CONFIRM ${rate}`;
+  const message =
+    `⚠️ *Confirm dividend run*\n\n` +
+    `Rate: *${rate}%* of net profit ${formatBalance(pnl.netProfit)}\n` +
+    `Member pool: *${formatBalance(pool)}*\n` +
+    `Direct bank payouts: *${payoutCount}* member(s)\n` +
+    (heldCount > 0 ? `Held (no verified bank account): *${heldCount}*\n` : ``) +
+    `Bank float: *${formatBalance(bankFloat)}*\n\n` +
+    `This sends real money to ${payoutCount} bank account(s) and cannot be undone.\n\n` +
+    `Reply *${confirmToken}* to proceed, or *cancel* (this expires with the session).`;
+
+  return { ok: true, message, confirmToken, pool, payoutCount, heldCount, bankFloat };
+}
+
+/**
+ * Execute a previously-previewed dividend run and record the governance
+ * bookkeeping (last rate, close any approved rate vote). Called only from the
+ * `awaiting_dividend_confirm` state machine after an explicit confirmation.
+ */
+export async function confirmDividendDistribution(
   phone: string,
   rate: number,
-): Promise<{ ok: boolean; message: string }> {
+): Promise<DividendRunResult> {
+  const result = await distributeDividend(phone, rate);
+  if (!result.ok) return result;
+
+  const admin = await prisma.member.findFirst({ where: { phone, role: "superadmin" } });
+  if (admin) {
+    await updateCoopConfig(admin.cooperativeId, {
+      lastDividendRate: rate,
+      pendingDividendRate: null,
+    } as any).catch(() => {});
+    const approvedVote = await prisma.dividendVote.findFirst({
+      where: { cooperativeId: admin.cooperativeId, proposedRate: rate, status: "approved" },
+      orderBy: { closedAt: "desc" },
+    });
+    if (approvedVote) {
+      await prisma.dividendVote.updateMany({
+        where: { id: approvedVote.id },
+        data: { status: "closed", closedById: admin.id, closedAt: new Date() },
+      });
+    }
+  }
+  return result;
+}
+
+export async function distributeDividend(phone: string, rate: number): Promise<DividendRunResult> {
   const admin = await prisma.member.findFirst({ where: { phone, role: "superadmin" } });
   if (!admin) {
     return { ok: false, message: "Only the super admin can pay dividends." };
   }
-  if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
+  if (!Number.isFinite(rate) || rate <= 0 || rate > MAX_DIVIDEND_RATE) {
     return {
       ok: false,
-      message: "Rate must be between 0 and 100, e.g. *paydividend 50* pays 50% of profit.",
-    };
-  }
-  if (rate > 25) {
-    return {
-      ok: false,
-      message: "Dividend rate cannot exceed 25% per Nigerian Cooperative Societies Act.",
+      message: `Rate must be between 0 and ${MAX_DIVIDEND_RATE}, e.g. *paydividend 20* pays 20% of profit.`,
     };
   }
 
@@ -139,27 +342,29 @@ export async function distributeDividend(
 
   const members = await prisma.member.findMany({
     where: { cooperativeId: admin.cooperativeId },
-    select: { id: true, name: true, wallet: { select: { id: true, totalSaved: true } } },
+    select: {
+      id: true,
+      name: true,
+      phone: true,
+      bankAccountNumber: true,
+      bankCode: true,
+      bankName: true,
+      bankAccountName: true,
+      wallet: { select: { totalSaved: true } },
+    },
   });
   const totalSaved = members.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
-  if (totalSaved <= 0 || members.length === 0) {
+  if (totalSaved <= 0) {
     return { ok: false, message: "No savings yet — nothing to distribute against." };
   }
 
-  const reference = `DIV-${Date.now()}`;
-
-  // Statutory deductions: 20% of NET PROFIT (not dividend pool) per Nigerian Cooperative Societies Act
   const reserveAmount = Math.floor(pnl.netProfit * RESERVE_FUND_RATE);
   const educationAmount = Math.floor(pnl.netProfit * EDUCATION_FUND_RATE);
   const developmentAmount = Math.floor(pnl.netProfit * DEVELOPMENT_FUND_RATE);
-  const totalDeductions = reserveAmount + educationAmount + developmentAmount;
-
-  // Dividend pool is rate% of (net profit - statutory deductions)
-  const distributableProfit = Math.max(0, pnl.netProfit - totalDeductions);
+  const totalDeductions = roundMoney(reserveAmount + educationAmount + developmentAmount);
+  const distributableProfit = Math.max(0, roundMoney(pnl.netProfit - totalDeductions));
   const pool = Math.max(0, Math.round(distributableProfit * (rate / 100)));
-  const memberPoolKobo = pool;
-
-  if (memberPoolKobo <= 0) {
+  if (pool <= 0) {
     return {
       ok: false,
       message:
@@ -168,8 +373,61 @@ export async function distributeDividend(
     };
   }
 
-  return prisma.$transaction(async (tx) => {
-    // Create reserve allocation record
+  const shares = allocateShares(members, pool);
+  const payable = members.filter((m) => (shares.get(m.id) ?? 0) > 0);
+  const candidates = payable.filter((m) => Boolean(m.bankAccountNumber && m.bankCode));
+  const held = payable.filter((m) => !(m.bankAccountNumber && m.bankCode));
+  const totalPayout = roundMoney(candidates.reduce((sum, m) => sum + (shares.get(m.id) ?? 0), 0));
+
+  // ---- Bulk guard: never launch an unbounded fan-out ----
+  if (candidates.length > DIVIDEND_MAX_PAYOUTS_PER_RUN) {
+    return {
+      ok: false,
+      message:
+        `This run would pay *${candidates.length}* members, above the per-run ceiling of ${DIVIDEND_MAX_PAYOUTS_PER_RUN}. ` +
+        `Raise DIVIDEND_MAX_PAYOUTS_PER_RUN or run in batches.`,
+    };
+  }
+
+  // ---- Explicit balance check against the JOURNAL-DERIVED bank float ----
+  const bankFloat = await getBankAccountBalance(admin.cooperativeId);
+  if (totalPayout > bankFloat) {
+    return {
+      ok: false,
+      message:
+        `🛑 Insufficient bank float. This run needs ${formatBalance(totalPayout)} but the cooperative bank account holds ${formatBalance(bankFloat)} (per the books). ` +
+        `Lower the rate or top up the bank account.`,
+    };
+  }
+
+  const reference = `DIV-${Date.now()}`;
+
+  // =====================================================================
+  // SAGA STEP 1 — ATOMIC DB CLAIM + BALANCED JOURNALS. NO network call here.
+  // =====================================================================
+  const dividend = await prisma.$transaction(async (tx) => {
+    const d = await tx.dividend.create({
+      data: {
+        cooperativeId: admin.cooperativeId,
+        reference,
+        rate,
+        totalPool: pool,
+        status: "distributing",
+        entries: {
+          create: payable.map((m) => {
+            const isCandidate = Boolean(m.bankAccountNumber && m.bankCode);
+            return {
+              memberId: m.id,
+              amount: shares.get(m.id) ?? 0,
+              status: isCandidate ? "processing" : "pending",
+              failureReason: isCandidate ? null : "No verified bank account on file",
+            };
+          }),
+        },
+      },
+    });
+
+    // Statutory funds: internal appropriation, no bank movement.
     await tx.reserveAllocation.create({
       data: {
         cooperativeId: admin.cooperativeId,
@@ -179,8 +437,6 @@ export async function distributeDividend(
         note: `20% statutory reserve from dividend at ${rate}% of net profit`,
       },
     });
-
-    // Create education fund record
     await tx.educationFund.create({
       data: {
         cooperativeId: admin.cooperativeId,
@@ -190,8 +446,6 @@ export async function distributeDividend(
         note: `2% education fund from dividend at ${rate}% of net profit`,
       },
     });
-
-    // Create development fund record
     await tx.developmentFund.create({
       data: {
         cooperativeId: admin.cooperativeId,
@@ -201,159 +455,278 @@ export async function distributeDividend(
         note: `5% development fund from dividend at ${rate}% of net profit`,
       },
     });
-
-    // Update cooperative fund balances
     await tx.cooperative.update({
       where: { id: admin.cooperativeId },
-      data: {
-        reserveFundBalance: { increment: reserveAmount },
-      },
+      data: { reserveFundBalance: { increment: reserveAmount } },
     });
 
-    // Post ledger entries for all allocations
-    await recordLedger({
-      cooperativeId: admin.cooperativeId,
-      type: "appropriation",
-      category: "dividend",
-      amount: reserveAmount,
-      note: `20% statutory reserve from dividend at ${rate}% of net profit`,
-      reference,
-      fundType: "reserve",
-      tx,
-    });
-
-    await recordLedger({
-      cooperativeId: admin.cooperativeId,
-      type: "appropriation",
-      category: "dividend",
-      amount: educationAmount,
-      note: `2% education fund from dividend at ${rate}% of net profit`,
-      reference,
-      fundType: "education",
-      tx,
-    });
-
-    await recordLedger({
-      cooperativeId: admin.cooperativeId,
-      type: "appropriation",
-      category: "dividend",
-      amount: developmentAmount,
-      note: `5% development fund from dividend at ${rate}% of net profit`,
-      reference,
-      fundType: "development",
-      tx,
-    });
-
-    // Compute shares as kobo integers with remainder distribution
-    const eligible = members.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
-    const rawShares = eligible.map((m) => ({
-      member: m,
-      raw: totalSaved > 0 ? ((m.wallet?.totalSaved ?? 0) / totalSaved) * memberPoolKobo : 0,
-      kobo: 0,
-      remainder: 0,
-    }));
-    for (const s of rawShares) {
-      s.kobo = Math.floor(s.raw);
-      s.remainder = s.raw - s.kobo;
-    }
-    const assigned = rawShares.reduce((sum, s) => sum + s.kobo, 0);
-    let leftover = memberPoolKobo - assigned;
-    rawShares.sort((a, b) => b.remainder - a.remainder);
-    for (const s of rawShares) {
-      if (leftover <= 0) break;
-      s.kobo += 1;
-      leftover -= 1;
-    }
-
-    // ATOMICITY: create all DividendEntry records with status "pending" first
-    const dividend = await tx.dividend.create({
-      data: {
-        cooperativeId: admin.cooperativeId,
-        rate,
-        totalPool: memberPoolKobo,
-        reference,
-        status: "distributed",
-        distributedAt: new Date(),
-        entries: {
-          create: rawShares.map((s) => ({
-            memberId: s.member.id,
-            amount: s.kobo,
-            status: "pending" as const,
-          })),
+    if (totalDeductions > 0) {
+      await postJournal(
+        {
+          cooperativeId: admin.cooperativeId,
+          txRef: `DIV-STAT-${d.id}`,
+          description: `Statutory deductions from dividend ${d.id.slice(-6)}`,
+          postings: [
+            {
+              account: "appropriation:statutory_funds",
+              direction: "DEBIT",
+              amount: totalDeductions,
+            },
+            { account: "liabilities:reserve_fund", direction: "CREDIT", amount: totalDeductions },
+          ],
         },
-      },
-      include: { entries: true },
-    });
-
-    // Credit wallets and mark each entry as "paid" — batched in groups of 100
-    let paidCount = 0;
-    const entriesWithShares = rawShares.filter((s) => s.kobo > 0);
-    for (let i = 0; i < entriesWithShares.length; i += 100) {
-      const batch = entriesWithShares.slice(i, i + 100);
-      // Batch wallet credits via raw SQL to reduce lock duration
-      for (const s of batch) {
-        await tx.$executeRaw`UPDATE "Wallet" SET balance = balance + ${s.kobo} WHERE "id" = ${s.member.wallet!.id}`;
-      }
-      for (const s of batch) {
-        paidCount += 1;
-        const entry = dividend.entries.find((e) => e.memberId === s.member.id);
-        await tx.contribution.create({
-          data: {
-            amount: s.kobo,
-            type: "dividend",
-            note: `Dividend at ${rate}% of profit (${reference})`,
-            reference: `DIV-${dividend.id.slice(-8)}-${s.member.id.slice(-6)}`,
-            status: "confirmed",
-            paidAt: new Date(),
-            memberId: s.member.id,
-            cooperativeId: admin.cooperativeId,
-          },
-        });
-        if (entry) {
-          await tx.dividendEntry.update({
-            where: { id: entry.id },
-            data: { status: "paid", paidAt: new Date() },
-          });
-        }
-      }
+        tx as any,
+      );
     }
 
-    await recordLedger({
-      cooperativeId: admin.cooperativeId,
-      type: "appropriation",
-      category: "dividend",
-      amount: memberPoolKobo,
-      note: `Dividend at ${rate}% of net profit (after statutory deductions)`,
-      reference: dividend.id,
-      fundType: "operational",
-      tx,
+    // Declaration: move appropriated profit into the members' dividend payable.
+    await postJournal(
+      {
+        cooperativeId: admin.cooperativeId,
+        txRef: `DIV-DECL-${d.id}`,
+        description: `Dividend declaration ${d.id.slice(-6)} at ${rate}%`,
+        postings: [
+          { account: "appropriation:dividend", direction: "DEBIT", amount: pool },
+          { account: "liabilities:dividend_payable", direction: "CREDIT", amount: pool },
+        ],
+      },
+      tx as any,
+    );
+
+    // Per-member payout legs (bank out), committed atomically with the claim so
+    // a crash before settlement leaves a reversible, balanced entry.
+    for (const m of candidates) {
+      const amount = shares.get(m.id) ?? 0;
+      await postJournal(
+        {
+          cooperativeId: admin.cooperativeId,
+          txRef: dividendPayoutRef(d.id, m.id),
+          description: `Dividend payout to ${m.name} (${d.id.slice(-6)})`,
+          postings: [
+            { account: "liabilities:dividend_payable", direction: "DEBIT", amount },
+            { account: "assets:bank", direction: "CREDIT", amount },
+          ],
+        },
+        tx as any,
+      );
+    }
+
+    return d;
+  });
+
+  // =====================================================================
+  // SAGA STEP 2 — call the gateway OUTSIDE the transaction, then settle/compensate.
+  // =====================================================================
+  let settled = 0;
+  let failed = 0;
+
+  await runPool(candidates, DIVIDEND_PAYOUT_CONCURRENCY, async (m) => {
+    const amount = shares.get(m.id) ?? 0;
+    const result = await sendToBank({
+      memberId: m.id,
+      amount,
+      bankAccountNumber: m.bankAccountNumber!,
+      bankCode: m.bankCode!,
+      bankName: m.bankName ?? undefined,
+      note: `Dividend ${reference} to ${m.name}`,
+      idempotencyKey: dividendPayoutRef(dividend.id, m.id),
+      // The dividend already posted its own balanced pair above.
+      suppressJournal: true,
+      successMessage: `🎉 *Dividend paid!* ${formatBalance(amount)} has been sent to your bank account (${m.bankName ?? m.bankCode} ****${m.bankAccountNumber!.slice(-4)}).`,
+      onFailure: async (_status, error) => {
+        await prisma.dividendEntry
+          .updateMany({
+            where: { dividendId: dividend.id, memberId: m.id },
+            data: { failureReason: error.slice(0, 300) },
+          })
+          .catch(() => {});
+      },
     });
 
-    return {
-      ok: true,
-      message:
-        `🎉 Dividend distributed!\n\n` +
-        `Total profit pool: *${formatBalance(pool)}* (${rate}% of ${formatBalance(pnl.netProfit)})\n\n` +
-        `*Statutory Deductions (Nigerian Cooperative Standard):*\n` +
-        `• Reserve Fund (20%): *${formatBalance(reserveAmount)}*\n` +
-        `• Education Fund (2%): *${formatBalance(educationAmount)}*\n` +
-        `• Development Fund (5%): *${formatBalance(developmentAmount)}*\n` +
-        `• Total deductions: *${formatBalance(totalDeductions)}*\n\n` +
-        `Member dividends: *${formatBalance(memberPoolKobo)}* shared among ${paidCount} member(s)\n\n` +
-        `_Distributed proportional to savings._`,
-    };
+    if (result.ok) {
+      await prisma.dividendEntry.updateMany({
+        where: { dividendId: dividend.id, memberId: m.id },
+        data: { status: "settled", paidAt: new Date(), payoutId: result.payoutId },
+      });
+      // Persist the provider-verified account name once (Zero-BVN assurance).
+      if (result.verifiedName && !m.bankAccountName) {
+        await prisma.member
+          .update({ where: { id: m.id }, data: { bankAccountName: result.verifiedName } })
+          .catch(() => {});
+      }
+      settled++;
+      return;
+    }
+
+    if (result.status === "unsure") {
+      // Ambiguous: the transfer may have been submitted. NEVER reverse here or
+      // the coop could reverse a payment that actually landed (double loss).
+      await alertSupers(
+        admin.cooperativeId,
+        `Dividend payout ${reference} for *${m.name}* has an *unconfirmed* outcome. Reconcile with the provider before reversing.`,
+        AlertSeverity.CRITICAL,
+      ).catch(() => {});
+      return;
+    }
+
+    // Confirmed failure (failed | name_mismatch) → reverse the bank-out journal.
+    await reverseDividendJournal(admin.cooperativeId, dividend.id, m.id, amount);
+    await prisma.dividendEntry.updateMany({
+      where: { dividendId: dividend.id, memberId: m.id },
+      data: {
+        status: "failed",
+        failureReason: `${result.status}: ${result.message}`.slice(0, 300),
+      },
+    });
+    failed++;
+  });
+
+  // ---- Wrap up ----
+  await prisma.dividend.update({
+    where: { id: dividend.id },
+    data: { status: "distributed", distributedAt: new Date() },
+  });
+
+  // Tell held members how to get paid; the liability stays on the books.
+  for (const m of held) {
+    await notifyMember(
+      m,
+      `🎉 You have a dividend of *${formatBalance(shares.get(m.id) ?? 0)}* waiting, but no verified bank account is on file.\n\n` +
+        `Reply *withdraw <amount> <account number> <bank>* once to register a bank account, and the next dividend run (or an admin) will pay it out.`,
+    ).catch(() => {});
+  }
+
+  await audit({
+    cooperativeId: admin.cooperativeId,
+    actorPhone: admin.phone,
+    actorId: admin.id,
+    actorRole: admin.role,
+    action: "dividend.distribute",
+    targetType: "dividend",
+    targetId: dividend.id,
+    amount: pool,
+    detail: `Bank payouts: settled ${settled}, held ${held.length}, failed ${failed}`,
+  }).catch(() => {});
+
+  const summary =
+    `🎉 *Dividend run ${dividend.id.slice(-6)} complete*\n\n` +
+    `Rate: *${rate}%* of net profit ${formatBalance(pnl.netProfit)}\n` +
+    `Member pool: *${formatBalance(pool)}*\n` +
+    `Statutory deductions: *${formatBalance(totalDeductions)}*\n\n` +
+    `✅ Paid to bank: *${settled}* member(s)\n` +
+    `⏸️ Held (no bank account): *${held.length}*\n` +
+    `⚠️ Failed (reversed): *${failed}*`;
+
+  await notifySuperAdmins(admin.cooperativeId, summary).catch(() => {});
+
+  return {
+    ok: true,
+    message: summary,
+    dividendId: dividend.id,
+    settled,
+    held: held.length,
+    failed,
+    totalPool: pool,
+  };
+}
+
+/**
+ * Reverse a dividend payout's bank-out journal. Idempotent on txRef, so the
+ * inline failure path and the async webhook can both call it safely.
+ */
+export async function reverseDividendJournal(
+  cooperativeId: string,
+  dividendId: string,
+  memberId: string,
+  amount: number,
+): Promise<{ posted: boolean; reason?: string }> {
+  return postJournal({
+    cooperativeId,
+    txRef: `DIV-REV-${dividendId}-${memberId}`,
+    description: `Reversal of dividend payout ${dividendId.slice(-6)} to ${memberId.slice(-6)}`,
+    postings: [
+      { account: "assets:bank", direction: "DEBIT", amount },
+      { account: "liabilities:dividend_payable", direction: "CREDIT", amount },
+    ],
   });
 }
+
+// ---------------------------------------------------------------------------
+// Async transfer-callback saga
+// ---------------------------------------------------------------------------
+
+export interface PayoutUpdate {
+  provider: string;
+  /** Payout.idempotencyKey / provider reference we sent. */
+  reference: string;
+  status: "successful" | "failed";
+  providerRef?: string;
+}
+
+/**
+ * Settle or reverse a dividend payout in response to a provider transfer
+ * callback. Idempotent and safe to call for any payout (ignores non-dividend
+ * payouts). `transfer.success` marks the entry settled; `transfer.failed`
+ * reverses the journal. Ambiguous statuses are the caller's responsibility to
+ * route to "investigating" and must never reach the reverse branch.
+ */
+export async function applyDividendPayoutUpdate(
+  update: PayoutUpdate,
+): Promise<{ handled: boolean; action?: "settled" | "reversed" | "noop" }> {
+  const payout = await prisma.payout.findUnique({
+    where: { idempotencyKey: update.reference },
+    include: { dividendEntry: true },
+  });
+  if (!payout || !payout.dividendEntry) return { handled: false };
+
+  const entry = payout.dividendEntry;
+
+  if (update.status === "successful") {
+    if (entry.status !== "settled") {
+      await prisma.$transaction([
+        prisma.dividendEntry.update({
+          where: { id: entry.id },
+          data: { status: "settled", paidAt: new Date() },
+        }),
+        prisma.payout.update({
+          where: { id: payout.id },
+          data: { status: "successful", providerRef: update.providerRef ?? payout.providerRef },
+        }),
+      ]);
+    }
+    return { handled: true, action: "settled" };
+  }
+
+  // status === "failed" — only reverse if not already finalised.
+  if (entry.status === "failed" || entry.status === "reversed") {
+    return { handled: true, action: "noop" };
+  }
+  await reverseDividendJournal(
+    payout.cooperativeId,
+    entry.dividendId,
+    entry.memberId,
+    entry.amount,
+  );
+  await prisma.$transaction([
+    prisma.dividendEntry.update({
+      where: { id: entry.id },
+      data: { status: "failed", failureReason: "Provider reported transfer.failed" },
+    }),
+    prisma.payout.update({ where: { id: payout.id }, data: { status: "failed" } }),
+  ]);
+  return { handled: true, action: "reversed" };
+}
+
+// ---------------------------------------------------------------------------
+// Fund balances / reserve info
+// ---------------------------------------------------------------------------
 
 /**
  * Get fund balances for a cooperative.
  *
- * NOTE: Reserve fund uses the denormalized `coop.reserveFundBalance` column
- * (incremented atomically during dividend distribution), while education and
- * development funds are aggregated from their respective transaction tables.
- * This hybrid approach can diverge if records are edited outside the normal
- * flow. A periodic reconciliation job should verify that the denormalized
- * balance matches the sum of allocation records.
+ * NOTE: Reserve fund uses the denormalized `coop.reserveFundBalance` column,
+ * while education/development are aggregated from their transaction tables.
+ * A periodic reconciliation job should verify the denormalized balance matches.
  */
 export async function getFundBalances(cooperativeId: string): Promise<{
   reserve: number;
@@ -368,7 +741,6 @@ export async function getFundBalances(cooperativeId: string): Promise<{
 
   const reserveBalance = reserveTotal._sum.amount ?? 0;
 
-  // Reconciliation: update denormalized field if it diverges
   const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
   const reported = coop?.reserveFundBalance ?? 0;
   if (Math.abs(reported - reserveBalance) > 1) {
@@ -407,17 +779,11 @@ export async function getReserveInfo(cooperativeId: string): Promise<{
 
   const [thisQuarter, lastQuarter] = await Promise.all([
     prisma.reserveAllocation.aggregate({
-      where: {
-        cooperativeId,
-        createdAt: { gte: thisQuarterStart },
-      },
+      where: { cooperativeId, createdAt: { gte: thisQuarterStart } },
       _sum: { amount: true },
     }),
     prisma.reserveAllocation.aggregate({
-      where: {
-        cooperativeId,
-        createdAt: { gte: lastQuarterStart, lt: thisQuarterStart },
-      },
+      where: { cooperativeId, createdAt: { gte: lastQuarterStart, lt: thisQuarterStart } },
       _sum: { amount: true },
     }),
   ]);
@@ -426,10 +792,5 @@ export async function getReserveInfo(cooperativeId: string): Promise<{
   const lastQ = lastQuarter._sum.amount ?? 0;
   const growthPercent = lastQ > 0 ? Math.round(((thisQ - lastQ) / lastQ) * 100) : 0;
 
-  return {
-    balance,
-    thisQuarter: thisQ,
-    lastQuarter: lastQ,
-    growthPercent,
-  };
+  return { balance, thisQuarter: thisQ, lastQuarter: lastQ, growthPercent };
 }

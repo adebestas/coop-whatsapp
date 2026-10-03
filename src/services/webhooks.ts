@@ -4,6 +4,7 @@ import { monnifyAdapter } from "./payments/monnify.js";
 import { paystackAdapter } from "./payments/paystack.js";
 import { handlePaymentNotification } from "./payments/topup.js";
 import type { PaymentNotification, ProviderAdapter } from "./payments/index.js";
+import { applyDividendPayoutUpdate } from "./dividends.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 
 /**
@@ -152,6 +153,108 @@ export async function processPaymentWebhook(
       ).catch(() => {});
     }
 
+    await prisma.webhookEvent
+      .update({
+        where: { id: eventId },
+        data: { status: "failed", error: String(err?.message ?? err).slice(0, 500) },
+      })
+      .catch(() => {});
+    return { httpStatus: 500, body: { status: "failed", event: eventId } };
+  }
+}
+
+/**
+ * Combined PAYOUT/transfer callback listener.
+ *
+ * Mirrors processPaymentWebhook but for transfers WE initiated (dividend
+ * payouts, etc.): verifies the signature, records the delivery for replay
+ * protection, then settles or reverses the corresponding dividend entry via the
+ * saga in dividends.ts. Always 200 for irrelevant/duplicate events so the
+ * provider stops retrying; 4xx only for signature failures.
+ */
+export async function processPayoutWebhook(
+  rawBody: string,
+  headers: Record<string, string | string[] | undefined>,
+): Promise<WebhookOutcome> {
+  const providerName = detectProvider(headers);
+  if (!providerName) {
+    return { httpStatus: 400, body: { error: "no recognizable provider signature header" } };
+  }
+  const adapter = adapters[providerName];
+  if (!adapter) {
+    return { httpStatus: 400, body: { error: `unknown provider ${providerName}` } };
+  }
+
+  // Signature first — before parsing or touching the DB.
+  if (!adapter.verifyWebhook(rawBody, headers)) {
+    console.error(`[payout-webhook] INVALID signature from ${providerName}`);
+    return { httpStatus: 401, body: { error: "invalid signature" } };
+  }
+
+  let parsedBody: unknown;
+  try {
+    parsedBody = JSON.parse(rawBody);
+  } catch {
+    return { httpStatus: 400, body: { error: "invalid json" } };
+  }
+
+  const update = adapter.parsePayoutNotification?.(parsedBody) ?? null;
+  if (!update) {
+    // Not a transfer update (e.g. a charge.success that hit the wrong endpoint).
+    return { httpStatus: 200, body: { status: "ignored" } };
+  }
+
+  // Include the status in the event id so a failed->success transition (if the
+  // provider ever re-sends) is not suppressed as a duplicate of the failure.
+  const eventId = `${providerName}:payout:${update.reference}:${update.status}`;
+
+  try {
+    await prisma.webhookEvent.create({
+      data: {
+        id: eventId,
+        provider: providerName,
+        kind: "payout_update",
+        payloadHash: createHash("sha256").update(rawBody).digest("hex"),
+        status: "received",
+      },
+    });
+  } catch (err: any) {
+    if (err?.code !== "P2002") {
+      console.error(`[payout-webhook] failed to record delivery ${eventId}:`, err);
+      return {
+        httpStatus: 500,
+        body: { status: "failed", error: "could not record webhook event" },
+      };
+    }
+    const existing = await prisma.webhookEvent.findUnique({
+      where: { id: eventId },
+      select: { status: true },
+    });
+    if (existing?.status === "processed") {
+      return { httpStatus: 200, body: { status: "duplicate", event: eventId } };
+    }
+  }
+
+  try {
+    await applyDividendPayoutUpdate({
+      provider: update.provider,
+      reference: update.reference,
+      status: update.status,
+      providerRef: update.providerRef,
+    });
+    await prisma.webhookEvent.update({
+      where: { id: eventId },
+      data: { status: "processed", processedAt: new Date() },
+    });
+    return { httpStatus: 200, body: { status: "ok", event: eventId } };
+  } catch (err: any) {
+    console.error(`[payout-webhook] processing failed for ${eventId}`, err);
+    // Best-effort alert: a stuck dividend reversal is a books-integrity issue.
+    await alertSupers(
+      "system",
+      `Payout webhook processing failed for ${eventId}\n\nError: ${err?.message ?? "unknown"}`,
+      AlertSeverity.CRITICAL,
+    ).catch(() => {});
     await prisma.webhookEvent
       .update({
         where: { id: eventId },

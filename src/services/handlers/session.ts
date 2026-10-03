@@ -24,6 +24,7 @@ import { FlowDataSchema, SECRET_STATES } from "../conversation.js";
 import { askEmail, askBirthday, askNokName, parseBirthday } from "./join.js";
 import { getActiveElectionsForNewMember } from "../votes.js";
 import { createCooperative, generateMemberFileNumber } from "../cooperative.js";
+import { confirmDividendDistribution } from "../dividends.js";
 import { hashPin, verifyPin } from "../../lib/security.js";
 
 /** A half-finished flow expires after this long. */
@@ -1194,6 +1195,36 @@ export async function handleAwaitingInput(
         return;
       }
       await sendText({ to: phone, text: "Okay, cancelled. Reply *menu* to see your options." });
+      break;
+    }
+
+    case "awaiting_dividend_confirm": {
+      const rate = data.dividendRate;
+      // Always leave the confirming state first so a malformed/again reply
+      // cannot re-trigger a payout.
+      await prisma.session.update({ where: { phone }, data: { state: "idle", data: "{}" } });
+      if (!rate || rate <= 0) {
+        await sendText({
+          to: phone,
+          text: "That dividend request expired. Reply *paydividend <rate>* to start again.",
+        });
+        break;
+      }
+      // Exact match on the token shown in the preview — a casual "yes" is not
+      // enough to move money to every member's bank account.
+      if (text.trim().toUpperCase() !== `CONFIRM ${rate}`) {
+        await sendText({
+          to: phone,
+          text: "Dividend cancelled. Nothing was paid. Reply *paydividend <rate>* to start again.",
+        });
+        break;
+      }
+      await sendText({
+        to: phone,
+        text: "⏳ Processing the dividend run — sending bank transfers now…",
+      });
+      const dividendResult = await confirmDividendDistribution(phone, rate);
+      await sendText({ to: phone, text: dividendResult.message });
       break;
     }
 

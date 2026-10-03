@@ -100,3 +100,24 @@ export async function trialBalance(cooperativeId: string): Promise<{
   const credits = roundMoney(rows.find((r) => r.direction === "CREDIT")?._sum.amount ?? 0);
   return { debits, credits, balanced: debits === credits };
 }
+
+/**
+ * Available cash float in the cooperative's bank account, derived from the
+ * double-entry journal rather than a denormalized column (which could drift).
+ *
+ * assets:bank is a DEBIT-normal asset: debits increase it, credits decrease it.
+ *   bankFloat = Σ DEBIT(assets:bank) − Σ CREDIT(assets:bank)
+ *
+ * Use this as the precondition before any outbound bank transfer so a dividend
+ * run (or payout) can never drain more than the books say the coop actually has.
+ */
+export async function getBankAccountBalance(cooperativeId: string): Promise<number> {
+  const rows = await prisma.posting.groupBy({
+    by: ["direction"],
+    where: { entry: { cooperativeId }, account: "assets:bank" },
+    _sum: { amount: true },
+  });
+  const debits = roundMoney(rows.find((r) => r.direction === "DEBIT")?._sum.amount ?? 0);
+  const credits = roundMoney(rows.find((r) => r.direction === "CREDIT")?._sum.amount ?? 0);
+  return roundMoney(debits - credits);
+}

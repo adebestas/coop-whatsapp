@@ -33,7 +33,13 @@ async function makeCoop(name = "New Coop") {
 async function makeMember(
   phone: string,
   coopId: string,
-  opts: { role?: string; name?: string; bank?: boolean; salaryAmount?: number; salaryKind?: string } = {},
+  opts: {
+    role?: string;
+    name?: string;
+    bank?: boolean;
+    salaryAmount?: number;
+    salaryKind?: string;
+  } = {},
 ) {
   let code = generateMemberCode();
   while (await prisma.member.findUnique({ where: { code } })) {
@@ -63,14 +69,41 @@ async function makeMember(
 beforeEach(async () => {
   vi.clearAllMocks();
   for (const m of [
-    "coopPost", "deductionItem", "deductionWaiver", "deductionBatch",
-    "posting", "journalEntry", "webhookEvent",
-    "beneficiary", "pollBallot", "pollOption", "purchasePoll", "externalPayment",
-    "guarantorDeduction", "ledgerEntry",
-    "voteBallot", "voteCandidate", "vote", "supportTicket", "auditLog",
-    "deathValidation", "deathClaim", "withdrawalRequest", "contribution",
-    "loanRepayment", "guarantor", "loan", "payout", "dividendEntry",
-    "dividend", "broadcast", "wallet", "member", "unit", "cooperative", "session",
+    "coopPost",
+    "deductionItem",
+    "deductionWaiver",
+    "deductionBatch",
+    "posting",
+    "journalEntry",
+    "webhookEvent",
+    "beneficiary",
+    "pollBallot",
+    "pollOption",
+    "purchasePoll",
+    "externalPayment",
+    "guarantorDeduction",
+    "ledgerEntry",
+    "voteBallot",
+    "voteCandidate",
+    "vote",
+    "supportTicket",
+    "auditLog",
+    "deathValidation",
+    "deathClaim",
+    "withdrawalRequest",
+    "contribution",
+    "loanRepayment",
+    "guarantor",
+    "loan",
+    "dividendEntry",
+    "payout",
+    "dividend",
+    "broadcast",
+    "wallet",
+    "member",
+    "unit",
+    "cooperative",
+    "session",
   ] as any[]) {
     await prisma[m].deleteMany();
   }
@@ -84,7 +117,13 @@ describe("pay anyone (3-super approval)", () => {
     const s2 = await makeMember("2348072222222", coop.id, { role: "superadmin" });
     const s3 = await makeMember("2348073333333", coop.id, { role: "superadmin" });
 
-    const actorOf = (m: { id: string; name: string; phone: string; role: string; cooperativeId: string }) => m;
+    const actorOf = (m: {
+      id: string;
+      name: string;
+      phone: string;
+      role: string;
+      cooperativeId: string;
+    }) => m;
     const req = await requestExternalPayment(actorOf(admin), {
       beneficiaryName: "Vic Ventures",
       accountNumber: "0123456789",
@@ -105,9 +144,9 @@ describe("pay anyone (3-super approval)", () => {
     const self = await approveExternalPayment(actorOf(admin), created!.id.slice(-6));
     expect(self.ok).toBe(false);
 
-await approveExternalPayment(actorOf(s2), created!.id.slice(-6));
+    await approveExternalPayment(actorOf(s2), created!.id.slice(-6));
     const final = await approveExternalPayment(actorOf(s3), created!.id.slice(-6));
-    console.log('[DEBUG TEST] final result:', final);
+    console.log("[DEBUG TEST] final result:", final);
     expect(final.ok).toBe(true);
 
     const done = await prisma.externalPayment.findUnique({ where: { id: created!.id } });
@@ -133,9 +172,27 @@ await approveExternalPayment(actorOf(s2), created!.id.slice(-6));
 describe("ledger + P&L", () => {
   it("computes income, expenses and net profit", async () => {
     const coop = await makeCoop();
-    await recordLedger({ cooperativeId: coop.id, type: "income", category: "interest", amount: 30000, note: "interest" });
-    await recordLedger({ cooperativeId: coop.id, type: "income", category: "fine", amount: 2000, note: "fines" });
-    await recordLedger({ cooperativeId: coop.id, type: "expense", category: "stipend", amount: 7000, note: "stipends" });
+    await recordLedger({
+      cooperativeId: coop.id,
+      type: "income",
+      category: "interest",
+      amount: 30000,
+      note: "interest",
+    });
+    await recordLedger({
+      cooperativeId: coop.id,
+      type: "income",
+      category: "fine",
+      amount: 2000,
+      note: "fines",
+    });
+    await recordLedger({
+      cooperativeId: coop.id,
+      type: "expense",
+      category: "stipend",
+      amount: 7000,
+      note: "stipends",
+    });
     const pnl = await computePnl(coop.id);
     expect(pnl.totalIncome).toBe(32000);
     expect(pnl.totalExpense).toBe(7000);
@@ -147,14 +204,27 @@ describe("audit trail", () => {
   it("chains hashes and detects tampering", async () => {
     const coop = await makeCoop();
     const member = await makeMember(PHONE, coop.id);
-    for (const [action, detail] of [["test.a", "one"], ["test.b", "two"], ["test.c", "three"]] as const) {
-      await audit({ cooperativeId: coop.id, actorPhone: member.phone, actorId: member.id, action, detail });
+    for (const [action, detail] of [
+      ["test.a", "one"],
+      ["test.b", "two"],
+      ["test.c", "three"],
+    ] as const) {
+      await audit({
+        cooperativeId: coop.id,
+        actorPhone: member.phone,
+        actorId: member.id,
+        action,
+        detail,
+      });
     }
 
     expect((await verifyAuditChain(coop.id)).ok).toBe(true);
 
     // Tamper with a middle row — every later hash stops matching.
-    const rows = await prisma.auditLog.findMany({ where: { cooperativeId: coop.id }, orderBy: { createdAt: "asc" } });
+    const rows = await prisma.auditLog.findMany({
+      where: { cooperativeId: coop.id },
+      orderBy: { createdAt: "asc" },
+    });
     await prisma.auditLog.update({ where: { id: rows[1].id }, data: { detail: "tampered" } });
     const broken = await verifyAuditChain(coop.id);
     expect(broken.ok).toBe(false);
@@ -192,17 +262,20 @@ describe("guarantor deductions", () => {
       expect(pending).not.toBeNull();
       expect(pending!.status).toBe("notified");
       // 50% of declining balance interest on 20000 at 10% APR over 11 months
-  // monthly rate = 10%/12 = 0.833%, monthly payment ≈ 1902, total = 20922, interest = 922, 50% = 461
-  // Actual calculation: monthly rate = 10%/12, payment = 20000 * r / (1 - (1+r)^-11) = 20000 * (0.1/12) / (1 - (1+0.1/12)^-11) ≈ 1902.5
-  // Total = 1902.5 * 11 = 20927.5, interest = 927.5, 50% = 463.75 → rounded to 505 due to rounding in implementation
-  expect(pending!.amount).toBe(505);
+      // monthly rate = 10%/12 = 0.833%, monthly payment ≈ 1902, total = 20922, interest = 922, 50% = 461
+      // Actual calculation: monthly rate = 10%/12, payment = 20000 * r / (1 - (1+r)^-11) = 20000 * (0.1/12) / (1 - (1+0.1/12)^-11) ≈ 1902.5
+      // Total = 1902.5 * 11 = 20927.5, interest = 927.5, 50% = 463.75 → rounded to 505 due to rounding in implementation
+      expect(pending!.amount).toBe(505);
 
       const textsAfterNotice = allTexts().join("\n");
       expect(textsAfterNotice).toContain("10-day deduction notice");
 
       // Borrower still owes when the notice window passes -> savings hit.
       vi.setSystemTime(new Date("2026-03-12T10:00:00Z"));
-      const gWalletBefore = (await prisma.member.findUnique({ where: { id: g1.id }, include: { wallet: true } }))!;
+      const gWalletBefore = (await prisma.member.findUnique({
+        where: { id: g1.id },
+        include: { wallet: true },
+      }))!;
       await prisma.wallet.update({
         where: { memberId: g1.id },
         data: { balance: 5000, totalSaved: 5000 },
@@ -213,8 +286,11 @@ describe("guarantor deductions", () => {
       expect(res.deducted).toBe(1);
       const deducted = await prisma.guarantorDeduction.findFirst();
       expect(deducted!.status).toBe("deducted");
-      const gWalletAfter = await prisma.member.findUnique({ where: { id: g1.id }, include: { wallet: true } });
-// 5000 - 505 (50% of declining balance interest) = 4495
+      const gWalletAfter = await prisma.member.findUnique({
+        where: { id: g1.id },
+        include: { wallet: true },
+      });
+      // 5000 - 505 (50% of declining balance interest) = 4495
       expect(gWalletAfter!.wallet!.balance).toBe(4495);
       expect(gWalletAfter!.wallet!.totalSaved).toBe(4495);
       expect(gWalletAfter!.wallet!.balance).toBeLessThan(5000);
@@ -261,8 +337,17 @@ describe("guarantor deductions", () => {
 describe("payroll", () => {
   it("queues salaries to BANK accounts only and demands a narration", async () => {
     const coop = await makeCoop();
-    const superAdmin = await makeMember("2348074444444", coop.id, { role: "superadmin", bank: true });
-    const staffA = await makeMember(PHONE, coop.id, { role: "superadmin", bank: true, salaryAmount: 15000, salaryKind: "salary", name: "Ada Obi" });
+    const superAdmin = await makeMember("2348074444444", coop.id, {
+      role: "superadmin",
+      bank: true,
+    });
+    const staffA = await makeMember(PHONE, coop.id, {
+      role: "superadmin",
+      bank: true,
+      salaryAmount: 15000,
+      salaryKind: "salary",
+      name: "Ada Obi",
+    });
     await makeMember("2348055550003", coop.id, { role: "superadmin", salaryAmount: 8000 }); // no bank details
 
     const shortNarration = await runPayroll(coop.id, superAdmin, "no");
@@ -279,7 +364,10 @@ describe("payroll", () => {
     expect(await prisma.externalPayment.count()).toBe(0);
 
     // Wallet untouched — salaries never land in wallets.
-    const staff = await prisma.member.findUnique({ where: { id: staffA.id }, include: { wallet: true } });
+    const staff = await prisma.member.findUnique({
+      where: { id: staffA.id },
+      include: { wallet: true },
+    });
     expect(staff!.wallet!.balance).toBe(0);
   });
 });
@@ -288,7 +376,13 @@ describe("exports", () => {
   it("writes xlsx and pdf files to disk without error", async () => {
     const coop = await makeCoop();
     const requester = await makeMember(PHONE, coop.id, { bank: true });
-    await recordLedger({ cooperativeId: coop.id, type: "income", category: "interest", amount: 900, note: "int" });
+    await recordLedger({
+      cooperativeId: coop.id,
+      type: "income",
+      category: "interest",
+      amount: 900,
+      note: "int",
+    });
     const res = await runExport(
       { id: requester.id, name: requester.name, email: null, cooperativeId: coop.id },
       "members",
@@ -309,6 +403,3 @@ describe("provider default", () => {
     expect(resolveProvider().name).toBe("monnify");
   });
 });
-
-
-

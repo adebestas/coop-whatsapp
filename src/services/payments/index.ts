@@ -54,6 +54,16 @@ export interface PayoutParams {
   currency?: string;
 }
 
+/** A provider webhook notification about a payout/transfer WE initiated. */
+export interface PayoutNotification {
+  /** Our internal reference (Payout.idempotencyKey / provider reference). */
+  reference: string;
+  status: "successful" | "failed";
+  providerRef?: string;
+  provider: string;
+  raw: unknown;
+}
+
 export interface PayoutResult {
   ok: boolean;
   providerRef?: string;
@@ -89,6 +99,11 @@ export interface ProviderAdapter {
   verifyWebhook(rawBody: string, headers: Record<string, string | string[] | undefined>): boolean;
   /** Parse a raw webhook body into a PaymentNotification, or null if irrelevant */
   parseNotification(body: unknown): PaymentNotification | null;
+  /**
+   * Parse a raw webhook body into a PayoutNotification (a transfer we
+   * initiated settling/failing), or null if the event is not a payout update.
+   */
+  parsePayoutNotification?(body: unknown): PayoutNotification | null;
   /**
    * Ask the provider about a transfer we initiated (payout status polling).
    * Lets us settle or refund rows stuck in "processing" without waiting for

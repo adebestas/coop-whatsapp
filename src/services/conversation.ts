@@ -137,6 +137,7 @@ export type BotState =
   | "awaiting_death_cert"
   | "awaiting_ai_confirm"
   | "awaiting_ai_query_confirm"
+  | "awaiting_dividend_confirm"
   | "awaiting_consent"
   | "awaiting_delete_account_pin"
   | "awaiting_optin"
@@ -177,6 +178,8 @@ export const FlowDataSchema = z.object({
   aiArgs: z.array(z.string()).optional(),
   aiQueryText: z.string().optional(),
   aiQueryResponse: z.string().optional(),
+  // Two-step dividend guardrail: the rate staged for explicit confirmation.
+  dividendRate: z.number().positive().optional(),
   flowToken: z.string().optional(),
   consentGiven: z.boolean().optional(),
   memberId: z.string().optional(),

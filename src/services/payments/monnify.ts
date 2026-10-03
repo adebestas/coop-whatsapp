@@ -5,6 +5,7 @@ import type {
   CreateVirtualAccountParams,
   VirtualAccountData,
   PaymentNotification,
+  PayoutNotification,
   ResolveAccountParams,
   ResolveAccountResult,
   PayoutParams,
@@ -53,6 +54,22 @@ const MonnifyTxSchema = z
           .optional(),
         accountNumber: z.union([z.string(), z.number()]).optional(),
         product: z.object({ reference: z.string().optional() }).passthrough().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+/** Shape contract for a disbursement (payout) webhook. */
+const MonnifyDisbursementSchema = z
+  .object({
+    eventType: z.string().optional(),
+    type: z.string().optional(),
+    eventData: z
+      .object({
+        reference: z.string().optional(),
+        providerReference: z.string().optional(),
+        status: z.string().optional(),
       })
       .passthrough()
       .optional(),
@@ -138,6 +155,29 @@ export const monnifyAdapter: ProviderAdapter = {
       amount: Math.round(Number(payload.amountPaid ?? payload.amount ?? 0) * 100),
       currency: String(payload.currencyCode ?? "NGN"),
       status: "successful",
+      provider: "monnify",
+      raw: body,
+    };
+  },
+
+  parsePayoutNotification(body: unknown): PayoutNotification | null {
+    const parsed = MonnifyDisbursementSchema.safeParse(body);
+    if (!parsed.success) return null;
+    const b = parsed.data;
+    const eventType = String(b.eventType ?? b.type ?? "").toUpperCase();
+    const status: PayoutNotification["status"] | null =
+      eventType.includes("SUCCESSFUL_DISBURSEMENT") || eventType.includes("DISBURSEMENT_SUCCESS")
+        ? "successful"
+        : eventType.includes("FAILED_DISBURSEMENT") || eventType.includes("REVERSED_DISBURSEMENT")
+          ? "failed"
+          : null;
+    if (!status) return null;
+    const reference = b.eventData?.reference;
+    if (!reference) return null;
+    return {
+      reference,
+      status,
+      providerRef: b.eventData?.providerReference,
       provider: "monnify",
       raw: body,
     };

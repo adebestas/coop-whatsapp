@@ -12,11 +12,7 @@ async function makeCoop(code: string, name: string, adminPhone?: string) {
   return prisma.cooperative.create({ data: { name, code, adminPhone } });
 }
 
-async function makeMember(
-  phone: string,
-  coopId: string,
-  opts: { role?: string } = {},
-) {
+async function makeMember(phone: string, coopId: string, opts: { role?: string } = {}) {
   let code = generateMemberCode();
   while (await prisma.member.findUnique({ where: { code } })) {
     code = generateMemberCode();
@@ -61,8 +57,8 @@ beforeEach(async () => {
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
-  await prisma.payout.deleteMany();
   await prisma.dividendEntry.deleteMany();
+  await prisma.payout.deleteMany();
   await prisma.dividend.deleteMany();
   await prisma.broadcast.deleteMany();
   await prisma.wallet.deleteMany();
@@ -120,7 +116,10 @@ describe("executive posts", () => {
 
     await handleMessage(ADMIN_PHONE, `setpost treasurer ${target.code}`);
     expect(
-      vi.mocked(sendText).mock.calls.map((c) => c[0].text).some((t) => t.includes("super admin")),
+      vi
+        .mocked(sendText)
+        .mock.calls.map((c) => c[0].text)
+        .some((t) => t.includes("super admin")),
     ).toBe(true);
   });
 
@@ -132,7 +131,10 @@ describe("executive posts", () => {
 
     expect(await prisma.coopPost.count({ where: { cooperativeId: coop.id } })).toBe(0);
     expect(
-      vi.mocked(sendText).mock.calls.map((c) => c[0].text).some((t) => t.includes("No member")),
+      vi
+        .mocked(sendText)
+        .mock.calls.map((c) => c[0].text)
+        .some((t) => t.includes("No member")),
     ).toBe(true);
   });
 

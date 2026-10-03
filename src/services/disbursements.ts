@@ -10,6 +10,10 @@ export interface DisbursementResult {
   ok: boolean;
   status: "successful" | "failed" | "name_mismatch" | "unsure";
   message: string;
+  /** Provider-resolved account-holder name, when the transfer succeeded. */
+  verifiedName?: string;
+  /** Payout.id of the created payout row, when the transfer succeeded. */
+  payoutId?: string;
 }
 
 interface SendToBankOpts {
@@ -92,7 +96,7 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
 async function payOut(
   opts: SendToBankOpts,
   member: { id: string; name: string; cooperativeId: string; phone: string },
-  _verifiedName: string | null,
+  verifiedName: string | null,
 ): Promise<DisbursementResult> {
   const provider = await resolveProvider();
   // Deterministic reference: retries reuse the SAME key, so the provider and
@@ -138,8 +142,9 @@ async function payOut(
       markProviderUp(provider.name);
     }
 
+    let payoutId: string;
     try {
-      await prisma.payout.create({
+      const payout = await prisma.payout.create({
         data: {
           amount: opts.amount,
           reference,
@@ -152,6 +157,7 @@ async function payOut(
           cooperativeId: member.cooperativeId,
         },
       });
+      payoutId = payout.id;
     } catch (err: any) {
       if (err?.code === "P2002") {
         // Lost the race with a concurrent identical payout — treat as duplicate.
@@ -193,7 +199,13 @@ async function payOut(
       opts.successMessage ??
       `✅ ${formatBalance(opts.amount)} sent to your bank account (${opts.bankName ?? opts.bankCode} ****${opts.bankAccountNumber.slice(-4)}). Ref: ${reference.slice(-6)}.`;
     await notify(member, msg);
-    return { ok: true, status: "successful", message: msg };
+    return {
+      ok: true,
+      status: "successful",
+      message: msg,
+      verifiedName: verifiedName ?? undefined,
+      payoutId,
+    };
   } catch (err: any) {
     if (submitted) {
       // The provider accepted the transfer but a later bookkeeping step failed.
