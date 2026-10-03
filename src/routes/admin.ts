@@ -1,5 +1,6 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
+import { withCoopContext, resolveCoopByPhone } from "../lib/tenant-context.js";
 import { verifyPin } from "../lib/security.js";
 import { checkRateLimit } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
@@ -46,6 +47,22 @@ async function checkLoginRateLimit(
   return { allowed: true };
 }
 
+/**
+ * Wrap an authenticated admin route handler so it runs inside the admin's
+ * cooperative RLS context. The preHandler auth hook has already resolved
+ * `req.adminCoopId` from the live DB row; every query in the handler is then
+ * scoped to that cooperative (no-op on SQLite).
+ */
+function withTenant(
+  handler: (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>,
+): (req: FastifyRequest, reply: FastifyReply) => Promise<unknown> {
+  return async (req, reply) => {
+    const coopId = req.adminCoopId;
+    if (!coopId) return handler(req, reply);
+    return withCoopContext(coopId, () => handler(req, reply));
+  };
+}
+
 export async function adminApiRoutes(app: FastifyInstance) {
   app.post("/api/admin/login", async (req, reply) => {
     const body = req.body as { phone?: string; pin?: string };
@@ -65,10 +82,18 @@ export async function adminApiRoutes(app: FastifyInstance) {
     if (!phone || !pin) {
       return reply.code(400).send({ error: "phone and pin required" });
     }
-    const member = await prisma.member.findFirst({
-      where: { phone, role: { in: ["admin", "superadmin"] } },
-      include: { cooperative: true },
-    });
+    // Resolve the cooperative BEFORE reading the RLS-protected Member table
+    // (the SECURITY DEFINER resolver bypasses RLS). Ambiguous/unknown phone ->
+    // null -> invalid credentials (fail-closed).
+    const loginCoopId = await resolveCoopByPhone(phone);
+    const member = loginCoopId
+      ? await withCoopContext(loginCoopId, () =>
+          prisma.member.findFirst({
+            where: { phone, role: { in: ["admin", "superadmin"] } },
+            include: { cooperative: true },
+          }),
+        )
+      : null;
     if (!member || !member.pin || !verifyPin(pin, member.pin)) {
       // Record suspicious event for auto-freeze (playbook Attack 8)
       if (member) {
@@ -154,11 +179,6 @@ export async function adminApiRoutes(app: FastifyInstance) {
     req.adminPhone = live.phone;
     req.adminCoopId = live.cooperativeId;
     req.adminRole = live.role;
-
-    // Set PostgreSQL session variable for Row-Level Security (RLS).
-    // This ensures all subsequent queries in this request are scoped to
-    // the admin's cooperative, enforcing tenant isolation at the database level.
-    await prisma.$executeRaw`SELECT set_config('app.current_cooperative_id', ${live.cooperativeId}, false)`;
   });
 
   app.post("/api/admin/logout", async (req, reply) => {
@@ -170,7 +190,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     return reply.code(200).send({ ok: true });
   });
 
-  app.get("/api/admin/overview", async (req) => {
+  app.get("/api/admin/overview", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     const [memberCount, contributions, contributionAgg, loans, walletAgg, payoutAgg] =
       await Promise.all([
@@ -198,9 +218,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       walletBalance: walletAgg._sum.balance ?? 0,
       payoutCount: payoutAgg,
     };
-  });
+  }));
 
-  app.get("/api/admin/members", async (req) => {
+  app.get("/api/admin/members", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     const query = req.query as { page?: string; limit?: string };
     const page = Math.max(1, Number(query.page ?? 1));
@@ -228,10 +248,10 @@ export async function adminApiRoutes(app: FastifyInstance) {
       prisma.member.count({ where: { cooperativeId: coopId } }),
     ]);
     return { members, total, page, limit, totalPages: Math.ceil(total / limit) };
-  });
+  }));
 
   // Send a broadcast / individual message to members via their messaging channel.
-  app.post("/api/admin/messages/send", async (req, reply) => {
+  app.post("/api/admin/messages/send", withTenant(async (req, reply) => {
     const coopId = req.adminCoopId!;
     const actorPhone = req.adminPhone!;
     const actorRole = req.adminRole ?? "admin";
@@ -334,9 +354,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       failed,
       failures,
     };
-  });
+  }));
 
-  app.get("/api/admin/loans", async (req) => {
+  app.get("/api/admin/loans", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     const status = (req.query as { status?: string }).status;
     return prisma.loan.findMany({
@@ -349,9 +369,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 200,
     });
-  });
+  }));
 
-  app.post("/api/admin/loans/:id/approve", async (req, reply) => {
+  app.post("/api/admin/loans/:id/approve", withTenant(async (req, reply) => {
     const coopId = req.adminCoopId!;
     const phone = req.adminPhone!;
     const { id } = req.params as { id: string };
@@ -377,18 +397,18 @@ export async function adminApiRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: result.message });
     }
     return { ok: true, message: result.message };
-  });
+  }));
 
-  app.post("/api/admin/loans/:id/reject", async (req, reply) => {
+  app.post("/api/admin/loans/:id/reject", withTenant(async (req, reply) => {
     const coopId = req.adminCoopId!;
     const { id } = req.params as { id: string };
     const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
     if (!loan) return reply.code(404).send({ error: "loan not found" });
     if (loan.status !== "pending") return reply.code(400).send({ error: `loan is ${loan.status}` });
     return prisma.loan.update({ where: { id }, data: { status: "rejected" } });
-  });
+  }));
 
-  app.get("/api/admin/payouts", async (req) => {
+  app.get("/api/admin/payouts", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     return prisma.payout.findMany({
       where: { cooperativeId: coopId },
@@ -396,9 +416,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 100,
     });
-  });
+  }));
 
-  app.get("/api/admin/contributions", async (req) => {
+  app.get("/api/admin/contributions", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     return prisma.contribution.findMany({
       where: { cooperativeId: coopId },
@@ -406,9 +426,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 200,
     });
-  });
+  }));
 
-  app.get("/api/admin/annualreport/:year", async (req) => {
+  app.get("/api/admin/annualreport/:year", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     const year = Number((req.params as { year: string }).year);
     const reportYear = Number.isFinite(year) && year > 2000 ? year : new Date().getFullYear();
@@ -486,9 +506,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       dividends: { total: totalDividends, perMember, count: dividendAgg._count },
       walletBalance: walletAgg._sum.balance ?? 0,
     };
-  });
+  }));
 
-  app.get("/api/admin/withdrawals", async (req) => {
+  app.get("/api/admin/withdrawals", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     return prisma.withdrawalRequest.findMany({
       where: { cooperativeId: coopId },
@@ -496,9 +516,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 100,
     });
-  });
+  }));
 
-  app.get("/api/admin/polls", async (req) => {
+  app.get("/api/admin/polls", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     return prisma.purchasePoll.findMany({
       where: { cooperativeId: coopId },
@@ -512,11 +532,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 20,
     });
-  });
+  }));
 
   // ---- Compliance (PL/AML): STR + PAYE ----
 
-  app.get("/api/admin/compliance/str", async (req) => {
+  app.get("/api/admin/compliance/str", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     return prisma.sTR.findMany({
       where: { cooperativeId: coopId },
@@ -524,9 +544,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 200,
     });
-  });
+  }));
 
-  app.get("/api/admin/compliance/paye", async (req) => {
+  app.get("/api/admin/compliance/paye", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     return prisma.pAYERecord.findMany({
       where: { cooperativeId: coopId },
@@ -534,9 +554,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: [{ year: "desc" }, { month: "desc" }],
       take: 500,
     });
-  });
+  }));
 
-  app.post("/api/admin/compliance/export/:kind", async (req, reply) => {
+  app.post("/api/admin/compliance/export/:kind", withTenant(async (req, reply) => {
     const coopId = req.adminCoopId!;
     const kind = (req.params as { kind: string }).kind;
     if (kind !== "str" && kind !== "paye") {
@@ -546,11 +566,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const result = await runComplianceExport(coopId, kind);
     if (!result.ok) return reply.code(400).send({ error: result.message });
     return { ok: true, message: result.message, files: result.files ?? [] };
-  });
+  }));
 
   // ---- Bulk member import ----
 
-  app.post("/api/admin/members/import", async (req, reply) => {
+  app.post("/api/admin/members/import", withTenant(async (req, reply) => {
     const coopId = req.adminCoopId!;
     const phone = req.adminPhone!;
     const actorRole = req.adminRole ?? "admin";
@@ -600,11 +620,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
     });
 
     return result;
-  });
+  }));
 
   // ---- Grievances (member complaints) ----
 
-  app.get("/api/admin/grievances", async (req) => {
+  app.get("/api/admin/grievances", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     return prisma.grievance.findMany({
       where: { cooperativeId: coopId },
@@ -615,9 +635,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 200,
     });
-  });
+  }));
 
-  app.post("/api/admin/grievances/:id/resolve", async (req, reply) => {
+  app.post("/api/admin/grievances/:id/resolve", withTenant(async (req, reply) => {
     const coopId = req.adminCoopId!;
     const phone = req.adminPhone!;
     const { id } = req.params as { id: string };
@@ -668,11 +688,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
       ok: true,
       message: `Grievance *${grievance.id.slice(-6)}* resolved. ${grievance.member.name} notified.`,
     };
-  });
+  }));
 
   // ---- Support Tickets ----
 
-  app.get("/api/admin/tickets", async (req) => {
+  app.get("/api/admin/tickets", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     const status = (req.query as { status?: string }).status;
     return prisma.supportTicket.findMany({
@@ -684,9 +704,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 200,
     });
-  });
+  }));
 
-  app.post("/api/admin/tickets/:id/resolve", async (req, reply) => {
+  app.post("/api/admin/tickets/:id/resolve", withTenant(async (req, reply) => {
     const coopId = req.adminCoopId!;
     const phone = req.adminPhone!;
     const { id } = req.params as { id: string };
@@ -737,11 +757,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
       ok: true,
       message: `Ticket *${ticket.id.slice(-6)}* resolved. ${ticket.member.name} notified.`,
     };
-  });
+  }));
 
   // ---- Executive Posts (organogram) ----
 
-  app.get("/api/admin/posts", async (req) => {
+  app.get("/api/admin/posts", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     return prisma.coopPost.findMany({
       where: { cooperativeId: coopId },
@@ -750,9 +770,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       },
       orderBy: { title: "asc" },
     });
-  });
+  }));
 
-  app.post("/api/admin/posts", async (req, reply) => {
+  app.post("/api/admin/posts", withTenant(async (req, reply) => {
     const superAuth = await requireSuper(req);
     if (!superAuth.ok)
       return reply.code(403).send({ error: "Only the super admin can create posts." });
@@ -789,9 +809,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
     });
 
     return { ok: true, message: `Post "${normalizeTitle(title)}" created.` };
-  });
+  }));
 
-  app.post("/api/admin/posts/:id/assign", async (req, reply) => {
+  app.post("/api/admin/posts/:id/assign", withTenant(async (req, reply) => {
     const superAuth = await requireSuper(req);
     if (!superAuth.ok)
       return reply.code(403).send({ error: "Only the super admin can assign posts." });
@@ -839,17 +859,17 @@ export async function adminApiRoutes(app: FastifyInstance) {
         ? `"${post.title}" assigned to ${memberName}.`
         : `"${post.title}" is now vacant.`,
     };
-  });
+  }));
 
   // ---- Payroll ----
 
-  app.get("/api/admin/payroll", async (req) => {
+  app.get("/api/admin/payroll", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     const { payrollOverview } = await import("../services/payroll.js");
     return { participants: await payrollOverview(coopId) };
-  });
+  }));
 
-  app.post("/api/admin/payroll/set", async (req, reply) => {
+  app.post("/api/admin/payroll/set", withTenant(async (req, reply) => {
     const superAuth = await requireSuper(req);
     if (!superAuth.ok)
       return reply.code(403).send({ error: "Only the super admin can set salaries." });
@@ -875,9 +895,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
     );
     if (!result.ok) return reply.code(400).send({ error: result.message });
     return { ok: true, message: result.message };
-  });
+  }));
 
-  app.post("/api/admin/payroll/run", async (req, reply) => {
+  app.post("/api/admin/payroll/run", withTenant(async (req, reply) => {
     const superAuth = await requireSuper(req);
     if (!superAuth.ok)
       return reply.code(403).send({ error: "Only the super admin can run payroll." });
@@ -903,9 +923,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
       paid: result.paid ?? 0,
       total: result.total ?? 0,
     };
-  });
+  }));
 
-  app.get("/api/admin/payroll/history", async (req) => {
+  app.get("/api/admin/payroll/history", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     const [paye, ledger] = await Promise.all([
       prisma.pAYERecord.findMany({
@@ -921,11 +941,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
       }),
     ]);
     return { paye, ledger };
-  });
+  }));
 
   // ---- Reserves / Funds ----
 
-  app.get("/api/admin/funds", async (req) => {
+  app.get("/api/admin/funds", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     const [coop, reserve, education, development] = await Promise.all([
       prisma.cooperative.findUnique({
@@ -957,11 +977,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
       education: education,
       development: development,
     };
-  });
+  }));
 
   // ---- Elections (management) ----
 
-  app.get("/api/admin/votes", async (req) => {
+  app.get("/api/admin/votes", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     return prisma.vote.findMany({
       where: { cooperativeId: coopId },
@@ -977,7 +997,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
       orderBy: { createdAt: "desc" },
       take: 50,
     });
-  });
+  }));
 
   async function requireSuper(req: {
     adminCoopId?: string;
@@ -991,7 +1011,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     return { ok: true, actorId: actor.id, phone };
   }
 
-  app.post("/api/admin/funds/reserve/allocate", async (req, reply) => {
+  app.post("/api/admin/funds/reserve/allocate", withTenant(async (req, reply) => {
     const superAuth = await requireSuper(req);
     if (!superAuth.ok)
       return reply
@@ -1038,11 +1058,11 @@ export async function adminApiRoutes(app: FastifyInstance) {
     });
 
     return { ok: true, message: "Reserve fund allocation recorded and balance updated." };
-  });
+  }));
 
   // ---- Elections (management) ----
 
-  app.post("/api/admin/votes/start", async (req, reply) => {
+  app.post("/api/admin/votes/start", withTenant(async (req, reply) => {
     const superAuth = await requireSuper(req);
     if (!superAuth.ok)
       return reply.code(403).send({ error: "Only the super admin can start an election." });
@@ -1051,9 +1071,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const result = await startVote(superAuth.phone!, body.kind ?? "", body.scope, body.title ?? "");
     if (!result.ok) return reply.code(400).send({ error: result.message });
     return { ok: true, message: result.message, voteId: result.voteId };
-  });
+  }));
 
-  app.post("/api/admin/votes/:id/candidate", async (req, reply) => {
+  app.post("/api/admin/votes/:id/candidate", withTenant(async (req, reply) => {
     const superAuth = await requireSuper(req);
     if (!superAuth.ok)
       return reply.code(403).send({ error: "Only the super admin can add candidates." });
@@ -1064,9 +1084,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const result = await addCandidate(superAuth.phone!, id, body.memberCode);
     if (!result.ok) return reply.code(400).send({ error: result.message });
     return { ok: true, message: result.message };
-  });
+  }));
 
-  app.post("/api/admin/votes/:id/close", async (req, reply) => {
+  app.post("/api/admin/votes/:id/close", withTenant(async (req, reply) => {
     const superAuth = await requireSuper(req);
     if (!superAuth.ok)
       return reply.code(403).send({ error: "Only the super admin can close an election." });
@@ -1075,9 +1095,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const result = await closeVote(superAuth.phone!, id);
     if (!result.ok) return reply.code(400).send({ error: result.message });
     return { ok: true, message: result.message };
-  });
+  }));
 
-  app.get("/api/admin/votes/:id/results", async (req, reply) => {
+  app.get("/api/admin/votes/:id/results", withTenant(async (req, reply) => {
     const coopId = req.adminCoopId!;
     const phone = req.adminPhone!;
     const { id } = req.params as { id: string };
@@ -1090,9 +1110,9 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const result = await showLiveResults(phone, id);
     if (!result.ok) return reply.code(400).send({ error: result.message });
     return { ok: true, results: result.message };
-  });
+  }));
 
-  app.post("/api/admin/votes/:id/export-pdf", async (req, reply) => {
+  app.post("/api/admin/votes/:id/export-pdf", withTenant(async (req, reply) => {
     const superAuth = await requireSuper(req);
     if (!superAuth.ok)
       return reply.code(403).send({ error: "Only the super admin can export results." });
@@ -1102,5 +1122,5 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const result = await exportElectionPdf(coopId, id);
     if (!result.ok) return reply.code(400).send({ error: result.message });
     return { ok: true, message: result.message, files: result.file ? [result.file] : [] };
-  });
+  }));
 }
