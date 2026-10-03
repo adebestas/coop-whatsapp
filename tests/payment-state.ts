@@ -13,4 +13,7 @@ export const paymentState = {
   resolveFails: false,
   /** When true the payout attempt fails. */
   payoutFails: false,
+  /** When true the provider accepted the transfer but it is not yet confirmed
+   *  (e.g. Monnify awaiting OTP authorization) — must map to "unsure". */
+  payoutPending: false,
 };

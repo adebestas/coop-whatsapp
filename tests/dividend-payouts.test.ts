@@ -58,6 +58,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   paymentState.resolveFails = false;
   paymentState.payoutFails = false;
+  paymentState.payoutPending = false;
 });
 
 // Leave no Payout/DividendEntry rows behind for the next file's manual cleanup
@@ -289,6 +290,34 @@ describe("dividend direct-to-bank distribution", () => {
     const entries = await prisma.dividendEntry.findMany();
     expect(entries).toHaveLength(1);
     expect(entries[0].status).toBe("settled");
+  });
+
+  it("treats an initiated-but-unconfirmed transfer as 'unsure' and never reverses it", async () => {
+    const coop = await makeCoop("DIV8");
+    const admin = await makeMember(coop.id, { role: "superadmin" });
+    const member = await makeMember(coop.id, { totalSaved: 100_000 });
+    paymentState.resolveName = member.name;
+    await seedProfit(coop.id, 1_000_000);
+
+    // Monnify accepted the transfer but is awaiting OTP authorization.
+    paymentState.payoutPending = true;
+
+    const result = await distributeDividend(admin.phone, 20);
+    expect(result.ok).toBe(true);
+    expect(result.settled).toBe(0);
+    expect(result.failed).toBe(0); // ambiguous — NOT a confirmed failure
+
+    const entry = await prisma.dividendEntry.findFirstOrThrow({
+      where: { dividendId: result.dividendId! },
+    });
+    expect(entry.status).toBe("processing"); // left open for webhook/reconciliation
+
+    // No reversal journal was posted.
+    const rev = await prisma.journalEntry.findUnique({
+      where: { txRef: `DIV-REV-${result.dividendId}-${member.id}` },
+    });
+    expect(rev).toBeNull();
+    expect((await trialBalance(coop.id)).balanced).toBe(true);
   });
 
   it("reduces the journal-derived bank float by the amount paid", async () => {

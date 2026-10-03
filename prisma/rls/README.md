@@ -16,10 +16,12 @@ entire app.
 
 ## Activation sequence (each step is a separate, revertible change)
 
-1. **Centralize a tenant query helper.** Add a `withCoopContext(cooperativeId, fn)`
-   that opens `prisma.$transaction` and issues
-   `SELECT set_config('app.current_cooperative_id', $coop, true)` as its first
-   statement. Route every service/scheduler/webhook read+write through it.
+1. **Centralize a tenant query helper.** ✅ DONE — `src/lib/tenant-context.ts`
+   exposes `withCoopContext(cooperativeId, fn)` and `setCoopContext(tx, coopId)`
+   (transaction-local `set_config(..., true)`, no-op on SQLite). The dividend
+   engine already runs its write transaction through `setCoopContext`
+   (`src/services/dividends.ts`). Remaining: route the other service/scheduler/
+   webhook read+write paths through it.
 2. **Apply the migration** by copying `recommended_policies.sql` into a new
    `prisma/migrations/<timestamp>_rls/migration.sql` and running
    `npm run prisma:generate && node scripts/db-migrate.mjs` against staging

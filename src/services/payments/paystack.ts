@@ -223,12 +223,14 @@ export const paystackAdapter: ProviderAdapter = {
     const parsed = PaystackTransferSchema.safeParse(body);
     if (!parsed.success) return null;
     const event = parsed.data.event.toLowerCase();
-    const status: PayoutNotification["status"] | null =
-      event === "transfer.success"
-        ? "successful"
-        : event === "transfer.failed" || event === "transfer.reversed"
-          ? "failed"
-          : null;
+    // Tolerate naming drift across API versions: transfer.success /
+    // transfer.successful, transfer.failed / transfer.reversed.
+    if (!event.includes("transfer")) return null;
+    const status: PayoutNotification["status"] | null = event.includes("success")
+      ? "successful"
+      : event.includes("fail") || event.includes("revers")
+        ? "failed"
+        : null;
     if (!status) return null;
     return {
       reference: parsed.data.data.reference,

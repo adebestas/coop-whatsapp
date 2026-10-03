@@ -68,6 +68,7 @@ const MonnifyDisbursementSchema = z
     eventData: z
       .object({
         reference: z.string().optional(),
+        paymentReference: z.string().optional(),
         providerReference: z.string().optional(),
         status: z.string().optional(),
       })
@@ -165,14 +166,16 @@ export const monnifyAdapter: ProviderAdapter = {
     if (!parsed.success) return null;
     const b = parsed.data;
     const eventType = String(b.eventType ?? b.type ?? "").toUpperCase();
-    const status: PayoutNotification["status"] | null =
-      eventType.includes("SUCCESSFUL_DISBURSEMENT") || eventType.includes("DISBURSEMENT_SUCCESS")
-        ? "successful"
-        : eventType.includes("FAILED_DISBURSEMENT") || eventType.includes("REVERSED_DISBURSEMENT")
-          ? "failed"
-          : null;
+    // Only disbursement (payout) events; tolerate DISBURSEMENT_SUCCESS /
+    // SUCCESSFUL_DISBURSEMENT / FAILED_DISBURSEMENT naming drift.
+    if (!eventType.includes("DISBURSEMENT")) return null;
+    const status: PayoutNotification["status"] | null = eventType.includes("SUCCESS")
+      ? "successful"
+      : eventType.includes("FAIL") || eventType.includes("REVERS")
+        ? "failed"
+        : null;
     if (!status) return null;
-    const reference = b.eventData?.reference;
+    const reference = b.eventData?.reference ?? b.eventData?.paymentReference;
     if (!reference) return null;
     return {
       reference,
@@ -257,6 +260,10 @@ export const monnifyAdapter: ProviderAdapter = {
 
   async payout(params: PayoutParams): Promise<PayoutResult> {
     if (!configured()) return { ok: false, error: "Monnify is not configured" };
+    // Once the transfer is INITIATED, any later uncertainty must be reported as
+    // `pending` (ambiguous), never as a clean failure — Monnify may already be
+    // holding the transfer awaiting authorization.
+    let initiated = false;
     try {
       // Step 1: initiate the transfer (2FA required).
       const init = await api<
@@ -276,23 +283,27 @@ export const monnifyAdapter: ProviderAdapter = {
         coin: "NGN",
       });
       if (!init.requestSuccessful) {
+        // Hard decline by Monnify — no transfer was accepted. Safe as failed.
         return { ok: false, error: init.responseMessage ?? "transfer rejected" };
       }
+      initiated = true;
 
-      // Step 2: Complete transfer with OTP
-      // ⚠️ PRODUCTION LIMITATION: Monnify generates a NEW OTP per transfer,
-      // sent to the account holder via SMS/email from Monnify directly.
-      // This env-var approach only works in sandbox. For production, use one of:
-      //   1. Monnify's "business factor" API for programmatic OTP retrieval
-      //   2. Route OTP to admin via WhatsApp for manual entry
-      //   3. Use Monnify's "resend OTP" endpoint to trigger re-delivery
-      //   4. Contact Monnify support to enable "auto-approve" for your contract
+      // Step 2: Complete transfer with OTP.
+      // ⚠️ PRODUCTION LIMITATION: Monnify issues a NEW OTP per transfer. The
+      // static-env approach only works in sandbox or on contracts with
+      // auto-approve. Without an OTP we CANNOT complete here, but the transfer
+      // is already initiated — report `pending` so the caller flags it for
+      // reconciliation instead of refunding a possibly in-flight transfer.
       const otp = process.env.MONNIFY_TRANSFER_OTP;
       if (!otp) {
-        console.warn("[Monnify] MONNIFY_TRANSFER_OTP not set — transfers will fail in production");
+        console.warn(
+          "[Monnify] transfer initiated but MONNIFY_TRANSFER_OTP not set — flagged as pending",
+        );
         return {
           ok: false,
-          error: "Monnify OTP not configured. Set MONNIFY_TRANSFER_OTP environment variable.",
+          pending: true,
+          error:
+            "Monnify transfer requires authorization (OTP). Configure an auto-approve contract, a business-factor OTP source, or authorized OTP relay.",
         };
       }
 
@@ -301,12 +312,27 @@ export const monnifyAdapter: ProviderAdapter = {
         "/api/v2/disbursements/single/complete",
         { reference: init.responseBody.transferReference, authorizationCode: otp },
       );
-      if (!validate.requestSuccessful || validate.responseBody.status === "FAILED") {
+      if (!validate.requestSuccessful) {
+        // Completion could not be confirmed — treat as ambiguous.
+        return {
+          ok: false,
+          pending: true,
+          error: validate.responseMessage ?? "transfer authorization unconfirmed",
+        };
+      }
+      if (validate.responseBody.status === "FAILED") {
+        // Monnify explicitly reports failure — safe as failed.
         return { ok: false, error: validate.responseMessage ?? "transfer validation failed" };
       }
       return { ok: true, providerRef: init.responseBody.reference };
     } catch (err: any) {
-      return { ok: false, error: err?.message ?? "monnify payout failed" };
+      // If the transfer was already initiated, an exception (network/timeout)
+      // leaves its outcome unknown — report `pending`, not failed.
+      return {
+        ok: false,
+        pending: initiated,
+        error: err?.message ?? "monnify payout failed",
+      };
     }
   },
 };

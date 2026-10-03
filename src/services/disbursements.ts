@@ -129,6 +129,15 @@ async function payOut(
         reference,
       });
       if (!result.ok) {
+        if (result.pending) {
+          // The provider ACCEPTED the transfer but it is not confirmed yet
+          // (e.g. Monnify awaiting a per-transfer OTP). This is ambiguous — do
+          // NOT mark it failed or refund/reverse; flag for reconciliation.
+          const msg = `⚠️ The payout was initiated but is awaiting provider authorization (${result.error ?? "pending"}). Do not retry or refund until it is confirmed.`;
+          await opts.onFailure?.("unsure", result.error ?? "pending authorization");
+          await notify(member, msg);
+          return { ok: false, status: "unsure", message: msg };
+        }
         // Provider explicitly declined — transfer not accepted. Safe to refund.
         markProviderDown(provider.name);
         const msg = `Not paid out: provider error (${result.error ?? "unknown"}). No money moved.`;

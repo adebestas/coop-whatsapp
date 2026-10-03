@@ -66,7 +66,9 @@ vi.mock("../src/services/payments/index.js", async (importOriginal) => {
       payout: vi.fn(async () =>
         paymentState.payoutFails
           ? { ok: false, error: "insufficient balance" }
-          : { ok: true, providerRef: "trx-1" },
+          : paymentState.payoutPending
+            ? { ok: false, pending: true, error: "awaiting authorization" }
+            : { ok: true, providerRef: "trx-1" },
       ),
       resolveAccount: vi.fn(async () =>
         paymentState.resolveFails
@@ -193,7 +195,13 @@ export async function createTestMember(
     update: { role, name, consentAt: new Date() },
   });
 
-  return { id: member.id, phone: member.phone, code: member.code, name: member.name, role: member.role };
+  return {
+    id: member.id,
+    phone: member.phone,
+    code: member.code,
+    name: member.name,
+    role: member.role,
+  };
 }
 
 // ===== Database Helpers =====

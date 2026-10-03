@@ -68,6 +68,13 @@ export interface PayoutResult {
   ok: boolean;
   providerRef?: string;
   error?: string;
+  /**
+   * True when the provider ACCEPTED the transfer but it is not yet confirmed
+   * (e.g. Monnify awaiting a per-transfer OTP). Callers must treat this as an
+   * ambiguous "unsure" outcome — never as a confirmed failure — so they do not
+   * refund/reverse money that may already be in flight.
+   */
+  pending?: boolean;
 }
 
 export interface ResolveAccountParams {

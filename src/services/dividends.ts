@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { computePnl } from "./ledger.js";
 import { postJournal, getBankAccountBalance } from "./journal.js";
+import { setCoopContext } from "../lib/tenant-context.js";
 import { sendToBank } from "./disbursements.js";
 import { roundMoney } from "./money.js";
 import { updateCoopConfig } from "./coop-config.js";
@@ -406,6 +407,9 @@ export async function distributeDividend(phone: string, rate: number): Promise<D
   // SAGA STEP 1 — ATOMIC DB CLAIM + BALANCED JOURNALS. NO network call here.
   // =====================================================================
   const dividend = await prisma.$transaction(async (tx) => {
+    // Scope the transaction to this cooperative's RLS context. No-op on SQLite;
+    // with the RLS policies applied this restricts every query below.
+    await setCoopContext(tx as never, admin.cooperativeId);
     const d = await tx.dividend.create({
       data: {
         cooperativeId: admin.cooperativeId,
