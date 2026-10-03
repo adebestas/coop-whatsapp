@@ -83,6 +83,26 @@
   };
 
   // ---- API helper ----
+  async function tryRefresh() {
+    const token = getToken();
+    if (!token) return false;
+    try {
+      const res = await fetch(`${API_BASE}/refresh`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'X-Requested-With': 'XMLHttpRequest' },
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (data.token) {
+        localStorage.setItem(STORAGE_TOKEN, data.token);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   async function api(path, opts = {}) {
     const token = getToken();
     const headers = { ...(opts.headers || {}) };
@@ -97,7 +117,12 @@
     }
     showLoader();
     try {
-      const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+      let res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+      // Access token expired mid-session: refresh once and retry the request.
+      if (res.status === 401 && path !== '/refresh' && (await tryRefresh())) {
+        headers['Authorization'] = `Bearer ${getToken()}`;
+        res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+      }
       if (res.status === 401) {
         localStorage.removeItem(STORAGE_TOKEN);
         localStorage.removeItem(STORAGE_MEMBER);
@@ -111,6 +136,9 @@
       hideLoader();
     }
   }
+
+  // Keep an active session alive: refresh the short-lived token periodically.
+  setInterval(() => { tryRefresh(); }, 30 * 60 * 1000);
 
   // ---- Theme ----
   window.toggleTheme = function () {

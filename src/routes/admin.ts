@@ -191,6 +191,14 @@ export async function adminApiRoutes(app: FastifyInstance) {
     return reply.code(200).send({ ok: true });
   });
 
+  // Mint a fresh access token from a still-valid one. The preHandler has already
+  // verified the current token and re-checked the live role/status, so this only
+  // extends an active session — it cannot resurrect an expired or revoked one.
+  app.post("/api/admin/refresh", async (req) => {
+    const token = sign(req.adminPhone!, req.adminCoopId!, req.adminRole!);
+    return { token };
+  });
+
   app.get("/api/admin/overview", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     const [memberCount, contributions, contributionAgg, loans, walletAgg, payoutAgg] =

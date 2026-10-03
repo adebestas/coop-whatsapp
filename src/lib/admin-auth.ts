@@ -14,7 +14,7 @@ import { getRedis } from "./cache.js";
  * The `iat` lives inside the signed payload (not a separate part).
  */
 
-export const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
+export const TOKEN_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours (short-lived; refreshed while active)
 const TOKEN_BLACKLIST_PREFIX = "admin:token:blacklist:";
 const TOKEN_BLACKLIST_TTL_SECONDS = Math.ceil(TOKEN_TTL_MS / 1000);
 
