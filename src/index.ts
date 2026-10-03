@@ -24,6 +24,7 @@ import { closeQueues, initQueueProcessors } from "./lib/queue.js";
 import { initRedis, closeRedis, isRedisConnected, withDistributedLock } from "./lib/cache.js";
 import { AlertSeverity, logAndAlert } from "./lib/alerting.js";
 import { log } from "./lib/logger.js";
+import { rlsEnforcementStatus } from "./lib/tenant-context.js";
 
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
@@ -103,6 +104,25 @@ async function main() {
     log.warn("Redis URL set but not connected — will retry in background");
   } else {
     log.warn("Redis not configured — running without cache");
+  }
+
+  // RLS canary: make a half-finished cutover visible instead of assumed.
+  try {
+    const rls = await rlsEnforcementStatus();
+    if (rls.postgres) {
+      if (rls.enforced) {
+        log.info("RLS enforced for the current role", { policies: rls.policies });
+      } else {
+        log.warn(
+          "RLS policies present but NOT enforced for the current role (table-owner bypass) — tenant isolation is not active",
+          { policies: rls.policies },
+        );
+      }
+    }
+  } catch (err) {
+    log.warn("RLS enforcement check failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   try {

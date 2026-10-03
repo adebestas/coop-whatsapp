@@ -117,3 +117,37 @@ export async function resolveCoopsByPhone(phone: string): Promise<CoopChoice[]> 
     SELECT id, name, code FROM app.resolve_coops_by_phone(${phone})
   `;
 }
+
+/**
+ * Report whether RLS is actually ENFORCED for the current database role.
+ *
+ * "Policies exist" is not the same as "isolation is enforced": the table owner
+ * bypasses RLS unless FORCE is set, and a non-owner is restricted by ENABLE
+ * alone. Call this at startup so a half-finished cutover is visible in the logs
+ * instead of silently assumed.
+ */
+export async function rlsEnforcementStatus(): Promise<{
+  postgres: boolean;
+  policies: number;
+  enforced: boolean;
+}> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) return { postgres: false, policies: 0, enforced: false };
+
+  const rows = await prisma.$queryRaw<
+    { policies: bigint; owner_bypass: boolean; forced: boolean }[]
+  >`
+    SELECT
+      (SELECT count(*) FROM pg_policies WHERE schemaname = 'public') AS policies,
+      (SELECT bool_or(c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user))
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relname = 'Member') AS owner_bypass,
+      (SELECT bool_or(c.relforcerowsecurity)
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relname = 'Member') AS forced
+  `;
+  const policies = Number(rows[0]?.policies ?? 0);
+  const ownerBypass = rows[0]?.owner_bypass ?? false;
+  const forced = rows[0]?.forced ?? false;
+  return { postgres: true, policies, enforced: policies > 0 && (!ownerBypass || forced) };
+}

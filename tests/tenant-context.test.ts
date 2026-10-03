@@ -6,6 +6,7 @@ import {
   resolveCoopByAltChannel,
   resolveCoopsByPhone,
   withCoopContext,
+  rlsEnforcementStatus,
 } from "../src/lib/tenant-context.js";
 import { withDeferredSends, enqueueDeferredSend } from "../src/lib/deferred.js";
 
@@ -67,6 +68,12 @@ describe("tenant-context resolvers (SQLite fallback)", () => {
     expect(coops.every((c) => c.name.length > 0 && c.code.length > 0)).toBe(true);
 
     expect(await resolveCoopsByPhone("2348000000000")).toEqual([]);
+  });
+
+  it("reports RLS as not enforced on SQLite", async () => {
+    const status = await rlsEnforcementStatus();
+    expect(status.postgres).toBe(false);
+    expect(status.enforced).toBe(false);
   });
 
   it("withCoopContext runs the callback and returns its value (GUC is a no-op on SQLite)", async () => {

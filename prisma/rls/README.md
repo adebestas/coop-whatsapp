@@ -47,13 +47,18 @@ queries in that context — flipping FORCE on today would silently blank the app
    (`resolveCoopByPhone` / `resolveCoopByAltChannel`), with a direct-query
    fallback on SQLite. This is what lets the app discover the tenant before it
    can set the GUC.
-4. **Route every tenant query through the helper** (in progress). The chat entry
-   point (`handleMessage`) now resolves the sender's cooperative and runs the
-   whole handler inside `withCoopContext`; services keep using the global
-   `prisma` proxy, which routes to the transaction. Remaining entry points:
-   admin routes, schedulers, webhook processors, and the join flow (which must
-   resolve its cooperative from the code it is given). Until this is complete,
-   the app must keep connecting as the table owner.
+4. **Route every tenant query through the helper** (in progress). Wired so far:
+   - **Chat** — `handleMessage` resolves the sender's cooperative and runs the
+     whole handler inside `withCoopContext`; services keep using the global
+     `prisma` proxy, which routes to the transaction. Outbound sends are
+     deferred until after the transaction commits (`src/lib/deferred.ts`), so
+     the transaction never spans network I/O.
+   - **Admin dashboard** — all 34 authenticated routes run inside `withTenant`;
+     `requireLiveAdmin` and `/api/admin/login` resolve the tenant first.
+   Remaining entry points: **schedulers**, **webhook processors** (need
+   resolvers by virtual-account number / reference), and the **join flow**
+   (must resolve its cooperative from the code it is given). Until this is
+   complete, the app must keep connecting as the table owner.
 5. **Apply Stage 2 (FORCE)** by copying `recommended_policies.sql` into a new
    `prisma/migrations/<timestamp>_rls_force/migration.sql`, and point the app at
    a **non-owner** role so enforcement actually bites.
@@ -65,6 +70,11 @@ queries in that context — flipping FORCE on today would silently blank the app
    previous version connected as the owner and could never pass.)
 7. **Audit fail-closed behavior** with the "no context" test (last case in the
    RLS suite) to confirm cross-tenant reads return zero rows.
+8. **Canary.** ✅ DONE — `rlsEnforcementStatus()` (called at startup in
+   `src/index.ts`) logs whether RLS is actually enforced for the current role.
+   "Policies exist" is not the same as "isolation is enforced": the table owner
+   bypasses RLS unless FORCE is set. The canary makes a half-finished cutover
+   visible in the logs instead of silently assumed.
 
 ## Notes / pitfalls
 
