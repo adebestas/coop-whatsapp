@@ -413,6 +413,20 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: Cross-cooperative isolation at
     await clearCoopContext();
   });
 
+  it("resolves a cooperative by phone via the SECURITY DEFINER resolver", async () => {
+    // The resolver bypasses RLS by design, so it works with no GUC set — this
+    // is what lets the app discover the tenant before it can set the context.
+    const unique = await prisma.$queryRaw<{ coop: string | null }[]>`
+      SELECT app.resolve_coop_by_phone(${memberA.phone}) AS coop
+    `;
+    expect(unique[0].coop).toBe(coopA.id);
+
+    const unknown = await prisma.$queryRaw<{ coop: string | null }[]>`
+      SELECT app.resolve_coop_by_phone('0000000000') AS coop
+    `;
+    expect(unknown[0].coop).toBeNull();
+  });
+
   it("fails closed when session variable is not set (no rows visible)", async () => {
     await clearCoopContext();
 

@@ -39,14 +39,24 @@ queries in that context — flipping FORCE on today would silently blank the app
    webhook read+write paths through it.
 2. **Apply the Stage 1 migration.** ✅ DONE — `prisma/migrations/20261005000000_rls_policies/`.
    Postgres-only; a no-op on SQLite (local dev + `npm test`).
-3. **Route every tenant query through the helper** (in progress). Until this is
+3. **Solve the RLS bootstrap.** ✅ DONE — `prisma/migrations/20261006000000_rls_resolvers/`
+   adds SECURITY DEFINER functions `app.resolve_coop_by_phone(text)` and
+   `app.resolve_coop_by_alt_channel(text)`. They are owned by the table owner,
+   bypass RLS, and return **only** a cooperative id (NULL when unknown or
+   ambiguous). App-side wrappers live in `src/lib/tenant-context.ts`
+   (`resolveCoopByPhone` / `resolveCoopByAltChannel`), with a direct-query
+   fallback on SQLite. This is what lets the app discover the tenant before it
+   can set the GUC.
+4. **Route every tenant query through the helper** (in progress). Until this is
    complete, the app must keep connecting as the table owner.
-4. **Apply Stage 2 (FORCE)** by copying `recommended_policies.sql` into a new
+5. **Apply Stage 2 (FORCE)** by copying `recommended_policies.sql` into a new
    `prisma/migrations/<timestamp>_rls_force/migration.sql`, and point the app at
    a **non-owner** role so enforcement actually bites.
-5. **Enable the tests** by setting `RLS_ENABLED=1` with a Postgres `DATABASE_URL`
-   in CI; `tests/rls-isolation.test.ts` stops skipping.
-6. **Audit fail-closed behavior** with the "no context" test (last case in the
+6. **Enable the tests** by setting `RLS_ENABLED=1` with a Postgres `DATABASE_URL`
+   in CI; `tests/rls-isolation.test.ts` stops skipping. Note: the isolation
+   cases must connect as a **non-owner** role — the owner bypasses RLS even with
+   FORCE off, so a second Prisma client on the `coop_app` role is required.
+7. **Audit fail-closed behavior** with the "no context" test (last case in the
    RLS suite) to confirm cross-tenant reads return zero rows.
 
 ## Notes / pitfalls

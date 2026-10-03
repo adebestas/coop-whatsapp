@@ -34,3 +34,49 @@ export async function withCoopContext<T>(
     return fn(tx as unknown as typeof prisma);
   });
 }
+
+/**
+ * Resolve the cooperative that owns a phone number, BEFORE any RLS context is
+ * set. On Postgres this calls the SECURITY DEFINER resolver
+ * `app.resolve_coop_by_phone` (see prisma/migrations/20261006000000_rls_resolvers),
+ * which bypasses RLS. Returns null when the phone is unknown OR ambiguous
+ * (registered in more than one cooperative) — fail-closed, matching
+ * getMemberByPhone().
+ *
+ * On SQLite (local dev + `npm test`) there is no RLS, so it resolves directly.
+ */
+export async function resolveCoopByPhone(phone: string): Promise<string | null> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const rows = await prisma.member.findMany({
+      where: { phone },
+      select: { cooperativeId: true },
+      take: 2,
+    });
+    return rows.length === 1 ? rows[0].cooperativeId : null;
+  }
+  const rows = await prisma.$queryRaw<{ coop: string | null }[]>`
+    SELECT app.resolve_coop_by_phone(${phone}) AS coop
+  `;
+  return rows[0]?.coop ?? null;
+}
+
+/**
+ * Resolve the cooperative that owns an alternate channel id (e.g. a linked
+ * Telegram id). Same fail-closed semantics as resolveCoopByPhone.
+ */
+export async function resolveCoopByAltChannel(channel: string): Promise<string | null> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const rows = await prisma.member.findMany({
+      where: { altChannelId: channel },
+      select: { cooperativeId: true },
+      take: 2,
+    });
+    return rows.length === 1 ? rows[0].cooperativeId : null;
+  }
+  const rows = await prisma.$queryRaw<{ coop: string | null }[]>`
+    SELECT app.resolve_coop_by_alt_channel(${channel}) AS coop
+  `;
+  return rows[0]?.coop ?? null;
+}
