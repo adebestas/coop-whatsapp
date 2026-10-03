@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { resolveCoopByPhone, withCoopContext } from "../lib/tenant-context.js";
+import { resolveCoopsByPhone, withCoopContext } from "../lib/tenant-context.js";
 import { sendText, platformOf } from "../lib/messaging.js";
 import { MESSAGE_CONSENT_PROMPT } from "../lib/consent.js";
 import { getMemberByPhone, invalidateMemberCache } from "./cooperative.js";
@@ -238,17 +238,56 @@ export async function handleMessage(
   text: string,
   meta: MessageMeta = {},
 ): Promise<void> {
-  const coopId = await resolveCoopByPhone(phone);
-  if (coopId) {
-    return withCoopContext(coopId, () => handleMessageInner(phone, text, meta));
+  const coops = await resolveCoopsByPhone(phone);
+
+  // Exactly one cooperative (or none — the join flow): the common case.
+  if (coops.length <= 1) {
+    const coopId = coops[0]?.id ?? null;
+    return coopId
+      ? withCoopContext(coopId, () => handleMessageInner(phone, text, meta, coopId))
+      : handleMessageInner(phone, text, meta);
   }
-  return handleMessageInner(phone, text, meta);
+
+  // The phone belongs to more than one cooperative. Use the remembered choice
+  // if it is still valid; otherwise ask the member to pick one.
+  const session = await prisma.session.findUnique({ where: { phone } });
+  const selected = session?.selectedCoopId ?? null;
+  if (selected && coops.some((c) => c.id === selected)) {
+    return withCoopContext(selected, () => handleMessageInner(phone, text, meta, selected));
+  }
+
+  const choice = text.trim();
+  if (/^\d+$/.test(choice)) {
+    const idx = parseInt(choice, 10) - 1;
+    if (idx >= 0 && idx < coops.length) {
+      const picked = coops[idx];
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, selectedCoopId: picked.id },
+        update: { selectedCoopId: picked.id },
+      });
+      await sendText({
+        to: phone,
+        text: `✅ You're now using *${picked.name}*. Reply *menu* to continue.`,
+      });
+      return;
+    }
+  }
+
+  const lines = coops.map((c, i) => `${i + 1}. ${c.name} (${c.code})`);
+  await sendText({
+    to: phone,
+    text:
+      `You belong to more than one cooperative. Reply with the number to choose which one to use:\n\n` +
+      lines.join("\n"),
+  });
 }
 
 async function handleMessageInner(
   phone: string,
   text: string,
   meta: MessageMeta = {},
+  coopId?: string,
 ): Promise<void> {
   messageCounter++;
   const shouldUpdateTimestamp = messageCounter % SESSION_UPDATE_EVERY === 0;
@@ -291,7 +330,7 @@ async function handleMessageInner(
     return;
   }
 
-  const member = await getMemberByPhone(phone);
+  const member = await getMemberByPhone(phone, coopId);
 
   const { cmd: preCmd } = parseCommand(text);
 
@@ -384,6 +423,21 @@ async function handleMessageInner(
     case "help":
       await sendText({ to: phone, text: buildFullMenu(member) });
       break;
+
+    case "switchcoop": {
+      await prisma.session.update({ where: { phone }, data: { selectedCoopId: null } });
+      const choices = await resolveCoopsByPhone(phone);
+      if (choices.length <= 1) {
+        await sendText({ to: phone, text: "You only belong to one cooperative." });
+        break;
+      }
+      const lines = choices.map((c, i) => `${i + 1}. ${c.name} (${c.code})`);
+      await sendText({
+        to: phone,
+        text: `Reply with the number of the cooperative to use:\n\n${lines.join("\n")}`,
+      });
+      break;
+    }
 
     case "admin": {
       if (!member || (member.role !== "admin" && member.role !== "superadmin")) {

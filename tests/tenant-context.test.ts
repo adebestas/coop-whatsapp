@@ -4,6 +4,7 @@ import { prisma as appPrisma } from "../src/lib/prisma.js";
 import {
   resolveCoopByPhone,
   resolveCoopByAltChannel,
+  resolveCoopsByPhone,
   withCoopContext,
 } from "../src/lib/tenant-context.js";
 
@@ -51,6 +52,20 @@ describe("tenant-context resolvers (SQLite fallback)", () => {
 
     expect(await resolveCoopByAltChannel("tg:999000111")).toBe(coop.id);
     expect(await resolveCoopByAltChannel("tg:does-not-exist")).toBeNull();
+  });
+
+  it("lists every cooperative a phone belongs to", async () => {
+    const coopA = await createTestCoop("MULTI1");
+    const coopB = await createTestCoop("MULTI2");
+    const phone = "2348090000010";
+    await createTestMember(coopA.id, { phone });
+    await createTestMember(coopB.id, { phone });
+
+    const coops = await resolveCoopsByPhone(phone);
+    expect(coops.map((c) => c.id).sort()).toEqual([coopA.id, coopB.id].sort());
+    expect(coops.every((c) => c.name.length > 0 && c.code.length > 0)).toBe(true);
+
+    expect(await resolveCoopsByPhone("2348000000000")).toEqual([]);
   });
 
   it("withCoopContext runs the callback and returns its value (GUC is a no-op on SQLite)", async () => {

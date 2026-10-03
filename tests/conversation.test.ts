@@ -9,6 +9,7 @@ vi.mock("../lib/messaging.js", () => ({
 
 import { prisma } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
+import { sendText } from "../src/lib/messaging.js";
 
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
@@ -386,5 +387,36 @@ describe("coop whatsapp bot", () => {
     await handleMessage(SUPER2_PHONE, `approve ${loan!.id.slice(-6)}`);
     loan = await prisma.loan.findUnique({ where: { id: loan!.id } });
     expect(loan!.status).toBe("disbursed");
+  });
+});
+
+describe("cooperative selection for multi-coop phones", () => {
+  it("prompts, remembers the choice, and then routes to that cooperative", async () => {
+    const coopA = await makeCoop("SEL1", "Alpha Coop");
+    const coopB = await makeCoop("SEL2", "Beta Coop");
+    const phone = "2348090000020";
+    await makeMember(phone, coopA.id);
+    await makeMember(phone, coopB.id);
+
+    // Ambiguous phone -> prompt listing both cooperatives.
+    await handleMessage(phone, "menu");
+    const prompt = vi.mocked(sendText).mock.calls.at(-1)![0].text;
+    expect(prompt).toContain("more than one cooperative");
+    expect(prompt).toContain("Alpha Coop");
+    expect(prompt).toContain("Beta Coop");
+
+    // Reply with a number -> the choice is remembered.
+    await handleMessage(phone, "1");
+    const session = await prisma.session.findUnique({ where: { phone } });
+    expect(session?.selectedCoopId).toBe(coopA.id);
+
+    // The next message is routed to the chosen cooperative: the member is
+    // recognised (member menu, not the guest "join" menu) and not re-prompted.
+    vi.mocked(sendText).mockClear();
+    await handleMessage(phone, "menu");
+    const menu = vi.mocked(sendText).mock.calls[0][0].text;
+    expect(menu).not.toContain("more than one cooperative");
+    expect(menu).not.toContain("reply *join <code>*");
+    expect(menu).toContain("balance");
   });
 });

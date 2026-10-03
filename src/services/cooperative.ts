@@ -148,7 +148,16 @@ export function clearMemberCache(): void {
  * re-prompt (or ignore) a member who just answered.
  */
 export function invalidateMemberCache(phone: string, cooperativeId?: string): void {
-  memberCache.delete(cooperativeId ? `${cooperativeId}:${phone}` : phone);
+  if (cooperativeId) {
+    memberCache.delete(`${cooperativeId}:${phone}`);
+    return;
+  }
+  // No cooperative given: drop every cached entry for this phone, including the
+  // cooperative-scoped keys (`<coopId>:<phone>`) written by getMemberByPhone.
+  memberCache.delete(phone);
+  for (const key of memberCache.keys()) {
+    if (key.endsWith(`:${phone}`)) memberCache.delete(key);
+  }
 }
 
 /**

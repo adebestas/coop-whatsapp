@@ -83,3 +83,32 @@ export async function resolveCoopByAltChannel(channel: string): Promise<string |
   `;
   return rows[0]?.coop ?? null;
 }
+
+export interface CoopChoice {
+  id: string;
+  name: string;
+  code: string;
+}
+
+/**
+ * List every cooperative a phone belongs to. On Postgres this calls the
+ * SECURITY DEFINER resolver `app.resolve_coops_by_phone` (bypasses RLS); on
+ * SQLite it queries directly. Returns [] for an unknown phone.
+ */
+export async function resolveCoopsByPhone(phone: string): Promise<CoopChoice[]> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const rows = await prisma.member.findMany({
+      where: { phone },
+      select: { cooperativeId: true, cooperative: { select: { name: true, code: true } } },
+    });
+    return rows.map((r) => ({
+      id: r.cooperativeId,
+      name: r.cooperative.name,
+      code: r.cooperative.code,
+    }));
+  }
+  return prisma.$queryRaw<CoopChoice[]>`
+    SELECT id, name, code FROM app.resolve_coops_by_phone(${phone})
+  `;
+}
