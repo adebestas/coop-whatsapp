@@ -5,6 +5,7 @@ import { verifyPin } from "../lib/security.js";
 import { checkRateLimit } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 import { approveLoan } from "../services/loans.js";
+import { audit } from "../services/audit.js";
 import { notifyMember } from "../lib/messaging.js";
 import {
   sign,
@@ -334,16 +335,14 @@ export async function adminApiRoutes(app: FastifyInstance) {
       }
     }
 
-    await prisma.auditLog.create({
-      data: {
-        cooperativeId: coopId,
-        actorId: "system",
-        actorPhone,
-        actorRole,
-        action: "broadcast.send",
-        targetType: toAll ? "all-members" : "members",
-        detail: `Broadcast sent: ${sent} delivered, ${skipped} opted-out, ${failed} failed (${targets.length} targeted)`,
-      },
+    await audit({
+      cooperativeId: coopId,
+      actorId: "system",
+      actorPhone,
+      actorRole,
+      action: "broadcast.send",
+      targetType: toAll ? "all-members" : "members",
+      detail: `Broadcast sent: ${sent} delivered, ${skipped} opted-out, ${failed} failed (${targets.length} targeted)`,
     });
 
     return {
@@ -607,16 +606,14 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const result = await bulkImportMembers(coopId, buffer, body.filename);
 
     // Audit log the import attempt
-    await prisma.auditLog.create({
-      data: {
-        cooperativeId: coopId,
-        actorId: "system",
-        actorPhone: phone,
-        actorRole,
-        action: "members.import",
-        targetType: "members",
-        detail: `Bulk import "${body.filename}": ${result.imported} imported, ${result.skipped} skipped, ${result.errors.length} errors`,
-      },
+    await audit({
+      cooperativeId: coopId,
+      actorId: "system",
+      actorPhone: phone,
+      actorRole,
+      action: "members.import",
+      targetType: "members",
+      detail: `Bulk import "${body.filename}": ${result.imported} imported, ${result.skipped} skipped, ${result.errors.length} errors`,
     });
 
     return result;
@@ -671,17 +668,15 @@ export async function adminApiRoutes(app: FastifyInstance) {
       `✅ Your grievance *${grievance.id.slice(-6)}* has been resolved.\n\nResponse: ${response}`,
     ).catch(() => {});
 
-    await prisma.auditLog.create({
-      data: {
-        cooperativeId: coopId,
-        actorId: actor.id,
-        actorPhone: phone,
-        actorRole: actor.role,
-        action: "grievance.resolve",
-        targetType: "grievance",
-        targetId: grievance.id,
-        detail: `Resolved grievance from ${grievance.member.name}`,
-      },
+    await audit({
+      cooperativeId: coopId,
+      actorId: actor.id,
+      actorPhone: phone,
+      actorRole: actor.role,
+      action: "grievance.resolve",
+      targetType: "grievance",
+      targetId: grievance.id,
+      detail: `Resolved grievance from ${grievance.member.name}`,
     });
 
     return {
@@ -740,17 +735,15 @@ export async function adminApiRoutes(app: FastifyInstance) {
       `✅ Your ticket *${ticket.id.slice(-6)}* has been resolved.\n${note ? `Note: ${note}` : ""}`,
     ).catch(() => {});
 
-    await prisma.auditLog.create({
-      data: {
-        cooperativeId: coopId,
-        actorId: actor.id,
-        actorPhone: phone,
-        actorRole: actor.role,
-        action: "ticket.resolve",
-        targetType: "ticket",
-        targetId: ticket.id,
-        detail: `Resolved ticket from ${ticket.member.name}`,
-      },
+    await audit({
+      cooperativeId: coopId,
+      actorId: actor.id,
+      actorPhone: phone,
+      actorRole: actor.role,
+      action: "ticket.resolve",
+      targetType: "ticket",
+      targetId: ticket.id,
+      detail: `Resolved ticket from ${ticket.member.name}`,
     });
 
     return {
@@ -795,17 +788,15 @@ export async function adminApiRoutes(app: FastifyInstance) {
       },
     });
 
-    await prisma.auditLog.create({
-      data: {
-        cooperativeId: coopId,
-        actorId: superAuth.actorId,
-        actorPhone: phone,
-        actorRole: "superadmin",
-        action: "post.create",
-        targetType: "post",
-        targetId: post.id,
-        detail: `Created post "${normalizeTitle(title)}"`,
-      },
+    await audit({
+      cooperativeId: coopId,
+      actorId: superAuth.actorId,
+      actorPhone: phone,
+      actorRole: "superadmin",
+      action: "post.create",
+      targetType: "post",
+      targetId: post.id,
+      detail: `Created post "${normalizeTitle(title)}"`,
     });
 
     return { ok: true, message: `Post "${normalizeTitle(title)}" created.` };
@@ -840,17 +831,15 @@ export async function adminApiRoutes(app: FastifyInstance) {
       data: { incumbentId, appointedById: superAuth.actorId, appointedAt: new Date() },
     });
 
-    await prisma.auditLog.create({
-      data: {
-        cooperativeId: coopId,
-        actorId: superAuth.actorId,
-        actorPhone: phone,
-        actorRole: "superadmin",
-        action: "post.assign",
-        targetType: "post",
-        targetId: post.id,
-        detail: `${body.memberCode ? `Assigned "${post.title}" to ${memberName}` : `Vacated "${post.title}"`}`,
-      },
+    await audit({
+      cooperativeId: coopId,
+      actorId: superAuth.actorId,
+      actorPhone: phone,
+      actorRole: "superadmin",
+      action: "post.assign",
+      targetType: "post",
+      targetId: post.id,
+      detail: `${body.memberCode ? `Assigned "${post.title}" to ${memberName}` : `Vacated "${post.title}"`}`,
     });
 
     return {
@@ -1044,17 +1033,15 @@ export async function adminApiRoutes(app: FastifyInstance) {
       },
     });
 
-    await prisma.auditLog.create({
-      data: {
-        cooperativeId: coopId,
-        actorId: superAuth.actorId,
-        actorPhone: phone,
-        actorRole: "superadmin",
-        action: "funds.reserve.allocate",
-        targetType: "cooperative",
-        amount,
-        detail: `Manual reserve allocation of ${amount} kobo${note ? " — " + note : ""}`,
-      },
+    await audit({
+      cooperativeId: coopId,
+      actorId: superAuth.actorId,
+      actorPhone: phone,
+      actorRole: "superadmin",
+      action: "funds.reserve.allocate",
+      targetType: "cooperative",
+      amount,
+      detail: `Manual reserve allocation of ${amount} kobo${note ? " — " + note : ""}`,
     });
 
     return { ok: true, message: "Reserve fund allocation recorded and balance updated." };

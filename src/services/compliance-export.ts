@@ -6,6 +6,7 @@ import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
+import { audit } from "./audit.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
 
@@ -126,16 +127,14 @@ export async function runComplianceExport(
 
   const links = [`📊 Excel: /api/export/${xlsxName}`, `📄 PDF: /api/export/${pdfName}`];
 
-  await prisma.auditLog.create({
-    data: {
-      cooperativeId,
-      actorId: "system",
-      actorPhone: "dashboard",
-      actorRole: "admin",
-      action: "compliance.export",
-      targetType: kind,
-      detail: `${kind.toUpperCase()} compliance report exported`,
-    },
+  await audit({
+    cooperativeId,
+    actorId: "system",
+    actorPhone: "dashboard",
+    actorRole: "admin",
+    action: "compliance.export",
+    targetType: kind,
+    detail: `${kind.toUpperCase()} compliance report exported`,
   });
 
   return {

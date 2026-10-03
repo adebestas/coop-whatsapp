@@ -8,6 +8,7 @@ import nodemailer from "nodemailer";
 import { prisma } from "../lib/prisma.js";
 import { computePnl } from "./ledger.js";
 import { uploadToS3 } from "../lib/s3.js";
+import { audit } from "./audit.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
 
@@ -90,16 +91,14 @@ export async function runExport(
     emailNote = `\n\n_Tip: add an email (\`email you@x.com\`) to get exports mailed to you._`;
   }
 
-  await prisma.auditLog.create({
-    data: {
-      cooperativeId: requester.cooperativeId,
-      actorId: requester.id,
-      actorPhone: "export",
-      actorRole: "superadmin",
-      action: "data.export",
-      targetType: kind,
-      detail: `${kind} exported by member ${requester.id}`,
-    },
+  await audit({
+    cooperativeId: requester.cooperativeId,
+    actorId: requester.id,
+    actorPhone: "export",
+    actorRole: "superadmin",
+    action: "data.export",
+    targetType: kind,
+    detail: `${kind} exported by member ${requester.id}`,
   });
 
   const storage = s3Keys.length === 2 ? "S3" : s3Keys.length === 1 ? "S3 (partial)" : "local";

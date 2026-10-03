@@ -223,12 +223,42 @@ describe("audit trail", () => {
     // Tamper with a middle row — every later hash stops matching.
     const rows = await prisma.auditLog.findMany({
       where: { cooperativeId: coop.id },
-      orderBy: { createdAt: "asc" },
+      orderBy: { seq: "asc" },
     });
     await prisma.auditLog.update({ where: { id: rows[1].id }, data: { detail: "tampered" } });
     const broken = await verifyAuditChain(coop.id);
     expect(broken.ok).toBe(false);
     expect(broken.brokenAt).toBeTruthy();
+  });
+
+  it("does not fork the chain under concurrent writes", async () => {
+    const coop = await makeCoop();
+    const member = await makeMember(PHONE, coop.id);
+
+    // Fire many writes at once. Without per-cooperative serialization they all
+    // read the same prevHash and fork the chain.
+    await Promise.all(
+      Array.from({ length: 25 }, (_, i) =>
+        audit({
+          cooperativeId: coop.id,
+          actorPhone: member.phone,
+          actorId: member.id,
+          action: "test.concurrent",
+          detail: `entry ${i}`,
+        }),
+      ),
+    );
+
+    const result = await verifyAuditChain(coop.id);
+    expect(result.ok).toBe(true);
+    expect(result.checked).toBe(25);
+
+    // seq is unique and contiguous — no gaps, no duplicates.
+    const rows = await prisma.auditLog.findMany({
+      where: { cooperativeId: coop.id },
+      orderBy: { seq: "asc" },
+    });
+    expect(rows.map((r) => r.seq)).toEqual(Array.from({ length: 25 }, (_, i) => i + 1));
   });
 });
 
