@@ -23,40 +23,11 @@ import { prisma } from "./lib/prisma.js";
 import { closeQueues, initQueueProcessors } from "./lib/queue.js";
 import { initRedis, closeRedis, isRedisConnected } from "./lib/cache.js";
 import { AlertSeverity, logAndAlert } from "./lib/alerting.js";
+import { log } from "./lib/logger.js";
 
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
 const RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000; // nightly
-
-// NOTE: Custom structured logger; could be consolidated with Fastify's built-in logger.
-// ===== Structured Logger =====
-const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 } as const;
-type LogLevel = keyof typeof LOG_LEVELS;
-const CURRENT_LOG_LEVEL: LogLevel = (process.env.LOG_LEVEL as LogLevel) ?? "info";
-
-function structuredLog(level: LogLevel, message: string, meta?: Record<string, unknown>): void {
-  if (LOG_LEVELS[level] > LOG_LEVELS[CURRENT_LOG_LEVEL]) return;
-  const entry = {
-    timestamp: new Date().toISOString(),
-    level,
-    message,
-    pid: process.pid,
-    ...(meta ? { meta } : {}),
-  };
-  const line = JSON.stringify(entry);
-  if (level === "error") {
-    process.stderr.write(line + "\n");
-  } else {
-    process.stdout.write(line + "\n");
-  }
-}
-
-const log = {
-  info: (msg: string, meta?: Record<string, unknown>) => structuredLog("info", msg, meta),
-  warn: (msg: string, meta?: Record<string, unknown>) => structuredLog("warn", msg, meta),
-  error: (msg: string, meta?: Record<string, unknown>) => structuredLog("error", msg, meta),
-  debug: (msg: string, meta?: Record<string, unknown>) => structuredLog("debug", msg, meta),
-};
 
 // ===== Graceful Shutdown =====
 let isShuttingDown = false;
@@ -94,6 +65,18 @@ async function shutdown(signal: string) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+
+// Surface crashes off-box: an unhandled rejection or uncaught exception in a
+// money path must not vanish into a container log nobody reads.
+process.on("unhandledRejection", (reason) => {
+  log.error("unhandledRejection", {
+    error: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+});
+process.on("uncaughtException", (err) => {
+  log.error("uncaughtException", { error: err.message, stack: err.stack });
+});
 
 let app: ReturnType<typeof buildApp>;
 

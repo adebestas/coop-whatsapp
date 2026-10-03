@@ -6,6 +6,7 @@ import { handlePaymentNotification } from "./payments/topup.js";
 import type { PaymentNotification, ProviderAdapter } from "./payments/index.js";
 import { applyDividendPayoutUpdate } from "./dividends.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
+import { log } from "../lib/logger.js";
 
 /**
  * Combined payment webhook listener.
@@ -64,7 +65,12 @@ export async function processPaymentWebhook(
 
   // 1. Signature check over the RAW bytes — before any parsing or DB access.
   if (!adapter.verifyWebhook(rawBody, headers)) {
-    console.error(`[webhook] INVALID signature from ${providerName}`);
+    // Off-box alert: a signature failure is either tampering or a misconfigured
+    // secret — both need a human, and there is no cooperative context to alert.
+    log.error("webhook signature verification failed", {
+      provider: providerName,
+      endpoint: "credit",
+    });
     return { httpStatus: 401, body: { error: "invalid signature" } };
   }
 
@@ -187,7 +193,10 @@ export async function processPayoutWebhook(
 
   // Signature first — before parsing or touching the DB.
   if (!adapter.verifyWebhook(rawBody, headers)) {
-    console.error(`[payout-webhook] INVALID signature from ${providerName}`);
+    log.error("webhook signature verification failed", {
+      provider: providerName,
+      endpoint: "payout",
+    });
     return { httpStatus: 401, body: { error: "invalid signature" } };
   }
 
