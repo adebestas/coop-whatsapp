@@ -4,7 +4,7 @@ import { formatBalance } from "./cooperative.js";
 import { showHistory } from "./statements.js";
 import { runAllAlerts } from "../lib/ai-alerts.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
-import { getRedis } from "../lib/cache.js";
+import { getRedis, claimOnce } from "../lib/cache.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -355,9 +355,6 @@ async function notifySuperAdminsDigest(cooperativeId: string, text: string): Pro
 // alerts and monthly summaries. Runs monthly (on the 1st) so members are
 // not nagged repeatedly; deduped per cooperative per month.
 
-const aiAlertsLastRun = new Map<string, string>();
-const backupVerifyLastRun = new Map<string, string>();
-
 export async function runBackupVerificationJob(now = new Date()): Promise<number> {
   // Run on the 2nd of each month (after monthly statements)
   if (now.getDate() !== 2) return 0;
@@ -366,7 +363,8 @@ export async function runBackupVerificationJob(now = new Date()): Promise<number
   let ran = 0;
   for (const coop of coops) {
     const key = `${coop.id}:${now.getFullYear()}-${now.getMonth()}`;
-    if (backupVerifyLastRun.get(coop.id) === key) continue;
+    // Redis-backed claim: survives restarts and is shared across instances.
+    if (!(await claimOnce("backup-verify", key, 40 * 24 * 3600))) continue;
     try {
       const { runBackupVerification } = await import("./backup-verify.js");
       await runBackupVerification();
@@ -379,7 +377,6 @@ export async function runBackupVerificationJob(now = new Date()): Promise<number
         AlertSeverity.CRITICAL,
       );
     }
-    backupVerifyLastRun.set(coop.id, key);
     ran++;
   }
   return ran;
@@ -392,7 +389,8 @@ export async function runProactiveAlerts(now = new Date()): Promise<number> {
   let ran = 0;
   for (const coop of coops) {
     const key = `${coop.id}:${now.getFullYear()}-${now.getMonth()}`;
-    if (aiAlertsLastRun.get(coop.id) === key) continue;
+    // Redis-backed claim: survives restarts and is shared across instances.
+    if (!(await claimOnce("ai-alerts", key, 40 * 24 * 3600))) continue;
     try {
       await runAllAlerts(coop.id);
     } catch (err: unknown) {
@@ -404,7 +402,6 @@ export async function runProactiveAlerts(now = new Date()): Promise<number> {
         AlertSeverity.CRITICAL,
       );
     }
-    aiAlertsLastRun.set(coop.id, key);
     ran++;
   }
   return ran;

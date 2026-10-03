@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { withDistributedLock } from "../src/lib/cache.js";
+import { withDistributedLock, claimOnce } from "../src/lib/cache.js";
 
 /**
  * In the test environment Redis is unavailable, so withDistributedLock takes
@@ -22,5 +22,14 @@ describe("withDistributedLock", () => {
         throw new Error("boom");
       }),
     ).rejects.toThrow("boom");
+  });
+});
+
+describe("claimOnce", () => {
+  it("claims a (key, period) once, then refuses; a new period is a fresh claim", async () => {
+    const key = `test-claim-${Date.now()}`;
+    expect(await claimOnce(key, "p1", 60)).toBe(true);
+    expect(await claimOnce(key, "p1", 60)).toBe(false);
+    expect(await claimOnce(key, "p2", 60)).toBe(true);
   });
 });

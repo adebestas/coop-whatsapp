@@ -181,6 +181,39 @@ export function isRedisConnected(): boolean {
   return isConnected;
 }
 
+/** In-memory fallback for claimOnce when Redis is unavailable. */
+const inMemoryOnce = new Map<string, number>();
+
+/**
+ * Claim a (key, period) exactly once. Returns true the first time, false after.
+ *
+ * Redis-backed (SET NX EX) so the claim survives restarts and is shared across
+ * instances — used for scheduler "already ran this period" guards. Falls back to
+ * an in-memory set when Redis is unavailable (single-instance only).
+ */
+export async function claimOnce(
+  key: string,
+  period: string,
+  ttlSeconds: number,
+): Promise<boolean> {
+  const client = getRedis();
+  const fullKey = `once:${key}:${period}`;
+  if (client) {
+    try {
+      const set = await client.set(fullKey, "1", "EX", ttlSeconds, "NX");
+      return set === "OK";
+    } catch {
+      // fall through to in-memory
+    }
+  }
+  const now = Date.now();
+  const memKey = `${key}:${period}`;
+  const expires = inMemoryOnce.get(memKey);
+  if (expires && now < expires) return false;
+  inMemoryOnce.set(memKey, now + ttlSeconds * 1000);
+  return true;
+}
+
 /**
  * Close Redis connection
  */
