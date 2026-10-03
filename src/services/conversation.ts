@@ -1,4 +1,5 @@
 import { prisma } from "../lib/prisma.js";
+import { resolveCoopByPhone, withCoopContext } from "../lib/tenant-context.js";
 import { sendText, platformOf } from "../lib/messaging.js";
 import { MESSAGE_CONSENT_PROMPT } from "../lib/consent.js";
 import { getMemberByPhone, invalidateMemberCache } from "./cooperative.js";
@@ -222,7 +223,29 @@ function parseCommand(text: string): { cmd: string; args: string[] } {
   return { cmd: parts[0] ?? "", args: parts.slice(1) };
 }
 
+/**
+ * Entry point for an inbound chat message.
+ *
+ * Resolves the sender's cooperative BEFORE any RLS-protected read (via the
+ * SECURITY DEFINER resolver) and runs the whole handler inside that tenant's
+ * RLS context, so every query below is scoped to the member's cooperative.
+ *
+ * Unregistered senders (no cooperative yet — the join flow) run without a
+ * context; the join flow resolves its cooperative from the code it is given.
+ */
 export async function handleMessage(
+  phone: string,
+  text: string,
+  meta: MessageMeta = {},
+): Promise<void> {
+  const coopId = await resolveCoopByPhone(phone);
+  if (coopId) {
+    return withCoopContext(coopId, () => handleMessageInner(phone, text, meta));
+  }
+  return handleMessageInner(phone, text, meta);
+}
+
+async function handleMessageInner(
   phone: string,
   text: string,
   meta: MessageMeta = {},

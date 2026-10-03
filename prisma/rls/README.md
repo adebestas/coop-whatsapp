@@ -47,8 +47,13 @@ queries in that context — flipping FORCE on today would silently blank the app
    (`resolveCoopByPhone` / `resolveCoopByAltChannel`), with a direct-query
    fallback on SQLite. This is what lets the app discover the tenant before it
    can set the GUC.
-4. **Route every tenant query through the helper** (in progress). Until this is
-   complete, the app must keep connecting as the table owner.
+4. **Route every tenant query through the helper** (in progress). The chat entry
+   point (`handleMessage`) now resolves the sender's cooperative and runs the
+   whole handler inside `withCoopContext`; services keep using the global
+   `prisma` proxy, which routes to the transaction. Remaining entry points:
+   admin routes, schedulers, webhook processors, and the join flow (which must
+   resolve its cooperative from the code it is given). Until this is complete,
+   the app must keep connecting as the table owner.
 5. **Apply Stage 2 (FORCE)** by copying `recommended_policies.sql` into a new
    `prisma/migrations/<timestamp>_rls_force/migration.sql`, and point the app at
    a **non-owner** role so enforcement actually bites.
