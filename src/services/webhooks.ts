@@ -7,6 +7,7 @@ import type { PaymentNotification, ProviderAdapter } from "./payments/index.js";
 import { applyDividendPayoutUpdate } from "./dividends.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { log } from "../lib/logger.js";
+import { incCounter } from "../lib/metrics.js";
 
 /**
  * Combined payment webhook listener.
@@ -67,6 +68,7 @@ export async function processPaymentWebhook(
   if (!adapter.verifyWebhook(rawBody, headers)) {
     // Off-box alert: a signature failure is either tampering or a misconfigured
     // secret — both need a human, and there is no cooperative context to alert.
+    incCounter("webhook_signature_failures_total", { provider: providerName, endpoint: "credit" });
     log.error("webhook signature verification failed", {
       provider: providerName,
       endpoint: "credit",
@@ -144,6 +146,7 @@ export async function processPaymentWebhook(
     return { httpStatus: 200, body: { status: "ok", event: eventId } };
   } catch (err: any) {
     console.error(`[webhook] processing failed for ${eventId}`, err);
+    incCounter("webhook_processing_failures_total", { provider: providerName, endpoint: "credit" });
     // Extract cooperativeId from the notification if possible for alerting
     let cooperativeId: string | undefined;
     if (notification && "cooperativeId" in notification) {
@@ -193,6 +196,7 @@ export async function processPayoutWebhook(
 
   // Signature first — before parsing or touching the DB.
   if (!adapter.verifyWebhook(rawBody, headers)) {
+    incCounter("webhook_signature_failures_total", { provider: providerName, endpoint: "payout" });
     log.error("webhook signature verification failed", {
       provider: providerName,
       endpoint: "payout",
@@ -258,6 +262,7 @@ export async function processPayoutWebhook(
     return { httpStatus: 200, body: { status: "ok", event: eventId } };
   } catch (err: any) {
     console.error(`[payout-webhook] processing failed for ${eventId}`, err);
+    incCounter("webhook_processing_failures_total", { provider: providerName, endpoint: "payout" });
     // Best-effort alert: a stuck dividend reversal is a books-integrity issue.
     await alertSupers(
       "system",

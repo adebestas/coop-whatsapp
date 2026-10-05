@@ -11,6 +11,7 @@ import { adminApiRoutes } from "./routes/admin.js";
 import { serveExportFile } from "./routes/exports.js";
 import { prisma } from "./lib/prisma.js";
 import { isRedisConnected } from "./lib/cache.js";
+import { incCounter, renderMetrics } from "./lib/metrics.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -113,6 +114,23 @@ export function buildApp() {
     } catch {
       return reply.status(503).send({ status: "error", message: "Service unavailable" });
     }
+  });
+
+  // Prometheus-format metrics. Protect with METRICS_TOKEN when set.
+  app.get("/metrics", async (req, reply) => {
+    const token = process.env.METRICS_TOKEN;
+    if (token) {
+      const auth = req.headers.authorization;
+      if (auth !== `Bearer ${token}`) {
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+    }
+    return reply.type("text/plain; version=0.0.4").send(renderMetrics());
+  });
+
+  // Count every response by method + status for the metrics endpoint.
+  app.addHook("onResponse", async (req, reply) => {
+    incCounter("http_requests_total", { method: req.method, status: String(reply.statusCode) });
   });
 
   app.get("/", async (_req, reply) => {
