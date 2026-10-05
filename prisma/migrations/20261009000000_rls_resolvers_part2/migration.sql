@@ -11,13 +11,13 @@ CREATE SCHEMA IF NOT EXISTS app;
 
 -- List all cooperative IDs (for schedulers that need to iterate all coops).
 CREATE OR REPLACE FUNCTION app.list_cooperative_ids()
-RETURNS SETOF text
+RETURNS TABLE(id text)
 LANGUAGE sql
 STABLE
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
-  SELECT id FROM "Cooperative" ORDER BY id;
+  SELECT c.id FROM "Cooperative" c ORDER BY c.id;
 $$;
 
 -- Resolve the cooperative that owns a virtual account number.
