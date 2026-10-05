@@ -7,6 +7,7 @@ import { postJournal } from "../journal.js";
 import { roundMoney } from "../money.js";
 import { formatBalance } from "../cooperative.js";
 import { flagTransaction } from "../aml.js";
+import { resolveCoopByVirtualAccount, withCoopContext, forEachCoop } from "../../lib/tenant-context.js";
 
 /**
  * Create a virtual account for a member so they can receive transfers.
@@ -112,15 +113,25 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
     return;
   }
 
-  // Find the member by their virtual account number.
-  const member = await prisma.member.findFirst({
-    where: { virtualAccountNumber: n.accountNumber },
-    include: { wallet: true },
-  });
-  if (!member || !member.wallet) {
+  // Resolve the cooperative from the virtual account number (SECURITY DEFINER
+  // resolver bypasses RLS so we can find the tenant before setting the GUC).
+  const coopId = await resolveCoopByVirtualAccount(n.accountNumber);
+  if (!coopId) {
     console.warn(`[topup] credit for unknown account ${n.accountNumber}, ignoring`);
     return;
   }
+
+  // Run the whole credit flow inside the cooperative's RLS context.
+  await withCoopContext(coopId, async () => {
+    // Find the member by their virtual account number.
+    const member = await prisma.member.findFirst({
+      where: { virtualAccountNumber: n.accountNumber },
+      include: { wallet: true },
+    });
+    if (!member || !member.wallet) {
+      console.warn(`[topup] credit for unknown account ${n.accountNumber}, ignoring`);
+      return;
+    }
 
   const amount = roundMoney(n.amount);
   if (amount <= 0) return;
@@ -217,6 +228,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
   } catch (err) {
     console.error("[topup] credit audit failed:", err);
   }
+  });
 }
 
 /**
@@ -224,29 +236,38 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
  * Clears the virtual account fields so stale provider accounts are not used.
  */
 export async function cleanupExpiredVirtualAccounts(): Promise<number> {
-  const expired = await prisma.member.findMany({
-    where: {
-      virtualAccountNumber: { not: null },
-      virtualAccountExpiresAt: { lt: new Date() },
-    },
-    select: { id: true, phone: true, virtualAccountNumber: true },
+  let cleaned = 0;
+  await forEachCoop(async (coopId) => {
+    const expired = await prisma.member.findMany({
+      where: {
+        cooperativeId: coopId,
+        virtualAccountNumber: { not: null },
+        virtualAccountExpiresAt: { lt: new Date() },
+      },
+      select: { id: true, phone: true, virtualAccountNumber: true },
+    });
+
+    if (expired.length === 0) return;
+
+    await prisma.member.updateMany({
+      where: {
+        cooperativeId: coopId,
+        virtualAccountNumber: { not: null },
+        virtualAccountExpiresAt: { lt: new Date() },
+      },
+      data: {
+        virtualAccountNumber: null,
+        virtualAccountBank: null,
+        virtualAccountProvider: null,
+        virtualAccountExpiresAt: null,
+      },
+    });
+
+    cleaned += expired.length;
   });
 
-  if (expired.length === 0) return 0;
-
-  await prisma.member.updateMany({
-    where: {
-      virtualAccountNumber: { not: null },
-      virtualAccountExpiresAt: { lt: new Date() },
-    },
-    data: {
-      virtualAccountNumber: null,
-      virtualAccountBank: null,
-      virtualAccountProvider: null,
-      virtualAccountExpiresAt: null,
-    },
-  });
-
-  console.log(`[topup] cleaned up ${expired.length} expired virtual accounts`);
-  return expired.length;
+  if (cleaned > 0) {
+    console.log(`[topup] cleaned up ${cleaned} expired virtual accounts`);
+  }
+  return cleaned;
 }

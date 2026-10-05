@@ -2,7 +2,7 @@ import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { computePnl } from "./ledger.js";
 import { postJournal, getBankAccountBalance } from "./journal.js";
-import { setCoopContext } from "../lib/tenant-context.js";
+import { setCoopContext, resolveCoopByPayoutReference, withCoopContext } from "../lib/tenant-context.js";
 import { sendToBank } from "./disbursements.js";
 import { roundMoney } from "./money.js";
 import { updateCoopConfig } from "./coop-config.js";
@@ -677,6 +677,12 @@ export interface PayoutUpdate {
 export async function applyDividendPayoutUpdate(
   update: PayoutUpdate,
 ): Promise<{ handled: boolean; action?: "settled" | "reversed" | "noop" }> {
+  // Resolve the cooperative from the payout reference (SECURITY DEFINER
+  // resolver bypasses RLS) before reading the RLS-protected Payout table.
+  const coopId = await resolveCoopByPayoutReference(update.reference);
+  if (!coopId) return { handled: false };
+
+  return withCoopContext(coopId, async () => {
   const payout = await prisma.payout.findUnique({
     where: { idempotencyKey: update.reference },
     include: { dividendEntry: true },
@@ -719,6 +725,7 @@ export async function applyDividendPayoutUpdate(
     prisma.payout.update({ where: { id: payout.id }, data: { status: "failed" } }),
   ]);
   return { handled: true, action: "reversed" };
+  });
 }
 
 // ---------------------------------------------------------------------------

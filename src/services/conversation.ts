@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { resolveCoopsByPhone, withCoopContext } from "../lib/tenant-context.js";
+import { resolveCoopsByPhone, resolveCoopByCode, withCoopContext } from "../lib/tenant-context.js";
 import { sendText, platformOf } from "../lib/messaging.js";
 import { MESSAGE_CONSENT_PROMPT } from "../lib/consent.js";
 import { getMemberByPhone, invalidateMemberCache } from "./cooperative.js";
@@ -224,6 +224,17 @@ function parseCommand(text: string): { cmd: string; args: string[] } {
   return { cmd: parts[0] ?? "", args: parts.slice(1) };
 }
 
+/** Extract the pending join code from a session's JSON data, if any. */
+function parseJoinCode(data: string | null | undefined): string | null {
+  if (!data) return null;
+  try {
+    const parsed = JSON.parse(data) as { joinCode?: unknown };
+    return typeof parsed.joinCode === "string" && parsed.joinCode ? parsed.joinCode : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Entry point for an inbound chat message.
  *
@@ -244,9 +255,22 @@ export async function handleMessage(
   // Exactly one cooperative (or none — the join flow): the common case.
   if (coops.length <= 1) {
     const coopId = coops[0]?.id ?? null;
-    return coopId
-      ? withCoopContext(coopId, () => handleMessageInner(phone, text, meta, coopId))
-      : handleMessageInner(phone, text, meta);
+    if (coopId) {
+      return withCoopContext(coopId, () => handleMessageInner(phone, text, meta, coopId));
+    }
+    // No cooperative yet — a join flow may be in progress. Resolve the
+    // cooperative from the session's join code so the flow runs in context.
+    const joinSession = await prisma.session.findUnique({ where: { phone } });
+    const joinCode = parseJoinCode(joinSession?.data);
+    if (joinCode) {
+      const joinCoopId = await resolveCoopByCode(joinCode);
+      if (joinCoopId) {
+        return withCoopContext(joinCoopId, () =>
+          handleMessageInner(phone, text, meta, joinCoopId),
+        );
+      }
+    }
+    return handleMessageInner(phone, text, meta);
   }
 
   // The phone belongs to more than one cooperative. Use the remembered choice

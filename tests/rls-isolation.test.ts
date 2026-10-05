@@ -300,6 +300,7 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: cross-cooperative isolation at
         actorRole: "member",
         action: "test.action",
         detail: "test",
+        seq: 1,
       },
     });
     await owner.auditLog.create({
@@ -310,6 +311,7 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: cross-cooperative isolation at
         actorRole: "member",
         action: "test.action",
         detail: "test",
+        seq: 1,
       },
     });
 

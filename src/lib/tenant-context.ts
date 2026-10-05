@@ -89,6 +89,89 @@ export async function resolveCoopByAltChannel(channel: string): Promise<string |
   return rows[0]?.coop ?? null;
 }
 
+/**
+ * List all cooperative IDs. On Postgres this calls the SECURITY DEFINER resolver
+ * `app.list_cooperative_ids()` (bypasses RLS); on SQLite it queries directly.
+ */
+export async function listCooperativeIds(): Promise<string[]> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const rows = await prisma.cooperative.findMany({ select: { id: true } });
+    return rows.map((r) => r.id);
+  }
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM app.list_cooperative_ids()
+  `;
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Run `fn` once per cooperative, each inside that cooperative's RLS context.
+ * For schedulers that must process every tenant.
+ */
+export async function forEachCoop<T>(fn: (coopId: string) => Promise<T>): Promise<void> {
+  const ids = await listCooperativeIds();
+  for (const id of ids) {
+    await withCoopContext(id, () => fn(id));
+  }
+}
+
+/**
+ * Resolve the cooperative that owns a virtual account number.
+ * On Postgres this calls the SECURITY DEFINER resolver `app.resolve_coop_by_virtual_account`;
+ * on SQLite it queries directly.
+ */
+export async function resolveCoopByVirtualAccount(accountNumber: string): Promise<string | null> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const row = await prisma.member.findFirst({
+      where: { virtualAccountNumber: accountNumber },
+      select: { cooperativeId: true },
+    });
+    return row?.cooperativeId ?? null;
+  }
+  const rows = await prisma.$queryRaw<{ coop: string | null }[]>`
+    SELECT app.resolve_coop_by_virtual_account(${accountNumber}) AS coop
+  `;
+  return rows[0]?.coop ?? null;
+}
+
+/**
+ * Resolve the cooperative that owns a payout reference.
+ */
+export async function resolveCoopByPayoutReference(reference: string): Promise<string | null> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const row = await prisma.payout.findUnique({
+      where: { reference },
+      select: { cooperativeId: true },
+    });
+    return row?.cooperativeId ?? null;
+  }
+  const rows = await prisma.$queryRaw<{ coop: string | null }[]>`
+    SELECT app.resolve_coop_by_payout_reference(${reference}) AS coop
+  `;
+  return rows[0]?.coop ?? null;
+}
+
+/**
+ * Resolve the cooperative by its join code.
+ */
+export async function resolveCoopByCode(code: string): Promise<string | null> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const row = await prisma.cooperative.findUnique({
+      where: { code },
+      select: { id: true },
+    });
+    return row?.id ?? null;
+  }
+  const rows = await prisma.$queryRaw<{ coop: string | null }[]>`
+    SELECT app.resolve_coop_by_code(${code}) AS coop
+  `;
+  return rows[0]?.coop ?? null;
+}
+
 export interface CoopChoice {
   id: string;
   name: string;

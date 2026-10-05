@@ -64,6 +64,24 @@ export const prisma = new Proxy(base, {
 }) as PrismaClient;
 
 /**
+ * Owner-role client for SYSTEM-LEVEL operations that legitimately need
+ * cross-tenant access — the nightly backup dump, and migrations. It bypasses
+ * RLS by design (the owner is not restricted unless FORCE is set).
+ *
+ * Uses DATABASE_OWNER_URL when set (production: the app connects as the
+ * non-owner `coop_app` role, so the owner URL is separate); otherwise falls
+ * back to the normal URL (local dev / tests, where the app is the owner).
+ */
+export const ownerPrisma = new PrismaClient({
+  log: isProd ? ["error", "warn"] : ["error", "warn", "info"],
+  datasources: {
+    db: {
+      url: process.env.DATABASE_OWNER_URL ?? resolveDatabaseUrl(),
+    },
+  },
+});
+
+/**
  * Run `fn` inside a transaction. If one is already open in the current async
  * context, reuse it so nested calls share the same connection and RLS context
  * (Prisma does not support nested interactive transactions).

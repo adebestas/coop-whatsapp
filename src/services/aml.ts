@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { getCoopConfig } from "./coop-config.js";
 import { notifyMember } from "../lib/messaging.js";
+import { forEachCoop } from "../lib/tenant-context.js";
 
 // ===== AML/STR Constants =====
 
@@ -514,38 +515,41 @@ export async function escalateOverdueSTRs(now = new Date()): Promise<number> {
   const SIXTY_ENDING_HOURS_MS = 72 * 60 * 60 * 1000;
   const resendBefore = new Date(now.getTime() - STR_ESCALATION_REPEAT_MS);
 
-  const overdue = await prisma.sTR.findMany({
-    where: {
-      status: "pending",
-      createdAt: { lt: new Date(now.getTime() - SIXTY_ENDING_HOURS_MS) },
-      OR: [{ escalatedAt: null }, { escalatedAt: { lt: resendBefore } }],
-    },
-    select: { id: true, cooperativeId: true, member: { select: { name: true, code: true } } },
-  });
-
   let escalated = 0;
-  for (const str of overdue) {
-    // Atomically claim the alert for this STR. Only the caller whose UPDATE
-    // matched a row proceeds, so a second instance (or a restart mid-loop)
-    // cannot duplicate the alert.
-    const claimed = await prisma.sTR.updateMany({
-      where: { id: str.id, OR: [{ escalatedAt: null }, { escalatedAt: { lt: resendBefore } }] },
-      data: { escalatedAt: now },
+  await forEachCoop(async (coopId) => {
+    const overdue = await prisma.sTR.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "pending",
+        createdAt: { lt: new Date(now.getTime() - SIXTY_ENDING_HOURS_MS) },
+        OR: [{ escalatedAt: null }, { escalatedAt: { lt: resendBefore } }],
+      },
+      select: { id: true, cooperativeId: true, member: { select: { name: true, code: true } } },
     });
-    if (claimed.count === 0) continue;
 
-    const supers = await prisma.member.findMany({
-      where: { cooperativeId: str.cooperativeId, role: "superadmin", status: "active" },
-    });
-    for (const admin of supers) {
-      await notifyMember(
-        admin,
-        `🚨 *STR filing deadline breached*\n\nA Suspicious Transaction Report for *${str.member.name}* (${str.member.code}) ` +
-          `has been pending for over 72 hours. CBN requires filing within 72 hours — file it *now* (\`strs\` to review).`,
-      ).catch(() => {});
+    for (const str of overdue) {
+      // Atomically claim the alert for this STR. Only the caller whose UPDATE
+      // matched a row proceeds, so a second instance (or a restart mid-loop)
+      // cannot duplicate the alert.
+      const claimed = await prisma.sTR.updateMany({
+        where: { id: str.id, OR: [{ escalatedAt: null }, { escalatedAt: { lt: resendBefore } }] },
+        data: { escalatedAt: now },
+      });
+      if (claimed.count === 0) continue;
+
+      const supers = await prisma.member.findMany({
+        where: { cooperativeId: str.cooperativeId, role: "superadmin", status: "active" },
+      });
+      for (const admin of supers) {
+        await notifyMember(
+          admin,
+          `🚨 *STR filing deadline breached*\n\nA Suspicious Transaction Report for *${str.member.name}* (${str.member.code}) ` +
+            `has been pending for over 72 hours. CBN requires filing within 72 hours — file it *now* (\`strs\` to review).`,
+        ).catch(() => {});
+      }
+      escalated += 1;
     }
-    escalated += 1;
-  }
+  });
 
   return escalated;
 }

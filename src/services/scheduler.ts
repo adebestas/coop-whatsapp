@@ -5,6 +5,7 @@ import { showHistory } from "./statements.js";
 import { runAllAlerts } from "../lib/ai-alerts.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { getRedis, claimOnce } from "../lib/cache.js";
+import { forEachCoop, withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -56,25 +57,32 @@ export async function setAutoSave(
 
 /** Send reminders to members whose recurring contribution is due now. */
 export async function runAutoSaveReminders(now = new Date()): Promise<number> {
-  const due = await prisma.member.findMany({
-    where: { autoSaveEnabled: true, autoSaveNextDue: { lte: now }, consentAt: { not: null } },
-  });
   let sent = 0;
-  for (const m of due) {
-    const interval = m.autoSaveInterval === "weekly" ? "week" : "month";
-    await notifyMember(
-      m,
-      `⏰ Time to save! Your *${interval}ly* contribution of *${formatBalance(m.autoSaveAmount ?? 0)}* is due.\n\nReply *save ${Math.round((m.autoSaveAmount ?? 0) / 100)}* to pay now.`,
-    );
-    // Schedule the next one so we don't nag every few minutes.
-    const next = new Date(m.autoSaveNextDue!);
-    next.setDate(next.getDate() + (m.autoSaveInterval === "weekly" ? 7 : 30));
-    await prisma.member.update({
-      where: { id: m.id },
-      data: { autoSaveNextDue: next },
+  await forEachCoop(async (coopId) => {
+    const due = await prisma.member.findMany({
+      where: {
+        cooperativeId: coopId,
+        autoSaveEnabled: true,
+        autoSaveNextDue: { lte: now },
+        consentAt: { not: null },
+      },
     });
-    sent++;
-  }
+    for (const m of due) {
+      const interval = m.autoSaveInterval === "weekly" ? "week" : "month";
+      await notifyMember(
+        m,
+        `⏰ Time to save! Your *${interval}ly* contribution of *${formatBalance(m.autoSaveAmount ?? 0)}* is due.\n\nReply *save ${Math.round((m.autoSaveAmount ?? 0) / 100)}* to pay now.`,
+      );
+      // Schedule the next one so we don't nag every few minutes.
+      const next = new Date(m.autoSaveNextDue!);
+      next.setDate(next.getDate() + (m.autoSaveInterval === "weekly" ? 7 : 30));
+      await prisma.member.update({
+        where: { id: m.id },
+        data: { autoSaveNextDue: next },
+      });
+      sent++;
+    }
+  });
   return sent;
 }
 
@@ -111,81 +119,87 @@ export async function runMonthlyStatements(now = new Date()): Promise<number> {
   if (now.getDate() !== 1) return 0;
 
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const members = await prisma.member.findMany({
-    where: {
-      status: "active",
-      consentAt: { not: null },
-      OR: [{ lastStatementSentAt: null }, { lastStatementSentAt: { lt: monthStart } }],
-    },
-    include: { cooperative: true },
-  });
-
   let sent = 0;
-  // Process members in batches of 10 to avoid flooding the messaging provider
-  for (let i = 0; i < members.length; i += 10) {
-    const batch = members.slice(i, i + 10);
-    const results = await Promise.allSettled(
-      batch.map(async (m) => {
-        if (!m.phone) return;
-        const stmt = await showHistory(m.phone);
-        if (!stmt.ok) return;
-        await notifyMember(
-          m,
-          `${stmt.message}\n\n_Generated ${now.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })} — reply *menu* for options._`,
-        ).catch(() => {});
-        await prisma.member.update({ where: { id: m.id }, data: { lastStatementSentAt: now } });
-      }),
-    );
-    sent += results.filter((r) => r.status === "fulfilled").length;
-  }
+  await forEachCoop(async (coopId) => {
+    const members = await prisma.member.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "active",
+        consentAt: { not: null },
+        OR: [{ lastStatementSentAt: null }, { lastStatementSentAt: { lt: monthStart } }],
+      },
+      include: { cooperative: true },
+    });
+
+    // Process members in batches of 10 to avoid flooding the messaging provider
+    for (let i = 0; i < members.length; i += 10) {
+      const batch = members.slice(i, i + 10);
+      const results = await Promise.allSettled(
+        batch.map(async (m) => {
+          if (!m.phone) return;
+          const stmt = await showHistory(m.phone);
+          if (!stmt.ok) return;
+          await notifyMember(
+            m,
+            `${stmt.message}\n\n_Generated ${now.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" })} — reply *menu* for options._`,
+          ).catch(() => {});
+          await prisma.member.update({ where: { id: m.id }, data: { lastStatementSentAt: now } });
+        }),
+      );
+      sent += results.filter((r) => r.status === "fulfilled").length;
+    }
+  });
   return sent;
 }
 
 /** Send a birthday greeting to members whose birthday is today (once per year). */
 export async function runBirthdayGreetings(now = new Date()): Promise<number> {
-  const members = await prisma.member.findMany({
-    where: {
-      status: "active",
-      consentAt: { not: null },
-      dateOfBirth: { not: null },
-      OR: [
-        { lastBirthdayGreetedYear: null },
-        { lastBirthdayGreetedYear: { not: now.getFullYear() } },
-      ],
-    },
-  });
-
   let sent = 0;
-  // Process in batches of 10 with concurrency
-  for (let i = 0; i < members.length; i += 10) {
-    const batch = members.slice(i, i + 10);
-    const results = await Promise.allSettled(
-      batch.map(async (m) => {
-        if (!m.dateOfBirth) return false;
-        if (
-          m.dateOfBirth.getMonth() !== now.getMonth() ||
-          m.dateOfBirth.getDate() !== now.getDate()
-        )
-          return false;
-        try {
-          await notifyMember(
-            m,
-            `🎂 *Happy Birthday, ${m.name}!* 🎉\n\nMay your new year be full of blessings and growth. Your cooperative family celebrates you today. 🥳`,
-          );
-          await prisma.member.update({
-            where: { id: m.id },
-            data: { lastBirthdayGreetedYear: now.getFullYear() },
-          });
-          return true;
-        } catch (err) {
-          // Log the error but don't fail the entire batch
-          console.error(`[scheduler] Failed to send birthday greeting to ${m.phone}:`, err);
-          return false;
-        }
-      }),
-    );
-    sent += results.filter((r) => r.status === "fulfilled" && r.value === true).length;
-  }
+  await forEachCoop(async (coopId) => {
+    const members = await prisma.member.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "active",
+        consentAt: { not: null },
+        dateOfBirth: { not: null },
+        OR: [
+          { lastBirthdayGreetedYear: null },
+          { lastBirthdayGreetedYear: { not: now.getFullYear() } },
+        ],
+      },
+    });
+
+    // Process in batches of 10 with concurrency
+    for (let i = 0; i < members.length; i += 10) {
+      const batch = members.slice(i, i + 10);
+      const results = await Promise.allSettled(
+        batch.map(async (m) => {
+          if (!m.dateOfBirth) return false;
+          if (
+            m.dateOfBirth.getMonth() !== now.getMonth() ||
+            m.dateOfBirth.getDate() !== now.getDate()
+          )
+            return false;
+          try {
+            await notifyMember(
+              m,
+              `🎂 *Happy Birthday, ${m.name}!* 🎉\n\nMay your new year be full of blessings and growth. Your cooperative family celebrates you today. 🥳`,
+            );
+            await prisma.member.update({
+              where: { id: m.id },
+              data: { lastBirthdayGreetedYear: now.getFullYear() },
+            });
+            return true;
+          } catch (err) {
+            // Log the error but don't fail the entire batch
+            console.error(`[scheduler] Failed to send birthday greeting to ${m.phone}:`, err);
+            return false;
+          }
+        }),
+      );
+      sent += results.filter((r) => r.status === "fulfilled" && r.value === true).length;
+    }
+  });
   return sent;
 }
 
@@ -208,28 +222,30 @@ export async function runDataRetention(
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
   // Anonymize member PII on records older than 7 years (keep amounts for audit)
-  const staleMembers = await prisma.member.findMany({
-    where: { createdAt: { lt: sevenYearsAgo }, status: "inactive" },
-    select: { id: true },
-  });
   let anonymized = 0;
-  for (const m of staleMembers) {
-    await prisma.member.update({
-      where: { id: m.id },
-      data: {
-        name: `Redacted_${m.id.slice(-6)}`,
-        phone: `redacted_${m.id.slice(-6)}`,
-        contactPhone: null,
-        email: null,
-        nextOfKinName: null,
-        nextOfKinPhone: null,
-        dateOfBirth: null,
-      },
+  await forEachCoop(async (coopId) => {
+    const staleMembers = await prisma.member.findMany({
+      where: { cooperativeId: coopId, createdAt: { lt: sevenYearsAgo }, status: "inactive" },
+      select: { id: true },
     });
-    anonymized++;
-  }
+    for (const m of staleMembers) {
+      await prisma.member.update({
+        where: { id: m.id },
+        data: {
+          name: `Redacted_${m.id.slice(-6)}`,
+          phone: `redacted_${m.id.slice(-6)}`,
+          contactPhone: null,
+          email: null,
+          nextOfKinName: null,
+          nextOfKinPhone: null,
+          dateOfBirth: null,
+        },
+      });
+      anonymized++;
+    }
+  });
 
-  // Delete session data older than 30 days
+  // Delete session data older than 30 days (Session is global, not RLS-scoped).
   const { count: deleted } = await prisma.session.deleteMany({
     where: { updatedAt: { lt: thirtyDaysAgo } },
   });
@@ -262,74 +278,86 @@ export async function runDailyDigest(now = new Date()): Promise<number> {
   const targetHour = Number(process.env.DIGEST_HOUR ?? 20); // 8pm default
   if (hour !== targetHour) return 0;
 
-  const coops = await prisma.cooperative.findMany({ select: { id: true, name: true } });
+  const coopIds = await listCooperativeIds();
   const redis = getRedis();
   let sent = 0;
-  for (const coop of coops) {
-    const key = `${coop.id}:${now.toDateString()}`;
+  for (const coopId of coopIds) {
+    const key = `${coopId}:${now.toDateString()}`;
 
     // Dedupe across restarts via Redis (in-memory fallback for single-instance).
-    let alreadySent = digestLastSentDate.get(coop.id) === key;
+    let alreadySent = digestLastSentDate.get(coopId) === key;
     if (!alreadySent && redis) {
       try {
-        alreadySent = (await redis.get(`digest:last:${coop.id}`)) === key;
+        alreadySent = (await redis.get(`digest:last:${coopId}`)) === key;
       } catch {
         /* ignore — fall back to the in-memory marker */
       }
     }
     if (alreadySent) continue;
 
-    const start = new Date(now);
-    start.setDate(start.getDate() - 1);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(start);
-    end.setDate(end.getDate() + 1);
+    await withCoopContext(coopId, async () => {
+      const coop = await prisma.cooperative.findUnique({
+        where: { id: coopId },
+        select: { name: true },
+      });
 
-    const [payouts, externals, topups] = await Promise.all([
-      prisma.payout.findMany({
-        where: { cooperativeId: coop.id, status: "successful", createdAt: { gte: start, lt: end } },
-        include: { member: { select: { name: true } } },
-      }),
-      prisma.externalPayment.findMany({
-        where: { cooperativeId: coop.id, status: "paid", updatedAt: { gte: start, lt: end } },
-      }),
-      prisma.contribution.aggregate({
-        where: {
-          cooperativeId: coop.id,
-          type: "topup",
-          status: "confirmed",
-          paidAt: { gte: start, lt: end },
-        },
-        _sum: { amount: true },
-      }),
-    ]);
+      const start = new Date(now);
+      start.setDate(start.getDate() - 1);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
 
-    // Withdrawals appear inside `payouts` too (TFR-WDR refs) — list them by note.
-    const lines: string[] = [];
-    let outTotal = 0;
-    for (const p of payouts) {
-      lines.push(
-        `• ${formatBalance(p.amount)} → ${p.member.name} (${p.note?.slice(0, 60) ?? "payout"})`,
-      );
-      outTotal += p.amount;
-    }
-    for (const e of externals) {
-      lines.push(`• ${formatBalance(e.amount)} → external: ${e.beneficiaryName}`);
-      outTotal += e.amount;
-    }
+      const [payouts, externals, topups] = await Promise.all([
+        prisma.payout.findMany({
+          where: {
+            cooperativeId: coopId,
+            status: "successful",
+            createdAt: { gte: start, lt: end },
+          },
+          include: { member: { select: { name: true } } },
+        }),
+        prisma.externalPayment.findMany({
+          where: { cooperativeId: coopId, status: "paid", updatedAt: { gte: start, lt: end } },
+        }),
+        prisma.contribution.aggregate({
+          where: {
+            cooperativeId: coopId,
+            type: "topup",
+            status: "confirmed",
+            paidAt: { gte: start, lt: end },
+          },
+          _sum: { amount: true },
+        }),
+      ]);
 
-    const text =
-      `📋 *Daily summary for ${coop.name}* (${start.toLocaleDateString("en-GB")})\n\n` +
-      (lines.length
-        ? `Money out (${formatBalance(outTotal)}):\n${lines.join("\n")}\n\n`
-        : `No money went out yesterday. ✅\n\n`) +
-      `Money in: *${formatBalance(topups._sum.amount ?? 0)}* via bank transfers.\n\n` +
-      `_If ANY line looks wrong, raise it with the other supers NOW — reply *tickets* to open one._`;
+      // Withdrawals appear inside `payouts` too (TFR-WDR refs) — list them by note.
+      const lines: string[] = [];
+      let outTotal = 0;
+      for (const p of payouts) {
+        lines.push(
+          `• ${formatBalance(p.amount)} → ${p.member.name} (${p.note?.slice(0, 60) ?? "payout"})`,
+        );
+        outTotal += p.amount;
+      }
+      for (const e of externals) {
+        lines.push(`• ${formatBalance(e.amount)} → external: ${e.beneficiaryName}`);
+        outTotal += e.amount;
+      }
 
-    await notifySuperAdminsDigest(coop.id, text);
-    digestLastSentDate.set(coop.id, key);
+      const text =
+        `📋 *Daily summary for ${coop?.name ?? "your cooperative"}* (${start.toLocaleDateString("en-GB")})\n\n` +
+        (lines.length
+          ? `Money out (${formatBalance(outTotal)}):\n${lines.join("\n")}\n\n`
+          : `No money went out yesterday. ✅\n\n`) +
+        `Money in: *${formatBalance(topups._sum.amount ?? 0)}* via bank transfers.\n\n` +
+        `_If ANY line looks wrong, raise it with the other supers NOW — reply *tickets* to open one._`;
+
+      await notifySuperAdminsDigest(coopId, text);
+    });
+
+    digestLastSentDate.set(coopId, key);
     if (redis) {
-      await redis.set(`digest:last:${coop.id}`, key).catch(() => {});
+      await redis.set(`digest:last:${coopId}`, key).catch(() => {});
     }
     sent++;
   }
@@ -359,21 +387,23 @@ export async function runBackupVerificationJob(now = new Date()): Promise<number
   // Run on the 2nd of each month (after monthly statements)
   if (now.getDate() !== 2) return 0;
 
-  const coops = await prisma.cooperative.findMany({ select: { id: true } });
+  const coopIds = await listCooperativeIds();
   let ran = 0;
-  for (const coop of coops) {
-    const key = `${coop.id}:${now.getFullYear()}-${now.getMonth()}`;
+  for (const coopId of coopIds) {
+    const key = `${coopId}:${now.getFullYear()}-${now.getMonth()}`;
     // Redis-backed claim: survives restarts and is shared across instances.
     if (!(await claimOnce("backup-verify", key, 40 * 24 * 3600))) continue;
     try {
-      const { runBackupVerification } = await import("./backup-verify.js");
-      await runBackupVerification();
+      await withCoopContext(coopId, async () => {
+        const { runBackupVerification } = await import("./backup-verify.js");
+        await runBackupVerification();
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "unknown";
       console.error("[scheduler] backup verification failed", err);
       await alertSupers(
         "system",
-        `Backup verification failed for cooperative ${coop.id}: ${msg}`,
+        `Backup verification failed for cooperative ${coopId}: ${msg}`,
         AlertSeverity.CRITICAL,
       );
     }
@@ -385,20 +415,20 @@ export async function runBackupVerificationJob(now = new Date()): Promise<number
 export async function runProactiveAlerts(now = new Date()): Promise<number> {
   if (now.getDate() !== 1) return 0;
 
-  const coops = await prisma.cooperative.findMany({ select: { id: true } });
+  const coopIds = await listCooperativeIds();
   let ran = 0;
-  for (const coop of coops) {
-    const key = `${coop.id}:${now.getFullYear()}-${now.getMonth()}`;
+  for (const coopId of coopIds) {
+    const key = `${coopId}:${now.getFullYear()}-${now.getMonth()}`;
     // Redis-backed claim: survives restarts and is shared across instances.
     if (!(await claimOnce("ai-alerts", key, 40 * 24 * 3600))) continue;
     try {
-      await runAllAlerts(coop.id);
+      await withCoopContext(coopId, () => runAllAlerts(coopId));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "unknown";
       console.error("[scheduler] proactive alerts failed", err);
       await alertSupers(
         "system",
-        `Proactive alerts failed for cooperative ${coop.id}: ${msg}`,
+        `Proactive alerts failed for cooperative ${coopId}: ${msg}`,
         AlertSeverity.CRITICAL,
       );
     }

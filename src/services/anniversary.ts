@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
+import { forEachCoop } from "../lib/tenant-context.js";
 
 function calculateYearsSince(date: Date, now: Date): number {
   const diffMs = now.getTime() - date.getTime();
@@ -46,33 +47,36 @@ export async function getAnniversaryMessage(
 }
 
 export async function checkAnniversaries(now = new Date()): Promise<number> {
-  const members = await prisma.member.findMany({
-    where: {
-      status: "active",
-      optedOut: false,
-      lastAnniversaryGreetedYear: {
-        not: now.getFullYear(),
-      },
-    },
-    include: { wallet: true, cooperative: true },
-  });
-
   let sent = 0;
-  for (const m of members) {
-    if (!m.createdAt) continue;
-    if (m.createdAt.getMonth() !== now.getMonth() || m.createdAt.getDate() !== now.getDate())
-      continue;
-
-    const years = calculateYearsSince(m.createdAt, now);
-    if (years < 1) continue;
-
-    const message = await getAnniversaryMessage(m, now);
-    await notifyMember(m, message).catch(() => {});
-    await prisma.member.update({
-      where: { id: m.id },
-      data: { lastAnniversaryGreetedYear: now.getFullYear() },
+  await forEachCoop(async (coopId) => {
+    const members = await prisma.member.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "active",
+        optedOut: false,
+        lastAnniversaryGreetedYear: {
+          not: now.getFullYear(),
+        },
+      },
+      include: { wallet: true, cooperative: true },
     });
-    sent++;
-  }
+
+    for (const m of members) {
+      if (!m.createdAt) continue;
+      if (m.createdAt.getMonth() !== now.getMonth() || m.createdAt.getDate() !== now.getDate())
+        continue;
+
+      const years = calculateYearsSince(m.createdAt, now);
+      if (years < 1) continue;
+
+      const message = await getAnniversaryMessage(m, now);
+      await notifyMember(m, message).catch(() => {});
+      await prisma.member.update({
+        where: { id: m.id },
+        data: { lastAnniversaryGreetedYear: now.getFullYear() },
+      });
+      sent++;
+    }
+  });
   return sent;
 }

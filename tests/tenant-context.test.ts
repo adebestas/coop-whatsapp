@@ -5,6 +5,11 @@ import {
   resolveCoopByPhone,
   resolveCoopByAltChannel,
   resolveCoopsByPhone,
+  resolveCoopByCode,
+  resolveCoopByVirtualAccount,
+  resolveCoopByPayoutReference,
+  listCooperativeIds,
+  forEachCoop,
   withCoopContext,
   rlsEnforcementStatus,
 } from "../src/lib/tenant-context.js";
@@ -68,6 +73,48 @@ describe("tenant-context resolvers (SQLite fallback)", () => {
     expect(coops.every((c) => c.name.length > 0 && c.code.length > 0)).toBe(true);
 
     expect(await resolveCoopsByPhone("2348000000000")).toEqual([]);
+  });
+
+  it("resolves a cooperative by join code", async () => {
+    const coop = await createTestCoop("CODE1");
+    expect(await resolveCoopByCode("CODE1")).toBe(coop.id);
+    expect(await resolveCoopByCode("NOPE")).toBeNull();
+  });
+
+  it("resolves a cooperative by virtual account and payout reference", async () => {
+    const coop = await createTestCoop("VA1");
+    const member = await createTestMember(coop.id, { phone: "2348090000021" });
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { virtualAccountNumber: "555000111" },
+    });
+    expect(await resolveCoopByVirtualAccount("555000111")).toBe(coop.id);
+    expect(await resolveCoopByVirtualAccount("000000000")).toBeNull();
+
+    await prisma.payout.create({
+      data: {
+        amount: 1000,
+        reference: "REF-1",
+        idempotencyKey: "REF-1",
+        status: "successful",
+        memberId: member.id,
+        cooperativeId: coop.id,
+      },
+    });
+    expect(await resolveCoopByPayoutReference("REF-1")).toBe(coop.id);
+    expect(await resolveCoopByPayoutReference("NOPE")).toBeNull();
+  });
+
+  it("lists cooperatives and iterates them with forEachCoop", async () => {
+    const coop = await createTestCoop("LIST1");
+    const ids = await listCooperativeIds();
+    expect(ids).toContain(coop.id);
+
+    const seen: string[] = [];
+    await forEachCoop(async (id) => {
+      seen.push(id);
+    });
+    expect(seen).toContain(coop.id);
   });
 
   it("reports RLS as not enforced on SQLite", async () => {

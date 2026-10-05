@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { createHash } from "node:crypto";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
+import { ownerPrisma } from "../lib/prisma.js";
 
 /**
  * Critical tables to verify during backup restore test.
@@ -474,7 +475,8 @@ export async function verifyBackupRestore(
  */
 export async function runBackupVerification(): Promise<BackupVerifyResult[]> {
   const results: BackupVerifyResult[] = [];
-  const sourcePrisma = new PrismaClient();
+  // System-level verification needs cross-tenant access — use the owner client.
+  const sourcePrisma = ownerPrisma;
 
   try {
     const coops = await sourcePrisma.cooperative.findMany({

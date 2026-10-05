@@ -1,6 +1,6 @@
 import { mkdir, writeFile, readdir, unlink, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { prisma } from "../lib/prisma.js";
+import { ownerPrisma } from "../lib/prisma.js";
 
 const BACKUP_DIR = process.env.BACKUP_DIR ?? "backups";
 const KEEP_BACKUPS = Number(process.env.BACKUP_KEEP ?? "14");
@@ -145,75 +145,75 @@ export async function runBackup(): Promise<{ ok: boolean; message: string; file?
       beneficiaries,
     ] = await Promise.all([
       fetchWithWarning(
-        () => prisma.cooperative.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.cooperative.findMany({ take: BACKUP_ROW_LIMIT }),
         "cooperatives",
       ),
-      fetchWithWarning(() => prisma.unit.findMany({ take: BACKUP_ROW_LIMIT }), "units"),
-      fetchWithWarning(() => prisma.member.findMany({ take: BACKUP_ROW_LIMIT }), "members"),
-      fetchWithWarning(() => prisma.wallet.findMany({ take: BACKUP_ROW_LIMIT }), "wallets"),
+      fetchWithWarning(() => ownerPrisma.unit.findMany({ take: BACKUP_ROW_LIMIT }), "units"),
+      fetchWithWarning(() => ownerPrisma.member.findMany({ take: BACKUP_ROW_LIMIT }), "members"),
+      fetchWithWarning(() => ownerPrisma.wallet.findMany({ take: BACKUP_ROW_LIMIT }), "wallets"),
       fetchWithWarning(
-        () => prisma.contribution.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.contribution.findMany({ take: BACKUP_ROW_LIMIT }),
         "contributions",
       ),
-      fetchWithWarning(() => prisma.loan.findMany({ take: BACKUP_ROW_LIMIT }), "loans"),
-      fetchWithWarning(() => prisma.guarantor.findMany({ take: BACKUP_ROW_LIMIT }), "guarantors"),
+      fetchWithWarning(() => ownerPrisma.loan.findMany({ take: BACKUP_ROW_LIMIT }), "loans"),
+      fetchWithWarning(() => ownerPrisma.guarantor.findMany({ take: BACKUP_ROW_LIMIT }), "guarantors"),
       fetchWithWarning(
-        () => prisma.loanRepayment.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.loanRepayment.findMany({ take: BACKUP_ROW_LIMIT }),
         "loanRepayments",
       ),
-      fetchWithWarning(() => prisma.payout.findMany({ take: BACKUP_ROW_LIMIT }), "payouts"),
+      fetchWithWarning(() => ownerPrisma.payout.findMany({ take: BACKUP_ROW_LIMIT }), "payouts"),
       fetchWithWarning(
-        () => prisma.withdrawalRequest.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.withdrawalRequest.findMany({ take: BACKUP_ROW_LIMIT }),
         "withdrawalRequests",
       ),
-      fetchWithWarning(() => prisma.deathClaim.findMany({ take: BACKUP_ROW_LIMIT }), "deathClaims"),
+      fetchWithWarning(() => ownerPrisma.deathClaim.findMany({ take: BACKUP_ROW_LIMIT }), "deathClaims"),
       fetchWithWarning(
-        () => prisma.deathValidation.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.deathValidation.findMany({ take: BACKUP_ROW_LIMIT }),
         "deathValidations",
       ),
-      fetchWithWarning(() => prisma.auditLog.findMany({ take: BACKUP_ROW_LIMIT }), "auditLogs"),
+      fetchWithWarning(() => ownerPrisma.auditLog.findMany({ take: BACKUP_ROW_LIMIT }), "auditLogs"),
       fetchWithWarning(
-        () => prisma.supportTicket.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.supportTicket.findMany({ take: BACKUP_ROW_LIMIT }),
         "supportTickets",
       ),
-      fetchWithWarning(() => prisma.vote.findMany({ take: BACKUP_ROW_LIMIT }), "votes"),
+      fetchWithWarning(() => ownerPrisma.vote.findMany({ take: BACKUP_ROW_LIMIT }), "votes"),
       fetchWithWarning(
-        () => prisma.voteCandidate.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.voteCandidate.findMany({ take: BACKUP_ROW_LIMIT }),
         "voteCandidates",
       ),
-      fetchWithWarning(() => prisma.voteBallot.findMany({ take: BACKUP_ROW_LIMIT }), "voteBallots"),
-      fetchWithWarning(() => prisma.dividend.findMany({ take: BACKUP_ROW_LIMIT }), "dividends"),
+      fetchWithWarning(() => ownerPrisma.voteBallot.findMany({ take: BACKUP_ROW_LIMIT }), "voteBallots"),
+      fetchWithWarning(() => ownerPrisma.dividend.findMany({ take: BACKUP_ROW_LIMIT }), "dividends"),
       fetchWithWarning(
-        () => prisma.dividendEntry.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.dividendEntry.findMany({ take: BACKUP_ROW_LIMIT }),
         "dividendEntries",
       ),
-      fetchWithWarning(() => prisma.broadcast.findMany({ take: BACKUP_ROW_LIMIT }), "broadcasts"),
-      fetchWithWarning(() => prisma.session.findMany({ take: BACKUP_ROW_LIMIT }), "sessions"),
+      fetchWithWarning(() => ownerPrisma.broadcast.findMany({ take: BACKUP_ROW_LIMIT }), "broadcasts"),
+      fetchWithWarning(() => ownerPrisma.session.findMany({ take: BACKUP_ROW_LIMIT }), "sessions"),
       fetchWithWarning(
-        () => prisma.ledgerEntry.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.ledgerEntry.findMany({ take: BACKUP_ROW_LIMIT }),
         "ledgerEntries",
       ),
       fetchWithWarning(
-        () => prisma.externalPayment.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.externalPayment.findMany({ take: BACKUP_ROW_LIMIT }),
         "externalPayments",
       ),
       fetchWithWarning(
-        () => prisma.purchasePoll.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.purchasePoll.findMany({ take: BACKUP_ROW_LIMIT }),
         "purchasePolls",
       ),
-      fetchWithWarning(() => prisma.pollOption.findMany({ take: BACKUP_ROW_LIMIT }), "pollOptions"),
-      fetchWithWarning(() => prisma.pollBallot.findMany({ take: BACKUP_ROW_LIMIT }), "pollBallots"),
+      fetchWithWarning(() => ownerPrisma.pollOption.findMany({ take: BACKUP_ROW_LIMIT }), "pollOptions"),
+      fetchWithWarning(() => ownerPrisma.pollBallot.findMany({ take: BACKUP_ROW_LIMIT }), "pollBallots"),
       fetchWithWarning(
-        () => prisma.guarantorDeduction.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.guarantorDeduction.findMany({ take: BACKUP_ROW_LIMIT }),
         "guarantorDeductions",
       ),
       fetchWithWarning(
-        () => prisma.journalEntry.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.journalEntry.findMany({ take: BACKUP_ROW_LIMIT }),
         "journalEntries",
       ),
-      fetchWithWarning(() => prisma.posting.findMany({ take: BACKUP_ROW_LIMIT }), "postings"),
+      fetchWithWarning(() => ownerPrisma.posting.findMany({ take: BACKUP_ROW_LIMIT }), "postings"),
       fetchWithWarning(
-        () => prisma.beneficiary.findMany({ take: BACKUP_ROW_LIMIT }),
+        () => ownerPrisma.beneficiary.findMany({ take: BACKUP_ROW_LIMIT }),
         "beneficiaries",
       ),
     ]);

@@ -6,6 +6,7 @@ import { recordLedger } from "./ledger.js";
 import { audit } from "./audit.js";
 import { notifySupers } from "./payanyone.js";
 import { applyDividendPayoutUpdate } from "./dividends.js";
+import { forEachCoop } from "../lib/tenant-context.js";
 
 /**
  * Transfer status polling — the safety net for the "crash after the provider
@@ -49,9 +50,10 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
   const actions: string[] = [];
   const cutoff = new Date(now.getTime() - MIN_STUCK_MS);
 
+  await forEachCoop(async (coopId) => {
   // ---- Withdrawals (wallet already debited before paying) ----
   const stuckWithdrawals = await prisma.withdrawalRequest.findMany({
-    where: { status: "processing", createdAt: { lt: cutoff } },
+    where: { cooperativeId: coopId, status: "processing", createdAt: { lt: cutoff } },
     include: { member: true },
   });
   for (const w of stuckWithdrawals) {
@@ -120,7 +122,12 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
 
   // ---- Death claims (same debit-first saga) ----
   const stuckClaims = await prisma.deathClaim.findMany({
-    where: { status: "processing", createdAt: { lt: cutoff }, familyAccountNumber: { not: null } },
+    where: {
+      cooperativeId: coopId,
+      status: "processing",
+      createdAt: { lt: cutoff },
+      familyAccountNumber: { not: null },
+    },
     include: { member: true },
   });
   for (const c of stuckClaims) {
@@ -187,7 +194,12 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
 
   // ---- Loan disbursements (no wallet involved) ----
   const stuckLoans = await prisma.loan.findMany({
-    where: { status: "approved", disbursementStatus: "processing", createdAt: { lt: cutoff } },
+    where: {
+      cooperativeId: coopId,
+      status: "approved",
+      disbursementStatus: "processing",
+      createdAt: { lt: cutoff },
+    },
     include: { member: true },
   });
   for (const loan of stuckLoans) {
@@ -249,7 +261,7 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
 
   // ---- Pay-anyone ----
   const stuckExternals = await prisma.externalPayment.findMany({
-    where: { status: "processing", createdAt: { lt: cutoff } },
+    where: { cooperativeId: coopId, status: "processing", createdAt: { lt: cutoff } },
   });
   for (const p of stuckExternals) {
     const reference = `PAYANY-${p.id.slice(-8)}`;
@@ -316,7 +328,12 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
   // ---- Dividend payouts (bank-out journal is posted at initiation; settle or
   // reverse it here if the transfer callback was missed) ----
   const stuckDividends = await prisma.dividendEntry.findMany({
-    where: { status: "processing", createdAt: { lt: cutoff }, payoutId: { not: null } },
+    where: {
+      dividend: { cooperativeId: coopId },
+      status: "processing",
+      createdAt: { lt: cutoff },
+      payoutId: { not: null },
+    },
     include: { payout: true },
   });
   for (const entry of stuckDividends) {
@@ -347,5 +364,6 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
     }
   }
 
+  });
   return actions;
 }
