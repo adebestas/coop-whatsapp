@@ -3,6 +3,7 @@ import { hashPin } from "../lib/security.js";
 import { audit } from "./audit.js";
 import { LIMITS, formatBalance } from "../lib/money.js";
 import { getCoopConfig } from "./coop-config.js";
+import { getRedis } from "../lib/cache.js";
 
 export { formatBalance } from "../lib/money.js";
 
@@ -132,7 +133,82 @@ export async function findOrCreateMember(
 }
 
 const memberCache = new Map<string, { data: any; expires: number }>();
-const CACHE_TTL = 30_000;
+const CACHE_TTL = 30_000; // ms
+const MEMBER_CACHE_PREFIX = "membercache:";
+
+// Prisma DateTime values become ISO strings over JSON; revive them so a cached
+// member has the same shape as a live query (callers use `.getTime()` etc.).
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+function reviveDates(_key: string, value: unknown): unknown {
+  return typeof value === "string" && ISO_DATE.test(value) ? new Date(value) : value;
+}
+
+/**
+ * Read a cached member. Redis is the shared cache (so an invalidation on one
+ * instance is seen by the others); the in-memory map is a fallback when Redis
+ * is unavailable. Returns null on a miss.
+ */
+async function readMemberCache(key: string): Promise<any | null> {
+  const redis = getRedis();
+  if (redis) {
+    try {
+      const raw = await redis.get(MEMBER_CACHE_PREFIX + key);
+      if (raw) return JSON.parse(raw, reviveDates);
+    } catch {
+      /* fall through to the in-memory cache */
+    }
+  }
+  const local = memberCache.get(key);
+  if (local && Date.now() < local.expires) return local.data;
+  return null;
+}
+
+async function writeMemberCache(key: string, data: unknown): Promise<void> {
+  const redis = getRedis();
+  if (redis) {
+    try {
+      await redis.set(MEMBER_CACHE_PREFIX + key, JSON.stringify(data), "PX", CACHE_TTL);
+      return;
+    } catch {
+      /* fall through */
+    }
+  }
+  memberCache.set(key, { data, expires: Date.now() + CACHE_TTL });
+}
+
+async function deleteRedisKey(key: string): Promise<void> {
+  const redis = getRedis();
+  if (!redis) return;
+  try {
+    await redis.del(MEMBER_CACHE_PREFIX + key);
+  } catch {
+    /* ignore */
+  }
+}
+
+async function deleteRedisPattern(phone: string): Promise<void> {
+  const redis = getRedis();
+  if (!redis) return;
+  try {
+    // `<coopId>:<phone>` keys (plus the bare `<phone>` key). Phone ids never
+    // contain Redis glob metacharacters, so the pattern is safe.
+    let cursor = "0";
+    do {
+      const [next, keys] = await redis.scan(
+        cursor,
+        "MATCH",
+        `${MEMBER_CACHE_PREFIX}*:${phone}`,
+        "COUNT",
+        100,
+      );
+      cursor = next;
+      if (keys.length) await redis.del(...keys);
+    } while (cursor !== "0");
+    await redis.del(MEMBER_CACHE_PREFIX + phone);
+  } catch {
+    /* ignore */
+  }
+}
 
 /**
  * Clear the member cache — useful for tests.
@@ -143,13 +219,14 @@ export function clearMemberCache(): void {
 
 /**
  * Drop the cached member for a phone after a write that changes consent,
- * role or status fields. The consent gate in conversation.ts reads
- * `consentAt`/`optedOut` from this cache, so a stale entry makes the bot
- * re-prompt (or ignore) a member who just answered.
+ * role or status fields. Clears both the shared Redis cache and the local map,
+ * so another instance cannot serve the stale row. The consent gate in
+ * conversation.ts reads `consentAt`/`optedOut` from this cache.
  */
 export function invalidateMemberCache(phone: string, cooperativeId?: string): void {
   if (cooperativeId) {
     memberCache.delete(`${cooperativeId}:${phone}`);
+    void deleteRedisKey(`${cooperativeId}:${phone}`);
     return;
   }
   // No cooperative given: drop every cached entry for this phone, including the
@@ -158,6 +235,7 @@ export function invalidateMemberCache(phone: string, cooperativeId?: string): vo
   for (const key of memberCache.keys()) {
     if (key.endsWith(`:${phone}`)) memberCache.delete(key);
   }
+  void deleteRedisPattern(phone);
 }
 
 /**
@@ -170,15 +248,15 @@ export function invalidateMemberCache(phone: string, cooperativeId?: string): vo
  */
 export async function getMemberByPhone(phone: string, cooperativeId?: string) {
   const cacheKey = cooperativeId ? `${cooperativeId}:${phone}` : phone;
-  const cached = memberCache.get(cacheKey);
-  if (cached && Date.now() < cached.expires) return cached.data;
+  const cached = await readMemberCache(cacheKey);
+  if (cached) return cached;
 
   if (cooperativeId) {
     const member = await prisma.member.findUnique({
       where: { cooperativeId_phone: { cooperativeId, phone } },
       include: { cooperative: true, wallet: true },
     });
-    if (member) memberCache.set(cacheKey, { data: member, expires: Date.now() + CACHE_TTL });
+    if (member) await writeMemberCache(cacheKey, member);
     return member;
   }
 
@@ -196,7 +274,7 @@ export async function getMemberByPhone(phone: string, cooperativeId?: string) {
     return null;
   }
   const member = candidates[0] ?? null;
-  if (member) memberCache.set(cacheKey, { data: member, expires: Date.now() + CACHE_TTL });
+  if (member) await writeMemberCache(cacheKey, member);
   return member;
 }
 
