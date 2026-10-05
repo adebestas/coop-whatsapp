@@ -63,8 +63,11 @@ export function buildApp() {
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-hashes'", "https://cdn.jsdelivr.net"],
-        scriptSrcAttr: ["'unsafe-inline'"],
+        // No 'unsafe-inline' for scripts: the dashboard uses delegated
+        // data-action handlers and external scripts only (dashboard/app.js,
+        // dashboard/login.js). Inline event handlers are blocked outright.
+        scriptSrc: ["'self'", "https://cdn.jsdelivr.net"],
+        scriptSrcAttr: ["'none'"],
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         imgSrc: ["'self'", "data:", "https:"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
