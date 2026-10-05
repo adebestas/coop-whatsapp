@@ -15,6 +15,7 @@ export const QUEUE_NAMES = {
   EXPORTS: "exports",
   BACKUPS: "backups",
   DIGEST: "digest",
+  SCHEDULER: "scheduler",
 } as const;
 
 // ===== Job Types =====
@@ -112,10 +113,57 @@ export function initQueueProcessors(): void {
     await sendText({ to, text: message });
   });
 
+  // Scheduler queue — repeatable jobs registered by scheduleSchedulerJobs().
+  processQueue<{ job: string }>(QUEUE_NAMES.SCHEDULER, async (job) => {
+    const { runSchedulerJob } = await import("../services/scheduler.js");
+    await runSchedulerJob(job.data.job);
+  });
+
   // NOTE: Payments, exports, backups and digests are executed synchronously by
   // their own services (disbursement/status-poller, export routes, backup
   // scheduler, digest scheduler). No code enqueues to those queues, so they
   // have no processors.
 
   console.warn("[Queue] All processors initialized");
+}
+
+/**
+ * Register the scheduler's repeatable jobs in BullMQ.
+ *
+ * Repeatable jobs persist in Redis, so a process restart cannot miss a
+ * scheduled run, and BullMQ guarantees exactly one worker processes each job
+ * (no duplicate backups/digests across instances). No-op when Redis is down —
+ * the caller falls back to the in-process loops.
+ */
+export async function scheduleSchedulerJobs(): Promise<void> {
+  const redis = getRedis();
+  if (!redis) return;
+
+  const { transferPollIntervalMs } = await import("../services/statuspoller.js");
+  const pollMs = transferPollIntervalMs();
+
+  const jobs: Array<{ name: string; every: number }> = [
+    { name: "tick", every: 15 * 60 * 1000 },
+    { name: "backup", every: 24 * 60 * 60 * 1000 },
+    { name: "reconcile", every: 24 * 60 * 60 * 1000 },
+    { name: "digest", every: 15 * 60 * 1000 },
+  ];
+  if (pollMs > 0) jobs.push({ name: "poller", every: pollMs });
+
+  const queue = new Queue(QUEUE_NAMES.SCHEDULER, { connection: redis });
+  try {
+    for (const j of jobs) {
+      await queue.upsertJobScheduler(
+        `scheduler-${j.name}`,
+        { every: j.every },
+        {
+          name: j.name,
+          data: { job: j.name },
+          opts: { removeOnComplete: true, removeOnFail: 100 },
+        },
+      );
+    }
+  } finally {
+    await queue.close();
+  }
 }

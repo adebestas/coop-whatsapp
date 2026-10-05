@@ -3,9 +3,10 @@ import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
 import { showHistory } from "./statements.js";
 import { runAllAlerts } from "../lib/ai-alerts.js";
-import { alertSupers, AlertSeverity } from "../lib/alerting.js";
+import { alertSupers, AlertSeverity, logAndAlert } from "../lib/alerting.js";
 import { getRedis, claimOnce } from "../lib/cache.js";
 import { forEachCoop, withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
+import { log } from "../lib/logger.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -435,4 +436,131 @@ export async function runProactiveAlerts(now = new Date()): Promise<number> {
     ran++;
   }
   return ran;
+}
+
+// ---------------------------------------------------------------------------
+// Scheduler jobs — the bodies run by the BullMQ repeatable jobs (or the
+// in-process fallback loops in index.ts when Redis is unavailable).
+// ---------------------------------------------------------------------------
+
+/** One scheduler tick: reminders, statements, birthdays, anniversaries,
+ *  guarantor defaults, status posts, VA cleanup, retention, STR escalation,
+ *  proactive alerts, backup verification. */
+export async function runSchedulerTick(): Promise<void> {
+  const { checkAnniversaries } = await import("./anniversary.js");
+  const { scanGuarantorDefaults, executeDueDeductions } = await import("./guarantordeduction.js");
+  const { postAutoStatus } = await import("./status-scheduler.js");
+  const { cleanupExpiredVirtualAccounts } = await import("./payments/topup.js");
+  const { escalateOverdueSTRs } = await import("./aml.js");
+
+  await runAutoSaveReminders().catch((err) =>
+    log.error("[scheduler] auto-save reminders failed", { err: String(err) }),
+  );
+  await runMonthlyStatements().catch((err) =>
+    log.error("[scheduler] monthly statements failed", { err: String(err) }),
+  );
+  await runBirthdayGreetings().catch((err) =>
+    log.error("[scheduler] birthday greetings failed", { err: String(err) }),
+  );
+  await checkAnniversaries().catch((err) =>
+    log.error("[scheduler] anniversary greetings failed", { err: String(err) }),
+  );
+  await scanGuarantorDefaults()
+    .then(async (n) => {
+      if (n > 0) {
+        // Critical: guarantor default deductions move money — alert on failure.
+        await logAndAlert(
+          "system",
+          "executeDueDeductions (guarantor default deductions)",
+          async () => {
+            await executeDueDeductions();
+          },
+          AlertSeverity.CRITICAL,
+        );
+      }
+    })
+    .catch((err) => log.error("[scheduler] guarantor default scan failed", { err: String(err) }));
+  await postAutoStatus().catch((err) =>
+    log.error("[scheduler] status auto-post failed", { err: String(err) }),
+  );
+  await cleanupExpiredVirtualAccounts().catch((err) =>
+    log.error("[scheduler] virtual account cleanup failed", { err: String(err) }),
+  );
+  await runDataRetention().catch((err) =>
+    log.error("[scheduler] data retention failed", { err: String(err) }),
+  );
+  await escalateOverdueSTRs().catch((err) =>
+    log.error("[scheduler] STR deadline escalation failed", { err: String(err) }),
+  );
+  await runProactiveAlerts().catch((err) =>
+    log.error("[scheduler] proactive alerts failed", { err: String(err) }),
+  );
+  await runBackupVerificationJob().catch((err) =>
+    log.error("[scheduler] backup verification failed", { err: String(err) }),
+  );
+}
+
+export async function runBackupJob(): Promise<void> {
+  const { runBackup } = await import("./backup.js");
+  await logAndAlert(
+    "system",
+    "runBackup (daily backup)",
+    async () => {
+      await runBackup();
+    },
+    AlertSeverity.CRITICAL,
+  );
+}
+
+export async function runReconcileJob(): Promise<void> {
+  const { runReconciliation } = await import("./reconcile.js");
+  await logAndAlert(
+    "system",
+    "runReconciliation (nightly reconciliation)",
+    async () => {
+      await runReconciliation();
+    },
+    AlertSeverity.CRITICAL,
+  );
+}
+
+export async function runPollerJob(): Promise<void> {
+  const { runTransferPolling } = await import("./statuspoller.js");
+  await logAndAlert(
+    "system",
+    "runTransferPolling (payout status polling)",
+    async () => {
+      await runTransferPolling();
+    },
+    AlertSeverity.CRITICAL,
+  );
+}
+
+export async function runDigestJob(): Promise<void> {
+  await logAndAlert(
+    "system",
+    "runDailyDigest (daily movement digest)",
+    async () => {
+      await runDailyDigest();
+    },
+    AlertSeverity.CRITICAL,
+  );
+}
+
+/** Dispatch a named scheduler job (used by the BullMQ worker). */
+export async function runSchedulerJob(name: string): Promise<void> {
+  switch (name) {
+    case "tick":
+      return runSchedulerTick();
+    case "backup":
+      return runBackupJob();
+    case "reconcile":
+      return runReconcileJob();
+    case "poller":
+      return runPollerJob();
+    case "digest":
+      return runDigestJob();
+    default:
+      log.warn("[scheduler] unknown job", { name });
+  }
 }
