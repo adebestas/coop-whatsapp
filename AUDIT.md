@@ -88,8 +88,10 @@ and all dual-control blocks. Full suite: **57/57**, `tsc --noEmit` clean.
 
 ## Residual risks / deferred work (accepted)
 
-1. **Floats for money** — structural migration to integer kobo deferred;
-   mitigated by kobo-exact rounding at every write boundary (`roundMoney`).
+1. **Money is integer kobo** (`Int`) across the schema — not floats. `roundMoney`
+   is still applied at write boundaries as defence-in-depth, but there is no
+   float-rounding risk to migrate away from. (This entry previously claimed
+   "floats for money"; that was stale — corrected 2026-10-05.)
 2. **Flutterwave `verif-hash` is not body-bound** (vendor design); replay
    protection therefore rests on the WebhookEvent dedupe layer, which covers it.
 3. **Crash between provider success and DB commit** leaves a row in
