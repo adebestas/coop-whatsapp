@@ -310,6 +310,15 @@ export async function handleAwaitingInput(
         await sendText({ to: phone, text: "Please enter your full name so we know who's saving." });
         return;
       }
+      // Allowlist letters/marks/space and common name punctuation only. Names are
+      // rendered elsewhere (dashboard, statements), so reject anything else.
+      if (name.length > 80 || !/^[\p{L}\p{M}'’. -]+$/u.test(name)) {
+        await sendText({
+          to: phone,
+          text: "Please use letters only for your name (e.g. *Ada Obi*).",
+        });
+        return;
+      }
       await prisma.session.upsert({
         where: { phone },
         create: { phone, state: "awaiting_consent", data: JSON.stringify({ ...data, name }) },

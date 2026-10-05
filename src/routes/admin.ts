@@ -582,9 +582,18 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const phone = req.adminPhone!;
     const actorRole = req.adminRole ?? "admin";
     const body = (req.body ?? {}) as { filename?: string; data?: string };
-    if (!body.filename || !body.data) {
-      return reply.code(400).send({ error: "filename and data (base64) are required" });
-    }
+      if (!body.filename || !body.data) {
+        return reply.code(400).send({ error: "filename and data (base64) are required" });
+      }
+
+      // Only CSV/Excel uploads (extension allowlist; the body limit + the 5MB
+      // check below bound the byte size).
+      const ext = (body.filename.split(".").pop() ?? "").toLowerCase();
+      if (!["csv", "xlsx", "xls"].includes(ext)) {
+        return reply
+          .code(400)
+          .send({ error: "Unsupported file type — use .csv, .xlsx or .xls" });
+      }
 
     // Rate limit: max 3 imports per 10 minutes per cooperative
     const rateKey = `import:${coopId}`;

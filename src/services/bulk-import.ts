@@ -131,6 +131,11 @@ export async function bulkImportMembers(
       skipped += 1;
       continue;
     }
+    const name = row.name.trim().replace(/\s+/g, " ");
+    if (name.length < 2 || name.length > 80 || !/^[\p{L}\p{M}'’. -]+$/u.test(name)) {
+      errors.push(`"${row.name}" — invalid name`);
+      continue;
+    }
     try {
       // Atomic sequence bump — never read-then-write, which would collide
       // member codes when two imports (or a join) run concurrently.
@@ -145,7 +150,7 @@ export async function bulkImportMembers(
         data: {
           code,
           phone,
-          name: row.name.trim().slice(0, 100),
+          name,
           cooperativeId,
           status: "active",
           role: "member",
