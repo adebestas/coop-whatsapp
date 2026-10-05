@@ -1,6 +1,6 @@
 (function () {
   // Redirect if already logged in
-  if (localStorage.getItem('coop_token')) {
+  if (localStorage.getItem('coop_member')) {
     window.location.href = 'index.html';
     return;
   }
@@ -44,7 +44,8 @@
         return;
       }
 
-      localStorage.setItem('coop_token', data.token);
+      // The token is set as an httpOnly cookie by the server; only the
+      // non-sensitive member profile is stored client-side.
       localStorage.setItem('coop_member', JSON.stringify(data.member));
       window.location.href = 'index.html';
     } catch (err) {

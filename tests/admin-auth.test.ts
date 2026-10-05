@@ -22,25 +22,32 @@ describe("admin token lifetime + refresh", () => {
       payload: { phone: admin.phone, pin: "1234" },
     });
     expect(login.statusCode).toBe(200);
-    const token = login.json().token as string;
+    // The token is delivered as an httpOnly cookie, not in the body.
+    const setCookie = String(login.headers["set-cookie"]);
+    expect(setCookie).toContain("coop_token=");
+    expect(setCookie).toContain("HttpOnly");
+    const token = setCookie.split("coop_token=")[1].split(";")[0];
     expect(token).toBeTruthy();
 
-    const refresh = await app.inject({
-      method: "POST",
-      url: "/api/admin/refresh",
-      headers: { authorization: `Bearer ${token}`, "x-requested-with": "XMLHttpRequest" },
-    });
-    expect(refresh.statusCode).toBe(200);
-    const newToken = refresh.json().token as string;
-    expect(newToken).toBeTruthy();
-    expect(verifyAdminToken(newToken)?.cooperativeId).toBe(coop.id);
-
+    // The cookie authenticates a protected route (no Authorization header).
     const overview = await app.inject({
       method: "GET",
       url: "/api/admin/overview",
-      headers: { authorization: `Bearer ${newToken}` },
+      headers: { cookie: `coop_token=${token}` },
     });
     expect(overview.statusCode).toBe(200);
+
+    // Refresh mints a fresh cookie.
+    const refresh = await app.inject({
+      method: "POST",
+      url: "/api/admin/refresh",
+      headers: { cookie: `coop_token=${token}`, "x-requested-with": "XMLHttpRequest" },
+    });
+    expect(refresh.statusCode).toBe(200);
+    const newToken = String(refresh.headers["set-cookie"])
+      .split("coop_token=")[1]
+      .split(";")[0];
+    expect(verifyAdminToken(newToken)?.cooperativeId).toBe(coop.id);
   });
 
   it("rejects refresh without a token", async () => {

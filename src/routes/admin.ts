@@ -13,6 +13,7 @@ import {
   isTokenRevoked,
   verifyAdminToken,
   requireLiveAdmin,
+  TOKEN_TTL_MS,
 } from "../lib/admin-auth.js";
 
 /**
@@ -62,6 +63,39 @@ function withTenant(
     if (!coopId) return handler(req, reply);
     return withCoopContext(coopId, () => handler(req, reply));
   };
+}
+
+const AUTH_COOKIE = "coop_token";
+
+/** Set the admin token as an httpOnly cookie (not readable by JS/XSS). */
+function setAuthCookie(reply: FastifyReply, token: string): void {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  reply.header(
+    "Set-Cookie",
+    `${AUTH_COOKIE}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${Math.floor(TOKEN_TTL_MS / 1000)}${secure}`,
+  );
+}
+
+function clearAuthCookie(reply: FastifyReply): void {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  reply.header(
+    "Set-Cookie",
+    `${AUTH_COOKIE}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${secure}`,
+  );
+}
+
+/** Read the admin token from the cookie (Bearer header still accepted). */
+function readAuthToken(req: FastifyRequest): string | null {
+  const auth = req.headers.authorization;
+  if (auth?.startsWith("Bearer ")) return auth.slice(7);
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === AUTH_COOKIE) return part.slice(idx + 1) || null;
+  }
+  return null;
 }
 
 export async function adminApiRoutes(app: FastifyInstance) {
@@ -125,8 +159,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
     }
 
     const token = sign(phone, member.cooperative.id, member.role);
+    setAuthCookie(reply, token);
     return {
-      token,
       member: {
         id: member.id,
         name: member.name,
@@ -158,8 +192,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
       }
     }
 
-    const auth = req.headers.authorization;
-    const rawToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+    const rawToken = readAuthToken(req);
     const payload = rawToken ? verifyAdminToken(rawToken) : null;
     if (!payload) {
       return reply.code(401).send({ error: "unauthorized" });
@@ -183,20 +216,21 @@ export async function adminApiRoutes(app: FastifyInstance) {
   });
 
   app.post("/api/admin/logout", async (req, reply) => {
-    const auth = req.headers.authorization;
-    const rawToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+    const rawToken = readAuthToken(req);
     if (rawToken) {
       await revokeToken(rawToken);
     }
+    clearAuthCookie(reply);
     return reply.code(200).send({ ok: true });
   });
 
   // Mint a fresh access token from a still-valid one. The preHandler has already
   // verified the current token and re-checked the live role/status, so this only
   // extends an active session — it cannot resurrect an expired or revoked one.
-  app.post("/api/admin/refresh", async (req) => {
+  app.post("/api/admin/refresh", async (req, reply) => {
     const token = sign(req.adminPhone!, req.adminCoopId!, req.adminRole!);
-    return { token };
+    setAuthCookie(reply, token);
+    return { ok: true };
   });
 
   app.get("/api/admin/overview", withTenant(async (req) => {

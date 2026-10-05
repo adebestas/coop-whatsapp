@@ -7,7 +7,6 @@
 
   // ---- Config ----
   const API_BASE = '/api/admin';
-  const STORAGE_TOKEN = 'coop_token'; // NOTE: In production, use httpOnly cookies instead of localStorage for JWT storage
   const STORAGE_MEMBER = 'coop_member';
   const STORAGE_THEME = 'coop_theme';
 
@@ -60,7 +59,7 @@
   };
 
   function init() {
-    if (!getToken()) {
+    if (!getMember()) {
       window.location.href = 'login.html';
       return;
     }
@@ -70,10 +69,8 @@
   }
 
   // ---- Auth ----
-  function getToken() {
-    return localStorage.getItem(STORAGE_TOKEN);
-  }
-
+  // The admin token is an httpOnly cookie (not readable by JS), so the dashboard
+  // never stores or sends it — it only keeps the non-sensitive member profile.
   function getMember() {
     try {
       return JSON.parse(localStorage.getItem(STORAGE_MEMBER));
@@ -113,36 +110,26 @@
     try {
       await api('/logout', { method: 'POST' });
     } catch { /* ignore */ }
-    localStorage.removeItem(STORAGE_TOKEN);
     localStorage.removeItem(STORAGE_MEMBER);
     window.location.href = 'login.html';
   };
 
   // ---- API helper ----
   async function tryRefresh() {
-    const token = getToken();
-    if (!token) return false;
     try {
       const res = await fetch(`${API_BASE}/refresh`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'X-Requested-With': 'XMLHttpRequest' },
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
       });
-      if (!res.ok) return false;
-      const data = await res.json();
-      if (data.token) {
-        localStorage.setItem(STORAGE_TOKEN, data.token);
-        return true;
-      }
-      return false;
+      return res.ok;
     } catch {
       return false;
     }
   }
 
   async function api(path, opts = {}) {
-    const token = getToken();
     const headers = { ...(opts.headers || {}) };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
     const method = (opts.method || 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
       headers['X-Requested-With'] = 'XMLHttpRequest';
@@ -153,14 +140,20 @@
     }
     showLoader();
     try {
-      let res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
-      // Access token expired mid-session: refresh once and retry the request.
+      let res = await fetch(`${API_BASE}${path}`, {
+        ...opts,
+        headers,
+        credentials: 'same-origin',
+      });
+      // Session expired mid-session: refresh once and retry the request.
       if (res.status === 401 && path !== '/refresh' && (await tryRefresh())) {
-        headers['Authorization'] = `Bearer ${getToken()}`;
-        res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+        res = await fetch(`${API_BASE}${path}`, {
+          ...opts,
+          headers,
+          credentials: 'same-origin',
+        });
       }
       if (res.status === 401) {
-        localStorage.removeItem(STORAGE_TOKEN);
         localStorage.removeItem(STORAGE_MEMBER);
         window.location.href = 'login.html';
         throw new Error('Unauthorized');
@@ -1737,13 +1730,10 @@
     }
   }
 
-  // Download an export file with the Authorization header (top-level window.open
-  // sends no headers, so the Bearer-protected endpoint would 401). Fetch the
-  // bytes as a blob and trigger a save instead.
+  // Download an export file. The auth token is an httpOnly cookie, so a plain
+  // fetch with credentials carries it (top-level window.open would not).
   async function downloadExport(url, fallbackName) {
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${getToken()}` },
-    });
+    const res = await fetch(url, { credentials: 'same-origin' });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       throw new Error(errData.error || 'Download failed');
