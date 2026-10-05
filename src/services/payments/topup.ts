@@ -8,6 +8,7 @@ import { roundMoney } from "../money.js";
 import { formatBalance } from "../cooperative.js";
 import { flagTransaction } from "../aml.js";
 import { resolveCoopByVirtualAccount, withCoopContext, forEachCoop } from "../../lib/tenant-context.js";
+import { maskId } from "../../lib/security.js";
 
 /**
  * Create a virtual account for a member so they can receive transfers.
@@ -117,7 +118,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
   // resolver bypasses RLS so we can find the tenant before setting the GUC).
   const coopId = await resolveCoopByVirtualAccount(n.accountNumber);
   if (!coopId) {
-    console.warn(`[topup] credit for unknown account ${n.accountNumber}, ignoring`);
+    console.warn(`[topup] credit for unknown account ${maskId(n.accountNumber)}, ignoring`);
     return;
   }
 
@@ -129,7 +130,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
       include: { wallet: true },
     });
     if (!member || !member.wallet) {
-      console.warn(`[topup] credit for unknown account ${n.accountNumber}, ignoring`);
+      console.warn(`[topup] credit for unknown account ${maskId(n.accountNumber)}, ignoring`);
       return;
     }
 
@@ -202,7 +203,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
     console.error("[topup] AML flag failed:", err);
   }
 
-  console.log(`[topup] credited ${member.phone} with ${amount} ${n.currency} (${n.transactionId})`);
+  console.log(`[topup] credited ${maskId(member.phone)} with ${amount} ${n.currency} (${n.transactionId})`);
 
   // Real-time credit alert: tell the member the moment their bank transfer lands.
   const newBalance = (member.wallet?.balance ?? 0) + amount;

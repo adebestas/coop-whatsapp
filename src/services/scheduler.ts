@@ -7,6 +7,7 @@ import { alertSupers, AlertSeverity, logAndAlert } from "../lib/alerting.js";
 import { getRedis, claimOnce } from "../lib/cache.js";
 import { forEachCoop, withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
 import { log } from "../lib/logger.js";
+import { maskId } from "../lib/security.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -193,7 +194,7 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
             return true;
           } catch (err) {
             // Log the error but don't fail the entire batch
-            console.error(`[scheduler] Failed to send birthday greeting to ${m.phone}:`, err);
+            console.error(`[scheduler] Failed to send birthday greeting to ${maskId(m.phone)}:`, err);
             return false;
           }
         }),
@@ -374,7 +375,7 @@ async function notifySuperAdminsDigest(cooperativeId: string, text: string): Pro
     try {
       await notifyMember(s, text);
     } catch (err) {
-      console.error(`[scheduler] Failed to send digest to super admin ${s.phone}:`, err);
+      console.error(`[scheduler] Failed to send digest to super admin ${maskId(s.phone)}:`, err);
     }
   }
 }

@@ -1,5 +1,6 @@
 import { notifyMember } from "./messaging.js";
 import { prisma } from "./prisma.js";
+import { maskId } from "./security.js";
 
 /**
  * Alert severity levels
@@ -34,7 +35,7 @@ export async function alertSupers(
         `${prefix} *${severity.toUpperCase()}*\n\n${message}`,
       );
     } catch (err) {
-      console.error(`[Alert] Failed to notify super admin ${sa.phone}:`, err);
+      console.error(`[Alert] Failed to notify super admin ${maskId(sa.phone)}:`, err);
     }
   }
 }
@@ -56,7 +57,7 @@ export async function alertAdmin(
       `${prefix} *${severity.toUpperCase()}*\n\n${message}`,
     );
   } catch (err) {
-    console.error(`[Alert] Failed to notify admin ${adminPhone}:`, err);
+    console.error(`[Alert] Failed to notify admin ${maskId(adminPhone)}:`, err);
   }
 }
 

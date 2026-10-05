@@ -11,4 +11,7 @@ web/node_modules/
 exports/
 backups/
 test-*.txt
-debug-*.ts
+debug-*
+check-db.cjs
+fix-imports.js
+baseline.sql

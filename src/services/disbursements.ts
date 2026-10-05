@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { resolveProvider, markProviderDown, markProviderUp } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
+import { maskId } from "../lib/security.js";
 import { recordLedger } from "./ledger.js";
 import { postJournal } from "./journal.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
@@ -386,6 +387,6 @@ async function notify(
   try {
     await notifyMember(member, text);
   } catch (err) {
-    console.error(`[disbursements] Failed to notify member ${member.phone}:`, err);
+    console.error(`[disbursements] Failed to notify member ${maskId(member.phone)}:`, err);
   }
 }

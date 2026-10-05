@@ -36,8 +36,7 @@ export function verifyOtp(otp: string, stored: string): boolean {
   return timingSafeEqual(candidate, expected);
 }
 
-export function generateGuarantorCode(): string {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export function generateGuarantorCode(): string {  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let s = "";
   for (let i = 0; i < 6; i++) s += chars[randomInt(chars.length)]; // ✅ Cryptographically secure
   return `GT-${s}`;
@@ -79,4 +78,13 @@ export function verifyPinResetCode(code: string, stored: string): boolean {
   const expected = Buffer.from(hash, "hex");
   if (candidate.length !== expected.length) return false;
   return timingSafeEqual(candidate, expected);
+}
+
+/**
+ * Mask a phone number / account id for logs: keep only the last 4 characters.
+ * Never log a full phone or account number.
+ */
+export function maskId(value: unknown): string {
+  const s = String(value ?? "");
+  return s.length <= 4 ? "****" : `****${s.slice(-4)}`;
 }
