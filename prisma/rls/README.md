@@ -47,7 +47,8 @@ queries in that context — flipping FORCE on today would silently blank the app
    (`resolveCoopByPhone` / `resolveCoopByAltChannel`), with a direct-query
    fallback on SQLite. This is what lets the app discover the tenant before it
    can set the GUC.
-4. **Route every tenant query through the helper** (in progress). Wired so far:
+4. **Route every tenant query through the helper.** ✅ DONE — all entry points
+   are wired:
    - **Chat** — `handleMessage` resolves the sender's cooperative and runs the
      whole handler inside `withCoopContext`; services keep using the global
      `prisma` proxy, which routes to the transaction. Outbound sends are
@@ -55,13 +56,19 @@ queries in that context — flipping FORCE on today would silently blank the app
      the transaction never spans network I/O.
    - **Admin dashboard** — all 34 authenticated routes run inside `withTenant`;
      `requireLiveAdmin` and `/api/admin/login` resolve the tenant first.
-   Remaining entry points: **schedulers**, **webhook processors** (need
-   resolvers by virtual-account number / reference), and the **join flow**
-   (must resolve its cooperative from the code it is given). Until this is
-   complete, the app must keep connecting as the table owner.
+   - **Join flow** — when the sender has no cooperative yet, `handleMessage`
+     resolves it from the session's pending `joinCode` and runs the flow in
+     context.
+   - **Webhooks** — the payment webhook resolves the cooperative from the
+     virtual account number; the payout webhook from the payout reference.
+   - **Schedulers** — every scheduled job iterates cooperatives and wraps each
+     in `withCoopContext` (`forEachCoop`).
+   - **System-level ops** (backup, backup verification) use `ownerPrisma`
+     (`DATABASE_OWNER_URL`) and bypass RLS by design.
 5. **Apply Stage 2 (FORCE)** by copying `recommended_policies.sql` into a new
    `prisma/migrations/<timestamp>_rls_force/migration.sql`, and point the app at
-   a **non-owner** role so enforcement actually bites.
+   a **non-owner** role (`DATABASE_URL` = `coop_app`, `DATABASE_OWNER_URL` = the
+   owner) so enforcement actually bites. This is the remaining step.
 6. **Enable the tests.** ✅ DONE — `tests/rls-isolation.test.ts` now provisions a
    non-owner `coop_app` role, connects a second Prisma client as it, and runs
    every isolation assertion inside a transaction that sets the GUC. The CI
