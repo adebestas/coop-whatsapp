@@ -65,10 +65,18 @@ queries in that context — flipping FORCE on today would silently blank the app
      in `withCoopContext` (`forEachCoop`).
    - **System-level ops** (backup, backup verification) use `ownerPrisma`
      (`DATABASE_OWNER_URL`) and bypass RLS by design.
-5. **Apply Stage 2 (FORCE)** by copying `recommended_policies.sql` into a new
-   `prisma/migrations/<timestamp>_rls_force/migration.sql`, and point the app at
-   a **non-owner** role (`DATABASE_URL` = `coop_app`, `DATABASE_OWNER_URL` = the
-   owner) so enforcement actually bites. This is the remaining step.
+5. **Apply Stage 2 (FORCE)** — the remaining step. Runbook:
+   1. Provision the non-owner role: run `prisma/rls/provision_app_role.sql` as the
+      owner (replace the password placeholder with a vault secret).
+   2. Copy `recommended_policies.sql` (FORCE-only — Stage 1 already created the
+      policies) into `prisma/migrations/<timestamp>_rls_force/migration.sql`.
+   3. Deploy with `DATABASE_URL` = `coop_app` and `DATABASE_OWNER_URL` = the owner.
+      Migrations and the backup dump use the owner; the app uses `coop_app`.
+   4. Confirm the startup canary logs `RLS enforced for the current role`.
+   5. Roll back by dropping FORCE (`ALTER TABLE ... NO FORCE ROW LEVEL SECURITY`)
+      and pointing `DATABASE_URL` back at the owner.
+   Verified on Postgres 16: with FORCE applied, the isolation suite passes 12/12
+   and the canary reports enforced for `coop_app`.
 6. **Enable the tests.** ✅ DONE — `tests/rls-isolation.test.ts` now provisions a
    non-owner `coop_app` role, connects a second Prisma client as it, and runs
    every isolation assertion inside a transaction that sets the GUC. The CI
