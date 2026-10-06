@@ -218,6 +218,23 @@ final signature the system auto-disburses to the account on file:
 
 The same super admin can't give both super signatures.
 
+## Loan protection
+
+Loans carry a **self-insured credit-life protection** — the cooperative pools a
+small premium instead of buying third-party insurance:
+
+- A **1% premium** of the loan principal (`loanProtectionPercent`, default `1`)
+  is withheld at disbursement and held in the cooperative's protection fund
+  (`protectionFundBalance`, a liability to insured members).
+- It is **per-cooperative configurable** and can be switched off entirely with
+  `loanProtectionEnabled` (then no premium is withheld).
+- It covers the borrower's **death and permanent disability**. When a death
+  claim is approved, every outstanding protected loan of the member is
+  **written off against the fund** — the loan is settled and the family still
+  receives the member's savings.
+- If the outstanding balance exceeds the fund, the excess is absorbed as a
+  cooperative expense; the fund never goes negative.
+
 ## Workplaces (units)
 
 Members can be grouped by workplace. Each workplace has its own code and an

@@ -6,6 +6,7 @@ import { sendToBank } from "./disbursements.js";
 import { resolveBankCode } from "../lib/banks.js";
 import { audit } from "./audit.js";
 import { hashOtp, verifyOtp } from "../lib/security.js";
+import { writeOffProtection } from "./loan-protection.js";
 
 /** Number of validations (by guarantors) a death claim needs. */
 export const REQUIRED_DEATH_VALIDATIONS = 2;
@@ -472,6 +473,10 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     };
   }
 
+  // Settle any protected loans against the coop's protection fund BEFORE the
+  // family's savings are paid out. The loan is written off; the fund covers it.
+  const writtenOff = await writeOffProtection(claim.cooperativeId, claim.memberId, claim.id);
+
   // Whether money has actually been sent. Once true, the outer catch must NOT
   // refund (that would double-pay).
   let paid = false;
@@ -556,9 +561,13 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
       detail: `${formatBalance(balance)} to family of ${claim.member.name}`,
     });
 
+    const writeOffNote =
+      writtenOff > 0
+        ? ` Loan of *${formatBalance(writtenOff)}* written off under loan protection.`
+        : "";
     return {
       ok: true,
-      message: `🕊️ *${formatBalance(balance)}* paid to the family of ${claim.member.name} (${claim.familyBankName ?? claim.familyBankCode} ****${claim.familyAccountNumber.slice(-4)}). Claim *${claim.id.slice(-6)}* closed.`,
+      message: `🕊️ *${formatBalance(balance)}* paid to the family of ${claim.member.name} (${claim.familyBankName ?? claim.familyBankCode} ****${claim.familyAccountNumber.slice(-4)}). Claim *${claim.id.slice(-6)}* closed.${writeOffNote}`,
     };
   } catch (err: any) {
     // Crash safety — any throw after the debit must be handled WITHOUT
