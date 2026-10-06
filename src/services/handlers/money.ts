@@ -7,7 +7,7 @@ import { joinUnit } from "../units.js";
 import { withdrawLimit, canWithdraw } from "../withdrawals.js";
 import { computeDividendPreview } from "../dividends.js";
 import { getQueuePosition } from "../loans.js";
-import { buyShares, getShareAccount } from "../shares.js";
+import { getShareAccount } from "../shares.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 
 export async function handleBalance(
@@ -393,6 +393,10 @@ export async function handleBuyShares(phone: string, args: string[]): Promise<vo
     await sendText({ to: phone, text: "How many shares? Reply *buyshares <count>*, e.g. *buyshares 5*." });
     return;
   }
-  const result = await buyShares(member.id, count);
-  await sendText({ to: phone, text: result.message });
+  await issueSecretChallenge(
+    phone,
+    "awaiting_buyshares_pin",
+    { shareCount: count },
+    `Buy *${count}* share(s)? Enter your 4-digit PIN to confirm.`,
+  );
 }

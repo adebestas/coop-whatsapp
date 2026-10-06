@@ -140,6 +140,7 @@ export type BotState =
   | "awaiting_withdraw_bank"
   | "awaiting_withdraw_pin"
   | "awaiting_repay_pin"
+  | "awaiting_buyshares_pin"
   | "awaiting_death_cert"
   | "awaiting_ai_confirm"
   | "awaiting_ai_query_confirm"
@@ -177,6 +178,7 @@ export const FlowDataSchema = z.object({
   loanBankName: z.string().optional(),
   loanId: z.string().optional(),
   withdrawAmount: z.number().positive().optional(),
+  shareCount: z.number().positive().optional(),
   withdrawAccount: z.string().optional(),
   withdrawBankCode: z.string().optional(),
   withdrawBankName: z.string().optional(),
@@ -203,6 +205,7 @@ export const SECRET_STATES: BotState[] = [
   "awaiting_pin_confirm",
   "awaiting_withdraw_pin",
   "awaiting_repay_pin",
+  "awaiting_buyshares_pin",
   "awaiting_delete_account_pin",
 ];
 
@@ -494,14 +497,11 @@ async function handleMessageInner(
       await handleShares(phone);
       break;
 
-    case "buyshares":
-      await handleBuyShares(phone, args);
-      break;
-
     case "save":
     case "loan":
     case "repay":
-    case "withdraw": {
+    case "withdraw":
+    case "buyshares": {
       if (member && (member.status === "suspended" || member.status === "deceased")) {
         await sendText({
           to: phone,
@@ -527,7 +527,7 @@ async function handleMessageInner(
       // amounts are stored in KOBO, so parse the user's naira into kobo before
       // comparing (otherwise a naira-vs-kobo mismatch silently disables the cap).
       const amt = parseNaira(args[0]);
-      if (amt !== null && member) {
+      if (cmd !== "buyshares" && amt !== null && member) {
         const tierError = await checkTierLimit(phone, amt, member.id);
         if (tierError) {
           await sendText({ to: phone, text: `⛔ ${tierError}` });
@@ -537,6 +537,7 @@ async function handleMessageInner(
       if (cmd === "save") await handleSave(phone, args);
       else if (cmd === "loan") await handleLoan(phone, args);
       else if (cmd === "repay") await handleRepay(phone, args);
+      else if (cmd === "buyshares") await handleBuyShares(phone, args);
       else await handleWithdraw(phone, args);
       break;
     }

@@ -85,10 +85,23 @@ describe("shares chat commands", () => {
     await fundWallet(member.id, 500000);
 
     await handleMessage(member.phone, "buyshares 2");
+    await handleMessage(member.phone, "1234");
 
     const account = await prisma.shareAccount.findFirst({ where: { memberId: member.id } });
     expect(account?.shares).toBe(2);
     const calls = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
     expect(calls).toMatch(/share/i);
+  });
+
+  it("does not buy shares on a wrong PIN", async () => {
+    const coop = await createTestCoop("SHARECHAT2");
+    const member = await createTestMember(coop.id, { phone: "2348000000098" });
+    await fundWallet(member.id, 500000);
+
+    await handleMessage(member.phone, "buyshares 2");
+    await handleMessage(member.phone, "0000");
+
+    const account = await prisma.shareAccount.findFirst({ where: { memberId: member.id } });
+    expect(account?.shares ?? 0).toBe(0);
   });
 });
