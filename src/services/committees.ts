@@ -13,18 +13,30 @@ function isValidType(type: string): type is CommitteeType {
   return (COMMITTEE_TYPES as readonly string[]).includes(type);
 }
 
-/** Optional actor details for the audit trail (command layer supplies these). */
+/** The admin performing the action. Only super admins may manage committees. */
 export interface CommitteeActor {
+  id: string;
+  role: string;
   phone?: string;
-  id?: string | null;
-  role?: string | null;
 }
 
-function actorFields(actor?: CommitteeActor) {
+/**
+ * Authorization gate. Committee setup is a governance action reserved for the
+ * super admin — enforced here in the service as well as at the command layer so
+ * every caller (commands, jobs, future APIs) is covered.
+ */
+function denyNonSuper(actor: CommitteeActor): string | null {
+  if (!actor || actor.role !== "superadmin") {
+    return "Only the *super admin* can manage committees.";
+  }
+  return null;
+}
+
+function actorFields(actor: CommitteeActor) {
   return {
-    actorPhone: actor?.phone ?? "system",
-    actorId: actor?.id ?? undefined,
-    actorRole: actor?.role ?? "system",
+    actorPhone: actor.phone ?? "system",
+    actorId: actor.id,
+    actorRole: actor.role,
   };
 }
 
@@ -58,8 +70,11 @@ export async function createCommittee(
   type: string,
   name: string,
   size: number,
-  actor?: CommitteeActor,
+  actor: CommitteeActor,
 ): Promise<CommitteeResult> {
+  const denial = denyNonSuper(actor);
+  if (denial) return { ok: false, message: denial };
+
   const cleanType = (type ?? "").trim().toLowerCase();
   if (!isValidType(cleanType)) {
     return {
@@ -115,8 +130,11 @@ export async function appointMember(
   type: string,
   memberCode: string,
   role: string,
-  actor?: CommitteeActor,
+  actor: CommitteeActor,
 ): Promise<CommitteeResult> {
+  const denial = denyNonSuper(actor);
+  if (denial) return { ok: false, message: denial };
+
   const cleanType = (type ?? "").trim().toLowerCase();
   if (!isValidType(cleanType)) {
     return {
@@ -161,7 +179,7 @@ export async function appointMember(
       data: {
         active: true,
         role: cleanRole,
-        appointedById: actor?.id ?? null,
+        appointedById: actor.id,
         appointedAt: new Date(),
       },
     });
@@ -171,7 +189,7 @@ export async function appointMember(
         committeeId: committee.id,
         memberId: member.id,
         role: cleanRole,
-        appointedById: actor?.id ?? null,
+        appointedById: actor.id,
       },
     });
   }
@@ -196,8 +214,11 @@ export async function removeMember(
   coopId: string,
   type: string,
   memberCode: string,
-  actor?: CommitteeActor,
+  actor: CommitteeActor,
 ): Promise<CommitteeResult> {
+  const denial = denyNonSuper(actor);
+  if (denial) return { ok: false, message: denial };
+
   const cleanType = (type ?? "").trim().toLowerCase();
   if (!isValidType(cleanType)) {
     return {

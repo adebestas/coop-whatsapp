@@ -1083,7 +1083,6 @@ export async function handleAdminCommand(
         const addType = args[0]?.toLowerCase();
         const lastArg = args[args.length - 1] ?? "";
         const hasSize = /^\d+$/.test(lastArg);
-        const addSize = hasSize ? parseInt(lastArg, 10) : 3;
         const addName = (hasSize ? args.slice(1, -1) : args.slice(1))
           .join(" ")
           .trim()
@@ -1094,6 +1093,22 @@ export async function handleAdminCommand(
             text: "Usage: *addcommittee <credit|supervisory|board> <name> [size]* — e.g. *addcommittee credit Credit Committee 3*.",
           });
           return true;
+        }
+        // When [size] is omitted, default to the cooperative's configured size
+        // for this committee type (credit/supervisory default 3, board default 5).
+        let addSize: number;
+        if (hasSize) {
+          addSize = parseInt(lastArg, 10);
+        } else {
+          const cfg = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
+          addSize =
+            addType === "credit"
+              ? (cfg?.creditCommitteeSize ?? 3)
+              : addType === "supervisory"
+                ? (cfg?.supervisoryCommitteeSize ?? 3)
+                : addType === "board"
+                  ? (cfg?.boardSize ?? 5)
+                  : 3;
         }
         const addResult = await createCommittee(coopId, addType, addName, addSize, {
           phone,

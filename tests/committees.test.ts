@@ -70,31 +70,58 @@ describe("committee service", () => {
 
   it("rejects an invalid type and duplicate committees", async () => {
     const coop = await createTestCoop("CMT02");
+    const superAdmin = await createTestMember(coop.id, SUPER);
+    const actor = { phone: superAdmin.phone, id: superAdmin.id, role: "superadmin" };
 
-    const bad = await createCommittee(coop.id, "finance", "Finance", 3);
+    const bad = await createCommittee(coop.id, "finance", "Finance", 3, actor);
     expect(bad.ok).toBe(false);
 
-    expect((await createCommittee(coop.id, "credit", "Credit", 3)).ok).toBe(true);
-    const dup = await createCommittee(coop.id, "credit", "Credit Again", 3);
+    expect((await createCommittee(coop.id, "credit", "Credit", 3, actor)).ok).toBe(true);
+    const dup = await createCommittee(coop.id, "credit", "Credit Again", 3, actor);
     expect(dup.ok).toBe(false);
     expect(await prisma.committee.count()).toBe(1);
   });
 
   it("does not appoint the same member twice", async () => {
     const coop = await createTestCoop("CMT03");
+    const superAdmin = await createTestMember(coop.id, SUPER);
+    const actor = { phone: superAdmin.phone, id: superAdmin.id, role: "superadmin" };
     const m = await createTestMember(coop.id, { phone: "2348010000010" });
-    await createCommittee(coop.id, "credit", "Credit", 3);
+    await createCommittee(coop.id, "credit", "Credit", 3, actor);
 
-    expect((await appointMember(coop.id, "credit", m.code, "member")).ok).toBe(true);
-    const second = await appointMember(coop.id, "credit", m.code, "member");
+    expect((await appointMember(coop.id, "credit", m.code, "member", actor)).ok).toBe(true);
+    const second = await appointMember(coop.id, "credit", m.code, "member", actor);
     expect(second.ok).toBe(false);
     expect(await prisma.committeeMember.count()).toBe(1);
 
     // Removing then re-appointing reactivates the same seat rather than duplicating it.
-    expect((await removeMember(coop.id, "credit", m.code)).ok).toBe(true);
+    expect((await removeMember(coop.id, "credit", m.code, actor)).ok).toBe(true);
     expect(await isCommitteeMember(coop.id, "credit", m.id)).toBe(false);
-    expect((await appointMember(coop.id, "credit", m.code, "member")).ok).toBe(true);
+    expect((await appointMember(coop.id, "credit", m.code, "member", actor)).ok).toBe(true);
     expect(await prisma.committeeMember.count()).toBe(1);
+  });
+
+  it("rejects a non-super actor at the service level", async () => {
+    const coop = await createTestCoop("CMT06");
+    const plainAdmin = await createTestMember(coop.id, { phone: "2348090000100", role: "admin" });
+    const nonSuper = { id: plainAdmin.id, role: "admin", phone: plainAdmin.phone };
+
+    const created = await createCommittee(coop.id, "credit", "Credit", 3, nonSuper);
+    expect(created.ok).toBe(false);
+    expect(created.message).toContain("super admin");
+    expect(await prisma.committee.count()).toBe(0);
+
+    // Even if a committee already exists, a non-super cannot appoint or remove.
+    await createCommittee(coop.id, "credit", "Credit", 3, {
+      id: "super-1",
+      role: "superadmin",
+    });
+    const target = await createTestMember(coop.id, { phone: "2348010000020" });
+    expect((await appointMember(coop.id, "credit", target.code, "member", nonSuper)).ok).toBe(false);
+    expect(
+      (await removeMember(coop.id, "credit", target.code, nonSuper)).ok,
+    ).toBe(false);
+    expect(await prisma.committeeMember.count()).toBe(0);
   });
 });
 
@@ -108,9 +135,30 @@ describe("committee admin commands", () => {
     expect(await prisma.committee.count()).toBe(0);
     expect(textsSent()).toContain("super admin");
 
-    await createCommittee(coop.id, "credit", "Credit", 3);
+    await createCommittee(coop.id, "credit", "Credit", 3, { id: "super-1", role: "superadmin" });
     await handleMessage(plainAdmin.phone, `appoint credit ${target.code} chair`);
     expect(await prisma.committeeMember.count()).toBe(0);
+  });
+
+  it("defaults committee size per type from cooperative config", async () => {
+    const coop = await createTestCoop("CMT07");
+    const superAdmin = await createTestMember(coop.id, SUPER);
+    await prisma.cooperativeConfig.create({
+      data: {
+        cooperativeId: coop.id,
+        creditCommitteeSize: 4,
+        supervisoryCommitteeSize: 2,
+        boardSize: 7,
+      },
+    });
+
+    await handleMessage(superAdmin.phone, "addcommittee credit Credit");
+    await handleMessage(superAdmin.phone, "addcommittee supervisory Supervisory");
+    await handleMessage(superAdmin.phone, "addcommittee board Board");
+
+    expect((await prisma.committee.findFirst({ where: { type: "credit" } }))!.size).toBe(4);
+    expect((await prisma.committee.findFirst({ where: { type: "supervisory" } }))!.size).toBe(2);
+    expect((await prisma.committee.findFirst({ where: { type: "board" } }))!.size).toBe(7);
   });
 
   it("lets the super admin create, appoint, list and remove via chat", async () => {
