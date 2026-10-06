@@ -17,7 +17,15 @@ import { formatBalance } from "./cooperative.js";
 import { toKobo } from "../lib/money.js";
 import { sendToBank } from "./disbursements.js";
 import { broadcastToScope, createUnit, listUnits, setUnitAdmin, unitAdminOf } from "./units.js";
-import { appointMember, createCommittee, listCommittees, removeMember } from "./committees.js";
+import {
+  appointMember,
+  committeeMajority,
+  createCommittee,
+  isCommitteeMember,
+  listCommittees,
+  recordCommitteeVote,
+  removeMember,
+} from "./committees.js";
 import { previewDividendRun, getFundBalances } from "./dividends.js";
 import {
   approveWithdrawal,
@@ -125,6 +133,170 @@ function roleLabel(ctx: AdminContext): string {
   return ctx.unitAdmin ? "unit admin" : "admin";
 }
 
+/** Commands a seated committee member can use without being a coop admin. */
+const COMMITTEE_COMMANDS = new Set([
+  "cvote",
+  "committeequeue",
+  "supervisoryfreeze",
+  "supervisoryunfreeze",
+]);
+
+/**
+ * Handle committee-member commands (voting, queue, supervisory freeze). The
+ * caller may be a plain member; authorization is by active committee seat, with
+ * super admins additionally allowed on the supervisory commands.
+ */
+async function handleCommitteeCommand(
+  phone: string,
+  cmd: string,
+  args: string[],
+  ctx: AdminContext | null,
+): Promise<boolean> {
+  const member = await prisma.member.findFirst({
+    where: { phone, status: { not: "deceased" } },
+  });
+  if (!member) return false;
+  const coopId = member.cooperativeId;
+  const isSuper = ctx?.isSuper ?? false;
+
+  if (cmd === "cvote") {
+    const loanRef = args[0];
+    const vote = args[1]?.trim().toLowerCase();
+    if (!loanRef || (vote !== "approve" && vote !== "reject")) {
+      await sendText({ to: phone, text: "Usage: *cvote <loan id> approve|reject*." });
+      return true;
+    }
+    if (!(await isCommitteeMember(coopId, "credit", member.id))) {
+      await sendText({ to: phone, text: "Only *Credit Committee* members can vote on loans." });
+      return true;
+    }
+    const loan = await prisma.loan.findFirst({
+      where: {
+        cooperativeId: coopId,
+        ...(loanRef.length >= 8 ? { id: loanRef } : { id: { endsWith: loanRef } }),
+      },
+    });
+    if (!loan) {
+      await sendText({ to: phone, text: "Loan not found. Check the id and try again." });
+      return true;
+    }
+
+    if (vote === "approve") {
+      const result = await approveLoan(loan.id, {
+        actorId: member.id,
+        cooperativeId: coopId,
+        isAdmin: isSuper || member.role === "admin" || member.role === "superadmin",
+      });
+      await sendText({ to: phone, text: result.message });
+      return true;
+    }
+
+    // Reject vote — decide the committee, then terminate the loan.
+    const outcome = await recordCommitteeVote(coopId, "credit", "loan", loan.id, member.id, "reject");
+    await sendText({ to: phone, text: outcome.message });
+    if (outcome.ok && outcome.decided === "rejected") {
+      const updated = await prisma.loan.updateMany({
+        where: { id: loan.id, status: { in: ["admin_approved", "super_approved_1"] } },
+        data: { status: "rejected", queuePosition: null, queueJoinedAt: null },
+      });
+      if (updated.count > 0) {
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: phone,
+          actorId: member.id,
+          actorRole: "committee",
+          action: "loan.reject_by_credit_committee",
+          targetType: "loan",
+          targetId: loan.id,
+          detail: `Credit Committee rejected loan ${loan.id.slice(-6)}`,
+        });
+      }
+    }
+    return true;
+  }
+
+  if (cmd === "committeequeue") {
+    const allowed =
+      isSuper ||
+      (await isCommitteeMember(coopId, "credit", member.id)) ||
+      (await isCommitteeMember(coopId, "supervisory", member.id));
+    if (!allowed) {
+      await sendText({ to: phone, text: "Only committee members can view the committee queue." });
+      return true;
+    }
+    const decisions = await prisma.committeeDecision.findMany({
+      where: { cooperativeId: coopId, status: "pending" },
+      include: { committee: { select: { name: true, type: true, size: true } }, votes: true },
+      orderBy: { createdAt: "asc" },
+      take: 20,
+    });
+    if (decisions.length === 0) {
+      await sendText({ to: phone, text: "No pending committee decisions. ✅" });
+      return true;
+    }
+    const body = decisions
+      .map((d) => {
+        const approvals = d.votes.filter((v) => v.vote === "approve").length;
+        return (
+          `• *${d.committee.name}* (${d.committee.type}) — ${d.subjectType} *${d.subjectId.slice(-6)}* — ${approvals}/${committeeMajority(d.committee.size)} approvals\n` +
+          `   Vote: *cvote ${d.subjectId.slice(-6)} approve|reject*`
+        );
+      })
+      .join("\n");
+    await sendText({ to: phone, text: `*Committee queue*\n\n${body}` });
+    return true;
+  }
+
+  // supervisoryfreeze / supervisoryunfreeze
+  const code = args[0]?.trim().toUpperCase();
+  if (!code) {
+    await sendText({
+      to: phone,
+      text: `Usage: *${cmd} <member code>${cmd === "supervisoryfreeze" ? " [reason]" : ""}*.`,
+    });
+    return true;
+  }
+  const allowed = isSuper || (await isCommitteeMember(coopId, "supervisory", member.id));
+  if (!allowed) {
+    await sendText({
+      to: phone,
+      text: "Only *Supervisory Committee* members or the super admin can freeze or unfreeze accounts.",
+    });
+    return true;
+  }
+  const target = await prisma.member.findFirst({
+    where: { cooperativeId: coopId, code },
+    select: { id: true, name: true },
+  });
+  if (!target) {
+    await sendText({ to: phone, text: `No member with code *${code}* in your cooperative.` });
+    return true;
+  }
+  const freezing = cmd === "supervisoryfreeze";
+  const reason = args.slice(1).join(" ").trim();
+  await prisma.member.update({
+    where: { id: target.id },
+    data: { frozenAt: freezing ? new Date() : null },
+  });
+  await audit({
+    cooperativeId: coopId,
+    actorPhone: phone,
+    actorId: member.id,
+    actorRole: isSuper ? "superadmin" : "committee",
+    action: freezing ? "member.supervisory_freeze" : "member.supervisory_unfreeze",
+    targetType: "member",
+    targetId: target.id,
+    detail: `${freezing ? "Froze" : "Unfroze"} ${target.name}${reason ? `: ${reason}` : ""}`,
+  });
+  await sendText({
+    to: phone,
+    text: freezing
+      ? `🔒 ${target.name}'s account has been *frozen*${reason ? ` (${reason})` : ""}. No money can leave until unfrozen.`
+      : `🔓 ${target.name}'s account has been *unfrozen*.`,
+  });
+  return true;
+}
+
 /** Execute an admin command from chat. Returns true if handled as admin. */
 export async function handleAdminCommand(
   phone: string,
@@ -133,6 +305,14 @@ export async function handleAdminCommand(
 ): Promise<boolean> {
   try {
     const ctx = await adminContext(phone);
+
+    // Committee commands are open to seated committee members, who are often
+    // ordinary members rather than admins. Resolve them before the admin-only
+    // gate so voting and supervisory oversight work without admin rights.
+    if (COMMITTEE_COMMANDS.has(cmd)) {
+      return handleCommitteeCommand(phone, cmd, args, ctx);
+    }
+
     if (!ctx) return false;
     const { admin, unitAdmin, isSuper } = ctx;
     const coopId = admin.cooperativeId;

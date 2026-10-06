@@ -333,3 +333,160 @@ export async function isCommitteeMember(
   });
   return seat !== null;
 }
+
+/**
+ * True when the cooperative has a `type` committee that is actually staffed —
+ * i.e. at least one active seated member. A committee that was created but has
+ * no members appointed yet is NOT "active": the cooperative keeps its legacy
+ * approval chain until the committee is operational, so a loan can never be
+ * stranded waiting for a vote that no one is able to cast.
+ */
+export async function hasActiveCommittee(coopId: string, type: string): Promise<boolean> {
+  const cleanType = (type ?? "").trim().toLowerCase();
+  if (!isValidType(cleanType)) return false;
+  const committee = await prisma.committee.findUnique({
+    where: { cooperativeId_type: { cooperativeId: coopId, type: cleanType } },
+    select: { id: true },
+  });
+  if (!committee) return false;
+  const seated = await prisma.committeeMember.count({
+    where: { committeeId: committee.id, active: true },
+  });
+  return seated > 0;
+}
+
+export interface CommitteeVoteResult {
+  ok: boolean;
+  message: string;
+  /** Set the moment the vote tally crosses a decision threshold. */
+  decided?: "approved" | "rejected";
+}
+
+/**
+ * Record one committee member's vote on a subject (e.g. a loan) and evaluate
+ * the tally. Creates the pending `CommitteeDecision` on first vote, rejects
+ * duplicate votes, and flips the decision to approved/rejected once a bare
+ * majority is reached (or once enough rejections make approval impossible).
+ */
+export async function recordCommitteeVote(
+  coopId: string,
+  type: string,
+  subjectType: string,
+  subjectId: string,
+  memberId: string,
+  vote: string,
+): Promise<CommitteeVoteResult> {
+  const cleanType = (type ?? "").trim().toLowerCase();
+  if (!isValidType(cleanType)) {
+    return { ok: false, message: "Unknown committee type." };
+  }
+  const cleanVote = (vote ?? "").trim().toLowerCase();
+  if (cleanVote !== "approve" && cleanVote !== "reject") {
+    return { ok: false, message: "Vote must be *approve* or *reject*." };
+  }
+
+  const committee = await prisma.committee.findUnique({
+    where: { cooperativeId_type: { cooperativeId: coopId, type: cleanType } },
+    select: { id: true, name: true, size: true },
+  });
+  if (!committee) {
+    return { ok: false, message: `No *${cleanType}* committee in your cooperative.` };
+  }
+
+  const seat = await prisma.committeeMember.findUnique({
+    where: { committeeId_memberId: { committeeId: committee.id, memberId } },
+    select: { active: true },
+  });
+  if (!seat?.active) {
+    return { ok: false, message: `Only active members of the *${committee.name}* may vote.` };
+  }
+
+  let decision = await prisma.committeeDecision.findUnique({
+    where: {
+      committeeId_subjectType_subjectId: { committeeId: committee.id, subjectType, subjectId },
+    },
+    select: { id: true, status: true },
+  });
+  if (!decision) {
+    decision = await prisma.committeeDecision.create({
+      data: {
+        cooperativeId: coopId,
+        committeeId: committee.id,
+        subjectType,
+        subjectId,
+        status: "pending",
+      },
+      select: { id: true, status: true },
+    });
+  }
+  if (decision.status !== "pending") {
+    return { ok: false, message: `This decision is already *${decision.status}*.` };
+  }
+
+  const existing = await prisma.committeeVote.findUnique({
+    where: { decisionId_memberId: { decisionId: decision.id, memberId } },
+    select: { id: true },
+  });
+  if (existing) {
+    return { ok: false, message: "You have already voted on this decision." };
+  }
+
+  await prisma.committeeVote.create({
+    data: { decisionId: decision.id, memberId, vote: cleanVote },
+  });
+
+  const votes = await prisma.committeeVote.findMany({
+    where: { decisionId: decision.id },
+    select: { vote: true },
+  });
+  const approvals = votes.filter((v) => v.vote === "approve").length;
+  const rejections = votes.filter((v) => v.vote === "reject").length;
+  const majority = committeeMajority(committee.size);
+
+  let decided: "approved" | "rejected" | undefined;
+  if (approvals >= majority) {
+    decided = "approved";
+  } else if (rejections >= majority || approvals + rejections >= committee.size) {
+    // Enough rejections, or every seat has voted without a majority — approval
+    // is no longer mathematically possible.
+    decided = "rejected";
+  }
+
+  if (decided) {
+    await prisma.committeeDecision.update({
+      where: { id: decision.id },
+      data: { status: decided, decidedAt: new Date() },
+    });
+  }
+
+  await audit({
+    cooperativeId: coopId,
+    actorPhone: "system",
+    actorId: memberId,
+    actorRole: "committee",
+    action: "committee.vote",
+    targetType: subjectType,
+    targetId: subjectId,
+    detail: `${cleanVote} on ${subjectType} ${subjectId.slice(-6)} (${approvals}/${committee.size} approve, ${rejections} reject)`,
+  });
+
+  const tally = `${approvals}/${committee.size} approve · ${rejections} reject`;
+  if (decided === "approved") {
+    return {
+      ok: true,
+      decided,
+      message: `✅ Vote recorded. The *${committee.name}* has approved this (${tally}).`,
+    };
+  }
+  if (decided === "rejected") {
+    return {
+      ok: true,
+      decided,
+      message: `❌ Vote recorded. The *${committee.name}* has rejected this (${tally}).`,
+    };
+  }
+  return {
+    ok: true,
+    message: `🗳️ Vote recorded (${tally}). *${majority}* approvals needed to decide.`,
+  };
+}

@@ -8,6 +8,11 @@ import { LIMITS } from "../lib/money.js";
 import { flagTransaction } from "./aml.js";
 import { getCoopConfig } from "./coop-config.js";
 import { sendText } from "../lib/messaging.js";
+import {
+  hasActiveCommittee,
+  isCommitteeMember,
+  recordCommitteeVote,
+} from "./committees.js";
 
 /** After a loan leaves the queue, renumber positions for remaining pending loans. */
 async function renumberQueue(cooperativeId: string): Promise<void> {
@@ -429,6 +434,36 @@ export async function approveLoan(
 
   // Stage 4: SUPER_APPROVED_1 (first super admin approval)
   if (loan.status === "admin_approved") {
+    // A cooperative with a staffed Credit Committee delegates the final loan
+    // approval to that committee. A bare-majority vote replaces the two
+    // super-admin signatures and triggers disbursement. Cooperatives without a
+    // credit committee keep the legacy admin -> super -> super chain below.
+    if (await hasActiveCommittee(opts.cooperativeId, "credit")) {
+      const memberId = opts.actorId;
+      if (!memberId || !(await isCommitteeMember(opts.cooperativeId, "credit", memberId))) {
+        return {
+          ok: false,
+          message: `Loan *${shortId}* is awaiting *Credit Committee* approval. Only committee members may vote.`,
+        };
+      }
+      const voteOutcome = await recordCommitteeVote(
+        opts.cooperativeId,
+        "credit",
+        "loan",
+        loan.id,
+        memberId,
+        "approve",
+      );
+      if (!voteOutcome.ok) {
+        return { ok: false, message: voteOutcome.message };
+      }
+      if (voteOutcome.decided === "approved") {
+        return finalizeLoanApproval(loan.id, memberId, "admin_approved");
+      }
+      // Vote recorded but the committee has not reached a majority yet.
+      return { ok: true, message: voteOutcome.message };
+    }
+
     if (!opts.superAdmin) {
       return {
         ok: false,
@@ -624,18 +659,23 @@ export async function approveLoan(
 /**
  * Second (final) super approval — sets terms, marks approved, disburses.
  * The status flip happens as an atomic CLAIM: exactly one concurrent caller
- * can move super_approved_1 -> approved, so the loan can never be disbursed
+ * can move the loan to `approved`, so the loan can never be disbursed
  * twice even under racing approvals.
+ *
+ * `expectedStatus` is the status this finalization claims from: the second
+ * super-admin signature claims `super_approved_1`, while a Credit Committee
+ * majority claims the loan directly from `admin_approved`.
  */
 async function finalizeLoanApproval(
   loanId: string,
   actorId?: string,
+  expectedStatus: "super_approved_1" | "admin_approved" = "super_approved_1",
 ): Promise<{ ok: boolean; message: string }> {
   const loan = await prisma.loan.findUnique({
     where: { id: loanId },
     include: { member: true },
   });
-  if (!loan || loan.status !== "super_approved_1") {
+  if (!loan || loan.status !== expectedStatus) {
     return { ok: false, message: "Loan isn't ready for final approval." };
   }
 
@@ -666,7 +706,7 @@ async function finalizeLoanApproval(
 
   // ATOMIC CLAIM — the second concurrent finalizer gets count=0 and stops.
   const claimed = await prisma.loan.updateMany({
-    where: { id: loan.id, status: "super_approved_1" },
+    where: { id: loan.id, status: expectedStatus },
     data: {
       status: "approved",
       monthlyPayment: monthly,

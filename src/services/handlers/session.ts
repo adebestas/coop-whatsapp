@@ -198,7 +198,8 @@ export function buildAdminMenu(): string {
     `• *verifypin <pin>* — unlock big payouts (10 min)\n` +
     `• *insights* — AI financial analysis\n` +
     `• *risk* — AI loan risk assessment\n\n` +
-    `*Committees (super admin):* *addcommittee <credit\\|supervisory\\|board> <name> [size]*, *appoint <type> <member code> [chair]*, *removecommittee <type> <member code>*, *committees*\n\n` +
+    `*Committees (super admin):* *addcommittee <credit\\|supervisory\\|board> <name> [size]*, *appoint <type> <member code> [chair]*, *removecommittee <type> <member code>*, *committees*\n` +
+    `*Committees (members):* *cvote <loan id> approve\\|reject*, *committeequeue*, *supervisoryfreeze <member code> [reason]*, *supervisoryunfreeze <member code>*\n\n` +
     `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *confirmname <code>*, *paydividend <rate%>*, *paysharedividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
 }
