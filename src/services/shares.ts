@@ -6,32 +6,6 @@ import { audit } from "./audit.js";
 
 const DEFAULT_SHARE_PRICE = 100000; // kobo (₦1,000)
 
-/** Largest-remainder (Hamilton) allocation of `pool` kobo across shareholdings. */
-export function allocateByShares(
-  holdings: { id: string; shares: number }[],
-  pool: number,
-): Map<string, number> {
-  const eligible = holdings.filter((h) => h.shares > 0);
-  const totalShares = eligible.reduce((sum, h) => sum + h.shares, 0);
-  const out = new Map<string, number>();
-  if (totalShares <= 0 || pool <= 0) return out;
-
-  const raw = eligible.map((h) => {
-    const exact = (h.shares / totalShares) * pool;
-    const kobo = Math.floor(exact);
-    return { id: h.id, kobo, remainder: exact - kobo };
-  });
-  let leftover = pool - raw.reduce((sum, r) => sum + r.kobo, 0);
-  raw.sort((a, b) => b.remainder - a.remainder);
-  for (const r of raw) {
-    if (leftover <= 0) break;
-    r.kobo += 1;
-    leftover -= 1;
-  }
-  for (const r of raw) out.set(r.id, r.kobo);
-  return out;
-}
-
 export async function getShareAccount(memberId: string): Promise<{
   shares: number;
   totalPaid: number;

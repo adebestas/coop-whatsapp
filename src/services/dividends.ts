@@ -79,6 +79,60 @@ function weightOf(
   return basis === "shares" ? (m.shareAccount?.shares ?? 0) : (m.wallet?.totalSaved ?? 0);
 }
 
+/** Start of the current fiscal dividend period (calendar year, local time). */
+function currentPeriodStart(now = new Date()): Date {
+  return new Date(now.getFullYear(), 0, 1);
+}
+
+interface DividendBase {
+  netProfit: number;
+  /** Statutory 20/2/5% already appropriated this period, in kobo. */
+  statutoryTakenThisPeriod: number;
+  /** Dividend pools already declared this period, in kobo. */
+  priorPoolsThisPeriod: number;
+  /** Profit still available to distribute this period, in kobo. */
+  remaining: number;
+}
+
+/**
+ * Profit available for distribution this period, after statutory funds already
+ * appropriated and dividends already declared. Statutory 20/2/5% is taken at
+ * most once per period (see the callers), so a second dividend run in the same
+ * period shares the same profit base and takes no statutory again.
+ */
+async function computeDividendBase(cooperativeId: string): Promise<DividendBase> {
+  const periodStart = currentPeriodStart();
+  const pnl = await computePnl(cooperativeId);
+  const [reserve, education, development, priorDividends] = await Promise.all([
+    prisma.reserveAllocation.aggregate({
+      where: { cooperativeId, createdAt: { gte: periodStart } },
+      _sum: { amount: true },
+    }),
+    prisma.educationFund.aggregate({
+      where: { cooperativeId, createdAt: { gte: periodStart } },
+      _sum: { amount: true },
+    }),
+    prisma.developmentFund.aggregate({
+      where: { cooperativeId, createdAt: { gte: periodStart } },
+      _sum: { amount: true },
+    }),
+    prisma.dividend.aggregate({
+      where: { cooperativeId, createdAt: { gte: periodStart } },
+      _sum: { totalPool: true },
+    }),
+  ]);
+  const statutoryTakenThisPeriod =
+    (reserve._sum.amount ?? 0) + (education._sum.amount ?? 0) + (development._sum.amount ?? 0);
+  const priorPoolsThisPeriod = priorDividends._sum.totalPool ?? 0;
+  const remaining = Math.max(0, pnl.netProfit - statutoryTakenThisPeriod - priorPoolsThisPeriod);
+  return {
+    netProfit: pnl.netProfit,
+    statutoryTakenThisPeriod,
+    priorPoolsThisPeriod,
+    remaining,
+  };
+}
+
 /** Largest-remainder (Hamilton) allocation of `pool` kobo across weighted members. */
 function allocateShares(
   members: {
@@ -240,11 +294,17 @@ export async function previewDividendRun(
     return { ok: false, message: `Rate must be between 0 and ${MAX_DIVIDEND_RATE}.` };
   }
 
-  const pnl = await computePnl(admin.cooperativeId);
-  if (pnl.netProfit <= 0) {
+  const base = await computeDividendBase(admin.cooperativeId);
+  if (base.netProfit <= 0) {
     return {
       ok: false,
-      message: `There's no profit to share yet (net: ${formatBalance(pnl.netProfit)}).`,
+      message: `There's no profit to share yet (net: ${formatBalance(base.netProfit)}).`,
+    };
+  }
+  if (base.remaining <= 0) {
+    return {
+      ok: false,
+      message: `No undistributed profit left this period (net ${formatBalance(base.netProfit)} is already fully appropriated and declared).`,
     };
   }
 
@@ -269,12 +329,17 @@ export async function previewDividendRun(
     };
   }
 
-  const totalDeductions = roundMoney(
-    Math.floor(pnl.netProfit * RESERVE_FUND_RATE) +
-      Math.floor(pnl.netProfit * EDUCATION_FUND_RATE) +
-      Math.floor(pnl.netProfit * DEVELOPMENT_FUND_RATE),
-  );
-  const distributable = Math.max(0, roundMoney(pnl.netProfit - totalDeductions));
+  // Statutory 20/2/5% is appropriated at most ONCE per period; a later run in
+  // the same period shares the same profit base and takes no statutory again.
+  const takeStatutory = base.statutoryTakenThisPeriod === 0;
+  const statutoryAmount = takeStatutory
+    ? roundMoney(
+        Math.floor(base.netProfit * RESERVE_FUND_RATE) +
+          Math.floor(base.netProfit * EDUCATION_FUND_RATE) +
+          Math.floor(base.netProfit * DEVELOPMENT_FUND_RATE),
+      )
+    : 0;
+  const distributable = Math.max(0, roundMoney(base.remaining - statutoryAmount));
   const pool = Math.max(0, Math.round(distributable * (rate / 100)));
   if (pool <= 0) {
     return {
@@ -299,11 +364,13 @@ export async function previewDividendRun(
   }
 
   const confirmToken = `CONFIRM ${rate}`;
+  const label = basis === "shares" ? "share dividend run" : "dividend run";
+  const audience = basis === "shares" ? "shareholders" : "members";
   const message =
-    `⚠️ *Confirm dividend run*\n\n` +
-    `Rate: *${rate}%* of net profit ${formatBalance(pnl.netProfit)}\n` +
-    `Member pool: *${formatBalance(pool)}*\n` +
-    `Direct bank payouts: *${payoutCount}* member(s)\n` +
+    `⚠️ *Confirm ${label}*\n\n` +
+    `Rate: *${rate}%* of net profit ${formatBalance(base.netProfit)}\n` +
+    `${audience} pool: *${formatBalance(pool)}*\n` +
+    `Direct bank payouts: *${payoutCount}* ${audience}\n` +
     (heldCount > 0 ? `Held (no verified bank account): *${heldCount}*\n` : ``) +
     `Bank float: *${formatBalance(bankFloat)}*\n\n` +
     `This sends real money to ${payoutCount} bank account(s) and cannot be undone.\n\n` +
@@ -357,19 +424,26 @@ export async function distributeDividend(
     return { ok: false, message: "Only the super admin can pay dividends." };
   }
   if (!Number.isFinite(rate) || rate <= 0 || rate > MAX_DIVIDEND_RATE) {
+    const cmd = basis === "shares" ? "paysharedividend" : "paydividend";
     return {
       ok: false,
-      message: `Rate must be between 0 and ${MAX_DIVIDEND_RATE}, e.g. *paydividend 20* pays 20% of profit.`,
+      message: `Rate must be between 0 and ${MAX_DIVIDEND_RATE}, e.g. *${cmd} 20* pays 20% of profit.`,
     };
   }
 
-  const pnl = await computePnl(admin.cooperativeId);
-  if (pnl.netProfit <= 0) {
+  const base = await computeDividendBase(admin.cooperativeId);
+  if (base.netProfit <= 0) {
     return {
       ok: false,
       message:
-        `There's no profit to share yet (net: ${formatBalance(pnl.netProfit)}).\n` +
+        `There's no profit to share yet (net: ${formatBalance(base.netProfit)}).\n` +
         `Profit comes from loan interest, fines and admin charges, minus salaries and payments.`,
+    };
+  }
+  if (base.remaining <= 0) {
+    return {
+      ok: false,
+      message: `No undistributed profit left this period (net ${formatBalance(base.netProfit)} is already fully appropriated and declared).`,
     };
   }
 
@@ -398,11 +472,13 @@ export async function distributeDividend(
     };
   }
 
-  const reserveAmount = Math.floor(pnl.netProfit * RESERVE_FUND_RATE);
-  const educationAmount = Math.floor(pnl.netProfit * EDUCATION_FUND_RATE);
-  const developmentAmount = Math.floor(pnl.netProfit * DEVELOPMENT_FUND_RATE);
+  // Statutory 20/2/5% is appropriated at most ONCE per period.
+  const takeStatutory = base.statutoryTakenThisPeriod === 0;
+  const reserveAmount = takeStatutory ? Math.floor(base.netProfit * RESERVE_FUND_RATE) : 0;
+  const educationAmount = takeStatutory ? Math.floor(base.netProfit * EDUCATION_FUND_RATE) : 0;
+  const developmentAmount = takeStatutory ? Math.floor(base.netProfit * DEVELOPMENT_FUND_RATE) : 0;
   const totalDeductions = roundMoney(reserveAmount + educationAmount + developmentAmount);
-  const distributableProfit = Math.max(0, roundMoney(pnl.netProfit - totalDeductions));
+  const distributableProfit = Math.max(0, roundMoney(base.remaining - totalDeductions));
   const pool = Math.max(0, Math.round(distributableProfit * (rate / 100)));
   if (pool <= 0) {
     return {
@@ -472,37 +548,39 @@ export async function distributeDividend(
     });
 
     // Statutory funds: internal appropriation, no bank movement.
-    await tx.reserveAllocation.create({
-      data: {
-        cooperativeId: admin.cooperativeId,
-        amount: reserveAmount,
-        source: "dividend_declaration",
-        referenceId: reference,
-        note: `20% statutory reserve from dividend at ${rate}% of net profit`,
-      },
-    });
-    await tx.educationFund.create({
-      data: {
-        cooperativeId: admin.cooperativeId,
-        amount: educationAmount,
-        source: "dividend_declaration",
-        referenceId: reference,
-        note: `2% education fund from dividend at ${rate}% of net profit`,
-      },
-    });
-    await tx.developmentFund.create({
-      data: {
-        cooperativeId: admin.cooperativeId,
-        amount: developmentAmount,
-        source: "dividend_declaration",
-        referenceId: reference,
-        note: `5% development fund from dividend at ${rate}% of net profit`,
-      },
-    });
-    await tx.cooperative.update({
-      where: { id: admin.cooperativeId },
-      data: { reserveFundBalance: { increment: reserveAmount } },
-    });
+    if (takeStatutory) {
+      await tx.reserveAllocation.create({
+        data: {
+          cooperativeId: admin.cooperativeId,
+          amount: reserveAmount,
+          source: "dividend_declaration",
+          referenceId: reference,
+          note: `20% statutory reserve from dividend at ${rate}% of net profit`,
+        },
+      });
+      await tx.educationFund.create({
+        data: {
+          cooperativeId: admin.cooperativeId,
+          amount: educationAmount,
+          source: "dividend_declaration",
+          referenceId: reference,
+          note: `2% education fund from dividend at ${rate}% of net profit`,
+        },
+      });
+      await tx.developmentFund.create({
+        data: {
+          cooperativeId: admin.cooperativeId,
+          amount: developmentAmount,
+          source: "dividend_declaration",
+          referenceId: reference,
+          note: `5% development fund from dividend at ${rate}% of net profit`,
+        },
+      });
+      await tx.cooperative.update({
+        where: { id: admin.cooperativeId },
+        data: { reserveFundBalance: { increment: reserveAmount } },
+      });
+    }
 
     if (totalDeductions > 0) {
       await postJournal(
@@ -654,7 +732,7 @@ export async function distributeDividend(
 
   const summary =
     `🎉 *Dividend run ${dividend.id.slice(-6)} complete*\n\n` +
-    `Rate: *${rate}%* of net profit ${formatBalance(pnl.netProfit)}\n` +
+    `Rate: *${rate}%* of net profit ${formatBalance(base.netProfit)}\n` +
     `Member pool: *${formatBalance(pool)}*\n` +
     `Statutory deductions: *${formatBalance(totalDeductions)}*\n\n` +
     `✅ Paid to bank: *${settled}* member(s)\n` +

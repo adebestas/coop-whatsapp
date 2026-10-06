@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, createTestCoop, createTestMember } from "./setup.js";
-import { allocateByShares, buyShares, getShareAccount } from "../src/services/shares.js";
+import { buyShares, getShareAccount } from "../src/services/shares.js";
 import { distributeDividend } from "../src/services/dividends.js";
 import { paymentState } from "./payment-state.js";
 import { recordLedger } from "../src/services/ledger.js";
@@ -26,18 +26,6 @@ describe("share capital", () => {
     await prisma.wallet.deleteMany();
     await prisma.member.deleteMany();
     await prisma.cooperative.deleteMany();
-  });
-
-  it("allocates a pool by shareholding with no kobo lost", () => {
-    const holdings = [
-      { id: "a", shares: 1 },
-      { id: "b", shares: 1 },
-      { id: "c", shares: 1 },
-    ];
-    const out = allocateByShares(holdings, 100);
-    const total = [...out.values()].reduce((s, v) => s + v, 0);
-    expect(total).toBe(100);
-    expect(out.get("a")).toBeGreaterThanOrEqual(33);
   });
 
   it("buys shares from the wallet and posts a balanced journal", async () => {
@@ -82,6 +70,44 @@ describe("share capital", () => {
     const account = await getShareAccount(member.id);
     expect(account?.shares).toBe(2);
     expect(account?.value).toBe(200000);
+  });
+
+  it("appropriates statutory funds only once across savings and share dividends", async () => {
+    const coop = await createTestCoop("DIVSHARED");
+    const admin = await createTestMember(coop.id, { phone: "2348000000300", role: "superadmin" });
+    const NAME = "Dual Holder";
+    const a = await createTestMember(coop.id, { phone: "2348000000301", name: NAME });
+    await prisma.member.update({
+      where: { id: a.id },
+      data: { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
+    });
+    await fundWallet(a.id, 1000000);
+    await buyShares(a.id, 2);
+    paymentState.resolveName = NAME;
+    await recordLedger({
+      cooperativeId: coop.id,
+      type: "income",
+      category: "interest",
+      amount: 1000000,
+      note: "Test profit",
+      reference: `TEST-SHARED-${Date.now()}`,
+    });
+
+    const savings = await distributeDividend(admin.phone, 10); // savings basis
+    expect(savings.ok).toBe(true);
+    const shares = await distributeDividend(admin.phone, 10, "shares");
+    expect(shares.ok).toBe(true);
+
+    // Statutory 20/2/5% of 1,000,000 taken exactly once = 270,000.
+    const reserve = await prisma.reserveAllocation.aggregate({ where: { cooperativeId: coop.id }, _sum: { amount: true } });
+    const education = await prisma.educationFund.aggregate({ where: { cooperativeId: coop.id }, _sum: { amount: true } });
+    const development = await prisma.developmentFund.aggregate({ where: { cooperativeId: coop.id }, _sum: { amount: true } });
+    expect(reserve._sum.amount).toBe(200000);
+    expect(education._sum.amount).toBe(20000);
+    expect(development._sum.amount).toBe(50000);
+
+    // Combined pools never exceed net profit minus statutory.
+    expect((savings.totalPool ?? 0) + (shares.totalPool ?? 0)).toBeLessThanOrEqual(1000000 - 270000);
   });
 });
 
