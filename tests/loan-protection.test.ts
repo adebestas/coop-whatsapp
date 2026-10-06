@@ -4,7 +4,7 @@ import { paymentState } from "./payment-state.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { disburseLoan } from "../src/services/disbursements.js";
 import { approveClaim } from "../src/services/deathclaims.js";
-import { trialBalance } from "../src/services/journal.js";
+import { postJournal, trialBalance } from "../src/services/journal.js";
 
 async function makeCoop(code: string) {
   return prisma.cooperative.create({ data: { name: `Protection Coop ${code}`, code } });
@@ -261,7 +261,7 @@ describe("loan protection write-off on an approved death claim", () => {
     expect(finalClaim!.status).toBe("paid");
   });
 
-  it("never lets the protection fund go negative — excess is absorbed, not thrown", async () => {
+  it("books the excess beyond the fund as an expense and never drives the liability negative", async () => {
     const coop = await makeCoop("PROT4");
     const deceased = await makeMember(coop.id, "Ada Obi");
     const superA = await makeSuper(coop.id, "Super One");
@@ -277,10 +277,20 @@ describe("loan protection write-off on an approved death claim", () => {
         status: "active",
       },
     });
-    // Fund is smaller than the outstanding balance.
+    // Fund is smaller than the outstanding balance. Seed the liability ledger
+    // the way a real disbursement would (CREDIT liabilities:loan_protection_fund).
     await prisma.cooperative.update({
       where: { id: coop.id },
       data: { protectionFundBalance: 1000 },
+    });
+    await postJournal({
+      cooperativeId: coop.id,
+      txRef: `LOAN-PROT-${loan.id}`,
+      description: "protection premium",
+      postings: [
+        { account: "assets:bank", direction: "DEBIT", amount: 1000 },
+        { account: "liabilities:loan_protection_fund", direction: "CREDIT", amount: 1000 },
+      ],
     });
 
     const claim = await makeValidatedClaim(coop.id, deceased.id);
@@ -294,6 +304,131 @@ describe("loan protection write-off on an approved death claim", () => {
     const updatedLoan = await prisma.loan.findUnique({ where: { id: loan.id } });
     expect(updatedLoan!.status).toBe("paid");
     expect(updatedLoan!.balance).toBe(0);
+
+    // The write-off splits: 1000 from the fund, 39000 as a coop expense.
+    const jr = await prisma.journalEntry.findUnique({
+      where: { txRef: `LOAN-PROT-CLAIM-${claim.id}-${loan.id}` },
+      include: { postings: true },
+    });
+    expect(jr).not.toBeNull();
+    const debitBy = (account: string) =>
+      jr!.postings
+        .filter((p) => p.direction === "DEBIT" && p.account === account)
+        .reduce((s, p) => s + p.amount, 0);
+    expect(debitBy("liabilities:loan_protection_fund")).toBe(1000);
+    expect(debitBy("expense:loan_protection_claim")).toBe(39000);
+    expect(
+      jr!.postings.filter((p) => p.direction === "CREDIT").reduce((s, p) => s + p.amount, 0),
+    ).toBe(40000);
+
+    // The liability ledger is exactly zero, never negative.
+    const liabilityRows = await prisma.posting.findMany({
+      where: { entry: { cooperativeId: coop.id }, account: "liabilities:loan_protection_fund" },
+    });
+    const liabilityNet = liabilityRows.reduce(
+      (s, p) => s + (p.direction === "CREDIT" ? p.amount : -p.amount),
+      0,
+    );
+    expect(liabilityNet).toBe(0);
+    expect(liabilityNet).toBeGreaterThanOrEqual(0);
+
+    expect((await trialBalance(coop.id)).balanced).toBe(true);
+  });
+
+  it("writes off every protected loan for a member (no P2002 on the second)", async () => {
+    const coop = await makeCoop("PROT5");
+    const deceased = await makeMember(coop.id, "Ada Obi");
+    const superA = await makeSuper(coop.id, "Super One");
+    await prisma.wallet.update({ where: { memberId: deceased.id }, data: { balance: 50000 } });
+
+    const loan1 = await makeOutstandingLoan(coop.id, deceased.id, 30000);
+    const loan2 = await makeOutstandingLoan(coop.id, deceased.id, 20000);
+    for (const loan of [loan1, loan2]) {
+      await prisma.loanProtection.create({
+        data: {
+          cooperativeId: coop.id,
+          loanId: loan.id,
+          memberId: deceased.id,
+          premium: 1000,
+          status: "active",
+        },
+      });
+    }
+    await prisma.cooperative.update({
+      where: { id: coop.id },
+      data: { protectionFundBalance: 60000 },
+    });
+
+    const claim = await makeValidatedClaim(coop.id, deceased.id);
+
+    const result = await approveClaim(superA.phone, claim.id.slice(-6));
+    expect(result.ok).toBe(true);
+
+    for (const [loan, writtenOff] of [
+      [loan1, 30000],
+      [loan2, 20000],
+    ] as const) {
+      const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
+      expect(updated!.status).toBe("paid");
+      expect(updated!.balance).toBe(0);
+
+      const protection = await prisma.loanProtection.findUnique({ where: { loanId: loan.id } });
+      expect(protection!.status).toBe("claimed");
+      expect(protection!.claimId).toBe(claim.id);
+      expect(protection!.writtenOff).toBe(writtenOff);
+    }
+
+    const updatedCoop = await prisma.cooperative.findUnique({ where: { id: coop.id } });
+    expect(updatedCoop!.protectionFundBalance).toBe(10000);
+    expect((await trialBalance(coop.id)).balanced).toBe(true);
+
+    const finalClaim = await prisma.deathClaim.findUnique({ where: { id: claim.id } });
+    expect(finalClaim!.status).toBe("paid");
+  });
+
+  it("still writes off the loan when the member left no savings", async () => {
+    const coop = await makeCoop("PROT6");
+    const deceased = await makeMember(coop.id, "Ada Obi"); // wallet balance 0
+    const superA = await makeSuper(coop.id, "Super One");
+
+    const loan = await makeOutstandingLoan(coop.id, deceased.id, 40000);
+    await prisma.loanProtection.create({
+      data: {
+        cooperativeId: coop.id,
+        loanId: loan.id,
+        memberId: deceased.id,
+        premium: 1000,
+        status: "active",
+      },
+    });
+    await prisma.cooperative.update({
+      where: { id: coop.id },
+      data: { protectionFundBalance: 50000 },
+    });
+
+    const claim = await makeValidatedClaim(coop.id, deceased.id);
+
+    const result = await approveClaim(superA.phone, claim.id.slice(-6));
+    expect(result.ok).toBe(true);
+    expect(result.message).toMatch(/written off under loan protection/i);
+
+    const updatedLoan = await prisma.loan.findUnique({ where: { id: loan.id } });
+    expect(updatedLoan!.status).toBe("paid");
+    expect(updatedLoan!.balance).toBe(0);
+
+    const protection = await prisma.loanProtection.findUnique({ where: { loanId: loan.id } });
+    expect(protection!.status).toBe("claimed");
+    expect(protection!.writtenOff).toBe(40000);
+
+    const updatedCoop = await prisma.cooperative.findUnique({ where: { id: coop.id } });
+    expect(updatedCoop!.protectionFundBalance).toBe(10000);
+
+    const finalClaim = await prisma.deathClaim.findUnique({ where: { id: claim.id } });
+    expect(finalClaim!.status).toBe("paid");
+    // No savings payout was attempted.
+    expect(
+      await prisma.payout.findUnique({ where: { idempotencyKey: `TFR-CLAIM-${claim.id}` } }),
+    ).toBeNull();
     expect((await trialBalance(coop.id)).balanced).toBe(true);
   });
 });

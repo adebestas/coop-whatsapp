@@ -448,19 +448,6 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
   }
 
   // --- All conditions met — proceed to payout ---
-  const wallet = await prisma.wallet.findUnique({ where: { memberId: claim.memberId } });
-  const balance = wallet?.balance ?? 0;
-  if (balance <= 0) {
-    await prisma.deathClaim.update({
-      where: { id: claim.id },
-      data: { status: "paid", finalizedAt: new Date() },
-    });
-    return {
-      ok: true,
-      message: `No balance left in ${claim.member.name}'s wallet. Claim *${claim.id.slice(-6)}* closed as paid.`,
-    };
-  }
-
   // ATOMIC CLAIM — exactly one super drives the payout; concurrent calls stop here.
   const claimed = await prisma.deathClaim.updateMany({
     where: { id: claim.id, status: "validated" },
@@ -474,8 +461,26 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
   }
 
   // Settle any protected loans against the coop's protection fund BEFORE the
-  // family's savings are paid out. The loan is written off; the fund covers it.
+  // family's savings are paid out. The loans are written off; the fund covers
+  // them. This also runs when the member left no savings.
   const writtenOff = await writeOffProtection(claim.cooperativeId, claim.memberId, claim.id);
+  const writeOffNote =
+    writtenOff > 0
+      ? ` Loan of *${formatBalance(writtenOff)}* written off under loan protection.`
+      : "";
+
+  const wallet = await prisma.wallet.findUnique({ where: { memberId: claim.memberId } });
+  const balance = wallet?.balance ?? 0;
+  if (balance <= 0) {
+    await prisma.deathClaim.updateMany({
+      where: { id: claim.id, status: "processing" },
+      data: { status: "paid", finalizedAt: new Date() },
+    });
+    return {
+      ok: true,
+      message: `No balance left in ${claim.member.name}'s wallet. Claim *${claim.id.slice(-6)}* closed as paid.${writeOffNote}`,
+    };
+  }
 
   // Whether money has actually been sent. Once true, the outer catch must NOT
   // refund (that would double-pay).
@@ -561,10 +566,6 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
       detail: `${formatBalance(balance)} to family of ${claim.member.name}`,
     });
 
-    const writeOffNote =
-      writtenOff > 0
-        ? ` Loan of *${formatBalance(writtenOff)}* written off under loan protection.`
-        : "";
     return {
       ok: true,
       message: `🕊️ *${formatBalance(balance)}* paid to the family of ${claim.member.name} (${claim.familyBankName ?? claim.familyBankCode} ****${claim.familyAccountNumber.slice(-4)}). Claim *${claim.id.slice(-6)}* closed.${writeOffNote}`,

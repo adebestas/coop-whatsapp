@@ -608,7 +608,7 @@ model DeathClaim {
   createdAt           DateTime          @default(now())
   validations         DeathValidation[]
   approvals            DeathClaimApproval[]
-  protection           LoanProtection?
+  protections          LoanProtection[]
 
   @@index([memberId, status])
   @@index([cooperativeId, status])
@@ -780,7 +780,7 @@ model LoanProtection {
   memberId      String
   premium       Int // protection premium withheld at disbursement in kobo
   status        String    @default("active") // active | claimed
-  claimId       String?   @unique
+  claimId       String?
   writtenOff    Int       @default(0) // amount written off against the fund in kobo
   createdAt     DateTime  @default(now())
   claimedAt     DateTime?
@@ -792,6 +792,7 @@ model LoanProtection {
 
   @@index([cooperativeId, status])
   @@index([memberId])
+  @@index([claimId])
 }
 
 // ---- Support tickets (customer service) ----

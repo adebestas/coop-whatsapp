@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { prisma, withTx } from "../lib/prisma.js";
+import { setCoopContext } from "../lib/tenant-context.js";
 import { postJournal } from "./journal.js";
 import { roundMoney } from "./money.js";
 
@@ -11,15 +12,16 @@ type Client = Prisma.TransactionClient | typeof prisma;
  * claim payout, BEFORE the family's savings are paid out, so a deceased
  * member's dependants are not chased for a loan the fund already covers.
  *
- * For each loan with status "disbursed" | "partial" and balance > 0:
+ * Only loans that actually carry an active `LoanProtection` row are touched.
+ * For each such loan with status "disbursed" | "partial" and balance > 0:
  *   - the loan is settled (status "paid", balance 0);
  *   - its LoanProtection row is marked "claimed" with the written-off amount;
  *   - a balanced journal entry is posted: DEBIT liabilities:loan_protection_fund
- *     / CREDIT assets:loan_portfolio;
- *   - the cooperative's protection-fund balance is decremented by the amount.
- *
- * The fund is clamped at zero: if the outstanding balance exceeds the fund, the
- * excess is absorbed as a cooperative expense and never throws.
+ *     for the part the fund covers, DEBIT expense:loan_protection_claim for any
+ *     shortfall (absorbed as a cooperative expense), CREDIT
+ *     assets:loan_portfolio for the whole outstanding balance;
+ *   - the cooperative's protection-fund balance is decremented atomically by
+ *     the amount the fund covered (never below zero).
  *
  * Returns the total amount written off (kobo).
  */
@@ -36,74 +38,94 @@ export async function writeOffProtection(
         memberId,
         status: { in: ["disbursed", "partial"] },
         balance: { gt: 0 },
+        protection: { isNot: null },
       },
       include: { protection: true },
     });
 
     let total = 0;
     for (const loan of loans) {
-      const balance = roundMoney(loan.balance);
-      if (balance <= 0) continue;
+      const protection = loan.protection;
+      if (!protection) continue;
+
+      const outstanding = roundMoney(loan.balance);
+      if (outstanding <= 0) continue;
+
+      const coop = await client.cooperative.findUnique({
+        where: { id: cooperativeId },
+        select: { protectionFundBalance: true },
+      });
+      const fundBalance = Math.max(0, coop?.protectionFundBalance ?? 0);
+      // Whatever the fund cannot cover is absorbed as a cooperative expense.
+      const fromFund = Math.min(outstanding, fundBalance);
+      const fromExpense = outstanding - fromFund;
 
       await client.loan.update({
         where: { id: loan.id },
         data: { status: "paid", balance: 0 },
       });
 
-      if (loan.protection) {
-        await client.loanProtection.update({
-          where: { id: loan.protection.id },
-          data: {
-            status: "claimed",
-            claimId,
-            writtenOff: balance,
-            claimedAt: new Date(),
-          },
-        });
-      }
+      await client.loanProtection.update({
+        where: { id: protection.id },
+        data: {
+          status: "claimed",
+          claimId,
+          writtenOff: outstanding,
+          claimedAt: new Date(),
+        },
+      });
+
+      const postings = [
+        { account: "assets:loan_portfolio", direction: "CREDIT" as const, amount: outstanding, memberId },
+        ...(fromFund > 0
+          ? [
+              {
+                account: "liabilities:loan_protection_fund",
+                direction: "DEBIT" as const,
+                amount: fromFund,
+                memberId,
+              },
+            ]
+          : []),
+        ...(fromExpense > 0
+          ? [
+              {
+                account: "expense:loan_protection_claim",
+                direction: "DEBIT" as const,
+                amount: fromExpense,
+                memberId,
+              },
+            ]
+          : []),
+      ];
 
       await postJournal(
         {
           cooperativeId,
           txRef: `LOAN-PROT-CLAIM-${claimId}-${loan.id}`,
           description: `Loan protection write-off for loan ${loan.id.slice(-6)} on claim ${claimId.slice(-6)}`,
-          postings: [
-            {
-              account: "liabilities:loan_protection_fund",
-              direction: "DEBIT",
-              amount: balance,
-              memberId: loan.memberId,
-            },
-            {
-              account: "assets:loan_portfolio",
-              direction: "CREDIT",
-              amount: balance,
-              memberId: loan.memberId,
-            },
-          ],
+          postings,
         },
         client as never,
       );
 
-      total = roundMoney(total + balance);
-    }
+      if (fromFund > 0) {
+        // Atomic decrement — guarded so the scalar can never go negative.
+        await client.cooperative.updateMany({
+          where: { id: cooperativeId, protectionFundBalance: { gte: fromFund } },
+          data: { protectionFundBalance: { decrement: fromFund } },
+        });
+      }
 
-    if (total > 0) {
-      const coop = await client.cooperative.findUnique({
-        where: { id: cooperativeId },
-        select: { protectionFundBalance: true },
-      });
-      // Clamp: never go negative. Any excess beyond the fund is a coop expense.
-      const fund = Math.max(0, coop?.protectionFundBalance ?? 0);
-      await client.cooperative.update({
-        where: { id: cooperativeId },
-        data: { protectionFundBalance: Math.max(0, fund - total) },
-      });
+      total = roundMoney(total + outstanding);
     }
 
     return total;
   };
 
   if (tx) return run(tx);
-  return withTx((t) => run(t));
+  return withTx(async (t) => {
+    await setCoopContext(t as never, cooperativeId);
+    return run(t);
+  });
 }
