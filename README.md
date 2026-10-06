@@ -60,6 +60,8 @@ tests/                   # vitest smoke tests
 | `history` | Your personal transaction statement |
 | `ledger` | Cooperative ledger — transparency for all members |
 | `dividend <rate>` | Real-time dividend calculator (% of net profit) |
+| `shares` | Show your shareholding and its current value |
+| `buyshares <count>` | Buy shares from your savings balance (default ₦1,000/share) |
 | `buypolls` | See open buy-votes (what should the coop purchase?) |
 | `votebuy <poll id> <option>` | Vote in a buy-vote |
 | `joinunit <code>` | Join your workplace/unit |
@@ -137,6 +139,7 @@ an append-only **audit log** (`audit` command shows the latest entries).
 | `addunit <name> <code>` / `unitadmin <unit> <member>` / `units` | all admins | Manage workplaces |
 | `interest` | admin + super | Shows the fixed tiered flat rates: 5% (≤3 months), 8% (≤6), 9% (≤9), 10% (10–12) |
 | `paydividend <rate%>` | super only | Distribute a percentage of **net profit** to members by savings share |
+| `paysharedividend <rate%>` | super only | Distribute a percentage of **net profit** to members by **shareholding** (bank payout, distinct from `paydividend`) |
 | `startvotediv <rate%>` | super only | Open a member ballot when a dividend rate change is >5% |
 | `closedivid [approve\|reject]` | super only | Close a dividend-rate vote (auto-tally, or force approve/reject) |
 | `votedivstatus` | super + member | Live tally and status of the dividend-rate vote |
@@ -249,6 +252,21 @@ salaries/stipends, pay-anyone and other expenses out.
   closes it (`closedivid [approve|reject]`, or `closedivid` auto-tallies).
   `votedivstatus` shows the live tally. A passed vote unlocks the rate for
   `paydividend <rate>`.
+
+## Share capital
+
+Members own part of the cooperative by buying shares from their savings
+balance with `buyshares <count>` — each share defaults to **₦1,000** (100,000
+kobo), configurable per cooperative via `CooperativeConfig.sharePrice`.
+`shares` shows their current holding and value.
+
+- Share capital is **permanent equity**, not savings: it is **not withdrawable**
+  unless the cooperative enables `allowShareRedemption`.
+- Share purchases post a balanced double-entry journal (`equity:share_capital`)
+  and are audited.
+- Super admins distribute profit **on shares** with `paysharedividend <rate%>`
+  — paid to shareholders by their shareholding (a bank payout). This is
+  **distinct from `paydividend`**, which pays on **savings**.
 
 ## Withdrawals
 

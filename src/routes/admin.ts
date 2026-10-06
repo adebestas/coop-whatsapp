@@ -233,6 +233,30 @@ export async function adminApiRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  app.get("/api/admin/shares", withTenant(async (req) => {
+    const coopId = req.adminCoopId!;
+    const config = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
+    const sharePrice = config?.sharePrice ?? 100000;
+    const accounts = await prisma.shareAccount.findMany({
+      where: { cooperativeId: coopId },
+      include: { member: { select: { name: true } } },
+      orderBy: { shares: "desc" },
+    });
+    const totalShares = accounts.reduce((sum, a) => sum + a.shares, 0);
+    return {
+      ok: true,
+      sharePrice,
+      totalShares,
+      accounts: accounts.map((a) => ({
+        memberId: a.memberId,
+        name: a.member.name,
+        shares: a.shares,
+        totalPaid: a.totalPaid,
+        value: a.shares * sharePrice,
+      })),
+    };
+  }));
+
   app.get("/api/admin/overview", withTenant(async (req) => {
     const coopId = req.adminCoopId!;
     const [memberCount, contributions, contributionAgg, loans, walletAgg, payoutAgg] =

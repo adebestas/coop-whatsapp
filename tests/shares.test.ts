@@ -184,3 +184,34 @@ describe("share dividend (bank payout)", () => {
     expect(aEntry.amount + bEntry.amount).toBe(result.totalPool);
   });
 });
+
+import { createTestApp } from "./setup.js";
+
+describe("shares admin endpoint", () => {
+  it("lists share accounts for the cooperative", async () => {
+    const coop = await createTestCoop("SHAREAPI");
+    const admin = await createTestMember(coop.id, { phone: "2348000000200", role: "superadmin", pin: "1234" });
+    const m = await createTestMember(coop.id, { phone: "2348000000201" });
+    await fundWallet(m.id, 500000);
+    await buyShares(m.id, 2);
+
+    const app = await createTestApp();
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/admin/login",
+      headers: { "x-requested-with": "xmlhttprequest" },
+      payload: { phone: admin.phone, pin: "1234" },
+    });
+    const cookie = login.headers["set-cookie"] as string;
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/admin/shares",
+      headers: { cookie, "x-requested-with": "xmlhttprequest" },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.totalShares).toBe(2);
+  });
+});
