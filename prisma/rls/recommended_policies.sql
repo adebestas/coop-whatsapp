@@ -33,6 +33,7 @@ BEGIN
     'GuarantorDeduction','JournalEntry','LedgerEntry','Loan','ManualCredit',
     'Member','PAYERecord','Payout','PurchasePoll','ReconciliationLog',
     'ReserveAllocation','STR','StatusPost','Subscription','SupportTicket',
+    'ShareAccount','ShareTransaction',
     'Unit','Vote','WithdrawalRequest',
     -- Child tables reached through a tenant parent.
     'Wallet','Posting','DividendEntry','DeductionItem','Guarantor',

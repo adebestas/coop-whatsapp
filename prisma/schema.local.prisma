@@ -64,6 +64,8 @@ subscription       Subscription?
   dividendVotes       DividendVote[]
   accountOfficerAssignments AccountOfficerAssignment[]
   phoneChangeRequests PhoneChangeRequest[]
+  shareAccounts      ShareAccount[]
+  shareTransactions  ShareTransaction[]
 
   @@index([status])
   @@index([code])
@@ -238,6 +240,8 @@ model Member {
   manualCreditsInitiated  ManualCredit[]     @relation("ManualCreditInitiator")
   manualCreditsApproved   ManualCredit[]     @relation("ManualCreditApprover")
   sessionsRevokedAt       DateTime? // when the superadmin revoked this member's sessions
+  shareAccount            ShareAccount?
+  shareTransactions       ShareTransaction[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -912,6 +916,45 @@ model DividendEntry {
   @@unique([dividendId, memberId])
 }
 
+// ---- Share capital (member equity) ----
+// Members buy shares in the cooperative. Unlike savings (a liability the member
+// can withdraw), share capital is permanent member equity: it earns dividends
+// and carries ownership. One member = one vote regardless of shares held.
+model ShareAccount {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId      String   @unique
+  member        Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  shares        Int      @default(0) // number of shares currently held
+  totalPaid     Int      @default(0) // kobo paid for shares currently held
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  transactions  ShareTransaction[]
+
+  @@unique([cooperativeId, memberId])
+  @@index([cooperativeId])
+}
+
+model ShareTransaction {
+  id             String       @id @default(cuid())
+  cooperativeId  String
+  cooperative    Cooperative  @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId       String
+  member         Member       @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  shareAccountId String
+  shareAccount   ShareAccount @relation(fields: [shareAccountId], references: [id], onDelete: Cascade)
+  type           String       // purchase | redemption | dividend
+  shares         Int          // shares bought (+) / redeemed (-); 0 for a dividend
+  amount         Int          // kobo moved
+  pricePerShare  Int          // kobo per share at the time of the transaction
+  reference      String       @unique
+  note           String?
+  createdAt      DateTime     @default(now())
+
+  @@index([cooperativeId, memberId, createdAt])
+}
+
 // ---- Broadcasts (admin announcements) ----
 model Broadcast {
   id            String      @id @default(cuid())
@@ -1058,6 +1101,10 @@ model CooperativeConfig {
   taxIdentificationNumber  String?
   cooperativeType          String   @default("member") // member | commercial
   commercialIncome         Int      @default(0) // kobo from non-member activities
+  sharePrice               Int      @default(100000) // kobo per share (₦1,000)
+  minShares                Int      @default(1)
+  maxShares                Int      @default(0) // 0 = unlimited
+  allowShareRedemption     Boolean  @default(false)
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
