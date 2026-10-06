@@ -150,7 +150,7 @@ describe("committee admin commands", () => {
       data: {
         cooperativeId: coop.id,
         creditCommitteeSize: 4,
-        supervisoryCommitteeSize: 2,
+        supervisoryCommitteeSize: 3,
         boardSize: 7,
       },
     });
@@ -160,8 +160,22 @@ describe("committee admin commands", () => {
     await handleMessage(superAdmin.phone, "addcommittee board Board");
 
     expect((await prisma.committee.findFirst({ where: { type: "credit" } }))!.size).toBe(4);
-    expect((await prisma.committee.findFirst({ where: { type: "supervisory" } }))!.size).toBe(2);
+    expect((await prisma.committee.findFirst({ where: { type: "supervisory" } }))!.size).toBe(3);
     expect((await prisma.committee.findFirst({ where: { type: "board" } }))!.size).toBe(7);
+  });
+
+  it("rejects a committee smaller than 3 seats", async () => {
+    const coop = await createTestCoop("CMT08");
+    const superAdmin = await createTestMember(coop.id, SUPER);
+    const actor = { phone: superAdmin.phone, id: superAdmin.id, role: "superadmin" as const };
+
+    const tooSmall = await createCommittee(coop.id, "credit", "Tiny", 1, actor);
+    expect(tooSmall.ok).toBe(false);
+    expect(tooSmall.message).toContain("3");
+    expect(await prisma.committee.count()).toBe(0);
+
+    await handleMessage(superAdmin.phone, "addcommittee credit Tiny 2");
+    expect(await prisma.committee.count()).toBe(0);
   });
 
   it("lets the super admin create, appoint, list and remove via chat", async () => {
@@ -312,6 +326,53 @@ describe("credit committee loan approval", () => {
     expect(res.ok).toBe(true);
     expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("super_approved_1");
   });
+
+  it("decides from the actual seated majority when the committee is partly staffed", async () => {
+    const coop = await createTestCoop("CCM09");
+    const superAdmin = await createTestMember(coop.id, SUPER);
+    const actor = { phone: superAdmin.phone, id: superAdmin.id, role: "superadmin" as const };
+    const a = await createTestMember(coop.id, { phone: "2348030000011" });
+    const b = await createTestMember(coop.id, { phone: "2348030000012" });
+    await createCommittee(coop.id, "credit", "Credit Committee", 3, actor);
+    await appointMember(coop.id, "credit", a.code, "member", actor);
+    await appointMember(coop.id, "credit", b.code, "member", actor);
+    const { loan } = await makeAdminApprovedLoan(coop.id, "9");
+
+    // Only 2 of 3 seats are filled, so 2 approvals is a majority of the seated
+    // members and the loan must not strand.
+    expect(
+      (await approveLoan(loan.id.slice(-6), { cooperativeId: coop.id, actorId: a.id })).ok,
+    ).toBe(true);
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("admin_approved");
+    const second = await approveLoan(loan.id.slice(-6), { cooperativeId: coop.id, actorId: b.id });
+    expect(second.ok).toBe(true);
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("disbursed");
+  });
+
+  it("lets a plain-member committee member vote via cvote and lists the queue", async () => {
+    const coop = await createTestCoop("CCM10");
+    const superAdmin = await createTestMember(coop.id, SUPER);
+    const actor = { phone: superAdmin.phone, id: superAdmin.id, role: "superadmin" as const };
+    const a = await createTestMember(coop.id, { phone: "2348030000021", name: "Plain Voter" });
+    const b = await createTestMember(coop.id, { phone: "2348030000022" });
+    await createCommittee(coop.id, "credit", "Credit Committee", 3, actor);
+    await appointMember(coop.id, "credit", a.code, "member", actor);
+    await appointMember(coop.id, "credit", b.code, "member", actor);
+    const { loan } = await makeAdminApprovedLoan(coop.id, "A");
+
+    // `a` is an ordinary member (role "member"), not an admin.
+    await handleMessage(a.phone, `cvote ${loan.id.slice(-6)} approve`);
+    expect(await prisma.committeeVote.count()).toBe(1);
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("admin_approved");
+
+    await handleMessage(a.phone, "committeequeue");
+    expect(textsSent()).toContain("Committee queue");
+    expect(textsSent()).toContain(loan.id.slice(-6));
+
+    // Second seated member's vote reaches the seated majority and disburses.
+    await handleMessage(b.phone, `cvote ${loan.id.slice(-6)} approve`);
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("disbursed");
+  });
 });
 
 describe("recordCommitteeVote", () => {
@@ -339,7 +400,7 @@ describe("recordCommitteeVote", () => {
 });
 
 describe("supervisory freeze", () => {
-  it("blocks a member's money-out after a supervisory committee freeze", async () => {
+  it("cannot be lifted by the member and blocks money-out until the committee unfreezes", async () => {
     const coop = await createTestCoop("CCM06");
     const superAdmin = await createTestMember(coop.id, SUPER);
     const actor = { phone: superAdmin.phone, id: superAdmin.id, role: "superadmin" as const };
@@ -350,12 +411,22 @@ describe("supervisory freeze", () => {
     await appointMember(coop.id, "supervisory", sup.code, "chair", actor);
 
     await handleMessage(sup.phone, `supervisoryfreeze ${target.code} suspected fraud`);
-    expect((await prisma.member.findUnique({ where: { id: target.id } }))!.frozenAt).not.toBeNull();
+    let row = await prisma.member.findUnique({ where: { id: target.id } });
+    expect(row!.supervisoryFrozenAt).not.toBeNull();
+    expect(row!.frozenAt).toBeNull();
 
+    // The member cannot lift a supervisory freeze themselves.
+    await handleMessage(target.phone, "unfreeze");
+    row = await prisma.member.findUnique({ where: { id: target.id } });
+    expect(row!.supervisoryFrozenAt).not.toBeNull();
+    expect(textsSent()).toContain("Supervisory Committee");
+
+    // Money out is blocked with the committee-specific freeze.
     await handleMessage(target.phone, "withdraw 1000");
     expect(textsSent().toLowerCase()).toContain("frozen");
 
     await handleMessage(sup.phone, `supervisoryunfreeze ${target.code}`);
-    expect((await prisma.member.findUnique({ where: { id: target.id } }))!.frozenAt).toBeNull();
+    row = await prisma.member.findUnique({ where: { id: target.id } });
+    expect(row!.supervisoryFrozenAt).toBeNull();
   });
 });

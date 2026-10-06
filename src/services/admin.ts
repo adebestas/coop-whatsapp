@@ -276,7 +276,7 @@ async function handleCommitteeCommand(
   const reason = args.slice(1).join(" ").trim();
   await prisma.member.update({
     where: { id: target.id },
-    data: { frozenAt: freezing ? new Date() : null },
+    data: { supervisoryFrozenAt: freezing ? new Date() : null },
   });
   await audit({
     cooperativeId: coopId,

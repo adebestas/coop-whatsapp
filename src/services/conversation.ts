@@ -558,6 +558,20 @@ async function handleMessageInner(
         break;
       }
       const freezing = cmd === "freeze";
+      if (!freezing) {
+        // A Supervisory Committee freeze is not the member's to lift.
+        const current = await prisma.member.findUnique({
+          where: { id: member.id },
+          select: { supervisoryFrozenAt: true },
+        });
+        if (current?.supervisoryFrozenAt) {
+          await sendText({
+            to: phone,
+            text: "🔒 Your account is frozen by the *Supervisory Committee*. Only the committee or a super admin can lift it — please contact your cooperative.",
+          });
+          break;
+        }
+      }
       await prisma.member.update({
         where: { id: member.id },
         data: { frozenAt: freezing ? new Date() : null },

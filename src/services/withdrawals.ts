@@ -154,6 +154,13 @@ export async function requestWithdrawal(
         message: "You need to join a cooperative first. Reply *join <code>*.",
       } as const;
     }
+    if (member.supervisoryFrozenAt) {
+      return {
+        ok: false,
+        message:
+          "🔒 Your wallet is frozen by the *Supervisory Committee*, so you can't withdraw right now. Only the committee or a super admin can lift it — please contact your cooperative.",
+      } as const;
+    }
     if (member.frozenAt) {
       return {
         ok: false,

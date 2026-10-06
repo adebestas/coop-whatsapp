@@ -61,6 +61,11 @@ export async function startAssistWithdrawal(
       message: "You can't assist a withdrawal for yourself — dual control is required.",
     };
   }
+  if (target.supervisoryFrozenAt)
+    return {
+      ok: false,
+      message: `${target.name}'s wallet is frozen by the Supervisory Committee — only the committee or a super admin can lift it.`,
+    };
   if (target.frozenAt) return { ok: false, message: `${target.name}'s wallet is frozen.` };
   if (target.status === "deceased")
     return { ok: false, message: "This account is under a death claim." };

@@ -89,8 +89,11 @@ export async function createCommittee(
   }
 
   const cleanSize = Number(size);
-  if (!Number.isFinite(cleanSize) || cleanSize < 1) {
-    return { ok: false, message: "Committee size must be a positive number." };
+  if (!Number.isFinite(cleanSize) || cleanSize < 3) {
+    return {
+      ok: false,
+      message: "Committee size must be at least *3* so a decision always needs more than one vote.",
+    };
   }
 
   const existing = await prisma.committee.findUnique({
@@ -431,6 +434,16 @@ export async function recordCommitteeVote(
     return { ok: false, message: "You have already voted on this decision." };
   }
 
+  // The decision threshold follows the ACTUAL seated membership, not the
+  // configured size: a partly-staffed committee must still be able to decide,
+  // otherwise loans would strand waiting for votes no one is seated to cast.
+  const activeSeats = await prisma.committeeMember.count({
+    where: { committeeId: committee.id, active: true },
+  });
+  if (activeSeats === 0) {
+    return { ok: false, message: `The *${committee.name}* has no seated members, so it can't decide.` };
+  }
+
   await prisma.committeeVote.create({
     data: { decisionId: decision.id, memberId, vote: cleanVote },
   });
@@ -441,12 +454,12 @@ export async function recordCommitteeVote(
   });
   const approvals = votes.filter((v) => v.vote === "approve").length;
   const rejections = votes.filter((v) => v.vote === "reject").length;
-  const majority = committeeMajority(committee.size);
+  const majority = committeeMajority(activeSeats);
 
   let decided: "approved" | "rejected" | undefined;
   if (approvals >= majority) {
     decided = "approved";
-  } else if (rejections >= majority || approvals + rejections >= committee.size) {
+  } else if (rejections >= majority || approvals + rejections >= activeSeats) {
     // Enough rejections, or every seat has voted without a majority — approval
     // is no longer mathematically possible.
     decided = "rejected";
@@ -467,10 +480,10 @@ export async function recordCommitteeVote(
     action: "committee.vote",
     targetType: subjectType,
     targetId: subjectId,
-    detail: `${cleanVote} on ${subjectType} ${subjectId.slice(-6)} (${approvals}/${committee.size} approve, ${rejections} reject)`,
+    detail: `${cleanVote} on ${subjectType} ${subjectId.slice(-6)} (${approvals}/${activeSeats} approve, ${rejections} reject)`,
   });
 
-  const tally = `${approvals}/${committee.size} approve · ${rejections} reject`;
+  const tally = `${approvals}/${activeSeats} approve · ${rejections} reject`;
   if (decided === "approved") {
     return {
       ok: true,
