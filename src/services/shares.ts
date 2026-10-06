@@ -89,13 +89,11 @@ export async function buyShares(
   if (maxShares > 0 && (existing?.shares ?? 0) + count > maxShares) {
     return { ok: false, message: `You can hold at most *${maxShares}* shares.` };
   }
+  const insufficientBalanceMessage =
+    `Buying *${count}* share(s) costs *${formatBalance(cost)}* but your savings balance is ` +
+    `*${formatBalance(member.wallet.balance)}*.\n\nReply *save <amount>* to top up first.`;
   if (member.wallet.balance < cost) {
-    return {
-      ok: false,
-      message:
-        `Buying *${count}* share(s) costs *${formatBalance(cost)}* but your savings balance is ` +
-        `*${formatBalance(member.wallet.balance)}*.\n\nReply *save <amount>* to top up first.`,
-    };
+    return { ok: false, message: insufficientBalanceMessage };
   }
 
   const account = await prisma.shareAccount.upsert({
@@ -107,38 +105,52 @@ export async function buyShares(
   const reference = `SHARE-BUY-${member.cooperativeId}-${memberId}-${Date.now()}`;
   const walletId = member.wallet.id;
 
-  await withTx(async (tx) => {
-    await setCoopContext(tx as never, member.cooperativeId);
-    await tx.wallet.update({ where: { id: walletId }, data: { balance: { decrement: cost } } });
-    await tx.shareAccount.update({
-      where: { id: account.id },
-      data: { shares: { increment: count }, totalPaid: { increment: cost } },
+  try {
+    await withTx(async (tx) => {
+      await setCoopContext(tx as never, member.cooperativeId);
+      // Authoritative race guard: only debit if the wallet still covers the cost.
+      // The balance pre-check above is just the fast path; concurrent purchases
+      // could otherwise drive the balance negative.
+      const claimed = await tx.wallet.updateMany({
+        where: { id: walletId, balance: { gte: cost } },
+        data: { balance: { decrement: cost } },
+      });
+      if (claimed.count === 0) throw new Error("INSUFFICIENT_BALANCE");
+      await tx.shareAccount.update({
+        where: { id: account.id },
+        data: { shares: { increment: count }, totalPaid: { increment: cost } },
+      });
+      await tx.shareTransaction.create({
+        data: {
+          cooperativeId: member.cooperativeId,
+          memberId,
+          shareAccountId: account.id,
+          type: "purchase",
+          shares: count,
+          amount: cost,
+          pricePerShare: price,
+          reference,
+        },
+      });
+      await postJournal(
+        {
+          cooperativeId: member.cooperativeId,
+          txRef: reference,
+          description: `Share purchase: ${count} share(s)`,
+          postings: [
+            { account: `member_wallet:${walletId}`, direction: "DEBIT", amount: cost, memberId },
+            { account: "equity:share_capital", direction: "CREDIT", amount: cost },
+          ],
+        },
+        tx as any,
+      );
     });
-    await tx.shareTransaction.create({
-      data: {
-        cooperativeId: member.cooperativeId,
-        memberId,
-        shareAccountId: account.id,
-        type: "purchase",
-        shares: count,
-        amount: cost,
-        pricePerShare: price,
-        reference,
-      },
-    });
-    await postJournal(
-      {
-        cooperativeId: member.cooperativeId,
-        txRef: reference,
-        description: `Share purchase: ${count} share(s)`,
-        postings: [
-          { account: `member_wallet:${walletId}`, direction: "DEBIT", amount: cost, memberId },
-          { account: "equity:share_capital", direction: "CREDIT", amount: cost },
-        ],
-      },
-      tx as any,
-    );
-  });
+  } catch (err) {
+    if (err instanceof Error && err.message === "INSUFFICIENT_BALANCE") {
+      return { ok: false, message: insufficientBalanceMessage };
+    }
+    throw err;
+  }
 
   await audit({
     cooperativeId: member.cooperativeId,
