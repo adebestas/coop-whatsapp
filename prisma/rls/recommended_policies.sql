@@ -27,7 +27,8 @@ BEGIN
     'Cooperative',
     -- Directly cooperativeId-scoped tables.
     'AccountOfficerAssignment','AdminAssistAction','AuditLog','Beneficiary',
-    'BrandingConfig','Broadcast','Byelaw','Contribution','CoopPost',
+    'BrandingConfig','Broadcast','Byelaw','Committee','CommitteeDecision',
+    'Contribution','CoopPost',
     'CooperativeConfig','DeathClaim','DeductionBatch','DevelopmentFund',
     'Dividend','DividendVote','EducationFund','ExternalPayment','Grievance',
     'GuarantorDeduction','JournalEntry','LedgerEntry','Loan','LoanProtection',
@@ -39,7 +40,8 @@ BEGIN
     -- Child tables reached through a tenant parent.
     'Wallet','Posting','DividendEntry','DeductionItem','Guarantor',
     'LoanRepayment','VoteBallot','VoteCandidate','PollBallot','PollOption',
-    'DeathValidation','FavoritePayee','MemberProgress'
+    'DeathValidation','FavoritePayee','MemberProgress',
+    'CommitteeMember','CommitteeVote'
   ]
   LOOP
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);

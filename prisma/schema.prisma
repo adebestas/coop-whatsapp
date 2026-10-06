@@ -67,6 +67,8 @@ subscription       Subscription?
   shareAccounts      ShareAccount[]
   shareTransactions  ShareTransaction[]
   loanProtections    LoanProtection[]
+  committees         Committee[]
+  committeeDecisions CommitteeDecision[]
 
   @@index([status])
   @@index([code])
@@ -244,6 +246,9 @@ model Member {
   shareAccount            ShareAccount?
   shareTransactions       ShareTransaction[]
   loanProtections         LoanProtection[]
+  committeeMemberships    CommitteeMember[] @relation("CommitteeMemberships")
+  committeeAppointments   CommitteeMember[] @relation("CommitteeAppointer")
+  committeeVotes          CommitteeVote[]   @relation("CommitteeVotes")
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -1138,6 +1143,9 @@ model CooperativeConfig {
   allowShareRedemption     Boolean  @default(false)
   loanProtectionPercent    Int      @default(1) // % of loan principal withheld as protection premium
   loanProtectionEnabled    Boolean  @default(true)
+  creditCommitteeSize      Int      @default(3)
+  supervisoryCommitteeSize Int      @default(3)
+  boardSize                Int      @default(5)
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
@@ -1321,4 +1329,70 @@ model ManualCredit {
 
   @@index([cooperativeId, status, createdAt])
   @@index([memberId, status])
+}
+
+// ---- Committee governance (Credit / Supervisory-Audit / Board) ----
+// Each cooperative elects up to three committees. Members serve roles with
+// scoped powers, and committee decisions (e.g. loan approvals) are recorded
+// with per-member votes.
+model Committee {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  type          String   // credit | supervisory | board
+  name          String
+  size          Int
+  createdAt     DateTime @default(now())
+  members       CommitteeMember[]
+  decisions     CommitteeDecision[]
+
+  @@unique([cooperativeId, type])
+  @@index([cooperativeId])
+}
+
+model CommitteeMember {
+  id            String    @id @default(cuid())
+  committeeId   String
+  committee     Committee @relation(fields: [committeeId], references: [id], onDelete: Cascade)
+  memberId      String
+  member        Member    @relation("CommitteeMemberships", fields: [memberId], references: [id], onDelete: Cascade)
+  role          String    // chair | member
+  appointedById String?
+  appointedBy   Member?   @relation("CommitteeAppointer", fields: [appointedById], references: [id], onDelete: SetNull)
+  appointedAt   DateTime  @default(now())
+  termEndsAt    DateTime?
+  active        Boolean   @default(true)
+
+  @@unique([committeeId, memberId])
+  @@index([memberId])
+}
+
+model CommitteeDecision {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  committeeId   String
+  committee     Committee @relation(fields: [committeeId], references: [id], onDelete: Cascade)
+  subjectType   String   // loan
+  subjectId     String
+  status        String   @default("pending") // pending | approved | rejected
+  createdAt     DateTime @default(now())
+  decidedAt     DateTime?
+  votes         CommitteeVote[]
+
+  @@unique([committeeId, subjectType, subjectId])
+  @@index([cooperativeId, status])
+}
+
+model CommitteeVote {
+  id         String   @id @default(cuid())
+  decisionId String
+  decision   CommitteeDecision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  memberId   String
+  member     Member   @relation("CommitteeVotes", fields: [memberId], references: [id], onDelete: Cascade)
+  vote       String   // approve | reject
+  createdAt  DateTime @default(now())
+
+  @@unique([decisionId, memberId])
+  @@index([memberId])
 }
