@@ -338,24 +338,28 @@ export async function isCommitteeMember(
 }
 
 /**
- * True when the cooperative has a `type` committee that is actually staffed —
- * i.e. at least one active seated member. A committee that was created but has
- * no members appointed yet is NOT "active": the cooperative keeps its legacy
- * approval chain until the committee is operational, so a loan can never be
- * stranded waiting for a vote that no one is able to cast.
+ * True when the cooperative has a `type` committee staffed to at least a bare
+ * majority of its configured seats. A committee that is created but not yet
+ * staffed to a majority is NOT "active": the cooperative keeps its legacy
+ * approval chain until the committee can actually decide, so a single person
+ * can never disburse a loan and a loan can never strand waiting for votes that
+ * no one is seated to cast.
+ *
+ * `committeeMajority(size)` rather than `activeSeats` is the bar, so a size-3
+ * committee needs ≥2 seated, a size-5 needs ≥3, etc.
  */
 export async function hasActiveCommittee(coopId: string, type: string): Promise<boolean> {
   const cleanType = (type ?? "").trim().toLowerCase();
   if (!isValidType(cleanType)) return false;
   const committee = await prisma.committee.findUnique({
     where: { cooperativeId_type: { cooperativeId: coopId, type: cleanType } },
-    select: { id: true },
+    select: { id: true, size: true },
   });
   if (!committee) return false;
   const seated = await prisma.committeeMember.count({
     where: { committeeId: committee.id, active: true },
   });
-  return seated > 0;
+  return seated >= committeeMajority(committee.size);
 }
 
 export interface CommitteeVoteResult {
@@ -434,9 +438,9 @@ export async function recordCommitteeVote(
     return { ok: false, message: "You have already voted on this decision." };
   }
 
-  // The decision threshold follows the ACTUAL seated membership, not the
-  // configured size: a partly-staffed committee must still be able to decide,
-  // otherwise loans would strand waiting for votes no one is seated to cast.
+  // The threshold follows the COMMITTEE'S configured size. `hasActiveCommittee`
+  // only treats the committee as active once activeSeats >= committeeMajority(size),
+  // so the threshold is always reachable here and a loan never strands.
   const activeSeats = await prisma.committeeMember.count({
     where: { committeeId: committee.id, active: true },
   });
@@ -454,7 +458,7 @@ export async function recordCommitteeVote(
   });
   const approvals = votes.filter((v) => v.vote === "approve").length;
   const rejections = votes.filter((v) => v.vote === "reject").length;
-  const majority = committeeMajority(activeSeats);
+  const majority = committeeMajority(committee.size);
 
   let decided: "approved" | "rejected" | undefined;
   if (approvals >= majority) {

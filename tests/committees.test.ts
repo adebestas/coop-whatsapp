@@ -349,6 +349,35 @@ describe("credit committee loan approval", () => {
     expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("disbursed");
   });
 
+  it("stays inactive below a majority, so one seated member cannot disburse", async () => {
+    const coop = await createTestCoop("CCM11");
+    const superAdmin = await createTestMember(coop.id, SUPER);
+    const actor = { phone: superAdmin.phone, id: superAdmin.id, role: "superadmin" as const };
+    const a = await createTestMember(coop.id, { phone: "2348030000031" });
+    await createCommittee(coop.id, "credit", "Credit Committee", 3, actor);
+    await appointMember(coop.id, "credit", a.code, "member", actor);
+    const { loan } = await makeAdminApprovedLoan(coop.id, "B");
+
+    // 1 of 3 seats filled is below the majority (2), so the committee is inactive.
+    expect(await hasActiveCommittee(coop.id, "credit")).toBe(false);
+
+    // A single committee vote must not disburse — no vote is even recorded.
+    await handleMessage(a.phone, `cvote ${loan.id.slice(-6)} approve`);
+    expect(await prisma.committeeVote.count()).toBe(0);
+    expect(await prisma.payout.count()).toBe(0);
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("admin_approved");
+
+    // The legacy super-admin chain still works.
+    const super1 = await createTestMember(coop.id, { phone: "2348040000011", role: "superadmin" });
+    const viaSuper = await approveLoan(loan.id.slice(-6), {
+      cooperativeId: coop.id,
+      superAdmin: true,
+      actorId: super1.id,
+    });
+    expect(viaSuper.ok).toBe(true);
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("super_approved_1");
+  });
+
   it("lets a plain-member committee member vote via cvote and lists the queue", async () => {
     const coop = await createTestCoop("CCM10");
     const superAdmin = await createTestMember(coop.id, SUPER);
