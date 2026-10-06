@@ -78,3 +78,73 @@ export async function uploadToS3(filePath: string, key: string): Promise<boolean
 function s3Configured(): boolean {
   return !!(BACKUP_BUCKET && BACKUP_KEY && BACKUP_SECRET);
 }
+
+/**
+ * Upload an in-memory buffer to S3-compatible storage (same SigV4 approach as
+ * `uploadToS3`). Used for employer deduction files, which arrive as buffers.
+ */
+export async function uploadBufferToS3(
+  body: Buffer,
+  key: string,
+  contentType?: string,
+): Promise<boolean> {
+  if (!s3Configured()) return false;
+  try {
+    const date = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
+    const dateStamp = date.slice(0, 8);
+    const endpoint = BACKUP_ENDPOINT
+      ? `${BACKUP_ENDPOINT}/${BACKUP_BUCKET}/${key}`
+      : `https://${BACKUP_BUCKET}.s3.${BACKUP_REGION}.amazonaws.com/${key}`;
+
+    const payloadHash = createHash("sha256").update(body).digest("hex");
+    const canonicalRequest = [
+      "PUT",
+      `/${key}`,
+      "",
+      `host:${BACKUP_BUCKET}.s3.${BACKUP_REGION}.amazonaws.com`,
+      `x-amz-content-sha256:${payloadHash}`,
+      `x-amz-date:${date}`,
+      "",
+      "host;x-amz-content-sha256;x-amz-date",
+      payloadHash,
+    ].join("\n");
+    const credentialScope = `${dateStamp}/${BACKUP_REGION}/s3/aws4_request`;
+    const stringToSign = [
+      "AWS4-HMAC-SHA256",
+      date,
+      credentialScope,
+      createHash("sha256").update(canonicalRequest).digest("hex"),
+    ].join("\n");
+
+    const hmac = (k: Buffer | string, data: string) =>
+      createHmac("sha256", k).update(data).digest();
+    const signingKey = hmac(
+      hmac(hmac(hmac(`AWS4${BACKUP_SECRET}`, dateStamp), BACKUP_REGION), "s3"),
+      "aws4_request",
+    );
+    const signature = createHmac("sha256", signingKey).update(stringToSign).digest("hex");
+    const authHeader = `AWS4-HMAC-SHA256 Credential=${BACKUP_KEY}/${credentialScope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=${signature}`;
+
+    const res = await fetch(endpoint, {
+      method: "PUT",
+      headers: {
+        Host: `${BACKUP_BUCKET}.s3.${BACKUP_REGION}.amazonaws.com`,
+        "x-amz-content-sha256": payloadHash,
+        "x-amz-date": date,
+        Authorization: authHeader,
+        ...(contentType ? { "Content-Type": contentType } : {}),
+      },
+      body,
+    });
+
+    if (!res.ok) {
+      console.error(`[S3] buffer upload failed (${res.status}): ${await res.text()}`);
+      return false;
+    }
+    console.log(`[S3] uploaded buffer to s3://${BACKUP_BUCKET}/${key}`);
+    return true;
+  } catch (err: any) {
+    console.error("[S3] buffer upload error:", err?.message ?? err);
+    return false;
+  }
+}

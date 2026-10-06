@@ -62,6 +62,7 @@ model Cooperative {
 subscription       Subscription?
   dividendVotes       DividendVote[]
   accountOfficerAssignments AccountOfficerAssignment[]
+  phoneChangeRequests PhoneChangeRequest[]
 
   @@index([status])
   @@index([code])
@@ -143,6 +144,7 @@ model Member {
   nextOfKinName           String? // required for death claims
   nextOfKinPhone          String?
   phoneVerified           Boolean             @default(false) // OTP-verified real phone number
+  nameVerified            Boolean             @default(false) // name confirmed by a super admin (maker-checker gate)
   name                    String
   bvn                     String?
   role                    String              @default("member") // member | admin | superadmin
@@ -222,6 +224,7 @@ model Member {
   deductionWaivers        DeductionWaiver[]
   batchesCreated          DeductionBatch[]    @relation("DeductionBatchCreator")
   batchesApproved         DeductionBatch[]    @relation("DeductionBatchApprover")
+  phoneChangeRequests     PhoneChangeRequest[]
   favoritePayees          FavoritePayee[]
   dividendVotesOpened     DividendVote[]      @relation("DividendVoteOpener")
   dividendVoteBallots     DividendVoteBallot[] @relation("DividendVoteVoter")
@@ -957,9 +960,19 @@ model DeductionBatch {
   cooperativeId String
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
   ref           String      @unique
-  status        String      @default("draft") // draft | submitted | approved | rejected
+  status        String      @default("draft") // draft | submitted | cheque_received | reconciled | approved | rejected
   totalAmount   Int         @default(0) // stored in kobo
   note          String?
+  chequeRef          String?
+  chequeAmount       Int? // kobo — amount on the employer cheque/remittance
+  chequeReceivedAt   DateTime?
+  chequeReceivedById String?
+  reconciledAt       DateTime?
+  reconciledAmount   Int? // kobo — amount actually confirmed received
+  reconciliationSource String? // webhook | manual | statement
+  reconciliationNote String?
+  sourceFileKey      String? // S3 key of the uploaded employer file
+  sourceFileName     String?
   createdById   String
   createdBy     Member      @relation("DeductionBatchCreator", fields: [createdById], references: [id])
   approvedById  String?
@@ -996,6 +1009,28 @@ model DeductionWaiver {
   createdAt   DateTime @default(now())
 
   @@unique([memberId, period])
+}
+
+// ---- Phone / channel change requests ----
+// A member-initiated change of their primary chat channel. The new number is
+// OTP-verified, then a super admin must approve before the switch is applied.
+model PhoneChangeRequest {
+  id            String      @id @default(cuid())
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  oldPhone      String
+  newPhone      String
+  status        String      @default("pending_approval") // pending_approval | approved | rejected
+  requestedAt   DateTime    @default(now())
+  verifiedAt    DateTime?
+  approvedById  String?
+  approvedAt    DateTime?
+  reason        String?
+
+  @@index([cooperativeId, status])
+  @@index([memberId])
 }
 
 // ---- Per-cooperative business rules (SaaS config) ----

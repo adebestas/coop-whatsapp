@@ -5,6 +5,10 @@ export interface InboundMessage {
   flowToken?: string;
   /** Present for voice-note audio messages (transcribed downstream). */
   audio?: { mediaId: string };
+  /** Present for uploaded documents (e.g. an employer deduction schedule). */
+  document?: { mediaId: string; filename?: string; mimeType?: string };
+  /** Present for uploaded images (OCR'd downstream). */
+  image?: { mediaId: string; mimeType?: string };
 }
 
 /**
@@ -29,6 +33,8 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
         nfm_reply?: { response_json?: string };
       };
       audio?: { id?: string };
+      document?: { id?: string; filename?: string; mime_type?: string };
+      image?: { id?: string; mime_type?: string };
     };
     const from = message.from;
     if (!from) continue;
@@ -60,7 +66,29 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
       out.push({ from, text: "", audio: { mediaId: message.audio.id } });
       continue;
     }
-    // Anything else (reactions, images, buttons…) is intentionally dropped.
+
+    // Documents (e.g. an employer deduction schedule) and images (OCR).
+    if (message.type === "document" && message.document?.id) {
+      out.push({
+        from,
+        text: "",
+        document: {
+          mediaId: message.document.id,
+          filename: message.document.filename,
+          mimeType: message.document.mime_type,
+        },
+      });
+      continue;
+    }
+    if (message.type === "image" && message.image?.id) {
+      out.push({
+        from,
+        text: "",
+        image: { mediaId: message.image.id, mimeType: message.image.mime_type },
+      });
+      continue;
+    }
+    // Anything else (reactions, buttons…) is intentionally dropped.
   }
   return out;
 }

@@ -13,16 +13,8 @@
  * Member-specific data requires authentication. Admin data requires admin role.
  */
 
-import { prisma } from "./prisma.js";
-import {
-  getCoopSnapshot,
-  getMemberSnapshot,
-  getSavingsTrend,
-  getLoanPerformance,
-  getFinancialMemory,
-  type CoopSnapshot,
-  type MemberSnapshot,
-} from "./ai-data.js";
+import { type CoopSnapshot, type MemberSnapshot } from "./ai-data.js";
+import { AI_TOOLS, canUseTool } from "./ai-tools.js";
 import {
   groqAvailable,
   groqModel,
@@ -291,7 +283,13 @@ function formatFallbackResponse(intent: AIQueryType, data: Record<string, unknow
     }
     case "coop_performance": {
       const d = data as {
-        performance: ReturnType<typeof getLoanPerformance> extends Promise<infer T> ? T : never;
+        performance: {
+          totalLoans: number;
+          paidLoans: number;
+          repaymentRate: number;
+          defaultedLoans: number;
+          avgRepaymentAmount: number;
+        };
       };
       return (
         `📈 Loan Performance\n\n` +
@@ -358,72 +356,22 @@ export async function handleAIQuery(
   const intent = await classifyIntent(truncated);
   if (!intent) return null;
 
-  // 2. Gather data based on intent
-  let data: Record<string, unknown> = {};
+  // 2. Resolve the tool and enforce permissions in code — never the model.
+  const tool = AI_TOOLS[intent.type];
+  if (!tool) return null;
+  if (!canUseTool(tool, role)) return null;
+  if (tool.scope === "self" && !memberId) {
+    return "Please register first to check your personal data. Reply *join <code>* to get started.";
+  }
 
-  switch (intent.type) {
-    case "member_balance":
-    case "member_savings":
-    case "member_loan": {
-      if (!memberId) {
-        return "Please register first to check your personal data. Reply *join <code>* to get started.";
-      }
-      const member = await getMemberSnapshot(memberId);
-      if (!member) return "Could not find your member data.";
-      const trends =
-        intent.type === "member_savings" ? await getSavingsTrend(cooperativeId, 6) : [];
-      data = { member, trends };
-      break;
+  let data: Record<string, unknown>;
+  try {
+    data = await tool.handler({ cooperativeId, memberId, role });
+  } catch (err) {
+    if ((err as Error).message === "MEMBER_REQUIRED") {
+      return "Please register first to check your personal data. Reply *join <code>* to get started.";
     }
-
-    case "coop_overview":
-    case "coop_contributions":
-    case "coop_loans":
-    case "coop_withdrawals": {
-      const snapshot = await getCoopSnapshot(cooperativeId);
-      data = { snapshot };
-      break;
-    }
-
-    case "coop_trends": {
-      const trends = await getSavingsTrend(cooperativeId, 6);
-      data = { trends };
-      break;
-    }
-
-    case "coop_performance": {
-      const performance = await getLoanPerformance(cooperativeId);
-      data = { performance };
-      break;
-    }
-
-    case "member_affordability": {
-      if (!memberId) {
-        return "Please register first to check your financial capacity. Reply *join <code>* to get started.";
-      }
-      const memory = await getFinancialMemory(memberId);
-      if (!memory) return "Could not find your member data.";
-      data = { memory };
-      break;
-    }
-
-    case "member_list": {
-      // Admin-only: member names are PII and must not be exposed to regular members via AI.
-      if (role !== "admin" && role !== "superadmin") {
-        return null;
-      }
-      const members = await prisma.member.findMany({
-        where: { cooperativeId, status: "active" },
-        select: { name: true, code: true, role: true },
-        orderBy: { name: "asc" },
-      });
-      data = { members: members.slice(0, 20), total: members.length };
-      break;
-    }
-
-    case "help":
-      data = {};
-      break;
+    throw err;
   }
 
   // 3. Generate response

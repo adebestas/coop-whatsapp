@@ -15,6 +15,7 @@ import { validateDeviceSession } from "../lib/security-hardening.js";
 import { isFrozen, freezeMessage, unfreezeMessage } from "../lib/freeze.js";
 import { savePayee, listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js";
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
+import { requestPhoneChange } from "./phone-change.js";
 
 /** Session TTL — how long an awaiting state stays alive before reset. */
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -116,6 +117,7 @@ export type BotState =
   | "awaiting_coop_code"
   | "awaiting_phone"
   | "awaiting_otp"
+  | "awaiting_changephone_otp"
   | "awaiting_email"
   | "awaiting_birthday"
   | "awaiting_nok_name"
@@ -157,6 +159,7 @@ export const FlowDataSchema = z.object({
   pin: z.string().optional(),
   name: z.string().optional(),
   contactPhone: z.string().optional(),
+  newPhone: z.string().optional(),
   otp: z.string().optional(),
   otpExpiresAt: z.number().optional(),
   phoneVerified: z.boolean().optional(),
@@ -641,6 +644,12 @@ async function handleMessageInner(
     case "phone":
       await handlePhone(phone, args);
       break;
+
+    case "changephone": {
+      const result = await requestPhoneChange(phone, args.join(""));
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
 
     case "ledger":
       await handleLedger(phone);

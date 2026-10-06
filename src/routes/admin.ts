@@ -670,6 +670,128 @@ export async function adminApiRoutes(app: FastifyInstance) {
     return result;
   }));
 
+  // ---- Employer deduction file ingestion ----
+
+  const DEDUCTION_EXTS = [
+    "csv",
+    "xlsx",
+    "xls",
+    "pdf",
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
+    "tif",
+    "tiff",
+    "bmp",
+  ];
+
+  app.post("/api/admin/deductions/parse", withTenant(async (req, reply) => {
+    const coopId = req.adminCoopId!;
+    const body = (req.body ?? {}) as { filename?: string; data?: string };
+    if (!body.filename || !body.data) {
+      return reply.code(400).send({ error: "filename and data (base64) are required" });
+    }
+    const ext = (body.filename.split(".").pop() ?? "").toLowerCase();
+    if (!DEDUCTION_EXTS.includes(ext)) {
+      return reply.code(400).send({ error: `Unsupported file type: .${ext}` });
+    }
+    const buffer = Buffer.from(body.data, "base64");
+    if (buffer.length > 10 * 1024 * 1024) {
+      return reply.code(400).send({ error: "File too large (max 10MB)" });
+    }
+    const { ingestDeductionFile } = await import("../services/deduction-ingest.js");
+    try {
+      return await ingestDeductionFile(coopId, buffer, body.filename);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  }));
+
+  app.post("/api/admin/deductions/build", withTenant(async (req, reply) => {
+    const coopId = req.adminCoopId!;
+    const phone = req.adminPhone!;
+    const body = (req.body ?? {}) as { filename?: string; data?: string; note?: string };
+    if (!body.filename || !body.data) {
+      return reply.code(400).send({ error: "filename and data (base64) are required" });
+    }
+    const ext = (body.filename.split(".").pop() ?? "").toLowerCase();
+    if (!DEDUCTION_EXTS.includes(ext)) {
+      return reply.code(400).send({ error: `Unsupported file type: .${ext}` });
+    }
+    const buffer = Buffer.from(body.data, "base64");
+    if (buffer.length > 10 * 1024 * 1024) {
+      return reply.code(400).send({ error: "File too large (max 10MB)" });
+    }
+    const { ingestDeductionFile } = await import("../services/deduction-ingest.js");
+    const { buildBatchFromRows } = await import("../services/deductions.js");
+    const { uploadBufferToS3 } = await import("../lib/s3.js");
+    try {
+      const ingested = await ingestDeductionFile(coopId, buffer, body.filename);
+      const matched = ingested.rows
+        .filter((r) => r.matched && r.memberId)
+        .map((r) => ({ memberId: r.memberId as string, amount: r.amount }));
+      const safeName = body.filename.replace(/[^\w.-]/g, "_");
+      const key = `deductions/${coopId}/${Date.now()}-${safeName}`;
+      const uploaded = await uploadBufferToS3(buffer, key);
+      const result = await buildBatchFromRows(phone, matched, body.note, {
+        key: uploaded ? key : undefined,
+        name: body.filename,
+      });
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorRole: req.adminRole ?? "admin",
+        action: "deduction.batch.import",
+        targetType: "deductionBatch",
+        detail: `${body.filename}: ${matched.length} rows -> ${result.ref}`,
+      });
+      return {
+        ok: true,
+        ref: result.ref,
+        message: result.message,
+        warnings: ingested.warnings,
+        unmatched: ingested.unmatchedCount,
+      };
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  }));
+
+  app.post("/api/admin/deductions/reconcile-statement", withTenant(async (req, reply) => {
+    const coopId = req.adminCoopId!;
+    const phone = req.adminPhone!;
+    const body = (req.body ?? {}) as { filename?: string; data?: string };
+    if (!body.filename || !body.data) {
+      return reply.code(400).send({ error: "filename and data (base64) are required" });
+    }
+    const ext = (body.filename.split(".").pop() ?? "").toLowerCase();
+    if (!["csv", "xlsx", "xls", "pdf"].includes(ext)) {
+      return reply.code(400).send({ error: "Statement must be .csv, .xlsx, .xls or .pdf" });
+    }
+    const buffer = Buffer.from(body.data, "base64");
+    if (buffer.length > 10 * 1024 * 1024) {
+      return reply.code(400).send({ error: "File too large (max 10MB)" });
+    }
+    const { reconcileFromStatement } = await import("../services/deductions.js");
+    try {
+      const result = await reconcileFromStatement(coopId, buffer, body.filename);
+      await audit({
+        cooperativeId: coopId,
+        actorPhone: phone,
+        actorRole: req.adminRole ?? "admin",
+        action: "deduction.statement.reconcile",
+        targetType: "deductionBatch",
+        detail: `${body.filename}: ${result.reconciled.join(", ") || "no matches"}`,
+      });
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, message: result.message, reconciled: result.reconciled };
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  }));
+
   // ---- Grievances (member complaints) ----
 
   app.get("/api/admin/grievances", withTenant(async (req) => {

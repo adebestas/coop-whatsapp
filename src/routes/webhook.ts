@@ -5,6 +5,8 @@ import { handleMessage } from "../services/conversation.js";
 import { extractWhatsAppMessages } from "../lib/inbound.js";
 import { sendText } from "../lib/messaging.js";
 import { transcribeAudioMessage, transcriptionEnabled } from "../lib/transcribe.js";
+import { downloadMedia, extFromMime } from "../lib/whatsapp-media.js";
+import { handleDeductionUpload } from "../services/deduction-ingest.js";
 import { RedisMutex } from "../lib/redis-mutex.js";
 
 /**
@@ -102,6 +104,23 @@ export async function webhookRoutes(app: FastifyInstance) {
               continue;
             }
             inbound.text = transcript;
+          }
+
+          // Documents / photos: an admin uploading an employer deduction file.
+          if (inbound.document || inbound.image) {
+            const media = inbound.document ?? inbound.image!;
+            const dl = await downloadMedia(media.mediaId);
+            if (!dl) {
+              sendText({
+                to: inbound.from,
+                text: "I couldn't download that file. Please try again.",
+              }).catch(() => {});
+              continue;
+            }
+            const filename = inbound.document?.filename ?? `upload.${extFromMime(dl.mime)}`;
+            const result = await handleDeductionUpload(inbound.from, dl.data, filename);
+            await sendText({ to: inbound.from, text: result.message }).catch(() => {});
+            continue;
           }
 
           // Don't await — Meta needs a quick 200 and we don't want a

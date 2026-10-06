@@ -9,6 +9,8 @@ import {
   rejectBatch,
   setCommitment,
   waiveMonth,
+  recordCheque,
+  reconcileBatch,
 } from "./deductions.js";
 import { approveLoan, listPendingLoans, rejectLoan } from "./loans.js";
 import { formatBalance } from "./cooperative.js";
@@ -24,6 +26,7 @@ import {
 } from "./withdrawals.js";
 import { startAssistWithdrawal, confirmAssistWithdrawal } from "./adminassist.js";
 import { revokeMemberSessions, unrevokeMemberSessions } from "./revocation.js";
+import { approvePhoneChange, rejectPhoneChange } from "./phone-change.js";
 import { requestManualCredit, approveManualCredit, rejectManualCredit } from "./manualcredit.js";
 import { startDeathClaim, setClaimBank, approveClaim, rejectClaim } from "./deathclaims.js";
 import { audit, recentAudit } from "./audit.js";
@@ -2060,6 +2063,46 @@ export async function handleAdminCommand(
         return true;
       }
 
+      case "recordcheque": {
+        if (!isSuper) {
+          await sendText({ to: phone, text: "Only the *super admin* can record a cheque." });
+          return true;
+        }
+        const [ref, amountArg, ...chequeParts] = args;
+        const amount = Number(amountArg);
+        if (!ref || !Number.isFinite(amount) || amount <= 0) {
+          await sendText({
+            to: phone,
+            text: "Usage: *recordcheque <ref> <amount> [cheque ref]*",
+          });
+          return true;
+        }
+        const result = await recordCheque(
+          phone,
+          ref,
+          toKobo(amount),
+          chequeParts.join(" ") || undefined,
+        );
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "reconbatch": {
+        if (!isSuper) {
+          await sendText({ to: phone, text: "Only the *super admin* can reconcile a batch." });
+          return true;
+        }
+        const [ref, amountArg] = args;
+        const amount = Number(amountArg);
+        if (!ref || !Number.isFinite(amount) || amount <= 0) {
+          await sendText({ to: phone, text: "Usage: *reconbatch <ref> <amount>*" });
+          return true;
+        }
+        const result = await reconcileBatch(phone, ref, toKobo(amount));
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
       case "approvebatch":
       case "rejectbatch": {
         if (!isSuper) {
@@ -2072,13 +2115,15 @@ export async function handleAdminCommand(
         if (!args[0]) {
           await sendText({
             to: phone,
-            text: `Usage: *${cmd} <ref>*` + (cmd === "rejectbatch" ? " [reason]" : ""),
+            text:
+              `Usage: *${cmd} <ref>*` +
+              (cmd === "rejectbatch" ? " [reason]" : cmd === "approvebatch" ? " [partial]" : ""),
           });
           return true;
         }
         const result =
           cmd === "approvebatch"
-            ? await approveBatch(phone, args[0])
+            ? await approveBatch(phone, args[0], { partial: args.slice(1).includes("partial") })
             : await rejectBatch(phone, args[0], args.slice(1).join(" ") || undefined);
         await sendText({ to: phone, text: result.message });
         return true;
@@ -2106,6 +2151,75 @@ export async function handleAdminCommand(
           return true;
         }
         const result = await waiveMonth(phone, code, period);
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "confirmname": {
+        if (!isSuper) {
+          await sendText({
+            to: phone,
+            text: "Only the *super admin* can confirm a member's name.",
+          });
+          return true;
+        }
+        const code = args[0]?.toUpperCase();
+        if (!code) {
+          await sendText({ to: phone, text: "Usage: *confirmname <member code>*" });
+          return true;
+        }
+        const target = await prisma.member.findFirst({ where: { code, cooperativeId: coopId } });
+        if (!target) {
+          await sendText({ to: phone, text: `No member found with code ${code}.` });
+          return true;
+        }
+        if (target.id === admin.id) {
+          await sendText({
+            to: phone,
+            text: "You cannot confirm your own name — ask another super admin.",
+          });
+          return true;
+        }
+        await prisma.member.update({ where: { id: target.id }, data: { nameVerified: true } });
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: phone,
+          actorId: admin.id,
+          actorRole: "superadmin",
+          action: "member.name.confirm",
+          targetType: "member",
+          targetId: target.id,
+          detail: target.name,
+        });
+        await notifyMember(
+          target,
+          "✅ Your name has been confirmed by a super admin. You can now create deduction batches.",
+        ).catch(() => {});
+        await sendText({ to: phone, text: `✅ ${target.name}'s name is now confirmed.` });
+        return true;
+      }
+
+      case "approvephone":
+      case "rejectphone": {
+        if (!isSuper) {
+          await sendText({
+            to: phone,
+            text: "Only the *super admin* can approve or reject phone changes.",
+          });
+          return true;
+        }
+        const code = args[0]?.toUpperCase();
+        if (!code) {
+          await sendText({
+            to: phone,
+            text: `Usage: *${cmd} <member code>*` + (cmd === "rejectphone" ? " [reason]" : ""),
+          });
+          return true;
+        }
+        const result =
+          cmd === "approvephone"
+            ? await approvePhoneChange(phone, code)
+            : await rejectPhoneChange(phone, code, args.slice(1).join(" ") || undefined);
         await sendText({ to: phone, text: result.message });
         return true;
       }

@@ -328,6 +328,56 @@ and the loan still isn't repaid, the deduction executes automatically
 (savings balance + lifetime savings reduced, ledger entry recorded, everyone
 notified). Clearing the arrears during the window cancels it.
 
+## Employer salary-deduction remittance
+
+Admins collect members' agreed monthly deductions from their employer. The
+lifecycle is maker-checked and reconciled before any money is credited:
+
+1. **Set commitments** — `setcommit <code> <amount>` (0 stops it); members can
+   request a month off with `skipmonth`, admins approve with `waive <code>`.
+2. **Build a batch** — `newbatch` builds a draft from every active member's
+   commitment plus any active loan installment. Or upload the employer's file
+   (Excel, CSV, PDF, or a photo) as a WhatsApp document/photo, or via
+   `POST /api/admin/deductions/build`; rows are matched to members by code,
+   phone, or name.
+3. **Submit** — `submitbatch <ref>` (draft → submitted).
+4. **Record the cheque** — `recordcheque <ref> <amount> [cheque ref]`
+   (submitted → cheque_received).
+5. **Reconcile** — `reconbatch <ref> <amount>` (cheque_received → reconciled).
+   A matching bank credit can auto-reconcile a batch, or upload a bank statement
+   via `POST /api/admin/deductions/reconcile-statement` to match credits to
+   batches. Approval is blocked while the reconciled amount is below the batch
+   total.
+6. **Approve** — `approvebatch <ref>` credits wallets and repays loans in a
+   single transaction. If the employer under-remitted, `approvebatch <ref>
+   partial` credits only the items the reconciled amount covers and leaves the
+   rest pending (batch → `partially_approved`) for a later top-up. Maker-checker:
+   the approver must be a *different* super admin than the maker, and the maker's
+   name must be confirmed first with `confirmname <code>`.
+
+Uploaded files are stored in S3-compatible object storage (when `BACKUP_*` is
+configured) and linked to the batch via `sourceFileKey` / `sourceFileName`.
+
+Reject with `rejectbatch <ref> [reason]`.
+
+## Changing your phone number
+
+A member moves their account to a new number with `changephone <number>`: an
+OTP is sent to the new number, and once verified the request waits for a super
+admin to approve it (`approvephone <code>` / `rejectphone <code> [reason]`).
+The old channel is warned and its sessions are wiped. Super admins can still
+force a move with `relink <code> <number>`.
+
+## AI assistant
+
+The assistant answers plain-English/Pidgin questions and maps free text to bot
+commands. It is **not** a tool-calling agent: the model only classifies a
+question into a tool name, and the server enforces permissions in code via the
+registry in `src/lib/ai-tools.ts` (each tool declares its `scope` and
+`requiredRole`). The model never chooses which data to fetch and never bypasses
+a permission check. Command suggestions are shown for confirmation and then run
+through the normal PIN/2FA/approval pipeline.
+
 ## Backups
 
 A daily scheduler job dumps the database state to `backups/coop-backup-<timestamp>.json`
@@ -430,6 +480,9 @@ tunnel --url http://localhost:3000`.
   accounts with narrations, Excel/PDF exports by email, hash-chained audit,
   daily payout limits + approval cool-offs, guarantor default deductions,
   daily backups, Monnify primary provider
+- [x] Phase 3.7: employer deduction file ingestion (Excel/CSV/PDF/OCR) +
+  cheque/reconciliation lifecycle, maker-checker on batch approval, OTP-verified
+  member phone change, AI tool/permission registry
 - [ ] Phase 4: marketplace, state/LGA grouping, Pidgin, scale, more languages
 
 ## Tests

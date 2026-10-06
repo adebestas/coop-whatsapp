@@ -22,6 +22,7 @@ import { submitCertificate } from "../deathclaims.js";
 import type { BotState, FlowData, MessageMeta } from "../conversation.js";
 import { FlowDataSchema, SECRET_STATES } from "../conversation.js";
 import { askEmail, askBirthday, askNokName, parseBirthday } from "./join.js";
+import { verifyPhoneChangeOtp } from "../phone-change.js";
 import { getActiveElectionsForNewMember } from "../votes.js";
 import { createCooperative, generateMemberFileNumber } from "../cooperative.js";
 import { confirmDividendDistribution } from "../dividends.js";
@@ -139,6 +140,7 @@ export function buildFullMenu(
     `• *ledger* — cooperative ledger (transparency)\n` +
     `• *code* — your member code\n` +
     `• *phone <number>* — add/update your phone\n` +
+    `• *changephone <number>* — move your account to a new number (OTP + admin approval)\n` +
     `• *mydata* / *deleteaccount* — your data (NDPR)\n\n` +
     `*🗳️ Governance*\n` +
     `• *vote <election id> <member code>* / *pollresults <id>*\n` +
@@ -173,6 +175,8 @@ export function buildAdminMenu(): string {
     `• *units* — list workplace units\n` +
     `• *addunit* — add a new unit\n` +
     `• *approvewdraw <id>* — approve withdrawal\n` +
+    `• *recordcheque <ref> <amount>* / *reconbatch <ref> <amount>* — employer remittance\n` +
+    `• *approvephone <code>* / *rejectphone <code>* — approve a member's phone change\n` +
     `• *overridewithdrawal <phone>* — override withdrawal\n` +
     `• *deathclaim* — process death claim\n` +
     `• *claimbank* — set claim bank\n` +
@@ -192,7 +196,7 @@ export function buildAdminMenu(): string {
     `• *verifypin <pin>* — unlock big payouts (10 min)\n` +
     `• *insights* — AI financial analysis\n` +
     `• *risk* — AI loan risk assessment\n\n` +
-    `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *paydividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
+    `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *confirmname <code>*, *paydividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
 }
 
@@ -470,6 +474,20 @@ export async function handleAwaitingInput(
         },
       });
       await askEmail(phone, { ...data, phoneVerified: true });
+      break;
+    }
+
+    case "awaiting_changephone_otp": {
+      const input = text.trim();
+      if (!/^\d{6}$/.test(input)) {
+        await sendText({
+          to: phone,
+          text: "Enter the 6-digit code we sent to your new number, or reply *menu* to cancel.",
+        });
+        return;
+      }
+      const result = await verifyPhoneChangeOtp(phone, input);
+      await sendText({ to: phone, text: result.message });
       break;
     }
 
@@ -1385,6 +1403,7 @@ export async function handleAwaitingInput(
           pin: hashPin(adminPin),
           cooperativeId: coop.id,
           role: "superadmin",
+          nameVerified: true,
           wallet: { create: {} },
         },
       });

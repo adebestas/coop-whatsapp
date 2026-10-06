@@ -3,6 +3,7 @@ import { prisma, cleanupDatabase } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
+import { reconcileFromWebhook, reconcileFromStatement } from "../src/services/deductions.js";
 
 const ADMIN_PHONE = "2348011111111";
 const SUPER_PHONE = "2348022222222";
@@ -83,6 +84,13 @@ describe("employer deduction remittance", () => {
 
     const superTexts = vi.mocked(notifyMember).mock.calls.map((c) => String(c[1]));
     expect(superTexts.some((t) => t.includes("approvebatch"))).toBe(true);
+
+    // Maker-checker: the maker's name must be confirmed by a super admin first.
+    await handleMessage(SUPER_PHONE, `confirmname ${admin.code}`);
+
+    // Money-in lifecycle: cheque received, then reconciled against the credit.
+    await handleMessage(SUPER_PHONE, `recordcheque ${batch!.ref} 130`);
+    await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 130`);
 
     // Super approves -> money lands, everyone is told on their platform.
     vi.clearAllMocks();
@@ -179,7 +187,7 @@ describe("employer deduction remittance", () => {
 
     // A rejected batch cannot be approved afterwards.
     await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
-    expect(texts()).toContain("rejected, not submitted");
+    expect(texts()).toContain("rejected, not reconciled");
   });
 
   it("full repayment via remittance closes the loan", async () => {
@@ -203,6 +211,9 @@ describe("employer deduction remittance", () => {
       ADMIN_PHONE,
       `submitbatch ${(await prisma.deductionBatch.findFirst())!.ref}`,
     );
+    await handleMessage(SUPER_PHONE, `confirmname ${admin.code}`);
+    await handleMessage(SUPER_PHONE, `recordcheque ${(await prisma.deductionBatch.findFirst())!.ref} 80`);
+    await handleMessage(SUPER_PHONE, `reconbatch ${(await prisma.deductionBatch.findFirst())!.ref} 80`);
     vi.clearAllMocks();
     await handleMessage(
       SUPER_PHONE,
@@ -213,6 +224,173 @@ describe("employer deduction remittance", () => {
     expect(done!.balance).toBe(0);
     expect(done!.status).toBe("paid");
     expect(texts()).toContain("fully repaid");
+  });
+
+  it("re-approving an approved batch does not double-credit", async () => {
+    const coop = await makeCoop("DEDB05", "Idem Coop", SUPER_PHONE);
+    await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const saver = await makeMember(M1, coop.id);
+    await handleMessage(ADMIN_PHONE, `setcommit ${saver.code} 5000`);
+    await handleMessage(ADMIN_PHONE, "newbatch");
+    const batch = await prisma.deductionBatch.findFirst();
+    await handleMessage(ADMIN_PHONE, `submitbatch ${batch!.ref}`);
+    await handleMessage(SUPER_PHONE, `confirmname ${admin.code}`);
+    await handleMessage(SUPER_PHONE, `recordcheque ${batch!.ref} 50`);
+    await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 50`);
+    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
+
+    const afterFirst = await prisma.wallet.findUnique({ where: { memberId: saver.id } });
+    expect(afterFirst!.balance).toBe(5000);
+
+    vi.clearAllMocks();
+    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
+    expect(texts()).toContain("approved, not reconciled");
+
+    const afterSecond = await prisma.wallet.findUnique({ where: { memberId: saver.id } });
+    expect(afterSecond!.balance).toBe(5000);
+    expect(await prisma.contribution.count({ where: { memberId: saver.id } })).toBe(1);
+  });
+
+  it("maker-checker: a super admin cannot approve their own batch", async () => {
+    const coop = await makeCoop("DEDB06", "Self Coop", SUPER_PHONE);
+    await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
+    const m = await makeMember(M1, coop.id);
+    await handleMessage(SUPER_PHONE, `setcommit ${m.code} 1000`);
+    await handleMessage(SUPER_PHONE, "newbatch");
+    const batch = await prisma.deductionBatch.findFirst();
+    await handleMessage(SUPER_PHONE, `submitbatch ${batch!.ref}`);
+    await handleMessage(SUPER_PHONE, `recordcheque ${batch!.ref} 10`);
+    await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 10`);
+
+    vi.clearAllMocks();
+    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
+    expect(texts()).toContain("Maker-checker");
+    expect((await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } }))!.status).toBe(
+      "reconciled",
+    );
+    expect((await prisma.wallet.findUnique({ where: { memberId: m.id } }))!.balance).toBe(0);
+  });
+
+  it("maker-checker: an unverified maker's batch cannot be approved until confirmed", async () => {
+    const coop = await makeCoop("DEDB07", "Unverified Coop", SUPER_PHONE);
+    await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const m = await makeMember(M1, coop.id);
+    await handleMessage(ADMIN_PHONE, `setcommit ${m.code} 1000`);
+    await handleMessage(ADMIN_PHONE, "newbatch");
+    const batch = await prisma.deductionBatch.findFirst();
+    await handleMessage(ADMIN_PHONE, `submitbatch ${batch!.ref}`);
+    await handleMessage(SUPER_PHONE, `recordcheque ${batch!.ref} 10`);
+    await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 10`);
+
+    vi.clearAllMocks();
+    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
+    expect(texts()).toContain("name must be confirmed");
+    expect((await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } }))!.status).toBe(
+      "reconciled",
+    );
+
+    // After a super confirms the maker's name, approval succeeds.
+    await handleMessage(SUPER_PHONE, `confirmname ${admin.code}`);
+    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
+    expect((await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } }))!.status).toBe(
+      "approved",
+    );
+  });
+
+  it("a short reconciliation blocks approval until the full amount is received", async () => {
+    const coop = await makeCoop("DEDB08", "Short Coop", SUPER_PHONE);
+    await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const m = await makeMember(M1, coop.id);
+    await handleMessage(ADMIN_PHONE, `setcommit ${m.code} 10000`);
+    await handleMessage(ADMIN_PHONE, "newbatch");
+    const batch = await prisma.deductionBatch.findFirst();
+    await handleMessage(ADMIN_PHONE, `submitbatch ${batch!.ref}`);
+    await handleMessage(SUPER_PHONE, `confirmname ${admin.code}`);
+    await handleMessage(SUPER_PHONE, `recordcheque ${batch!.ref} 100`);
+    await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 60`);
+
+    vi.clearAllMocks();
+    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
+    expect(texts()).toContain("reconciled short");
+    expect((await prisma.wallet.findUnique({ where: { memberId: m.id } }))!.balance).toBe(0);
+
+    // A later full reconciliation unblocks approval.
+    await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 100`);
+    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
+    expect((await prisma.wallet.findUnique({ where: { memberId: m.id } }))!.balance).toBe(10000);
+  });
+
+  it("auto-reconciles a cheque_received batch from a matching bank credit", async () => {
+    const coop = await makeCoop("DEDB09", "Webhook Coop", SUPER_PHONE);
+    await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const m = await makeMember(M1, coop.id);
+    await handleMessage(ADMIN_PHONE, `setcommit ${m.code} 10000`);
+    await handleMessage(ADMIN_PHONE, "newbatch");
+    const batch = await prisma.deductionBatch.findFirst();
+    await handleMessage(ADMIN_PHONE, `submitbatch ${batch!.ref}`);
+    await handleMessage(SUPER_PHONE, `recordcheque ${batch!.ref} 100`);
+
+    const res = await reconcileFromWebhook(coop.id, 10000, "TRX-1");
+    expect(res.ok).toBe(true);
+    const fresh = await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } });
+    expect(fresh!.status).toBe("reconciled");
+    expect(fresh!.reconciliationSource).toBe("webhook");
+  });
+
+  it("partial approval credits only what the reconciled amount covers", async () => {
+    const coop = await makeCoop("DEDB10", "Partial Coop", SUPER_PHONE);
+    await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const m1 = await makeMember(M1, coop.id);
+    const m2 = await makeMember(M2, coop.id);
+    await handleMessage(ADMIN_PHONE, `setcommit ${m1.code} 10000`);
+    await handleMessage(ADMIN_PHONE, `setcommit ${m2.code} 10000`);
+    await handleMessage(ADMIN_PHONE, "newbatch");
+    const batch = await prisma.deductionBatch.findFirst();
+    await handleMessage(ADMIN_PHONE, `submitbatch ${batch!.ref}`);
+    await handleMessage(SUPER_PHONE, `confirmname ${admin.code}`);
+    await handleMessage(SUPER_PHONE, `recordcheque ${batch!.ref} 200`);
+    await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 100`); // only ₦100 arrived
+
+    vi.clearAllMocks();
+    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
+    expect(texts()).toContain("reconciled short");
+
+    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref} partial`);
+    const fresh = await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } });
+    expect(fresh!.status).toBe("partially_approved");
+    const credited = await prisma.deductionItem.count({
+      where: { batchId: batch!.id, status: "credited" },
+    });
+    expect(credited).toBe(1);
+    const wallets = await prisma.wallet.findMany({
+      where: { memberId: { in: [m1.id, m2.id] } },
+    });
+    expect(wallets.reduce((s, w) => s + w.balance, 0)).toBe(10000);
+  });
+
+  it("reconciles a cheque_received batch from an uploaded statement", async () => {
+    const coop = await makeCoop("DEDB11", "Statement Coop", SUPER_PHONE);
+    await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const m = await makeMember(M1, coop.id);
+    await handleMessage(ADMIN_PHONE, `setcommit ${m.code} 10000`);
+    await handleMessage(ADMIN_PHONE, "newbatch");
+    const batch = await prisma.deductionBatch.findFirst();
+    await handleMessage(ADMIN_PHONE, `submitbatch ${batch!.ref}`);
+    await handleMessage(SUPER_PHONE, `recordcheque ${batch!.ref} 100`);
+
+    const csv = "Date,Description,Credit\n2026-10-01,EMPLOYER REMIT,100\n";
+    const res = await reconcileFromStatement(coop.id, Buffer.from(csv), "statement.csv");
+    expect(res.ok).toBe(true);
+    expect(res.reconciled).toContain(batch!.ref);
+    const fresh = await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } });
+    expect(fresh!.status).toBe("reconciled");
+    expect(fresh!.reconciliationSource).toBe("statement");
   });
 });
 
