@@ -104,7 +104,7 @@ export async function buyShares(
           reference,
         },
       });
-      await postJournal(
+      const posted = await postJournal(
         {
           cooperativeId: member.cooperativeId,
           txRef: reference,
@@ -116,6 +116,8 @@ export async function buyShares(
         },
         tx as any,
       );
+      if (!posted.posted)
+        throw new Error(`share journal not posted: ${posted.reason ?? "unknown"}`);
     });
   } catch (err) {
     if (err instanceof Error && err.message === "INSUFFICIENT_BALANCE") {

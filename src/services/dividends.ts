@@ -79,6 +79,11 @@ function weightOf(
   return basis === "shares" ? (m.shareAccount?.shares ?? 0) : (m.wallet?.totalSaved ?? 0);
 }
 
+/** Runtime guard: anything other than the exact "shares" tag behaves as savings. */
+function normalizeBasis(basis: DividendBasis): DividendBasis {
+  return basis === "shares" ? "shares" : "savings";
+}
+
 /** Start of the current fiscal dividend period (calendar year, local time). */
 function currentPeriodStart(now = new Date()): Date {
   return new Date(now.getFullYear(), 0, 1);
@@ -288,6 +293,7 @@ export async function previewDividendRun(
   rate: number,
   basis: DividendBasis = "savings",
 ): Promise<DividendRunPreview> {
+  basis = normalizeBasis(basis);
   const admin = await prisma.member.findFirst({ where: { phone, role: "superadmin" } });
   if (!admin) return { ok: false, message: "Only the super admin can distribute dividends." };
   if (!Number.isFinite(rate) || rate <= 0 || rate > MAX_DIVIDEND_RATE) {
@@ -389,6 +395,7 @@ export async function confirmDividendDistribution(
   rate: number,
   basis: DividendBasis = "savings",
 ): Promise<DividendRunResult> {
+  basis = normalizeBasis(basis);
   const result = await distributeDividend(phone, rate, basis);
   if (!result.ok) return result;
 
@@ -419,6 +426,7 @@ export async function distributeDividend(
   rate: number,
   basis: DividendBasis = "savings",
 ): Promise<DividendRunResult> {
+  basis = normalizeBasis(basis);
   const admin = await prisma.member.findFirst({ where: { phone, role: "superadmin" } });
   if (!admin) {
     return { ok: false, message: "Only the super admin can pay dividends." };

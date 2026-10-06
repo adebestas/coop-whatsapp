@@ -1,20 +1,34 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  prisma,
+  createTestCoop,
+  createTestMember,
+  createTestApp,
+  cleanupDatabase,
+} from "./setup.js";
 import { buyShares, getShareAccount } from "../src/services/shares.js";
 import { distributeDividend } from "../src/services/dividends.js";
+import { clearMemberCache } from "../src/services/cooperative.js";
 import { paymentState } from "./payment-state.js";
 import { recordLedger } from "../src/services/ledger.js";
+import { handleMessage } from "../src/services/conversation.js";
+import { sendText } from "../src/lib/messaging.js";
 
 async function fundWallet(memberId: string, kobo: number) {
   await prisma.wallet.update({ where: { memberId }, data: { balance: kobo, totalSaved: kobo } });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  vi.clearAllMocks();
+  clearMemberCache();
+  await cleanupDatabase();
   paymentState.resolveFails = false;
   paymentState.payoutFails = false;
   paymentState.payoutPending = false;
   paymentState.transferStatus = "unknown";
 });
+
+afterAll(cleanupDatabase);
 
 describe("share capital", () => {
   beforeEach(async () => {
@@ -150,9 +164,6 @@ describe("share capital", () => {
   });
 });
 
-import { handleMessage } from "../src/services/conversation.js";
-import { sendText } from "../src/lib/messaging.js";
-
 describe("shares chat commands", () => {
   it("buys shares via the chat command", async () => {
     const coop = await createTestCoop("SHARECHAT");
@@ -249,8 +260,6 @@ describe("share dividend (bank payout)", () => {
     expect(aEntry.amount + bEntry.amount).toBe(result.totalPool);
   });
 });
-
-import { createTestApp } from "./setup.js";
 
 describe("shares admin endpoint", () => {
   it("lists share accounts for the cooperative", async () => {
