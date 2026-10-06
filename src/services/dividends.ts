@@ -105,15 +105,15 @@ async function computeDividendBase(cooperativeId: string): Promise<DividendBase>
   const pnl = await computePnl(cooperativeId);
   const [reserve, education, development, priorDividends] = await Promise.all([
     prisma.reserveAllocation.aggregate({
-      where: { cooperativeId, createdAt: { gte: periodStart } },
+      where: { cooperativeId, source: "dividend_declaration", createdAt: { gte: periodStart } },
       _sum: { amount: true },
     }),
     prisma.educationFund.aggregate({
-      where: { cooperativeId, createdAt: { gte: periodStart } },
+      where: { cooperativeId, source: "dividend_declaration", createdAt: { gte: periodStart } },
       _sum: { amount: true },
     }),
     prisma.developmentFund.aggregate({
-      where: { cooperativeId, createdAt: { gte: periodStart } },
+      where: { cooperativeId, source: "dividend_declaration", createdAt: { gte: periodStart } },
       _sum: { amount: true },
     }),
     prisma.dividend.aggregate({
@@ -730,10 +730,11 @@ export async function distributeDividend(
     detail: `Bank payouts: settled ${settled}, held ${held.length}, failed ${failed}`,
   }).catch(() => {});
 
+  const poolLabel = basis === "shares" ? "Shareholders pool" : "Member pool";
   const summary =
     `🎉 *Dividend run ${dividend.id.slice(-6)} complete*\n\n` +
     `Rate: *${rate}%* of net profit ${formatBalance(base.netProfit)}\n` +
-    `Member pool: *${formatBalance(pool)}*\n` +
+    `${poolLabel}: *${formatBalance(pool)}*\n` +
     `Statutory deductions: *${formatBalance(totalDeductions)}*\n\n` +
     `✅ Paid to bank: *${settled}* member(s)\n` +
     `⏸️ Held (no bank account): *${held.length}*\n` +

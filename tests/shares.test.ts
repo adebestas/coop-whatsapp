@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma, createTestCoop, createTestMember } from "./setup.js";
+import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import { buyShares, getShareAccount } from "../src/services/shares.js";
 import { distributeDividend } from "../src/services/dividends.js";
 import { paymentState } from "./payment-state.js";
@@ -19,13 +19,7 @@ beforeEach(() => {
 describe("share capital", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
-    await prisma.shareTransaction.deleteMany();
-    await prisma.shareAccount.deleteMany();
-    await prisma.posting.deleteMany();
-    await prisma.journalEntry.deleteMany();
-    await prisma.wallet.deleteMany();
-    await prisma.member.deleteMany();
-    await prisma.cooperative.deleteMany();
+    await cleanupDatabase();
   });
 
   it("buys shares from the wallet and posts a balanced journal", async () => {
@@ -108,6 +102,51 @@ describe("share capital", () => {
 
     // Combined pools never exceed net profit minus statutory.
     expect((savings.totalPool ?? 0) + (shares.totalPool ?? 0)).toBeLessThanOrEqual(1000000 - 270000);
+  });
+
+  it("manual reserve allocations do not suppress statutory appropriations", async () => {
+    const coop = await createTestCoop("DIVMANUAL");
+    const admin = await createTestMember(coop.id, { phone: "2348000000400", role: "superadmin" });
+    const NAME = "Manual Holder";
+    const a = await createTestMember(coop.id, { phone: "2348000000401", name: NAME });
+    await prisma.member.update({
+      where: { id: a.id },
+      data: { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
+    });
+    await fundWallet(a.id, 1000000);
+    paymentState.resolveName = NAME;
+    await recordLedger({
+      cooperativeId: coop.id,
+      type: "income",
+      category: "interest",
+      amount: 1000000,
+      note: "Test profit",
+      reference: `TEST-MANUAL-${Date.now()}`,
+    });
+    // A superadmin tops up the reserve fund OUTSIDE any dividend run.
+    await prisma.reserveAllocation.create({
+      data: { cooperativeId: coop.id, amount: 123456, source: "manual", note: "Manual top-up" },
+    });
+
+    const result = await distributeDividend(admin.phone, 10);
+    expect(result.ok).toBe(true);
+
+    // The dividend run still takes the full 20/2/5% statutory slice.
+    const reserve = await prisma.reserveAllocation.aggregate({
+      where: { cooperativeId: coop.id, source: "dividend_declaration" },
+      _sum: { amount: true },
+    });
+    const education = await prisma.educationFund.aggregate({
+      where: { cooperativeId: coop.id },
+      _sum: { amount: true },
+    });
+    const development = await prisma.developmentFund.aggregate({
+      where: { cooperativeId: coop.id },
+      _sum: { amount: true },
+    });
+    expect(reserve._sum.amount).toBe(200000);
+    expect(education._sum.amount).toBe(20000);
+    expect(development._sum.amount).toBe(50000);
   });
 });
 
