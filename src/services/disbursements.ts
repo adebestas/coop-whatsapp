@@ -1,4 +1,5 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx } from "../lib/prisma.js";
+import { setCoopContext } from "../lib/tenant-context.js";
 import { notifyMember } from "../lib/messaging.js";
 import { resolveProvider, markProviderDown, markProviderUp } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
@@ -289,9 +290,16 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
     return { ok: false, status: "failed", message: msg };
   }
 
-  // The member receives the loan minus the flat admin charge.
+  // The member receives the loan minus the flat admin charge and, when
+  // enabled, the credit-life protection premium withheld into the coop fund.
   const adminCharge = loan.adminCharge ?? 0;
-  const disbursable = Math.max(0, loan.amount - adminCharge);
+  const config = await prisma.cooperativeConfig.findUnique({
+    where: { cooperativeId: loan.cooperativeId },
+  });
+  const protectionEnabled = config?.loanProtectionEnabled ?? true;
+  const protectionPercent = config?.loanProtectionPercent ?? 1;
+  const premium = protectionEnabled ? Math.floor((loan.amount * protectionPercent) / 100) : 0;
+  const disbursable = Math.max(0, loan.amount - adminCharge - premium);
 
   const result = await sendToBank({
     memberId: member.id,
@@ -303,7 +311,7 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
     // Deterministic per-loan key: a retried disbursement of THIS loan can
     // never pay out twice, even across app restarts.
     idempotencyKey: `TFR-LOAN-${loan.id}`,
-    successMessage: `🎉 Loan *disbursed!* ${formatBalance(loan.amount)} approved — *${formatBalance(disbursable)}* (after the ${formatBalance(adminCharge)} admin charge) is on its way to your ${loan.bankName ?? loan.bankCode} account ****${loan.bankAccountNumber.slice(-4)}.`,
+    successMessage: `🎉 Loan *disbursed!* ${formatBalance(loan.amount)} approved — *${formatBalance(disbursable)}* (after the ${formatBalance(adminCharge)} admin charge${premium > 0 ? ` and the ${formatBalance(premium)} protection premium` : ""}) is on its way to your ${loan.bankName ?? loan.bankCode} account ****${loan.bankAccountNumber.slice(-4)}.`,
     onFailure: async (status, error) => {
       // "failed" is retryable; the next attempt re-claims via the gate above.
       await prisma.loan.update({
@@ -350,10 +358,57 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
       reference: loan.id,
       fundType: "operational",
     });
+    // Credit-life protection: the premium withheld from the payout is held in
+    // the cooperative's protection fund (a liability to the insured members).
+    if (premium > 0) {
+      await withTx(async (tx) => {
+        await setCoopContext(tx as never, loan.cooperativeId);
+        await prisma.loanProtection.create({
+          data: {
+            cooperativeId: loan.cooperativeId,
+            loanId: loan.id,
+            memberId: member.id,
+            premium,
+            status: "active",
+          },
+        });
+        await prisma.cooperative.update({
+          where: { id: loan.cooperativeId },
+          data: { protectionFundBalance: { increment: premium } },
+        });
+        await prisma.ledgerEntry.create({
+          data: {
+            cooperativeId: loan.cooperativeId,
+            type: "balance_sheet",
+            category: "liabilities:loan_protection_fund",
+            amount: premium,
+            note: `Loan protection premium on loan ${loan.id.slice(-6)}`,
+            reference: loan.id,
+            fundType: "operational",
+          },
+        });
+        await postJournal(
+          {
+            cooperativeId: loan.cooperativeId,
+            txRef: `LOAN-PROT-${loan.id}`,
+            description: `Loan protection premium on loan ${loan.id.slice(-6)}`,
+            postings: [
+              { account: "assets:bank", direction: "DEBIT", amount: premium },
+              {
+                account: "liabilities:loan_protection_fund",
+                direction: "CREDIT",
+                amount: premium,
+              },
+            ],
+          },
+          tx,
+        );
+      });
+    }
     return {
       ok: true,
       status: "successful",
-      message: `🎉 Loan *disbursed!* ${formatBalance(loan.amount)} approved — *${formatBalance(disbursable)}* (after the ${formatBalance(adminCharge)} admin charge) is on its way to your ${loan.bankName ?? loan.bankCode} account ****${loan.bankAccountNumber.slice(-4)}.`,
+      message: `🎉 Loan *disbursed!* ${formatBalance(loan.amount)} approved — *${formatBalance(disbursable)}* (after the ${formatBalance(adminCharge)} admin charge${premium > 0 ? ` and the ${formatBalance(premium)} protection premium` : ""}) is on its way to your ${loan.bankName ?? loan.bankCode} account ****${loan.bankAccountNumber.slice(-4)}.`,
     };
   }
   return result;
