@@ -322,48 +322,56 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
   });
 
   if (result.ok) {
-    // Defensive final claim — even if two paths somehow reached here, only
-    // the one that flips the status books the ledger entry.
-    const finalized = await prisma.loan.updateMany({
-      where: { id: loan.id, status: "approved" },
-      data: {
-        status: "disbursed",
-        disbursedAt: new Date(),
-        disbursementStatus: "successful",
-        disbursementAmount: disbursable,
-        disbursementError: null,
-      },
-    });
-    if (finalized.count === 0) {
-      console.error(`[loan] disbursement succeeded but loan ${loan.id} was already finalized`);
-      return result;
-    }
-    // P&L: the admin charge is cooperative income.
-    await recordLedger({
-      cooperativeId: loan.cooperativeId,
-      type: "income",
-      category: "admin_charge",
-      amount: adminCharge,
-      note: `Admin charge on loan ${loan.id.slice(-6)}`,
-      reference: loan.id,
-      fundType: "operational",
-    });
-    // Balance sheet: loan portfolio increases, bank decreases.
-    await recordLedger({
-      cooperativeId: loan.cooperativeId,
-      type: "balance_sheet",
-      category: "assets:loan_portfolio",
-      amount: disbursable,
-      note: `Loan disbursement ${loan.id.slice(-6)} to ${member.name}`,
-      reference: loan.id,
-      fundType: "operational",
-    });
-    // Credit-life protection: the premium withheld from the payout is held in
-    // the cooperative's protection fund (a liability to the insured members).
-    if (premium > 0) {
-      await withTx(async (tx) => {
-        await setCoopContext(tx as never, loan.cooperativeId);
-        await prisma.loanProtection.create({
+    // All post-payout bookkeeping — loan finalization, admin-charge and
+    // portfolio ledger entries, and the protection-fund write — happens in ONE
+    // transaction. The member has already been paid (external sendToBank), so
+    // either every internal side effect lands or none does; the loan can never
+    // reach a terminal "disbursed" state without its protection row and fund
+    // credit, which no retry could repair.
+    const booked = await withTx(async (tx) => {
+      await setCoopContext(tx as never, loan.cooperativeId);
+      // Defensive final claim — even if two paths somehow reached here, only
+      // the one that flips the status books the ledger entry.
+      const finalized = await tx.loan.updateMany({
+        where: { id: loan.id, status: "approved" },
+        data: {
+          status: "disbursed",
+          disbursedAt: new Date(),
+          disbursementStatus: "successful",
+          disbursementAmount: disbursable,
+          disbursementError: null,
+        },
+      });
+      if (finalized.count === 0) {
+        console.error(`[loan] disbursement succeeded but loan ${loan.id} was already finalized`);
+        return false;
+      }
+      // P&L: the admin charge is cooperative income.
+      await recordLedger({
+        cooperativeId: loan.cooperativeId,
+        type: "income",
+        category: "admin_charge",
+        amount: adminCharge,
+        note: `Admin charge on loan ${loan.id.slice(-6)}`,
+        reference: loan.id,
+        fundType: "operational",
+        tx: tx as never,
+      });
+      // Balance sheet: loan portfolio increases, bank decreases.
+      await recordLedger({
+        cooperativeId: loan.cooperativeId,
+        type: "balance_sheet",
+        category: "assets:loan_portfolio",
+        amount: disbursable,
+        note: `Loan disbursement ${loan.id.slice(-6)} to ${member.name}`,
+        reference: loan.id,
+        fundType: "operational",
+        tx: tx as never,
+      });
+      // Credit-life protection: the premium withheld from the payout is held in
+      // the cooperative's protection fund (a liability to the insured members).
+      if (premium > 0) {
+        await tx.loanProtection.create({
           data: {
             cooperativeId: loan.cooperativeId,
             loanId: loan.id,
@@ -372,11 +380,11 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
             status: "active",
           },
         });
-        await prisma.cooperative.update({
+        await tx.cooperative.update({
           where: { id: loan.cooperativeId },
           data: { protectionFundBalance: { increment: premium } },
         });
-        await prisma.ledgerEntry.create({
+        await tx.ledgerEntry.create({
           data: {
             cooperativeId: loan.cooperativeId,
             type: "balance_sheet",
@@ -403,8 +411,12 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
           },
           tx,
         );
-      });
-    }
+      }
+      return true;
+    });
+    // Another path finalized this loan first — bookkeeping is skipped and the
+    // payout result is returned unchanged.
+    if (!booked) return result;
     return {
       ok: true,
       status: "successful",
