@@ -26,6 +26,7 @@ model Cooperative {
   loanInterestRate   Float               @default(2) // fallback monthly % charged on loans (percentage)
   dailyPayoutLimit   Int                 @default(100000000) // fraud guard: max total money-out per day in kobo (₦1M)
   reserveFundBalance Int                 @default(0) // statutory reserve fund balance in kobo
+  protectionFundBalance Int              @default(0) // self-insured loan-protection fund balance in kobo
   memberSeq          Int                 @default(0) // atomic per-coop member sequence used for file numbers (COOP/YYY/seq)
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
@@ -66,6 +67,7 @@ subscription       Subscription?
   phoneChangeRequests PhoneChangeRequest[]
   shareAccounts      ShareAccount[]
   shareTransactions  ShareTransaction[]
+  loanProtections    LoanProtection[]
 
   @@index([status])
   @@index([code])
@@ -242,6 +244,7 @@ model Member {
   sessionsRevokedAt       DateTime? // when the superadmin revoked this member's sessions
   shareAccount            ShareAccount?
   shareTransactions       ShareTransaction[]
+  loanProtections         LoanProtection[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -362,6 +365,7 @@ model Loan {
   guarantors         Guarantor[]
   guarantorVerifications GuarantorVerification[]
   repayments         LoanRepayment[]
+  protection         LoanProtection?
 
   @@index([memberId, status])
   @@index([cooperativeId, status])
@@ -604,6 +608,7 @@ model DeathClaim {
   createdAt           DateTime          @default(now())
   validations         DeathValidation[]
   approvals            DeathClaimApproval[]
+  protection           LoanProtection?
 
   @@index([memberId, status])
   @@index([cooperativeId, status])
@@ -762,6 +767,31 @@ model GuarantorDeduction {
   @@unique([loanId, guarantorId])
   @@index([cooperativeId])
   @@index([status, deductAt])
+}
+
+// ---- Loan protection (credit life / self-insured) ----
+// One row per loan. The premium is withheld at disbursement and held in the
+// cooperative's protection fund; on an approved death/disability claim the
+// outstanding balance is written off against that fund.
+model LoanProtection {
+  id            String    @id @default(cuid())
+  cooperativeId String
+  loanId        String    @unique
+  memberId      String
+  premium       Int // protection premium withheld at disbursement in kobo
+  status        String    @default("active") // active | claimed
+  claimId       String?   @unique
+  writtenOff    Int       @default(0) // amount written off against the fund in kobo
+  createdAt     DateTime  @default(now())
+  claimedAt     DateTime?
+
+  cooperative Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  loan        Loan        @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  member      Member      @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  claim       DeathClaim? @relation(fields: [claimId], references: [id], onDelete: SetNull)
+
+  @@index([cooperativeId, status])
+  @@index([memberId])
 }
 
 // ---- Support tickets (customer service) ----
@@ -1106,6 +1136,8 @@ model CooperativeConfig {
   minShares                Int      @default(1)
   maxShares                Int      @default(0) // 0 = unlimited
   allowShareRedemption     Boolean  @default(false)
+  loanProtectionPercent    Int      @default(1) // % of loan principal withheld as protection premium
+  loanProtectionEnabled    Boolean  @default(true)
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
