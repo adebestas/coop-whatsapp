@@ -7,6 +7,7 @@ import { joinUnit } from "../units.js";
 import { withdrawLimit, canWithdraw } from "../withdrawals.js";
 import { computeDividendPreview } from "../dividends.js";
 import { getQueuePosition } from "../loans.js";
+import { buyShares, getShareAccount } from "../shares.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 
 export async function handleBalance(
@@ -357,4 +358,41 @@ export async function handleAnalytics(
   ];
 
   await sendText({ to: phone, text: lines.join("\n") });
+}
+
+export async function handleShares(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const account = await getShareAccount(member.id);
+  if (!account) {
+    await sendText({ to: phone, text: "We couldn't load your share account. Please try again." });
+    return;
+  }
+  await sendText({
+    to: phone,
+    text:
+      `📈 *Your shares*\n\n` +
+      `Shares held: *${account.shares}*\n` +
+      `Value: *${formatBalance(account.value)}* (at ${formatBalance(account.pricePerShare)}/share)\n` +
+      `Total paid: *${formatBalance(account.totalPaid)}*\n\n` +
+      `Reply *buyshares <count>* to buy more.`,
+  });
+}
+
+export async function handleBuyShares(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const count = args[0] ? parseInt(args[0], 10) : NaN;
+  if (!Number.isInteger(count) || count <= 0) {
+    await sendText({ to: phone, text: "How many shares? Reply *buyshares <count>*, e.g. *buyshares 5*." });
+    return;
+  }
+  const result = await buyShares(member.id, count);
+  await sendText({ to: phone, text: result.message });
 }

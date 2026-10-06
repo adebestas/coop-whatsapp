@@ -129,7 +129,8 @@ export function buildFullMenu(
     `• *save <amount>* — contribute (e.g. *save 2000*)\n` +
     `• *withdraw <amount>* — request a withdrawal (up to 45%)\n` +
     `• *plan <amount> <weekly|monthly>* — recurring contribution\n` +
-    `• *fund* — your personal top-up account\n\n` +
+    `• *fund* — your personal top-up account\n` +
+    `• *shares* / *buyshares <count>* — own shares in the coop\n\n` +
     `*📄 Loans*\n` +
     `• *loan <amount> <months>* — apply (e.g. *loan 50000 3*)\n` +
     `• *repay* — pay your monthly installment\n` +

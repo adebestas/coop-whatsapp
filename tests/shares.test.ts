@@ -74,3 +74,21 @@ describe("share capital", () => {
     expect(account?.value).toBe(200000);
   });
 });
+
+import { handleMessage } from "../src/services/conversation.js";
+import { sendText } from "../src/lib/messaging.js";
+
+describe("shares chat commands", () => {
+  it("buys shares via the chat command", async () => {
+    const coop = await createTestCoop("SHARECHAT");
+    const member = await createTestMember(coop.id, { phone: "2348000000099" });
+    await fundWallet(member.id, 500000);
+
+    await handleMessage(member.phone, "buyshares 2");
+
+    const account = await prisma.shareAccount.findFirst({ where: { memberId: member.id } });
+    expect(account?.shares).toBe(2);
+    const calls = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    expect(calls).toMatch(/share/i);
+  });
+});

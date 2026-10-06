@@ -76,6 +76,8 @@ import {
   handleJoinUnit,
   handleLoanQueue,
   handleAnalytics,
+  handleShares,
+  handleBuyShares,
 } from "./handlers/money.js";
 import {
   handleValidateClaim,
@@ -486,6 +488,14 @@ async function handleMessageInner(
 
     case "balance":
       await handleBalance(phone, member);
+      break;
+
+    case "shares":
+      await handleShares(phone);
+      break;
+
+    case "buyshares":
+      await handleBuyShares(phone, args);
       break;
 
     case "save":

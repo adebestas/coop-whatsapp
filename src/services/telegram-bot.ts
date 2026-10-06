@@ -64,6 +64,8 @@ async function setTelegramCommands(): Promise<void> {
     { command: "repay", description: "Repay your loan installment" },
     { command: "plan", description: "Set a recurring plan (e.g. /plan 5000 weekly)" },
     { command: "fund", description: "Get your personal top-up account number" },
+    { command: "shares", description: "View your shares" },
+    { command: "buyshares", description: "Buy shares in the cooperative" },
     { command: "history", description: "Your transaction statement" },
     { command: "statement", description: "Get a statement" },
     { command: "ledger", description: "Cooperative ledger (transparency)" },
