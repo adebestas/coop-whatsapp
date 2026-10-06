@@ -198,7 +198,7 @@ export function buildAdminMenu(): string {
     `• *verifypin <pin>* — unlock big payouts (10 min)\n` +
     `• *insights* — AI financial analysis\n` +
     `• *risk* — AI loan risk assessment\n\n` +
-    `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *confirmname <code>*, *paydividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
+    `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *confirmname <code>*, *paydividend <rate%>*, *paysharedividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
 }
 
@@ -1291,6 +1291,32 @@ export async function handleAwaitingInput(
       });
       const dividendResult = await confirmDividendDistribution(phone, rate);
       await sendText({ to: phone, text: dividendResult.message });
+      break;
+    }
+
+    case "awaiting_sharedividend_confirm": {
+      const rate = data.shareDividendRate;
+      await prisma.session.update({ where: { phone }, data: { state: "idle", data: "{}" } });
+      if (!rate || rate <= 0) {
+        await sendText({
+          to: phone,
+          text: "That share-dividend request expired. Reply *paysharedividend <rate>* to start again.",
+        });
+        break;
+      }
+      if (text.trim().toUpperCase() !== `CONFIRM ${rate}`) {
+        await sendText({
+          to: phone,
+          text: "Share dividend cancelled. Nothing was paid. Reply *paysharedividend <rate>* to start again.",
+        });
+        break;
+      }
+      await sendText({
+        to: phone,
+        text: "⏳ Processing the share dividend run — sending bank transfers now…",
+      });
+      const result = await confirmDividendDistribution(phone, rate, "shares");
+      await sendText({ to: phone, text: result.message });
       break;
     }
 

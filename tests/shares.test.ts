@@ -1,10 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, createTestCoop, createTestMember } from "./setup.js";
 import { allocateByShares, buyShares, getShareAccount } from "../src/services/shares.js";
+import { distributeDividend } from "../src/services/dividends.js";
+import { paymentState } from "./payment-state.js";
+import { recordLedger } from "../src/services/ledger.js";
 
 async function fundWallet(memberId: string, kobo: number) {
   await prisma.wallet.update({ where: { memberId }, data: { balance: kobo, totalSaved: kobo } });
 }
+
+beforeEach(() => {
+  paymentState.resolveFails = false;
+  paymentState.payoutFails = false;
+  paymentState.payoutPending = false;
+  paymentState.transferStatus = "unknown";
+});
 
 describe("share capital", () => {
   beforeEach(async () => {
@@ -131,5 +141,46 @@ describe("shares chat commands", () => {
 
     const account = await prisma.shareAccount.findFirst({ where: { memberId: member.id } });
     expect(account?.shares ?? 0).toBe(0);
+  });
+});
+
+describe("share dividend (bank payout)", () => {
+  it("pays shareholders to their bank by shareholding", async () => {
+    const coop = await createTestCoop("SHAREDIV");
+    const admin = await createTestMember(coop.id, { phone: "2348000000100", role: "superadmin" });
+    const NAME = "Share Holder";
+    const a = await createTestMember(coop.id, { phone: "2348000000101", name: NAME });
+    const b = await createTestMember(coop.id, { phone: "2348000000102", name: NAME });
+    for (const m of [a, b]) {
+      await prisma.member.update({
+        where: { id: m.id },
+        data: { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
+      });
+      await fundWallet(m.id, 1000000);
+    }
+    await buyShares(a.id, 3);
+    await buyShares(b.id, 1);
+    paymentState.resolveName = NAME;
+    await recordLedger({
+      cooperativeId: coop.id,
+      type: "income",
+      category: "interest",
+      amount: 1000000,
+      note: "Test profit",
+      reference: `TEST-${Date.now()}`,
+    });
+
+    const result = await distributeDividend(admin.phone, 20, "shares");
+    expect(result.ok).toBe(true);
+    expect(result.settled).toBe(2);
+
+    const entries = await prisma.dividendEntry.findMany({
+      where: { dividendId: result.dividendId! },
+    });
+    const aEntry = entries.find((e) => e.memberId === a.id)!;
+    const bEntry = entries.find((e) => e.memberId === b.id)!;
+    // a holds 3 of 4 shares → gets ~3× b's dividend
+    expect(aEntry.amount).toBeGreaterThan(bEntry.amount);
+    expect(aEntry.amount + bEntry.amount).toBe(result.totalPool);
   });
 });

@@ -884,6 +884,7 @@ model Dividend {
   cooperative   Cooperative     @relation(fields: [cooperativeId], references: [id])
   reference     String          @unique
   rate          Float // percentage of totalSaved (percentage, not money)
+  basis         String          @default("savings") // savings | shares
   totalPool     Int // stored in kobo
   status        String          @default("pending") // pending | distributed
   createdAt     DateTime        @default(now())

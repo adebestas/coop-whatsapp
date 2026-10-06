@@ -70,18 +70,32 @@ export interface DividendRunResult {
   totalPool?: number;
 }
 
+export type DividendBasis = "savings" | "shares";
+
+function weightOf(
+  m: { wallet: { totalSaved: number } | null; shareAccount?: { shares: number } | null },
+  basis: DividendBasis,
+): number {
+  return basis === "shares" ? (m.shareAccount?.shares ?? 0) : (m.wallet?.totalSaved ?? 0);
+}
+
 /** Largest-remainder (Hamilton) allocation of `pool` kobo across weighted members. */
 function allocateShares(
-  members: { id: string; wallet: { totalSaved: number } | null }[],
+  members: {
+    id: string;
+    wallet: { totalSaved: number } | null;
+    shareAccount?: { shares: number } | null;
+  }[],
   pool: number,
+  basis: DividendBasis = "savings",
 ): Map<string, number> {
-  const eligible = members.filter((m) => (m.wallet?.totalSaved ?? 0) > 0);
-  const totalSaved = eligible.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
+  const eligible = members.filter((m) => weightOf(m, basis) > 0);
+  const totalWeight = eligible.reduce((sum, m) => sum + weightOf(m, basis), 0);
   const shares = new Map<string, number>();
-  if (totalSaved <= 0 || pool <= 0) return shares;
+  if (totalWeight <= 0 || pool <= 0) return shares;
 
   const raw = eligible.map((m) => {
-    const exact = ((m.wallet?.totalSaved ?? 0) / totalSaved) * pool;
+    const exact = (weightOf(m, basis) / totalWeight) * pool;
     const kobo = Math.floor(exact);
     return { id: m.id, kobo, remainder: exact - kobo };
   });
@@ -215,7 +229,11 @@ export interface DividendRunPreview {
  * `paydividend <rate>` shows this preview and stores an `awaiting_dividend_confirm`
  * state; only an explicit `CONFIRM <rate>` executes it.
  */
-export async function previewDividendRun(phone: string, rate: number): Promise<DividendRunPreview> {
+export async function previewDividendRun(
+  phone: string,
+  rate: number,
+  basis: DividendBasis = "savings",
+): Promise<DividendRunPreview> {
   const admin = await prisma.member.findFirst({ where: { phone, role: "superadmin" } });
   if (!admin) return { ok: false, message: "Only the super admin can distribute dividends." };
   if (!Number.isFinite(rate) || rate <= 0 || rate > MAX_DIVIDEND_RATE) {
@@ -237,11 +255,18 @@ export async function previewDividendRun(phone: string, rate: number): Promise<D
       bankAccountNumber: true,
       bankCode: true,
       wallet: { select: { totalSaved: true } },
+      shareAccount: { select: { shares: true } },
     },
   });
-  const totalSaved = members.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
-  if (totalSaved <= 0) {
-    return { ok: false, message: "No savings yet — nothing to distribute against." };
+  const totalWeight = members.reduce((sum, m) => sum + weightOf(m, basis), 0);
+  if (totalWeight <= 0) {
+    return {
+      ok: false,
+      message:
+        basis === "shares"
+          ? "No shares have been issued yet — nothing to distribute against."
+          : "No savings yet — nothing to distribute against.",
+    };
   }
 
   const totalDeductions = roundMoney(
@@ -258,7 +283,7 @@ export async function previewDividendRun(phone: string, rate: number): Promise<D
     };
   }
 
-  const shares = allocateShares(members, pool);
+  const shares = allocateShares(members, pool, basis);
   const payable = members.filter((m) => (shares.get(m.id) ?? 0) > 0);
   const withBank = payable.filter((m) => Boolean(m.bankAccountNumber && m.bankCode));
   const payoutCount = withBank.length;
@@ -295,31 +320,38 @@ export async function previewDividendRun(phone: string, rate: number): Promise<D
 export async function confirmDividendDistribution(
   phone: string,
   rate: number,
+  basis: DividendBasis = "savings",
 ): Promise<DividendRunResult> {
-  const result = await distributeDividend(phone, rate);
+  const result = await distributeDividend(phone, rate, basis);
   if (!result.ok) return result;
 
-  const admin = await prisma.member.findFirst({ where: { phone, role: "superadmin" } });
-  if (admin) {
-    await updateCoopConfig(admin.cooperativeId, {
-      lastDividendRate: rate,
-      pendingDividendRate: null,
-    } as any).catch(() => {});
-    const approvedVote = await prisma.dividendVote.findFirst({
-      where: { cooperativeId: admin.cooperativeId, proposedRate: rate, status: "approved" },
-      orderBy: { closedAt: "desc" },
-    });
-    if (approvedVote) {
-      await prisma.dividendVote.updateMany({
-        where: { id: approvedVote.id },
-        data: { status: "closed", closedById: admin.id, closedAt: new Date() },
+  if (basis === "savings") {
+    const admin = await prisma.member.findFirst({ where: { phone, role: "superadmin" } });
+    if (admin) {
+      await updateCoopConfig(admin.cooperativeId, {
+        lastDividendRate: rate,
+        pendingDividendRate: null,
+      } as any).catch(() => {});
+      const approvedVote = await prisma.dividendVote.findFirst({
+        where: { cooperativeId: admin.cooperativeId, proposedRate: rate, status: "approved" },
+        orderBy: { closedAt: "desc" },
       });
+      if (approvedVote) {
+        await prisma.dividendVote.updateMany({
+          where: { id: approvedVote.id },
+          data: { status: "closed", closedById: admin.id, closedAt: new Date() },
+        });
+      }
     }
   }
   return result;
 }
 
-export async function distributeDividend(phone: string, rate: number): Promise<DividendRunResult> {
+export async function distributeDividend(
+  phone: string,
+  rate: number,
+  basis: DividendBasis = "savings",
+): Promise<DividendRunResult> {
   const admin = await prisma.member.findFirst({ where: { phone, role: "superadmin" } });
   if (!admin) {
     return { ok: false, message: "Only the super admin can pay dividends." };
@@ -352,11 +384,18 @@ export async function distributeDividend(phone: string, rate: number): Promise<D
       bankName: true,
       bankAccountName: true,
       wallet: { select: { totalSaved: true } },
+      shareAccount: { select: { shares: true } },
     },
   });
-  const totalSaved = members.reduce((sum, m) => sum + (m.wallet?.totalSaved ?? 0), 0);
-  if (totalSaved <= 0) {
-    return { ok: false, message: "No savings yet — nothing to distribute against." };
+  const totalWeight = members.reduce((sum, m) => sum + weightOf(m, basis), 0);
+  if (totalWeight <= 0) {
+    return {
+      ok: false,
+      message:
+        basis === "shares"
+          ? "No shares have been issued yet — nothing to distribute against."
+          : "No savings yet — nothing to distribute against.",
+    };
   }
 
   const reserveAmount = Math.floor(pnl.netProfit * RESERVE_FUND_RATE);
@@ -374,7 +413,7 @@ export async function distributeDividend(phone: string, rate: number): Promise<D
     };
   }
 
-  const shares = allocateShares(members, pool);
+  const shares = allocateShares(members, pool, basis);
   const payable = members.filter((m) => (shares.get(m.id) ?? 0) > 0);
   const candidates = payable.filter((m) => Boolean(m.bankAccountNumber && m.bankCode));
   const held = payable.filter((m) => !(m.bankAccountNumber && m.bankCode));
@@ -415,6 +454,7 @@ export async function distributeDividend(phone: string, rate: number): Promise<D
         cooperativeId: admin.cooperativeId,
         reference,
         rate,
+        basis,
         totalPool: pool,
         status: "distributing",
         entries: {

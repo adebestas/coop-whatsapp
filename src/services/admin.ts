@@ -77,6 +77,7 @@ const MONEY_OUT_COMMANDS = new Set([
   "approvepay",
   "runpayroll",
   "paydividend",
+  "paysharedividend",
   "disable2fa",
 ]);
 
@@ -1913,6 +1914,40 @@ export async function handleAdminCommand(
           update: {
             state: "awaiting_dividend_confirm",
             data: JSON.stringify({ dividendRate: rate }),
+          },
+        });
+        await sendText({ to: phone, text: preview.message });
+        return true;
+      }
+
+      case "paysharedividend": {
+        if (!isSuper) {
+          await sendText({ to: phone, text: "Only the *super admin* can distribute dividends." });
+          return true;
+        }
+        const rate = Number(args[0]);
+        if (!Number.isFinite(rate) || rate <= 0 || rate > 25) {
+          await sendText({
+            to: phone,
+            text: "Usage: *paysharedividend <rate%>*, e.g. *paysharedividend 5* to pay 5% of profit on shares.",
+          });
+          return true;
+        }
+        const preview = await previewDividendRun(phone, rate, "shares");
+        if (!preview.ok || !preview.confirmToken) {
+          await sendText({ to: phone, text: preview.message });
+          return true;
+        }
+        await prisma.session.upsert({
+          where: { phone },
+          create: {
+            phone,
+            state: "awaiting_sharedividend_confirm",
+            data: JSON.stringify({ shareDividendRate: rate }),
+          },
+          update: {
+            state: "awaiting_sharedividend_confirm",
+            data: JSON.stringify({ shareDividendRate: rate }),
           },
         });
         await sendText({ to: phone, text: preview.message });
