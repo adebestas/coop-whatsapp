@@ -17,6 +17,7 @@ import { formatBalance } from "./cooperative.js";
 import { toKobo } from "../lib/money.js";
 import { sendToBank } from "./disbursements.js";
 import { broadcastToScope, createUnit, listUnits, setUnitAdmin, unitAdminOf } from "./units.js";
+import { appointMember, createCommittee, listCommittees, removeMember } from "./committees.js";
 import { previewDividendRun, getFundBalances } from "./dividends.js";
 import {
   approveWithdrawal,
@@ -1071,6 +1072,95 @@ export async function handleAdminCommand(
       case "units": {
         const result = await listUnits(phone);
         await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "addcommittee": {
+        if (!isSuper) {
+          await sendText({ to: phone, text: "Only the *super admin* can create committees." });
+          return true;
+        }
+        const addType = args[0]?.toLowerCase();
+        const lastArg = args[args.length - 1] ?? "";
+        const hasSize = /^\d+$/.test(lastArg);
+        const addSize = hasSize ? parseInt(lastArg, 10) : 3;
+        const addName = (hasSize ? args.slice(1, -1) : args.slice(1))
+          .join(" ")
+          .trim()
+          .replace(/\b\w/g, (ch) => ch.toUpperCase());
+        if (!addType || !addName) {
+          await sendText({
+            to: phone,
+            text: "Usage: *addcommittee <credit|supervisory|board> <name> [size]* — e.g. *addcommittee credit Credit Committee 3*.",
+          });
+          return true;
+        }
+        const addResult = await createCommittee(coopId, addType, addName, addSize, {
+          phone,
+          id: admin.id,
+          role: "superadmin",
+        });
+        await sendText({ to: phone, text: addResult.message });
+        return true;
+      }
+
+      case "appoint": {
+        if (!isSuper) {
+          await sendText({ to: phone, text: "Only the *super admin* can appoint committee members." });
+          return true;
+        }
+        const appointType = args[0]?.toLowerCase();
+        const appointCode = args[1];
+        const appointRole = args[2]?.toLowerCase() === "chair" ? "chair" : "member";
+        if (!appointType || !appointCode) {
+          await sendText({
+            to: phone,
+            text: "Usage: *appoint <credit|supervisory|board> <member code> [chair]*.",
+          });
+          return true;
+        }
+        const appointResult = await appointMember(coopId, appointType, appointCode, appointRole, {
+          phone,
+          id: admin.id,
+          role: "superadmin",
+        });
+        await sendText({ to: phone, text: appointResult.message });
+        return true;
+      }
+
+      case "removecommittee": {
+        if (!isSuper) {
+          await sendText({
+            to: phone,
+            text: "Only the *super admin* can remove committee members.",
+          });
+          return true;
+        }
+        const removeType = args[0]?.toLowerCase();
+        const removeCode = args[1];
+        if (!removeType || !removeCode) {
+          await sendText({
+            to: phone,
+            text: "Usage: *removecommittee <credit|supervisory|board> <member code>*.",
+          });
+          return true;
+        }
+        const removeResult = await removeMember(coopId, removeType, removeCode, {
+          phone,
+          id: admin.id,
+          role: "superadmin",
+        });
+        await sendText({ to: phone, text: removeResult.message });
+        return true;
+      }
+
+      case "committees": {
+        if (!isSuper) {
+          await sendText({ to: phone, text: "Only the *super admin* can view committees." });
+          return true;
+        }
+        const committeesResult = await listCommittees(coopId);
+        await sendText({ to: phone, text: committeesResult.message });
         return true;
       }
 
