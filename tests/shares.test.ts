@@ -104,4 +104,32 @@ describe("shares chat commands", () => {
     const account = await prisma.shareAccount.findFirst({ where: { memberId: member.id } });
     expect(account?.shares ?? 0).toBe(0);
   });
+
+  it("blocks buyshares for a frozen member", async () => {
+    const coop = await createTestCoop("SHARECHAT3");
+    const member = await createTestMember(coop.id, { phone: "2348000000097" });
+    await fundWallet(member.id, 500000);
+    await prisma.member.update({ where: { id: member.id }, data: { frozenAt: new Date() } });
+
+    await handleMessage(member.phone, "buyshares 2");
+    await handleMessage(member.phone, "1234");
+
+    const account = await prisma.shareAccount.findFirst({ where: { memberId: member.id } });
+    expect(account?.shares ?? 0).toBe(0);
+    const wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
+    expect(wallet?.balance).toBe(500000);
+  });
+
+  it("blocks buyshares for a suspended member", async () => {
+    const coop = await createTestCoop("SHARECHAT4");
+    const member = await createTestMember(coop.id, { phone: "2348000000096" });
+    await fundWallet(member.id, 500000);
+    await prisma.member.update({ where: { id: member.id }, data: { status: "suspended" } });
+
+    await handleMessage(member.phone, "buyshares 2");
+    await handleMessage(member.phone, "1234");
+
+    const account = await prisma.shareAccount.findFirst({ where: { memberId: member.id } });
+    expect(account?.shares ?? 0).toBe(0);
+  });
 });
