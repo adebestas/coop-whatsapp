@@ -10,11 +10,14 @@ import { buildApp } from "../src/app.js";
 import { PrismaClient } from "@prisma/client";
 import { vi } from "vitest";
 
-// Use SQLite for tests (local schema)
+// Use SQLite for tests (local schema). `connection_limit=1` forces a single
+// connection so `PRAGMA foreign_keys = OFF` in cleanupDatabase() reliably
+// applies to the DELETEs (Prisma otherwise pools 9 connections and the pragma
+// is connection-scoped).
 export const prisma = new PrismaClient({
   datasources: {
     db: {
-      url: "file:./dev.db",
+      url: "file:./dev.db?connection_limit=1",
     },
   },
 });
