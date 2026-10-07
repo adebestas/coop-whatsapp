@@ -59,6 +59,7 @@ import { startBuyPoll, addPollOption, closeBuyPoll, listBuyPolls } from "./buypo
 import { payrollOverview, runPayroll, setSalary } from "./payroll.js";
 import { runExport, exportMeetingMinutes, type ExportKind } from "./exports.js";
 import { createGroup, closeGroupCycle, listGroups, groupLoans } from "./groups.js";
+import { createProduct, listProducts } from "./savings-products.js";
 import { checkDailyPayoutLimit, checkVelocity } from "./fraud.js";
 import { runBackup } from "./backup.js";
 import { runReconciliation } from "./reconcile.js";
@@ -3579,6 +3580,67 @@ export async function handleAdminCommand(
           );
         }
         await sendText({ to: phone, text: glines.join("\n") });
+        return true;
+      }
+
+      case "newproduct": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can create savings products." });
+          return true;
+        }
+        const type = (args[0] ?? "").trim().toLowerCase();
+        const name = (args[1] ?? "").trim();
+        const rate = args[2] !== undefined ? Number(args[2]) : 0;
+        const term = args[3] !== undefined ? Number(args[3]) : null;
+        if (!type || !name) {
+          await sendText({
+            to: phone,
+            text: "Usage: *newproduct <fixed|goal|seasonal> <name> [rate] [termMonths]* — e.g. *newproduct fixed 12-Month 10 12*",
+          });
+          return true;
+        }
+        const created = await createProduct(
+          coopId,
+          type,
+          name,
+          {
+            interestRate: Number.isFinite(rate) ? rate : 0,
+            termMonths: term !== null && Number.isFinite(term) ? term : null,
+          },
+          { id: admin.id, phone, role: roleLabel(ctx) },
+        );
+        await sendText({ to: phone, text: created.message });
+        return true;
+      }
+
+      case "products": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can view all savings products." });
+          return true;
+        }
+        const listed = await listProducts(coopId);
+        if (!listed.products || listed.products.length === 0) {
+          await sendText({
+            to: phone,
+            text: "No savings products yet. Create one with *newproduct <fixed|goal|seasonal> <name> [rate] [termMonths]*.",
+          });
+          return true;
+        }
+        const plines = ["*🏦 Savings Products*", ""];
+        for (const p of listed.products) {
+          const meta = [
+            p.termMonths ? `${p.termMonths} months` : null,
+            p.interestRate ? `${p.interestRate}% at maturity` : null,
+            p.minAmount ? `${formatBalance(p.minAmount)} min` : null,
+          ]
+            .filter(Boolean)
+            .join(" — ");
+          plines.push(
+            `• *${p.name}* (${p.type.toUpperCase()})${meta ? ` — ${meta}` : ""}${p.active ? "" : " — _closed_"}`,
+            `  ID: ${p.id}`,
+          );
+        }
+        await sendText({ to: phone, text: plines.join("\n") });
         return true;
       }
 

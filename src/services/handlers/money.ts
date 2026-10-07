@@ -9,6 +9,14 @@ import { computeDividendPreview } from "../dividends.js";
 import { getQueuePosition } from "../loans.js";
 import { getShareAccount } from "../shares.js";
 import { applyGroupLoan } from "../groups.js";
+import {
+  listProducts,
+  openProduct,
+  depositToProduct,
+  withdrawFromProduct,
+  matureProduct,
+  listMemberProducts,
+} from "../savings-products.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 
 export async function handleBalance(
@@ -420,4 +428,147 @@ export async function handleGroupLoan(phone: string, args: string[]): Promise<vo
   }
   const applied = await applyGroupLoan(member.cooperativeId, groupId, member.id, amount, months);
   await sendText({ to: phone, text: applied.message });
+}
+
+/** Browse the cooperative's fixed, goal and seasonal savings products. */
+export async function handleProducts(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const listed = await listProducts(member.cooperativeId);
+  const active = (listed.products ?? []).filter((p) => p.active);
+  if (active.length === 0) {
+    await sendText({
+      to: phone,
+      text: "No savings products yet. Ask your cooperative admin to create one.",
+    });
+    return;
+  }
+  const lines = ["*🏦 Savings Products*", ""];
+  for (const p of active) {
+    const meta = [
+      p.termMonths ? `${p.termMonths} months` : null,
+      p.interestRate ? `${p.interestRate}% at maturity` : null,
+      p.minAmount ? `${formatBalance(p.minAmount)} min` : null,
+    ]
+      .filter(Boolean)
+      .join(" — ");
+    lines.push(
+      `• *${p.name}* (${p.type.toUpperCase()})${meta ? ` — ${meta}` : ""}`,
+      `  Open with *openproduct ${p.id}${p.type === "goal" ? " <target>" : ""}*`,
+    );
+  }
+  await sendText({ to: phone, text: lines.join("\n") });
+}
+
+/** Open a savings account against a product, optionally with a goal target. */
+export async function handleOpenProduct(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const productId = args[0];
+  if (!productId) {
+    await sendText({
+      to: phone,
+      text: "Usage: *openproduct <product id> [target]* — browse products with *products*.",
+    });
+    return;
+  }
+  const target = args[1] ? parseNaira(args[1]) : null;
+  const opened = await openProduct(
+    member.cooperativeId,
+    productId,
+    member.id,
+    target === null ? undefined : target,
+  );
+  await sendText({ to: phone, text: opened.message });
+}
+
+/** Deposit wallet funds into a savings account. */
+export async function handleSaveProduct(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const accountId = args[0];
+  const amount = parseNaira(args[1]);
+  if (!accountId || amount === null) {
+    await sendText({
+      to: phone,
+      text: "Usage: *saveproduct <account id> <amount>* — e.g. *saveproduct abc123 5000*.",
+    });
+    return;
+  }
+  const result = await depositToProduct(member.cooperativeId, accountId, member.id, amount);
+  await sendText({ to: phone, text: result.message });
+}
+
+/** Withdraw from a savings account back into the wallet. */
+export async function handleWithdrawProduct(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const accountId = args[0];
+  const amount = parseNaira(args[1]);
+  if (!accountId || amount === null) {
+    await sendText({
+      to: phone,
+      text: "Usage: *withdrawproduct <account id> <amount>* — e.g. *withdrawproduct abc123 5000*.",
+    });
+    return;
+  }
+  const result = await withdrawFromProduct(member.cooperativeId, accountId, member.id, amount);
+  await sendText({ to: phone, text: result.message });
+}
+
+/** List a member's product savings accounts. */
+export async function handleMyProducts(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const mine = await listMemberProducts(member.cooperativeId, member.id);
+  if (!mine.accounts || mine.accounts.length === 0) {
+    await sendText({
+      to: phone,
+      text: "You have no product savings yet. Browse *products* and open one with *openproduct <id>*.",
+    });
+    return;
+  }
+  const lines = ["*🏦 Your Savings Products*", ""];
+  for (const a of mine.accounts) {
+    const target = a.targetAmount
+      ? ` — ${formatBalance(a.balance)} of ${formatBalance(a.targetAmount)} (${a.progress.percent}%)`
+      : ` — ${formatBalance(a.balance)}`;
+    const maturity = a.maturesAt ? ` — matures ${a.maturesAt.toDateString()}` : "";
+    lines.push(
+      `• *${a.productName}* (${a.type.toUpperCase()})${target} — _${a.status}_${maturity}`,
+      `  ID: ${a.id}`,
+    );
+  }
+  await sendText({ to: phone, text: lines.join("\n") });
+}
+
+/** Mature a term deposit (or complete an open goal) and credit the wallet. */
+export async function handleMatureProduct(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const accountId = args[0];
+  if (!accountId) {
+    await sendText({ to: phone, text: "Usage: *matureproduct <account id>*." });
+    return;
+  }
+  const result = await matureProduct(member.cooperativeId, accountId, member.id);
+  await sendText({ to: phone, text: result.message });
 }

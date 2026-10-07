@@ -80,6 +80,12 @@ import {
   handleShares,
   handleBuyShares,
   handleGroupLoan,
+  handleProducts,
+  handleOpenProduct,
+  handleSaveProduct,
+  handleWithdrawProduct,
+  handleMyProducts,
+  handleMatureProduct,
 } from "./handlers/money.js";
 import {
   handleValidateClaim,
@@ -513,6 +519,10 @@ async function handleMessageInner(
     case "repay":
     case "withdraw":
     case "buyshares":
+    case "openproduct":
+    case "saveproduct":
+    case "withdrawproduct":
+    case "matureproduct":
     case "grouploan": {
       if (member && (member.status === "suspended" || member.status === "deceased")) {
         await sendText({
@@ -540,7 +550,11 @@ async function handleMessageInner(
       // comparing (otherwise a naira-vs-kobo mismatch silently disables the cap).
       // grouploan is *grouploan <group id> <amount> <months>* — its amount is
       // the SECOND arg, so parse the right token for the tier cap.
-      const amt = parseNaira(cmd === "grouploan" ? args[1] : args[0]);
+      const amt = parseNaira(
+        cmd === "grouploan" || cmd === "saveproduct" || cmd === "withdrawproduct"
+          ? args[1]
+          : args[0],
+      );
       if (cmd !== "buyshares" && amt !== null && member) {
         const tierError = await checkTierLimit(phone, amt, member.id);
         if (tierError) {
@@ -552,6 +566,10 @@ async function handleMessageInner(
       else if (cmd === "loan") await handleLoan(phone, args);
       else if (cmd === "repay") await handleRepay(phone, args);
       else if (cmd === "buyshares") await handleBuyShares(phone, args);
+      else if (cmd === "openproduct") await handleOpenProduct(phone, args);
+      else if (cmd === "saveproduct") await handleSaveProduct(phone, args);
+      else if (cmd === "withdrawproduct") await handleWithdrawProduct(phone, args);
+      else if (cmd === "matureproduct") await handleMatureProduct(phone, args);
       else if (cmd === "grouploan") await handleGroupLoan(phone, args);
       else await handleWithdraw(phone, args);
       break;
@@ -1102,6 +1120,16 @@ async function handleMessageInner(
         );
       }
       await sendText({ to: phone, text: lines.join("\n") });
+      break;
+    }
+
+    case "products": {
+      await handleProducts(phone);
+      break;
+    }
+
+    case "myproducts": {
+      await handleMyProducts(phone);
       break;
     }
 
