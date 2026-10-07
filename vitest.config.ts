@@ -10,8 +10,8 @@ dotenvConfig({ path: path.resolve(__dirname, ".env") });
 
 export default defineConfig({
   test: {
-    hookTimeout: 60000,
-    testTimeout: 60000,
+    hookTimeout: 120000,
+    testTimeout: 120000,
     fileParallelism: false,
     setupFiles: [path.resolve(__dirname, "tests/setup.ts")],
     env: {

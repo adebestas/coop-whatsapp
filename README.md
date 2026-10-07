@@ -103,6 +103,32 @@ The super admin is any member with the `superadmin` role **or** the
 cooperative's registered `adminPhone`. Every money/admin action is written to
 an append-only **audit log** (`audit` command shows the latest entries).
 
+## Committees
+
+Cooperatives can run three formal committees, appointed by the super admin:
+
+| Committee | Default size | Powers |
+| --- | --- | --- |
+| **Credit** | 3 | Approves loans — **replaces the two super-admin signatures**. A loan at `admin_approved` is disbursed once a majority of the Credit Committee approves. |
+| **Supervisory / Audit** | 3 | Read-only oversight of the audit trail, ledger and reports, **plus** the power to freeze/suspend a member pending review. |
+| **Board** | 5 | Sets policy (interest tiers, dividend rate, limits). |
+
+Sizes are configurable per cooperative (`CooperativeConfig.creditCommitteeSize`,
+`supervisoryCommitteeSize`, `boardSize`). A member can sit on more than one
+committee.
+
+- Super admin: `addcommittee <credit|supervisory|board> <name> [size]` →
+  `appoint <type> <member code> [chair]` → `committees` lists them.
+- **Credit Committee:** when a cooperative has a Credit Committee staffed to at
+  least its majority, loans at `admin_approved` are decided by committee vote
+  (`cvote <loan id> approve|reject`; `committeequeue` lists pending decisions).
+  A cooperative **without** a staffed Credit Committee keeps the existing
+  admin → super → super approval chain.
+- **Supervisory freeze:** `supervisoryfreeze <member code> [reason]` /
+  `supervisoryunfreeze <member code>` — a supervisory freeze blocks all
+  money-out and **cannot** be lifted by the member themselves (only the
+  Supervisory Committee or a super admin can clear it).
+
 ## Admin commands
 
 | Command | Who | What it does |
