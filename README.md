@@ -525,6 +525,37 @@ Meetings** (`sgm`) entirely through chat.
   downloadable **Excel + PDF** export via the shared export pipeline
   (`/api/export/<file>`).
 
+## Groups (ROSCA / VSLA)
+
+Cooperatives can run informal **savings groups** inside the coop. An admin
+creates one with `newgroup <rosca|vsla> <name> <code> <amount> <cycleLength>`
+(amount in naira; cycle length in rounds). Members join with
+`joingroup <code>`, pay in with `groupcontribute <group id> <amount>`, and check
+their groups with `mygroups` / `groupstatus <group id>`. Admins manage cycles
+with `closegroupcycle <group id>` and review joint-liability lending with
+`grouploans <group id>`.
+
+**ROSCA (rotating savings).** Each round every member pays the same fixed
+contribution into the pot. Members are assigned a rotation position when they
+join, and `closegroupcycle` pays the whole pot to the member whose turn it is.
+A member may contribute only once per round.
+
+**VSLA (village savings & loans).** Members buy one or more *shares* per round
+(contributions must be a multiple of the group's share price). When the cycle
+closes, the pot is shared out **pro-rata by shares** using the largest-remainder
+method, so the whole pot is distributed with no rounding loss; shares are then
+redeemed for the next round.
+
+**Joint-liability group loans.** A group member borrows with
+`grouploan <group id> <amount> <months>` (up to 12 months). The group stands as
+**joint guarantor**, so an active-group loan is created already *guaranteed*
+and needs **no individual guarantors** before it moves through the approval
+chain — if the member defaults, the group is liable. A non-member, or a loan
+against a closed group, is refused.
+
+Every contribution, payout and share-out is booked through the double-entry
+journal against the group's pot account, so the books always balance.
+
 ## Payment provider failover
 
 Top-ups and payouts run through **Monnify** (primary) with **Paystack** as the

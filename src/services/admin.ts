@@ -58,7 +58,7 @@ import {
 import { startBuyPoll, addPollOption, closeBuyPoll, listBuyPolls } from "./buypoll.js";
 import { payrollOverview, runPayroll, setSalary } from "./payroll.js";
 import { runExport, exportMeetingMinutes, type ExportKind } from "./exports.js";
-import { createGroup, closeGroupCycle, listGroups } from "./groups.js";
+import { createGroup, closeGroupCycle, listGroups, groupLoans } from "./groups.js";
 import { checkDailyPayoutLimit, checkVelocity } from "./fraud.js";
 import { runBackup } from "./backup.js";
 import { runReconciliation } from "./reconcile.js";
@@ -3547,6 +3547,38 @@ export async function handleAdminCommand(
           );
         }
         await sendText({ to: phone, text: lines.join("\n") });
+        return true;
+      }
+
+      case "grouploans": {
+        if (unitAdmin) {
+          await sendText({
+            to: phone,
+            text: "Only the cooperative admin can view group loans.",
+          });
+          return true;
+        }
+        const id = args[0];
+        if (!id) {
+          await sendText({ to: phone, text: "Usage: *grouploans <group id>*" });
+          return true;
+        }
+        const listed = await groupLoans(coopId, id);
+        if (!listed.ok || !listed.loans || listed.loans.length === 0) {
+          await sendText({
+            to: phone,
+            text: listed.ok ? "This group has no joint-liability loans yet." : listed.message,
+          });
+          return true;
+        }
+        const glines = [`*👥 Group loans — ${listed.group?.name} (${listed.group?.code})*`, ""];
+        for (const l of listed.loans) {
+          glines.push(
+            `• *${l.memberName}* — ${formatBalance(l.amount)} — _${l.status}_ — balance ${formatBalance(l.balance)}`,
+            `  ID: ${l.id.slice(-6)}`,
+          );
+        }
+        await sendText({ to: phone, text: glines.join("\n") });
         return true;
       }
 

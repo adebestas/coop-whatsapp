@@ -13,7 +13,10 @@ import {
   listGroups,
   groupStatus,
   myGroups,
+  applyGroupLoan,
+  groupLoans,
 } from "../src/services/groups.js";
+import { approveLoan } from "../src/services/loans.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
 import { handleAdminCommand } from "../src/services/admin.js";
 import { createUnit, setUnitAdmin } from "../src/services/units.js";
@@ -292,6 +295,114 @@ describe("VSLA groups", () => {
   });
 });
 
+describe("joint-liability group loans", () => {
+  it("lets a group member borrow with the group as joint guarantor", async () => {
+    const coop = await createTestCoop("GRPLOAN1");
+    const admin = await createTestMember(coop.id, { phone: "2348000010400", role: "superadmin" });
+    const a = await createTestMember(coop.id, { phone: "2348000010401" });
+
+    const created = await createGroup(coop.id, "vsla", "Traders", "TRD1", 50000, 6, actor(admin));
+    const groupId = created.groupId!;
+    await joinGroup(coop.id, "TRD1", a.id);
+
+    const applied = await applyGroupLoan(coop.id, groupId, a.id, 500000, 3);
+    expect(applied.ok).toBe(true);
+    const loanId = applied.loanId!;
+
+    const loan = await prisma.loan.findUnique({ where: { id: loanId } });
+    expect(loan).not.toBeNull();
+    expect(loan!.groupId).toBe(groupId);
+    expect(loan!.memberId).toBe(a.id);
+    // The group guarantees the loan, so it starts already guaranteed with no
+    // individual guarantors on the hook.
+    expect(loan!.status).toBe("guaranteed");
+    expect(await prisma.guarantor.count({ where: { loanId } })).toBe(0);
+  });
+
+  it("can be approved without individual guarantors when the group is active", async () => {
+    const coop = await createTestCoop("GRPLOAN2");
+    const admin = await createTestMember(coop.id, { phone: "2348000010410", role: "superadmin" });
+    const a = await createTestMember(coop.id, { phone: "2348000010411" });
+
+    const created = await createGroup(coop.id, "vsla", "Artisans", "ART1", 50000, 6, actor(admin));
+    const groupId = created.groupId!;
+    await joinGroup(coop.id, "ART1", a.id);
+
+    const applied = await applyGroupLoan(coop.id, groupId, a.id, 500000, 3);
+    expect(applied.ok).toBe(true);
+    const loanId = applied.loanId!;
+
+    const officer = await prisma.accountOfficer.create({
+      data: { email: `ao-${loanId}@test.local`, name: "Test Officer", isActive: true },
+    });
+    await prisma.accountOfficerAssignment.create({
+      data: {
+        accountOfficerId: officer.id,
+        cooperativeId: coop.id,
+        assignedById: admin.id,
+        isActive: true,
+      },
+    });
+
+    // If the loan still required individual guarantors it would be stuck at
+    // "pending" and this approval would be rejected.
+    const approved = await approveLoan(loanId.slice(-6), {
+      isAdmin: true,
+      actorId: officer.id,
+      cooperativeId: coop.id,
+    });
+    expect(approved.ok).toBe(true);
+    const after = await prisma.loan.findUnique({ where: { id: loanId } });
+    expect(after!.status).toBe("account_officer_approved");
+  });
+
+  it("refuses a group loan from a non-member", async () => {
+    const coop = await createTestCoop("GRPLOAN3");
+    const admin = await createTestMember(coop.id, { phone: "2348000010420", role: "superadmin" });
+    const a = await createTestMember(coop.id, { phone: "2348000010421" });
+    const outsider = await createTestMember(coop.id, { phone: "2348000010422" });
+
+    const created = await createGroup(coop.id, "vsla", "Savings", "SAV1", 50000, 6, actor(admin));
+    const groupId = created.groupId!;
+    await joinGroup(coop.id, "SAV1", a.id);
+
+    const refused = await applyGroupLoan(coop.id, groupId, outsider.id, 500000, 3);
+    expect(refused.ok).toBe(false);
+    expect(await prisma.loan.count({ where: { memberId: outsider.id } })).toBe(0);
+  });
+
+  it("refuses a group loan from a closed group", async () => {
+    const coop = await createTestCoop("GRPLOAN4");
+    const admin = await createTestMember(coop.id, { phone: "2348000010430", role: "superadmin" });
+    const a = await createTestMember(coop.id, { phone: "2348000010431" });
+
+    const created = await createGroup(coop.id, "vsla", "Closed", "CLS1", 50000, 6, actor(admin));
+    const groupId = created.groupId!;
+    await joinGroup(coop.id, "CLS1", a.id);
+    await prisma.group.update({ where: { id: groupId }, data: { status: "closed" } });
+
+    const refused = await applyGroupLoan(coop.id, groupId, a.id, 500000, 3);
+    expect(refused.ok).toBe(false);
+  });
+
+  it("lists a group's joint-liability loans for admins", async () => {
+    const coop = await createTestCoop("GRPLOAN5");
+    const admin = await createTestMember(coop.id, { phone: "2348000010440", role: "superadmin" });
+    const a = await createTestMember(coop.id, { phone: "2348000010441" });
+
+    const created = await createGroup(coop.id, "vsla", "Ledger", "LDG1", 50000, 6, actor(admin));
+    const groupId = created.groupId!;
+    await joinGroup(coop.id, "LDG1", a.id);
+    expect((await applyGroupLoan(coop.id, groupId, a.id, 500000, 3)).ok).toBe(true);
+
+    const listed = await groupLoans(coop.id, groupId);
+    expect(listed.ok).toBe(true);
+    expect(listed.loans?.length).toBe(1);
+    expect(listed.loans?.[0].memberName).toBe(a.name);
+    expect(listed.loans?.[0].status).toBe("guaranteed");
+  });
+});
+
 describe("group command gating", () => {
   it("a unit admin cannot create or list coop-wide groups", async () => {
     const coop = await createTestCoop("GRPCMD");
@@ -316,6 +427,14 @@ describe("group command gating", () => {
 
     vi.clearAllMocks();
     await handleAdminCommand(unitAdmin.phone, "groups", []);
+    texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(texts).toMatch(/Only the cooperative admin/i);
+
+    vi.clearAllMocks();
+    await handleAdminCommand(unitAdmin.phone, "grouploans", ["abc"]);
     texts = vi
       .mocked(sendText)
       .mock.calls.map((c) => c[0].text)

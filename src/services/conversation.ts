@@ -15,7 +15,13 @@ import { validateDeviceSession } from "../lib/security-hardening.js";
 import { isFrozen, freezeMessage, unfreezeMessage } from "../lib/freeze.js";
 import { savePayee, listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js";
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
-import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js";
+import {
+  joinGroup,
+  contributeToGroup,
+  myGroups,
+  groupStatus,
+  applyGroupLoan,
+} from "./groups.js";
 import { requestPhoneChange } from "./phone-change.js";
 
 /** Session TTL — how long an awaiting state stays alive before reset. */
@@ -1070,6 +1076,35 @@ async function handleMessageInner(
         amount,
       );
       await sendText({ to: phone, text: contributed.message });
+      break;
+    }
+
+    case "grouploan": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const groupId = args[0];
+      const amount = parseNaira(args[1]);
+      const months = Number(args[2]);
+      if (!groupId || amount === null || !Number.isInteger(months) || months <= 0) {
+        await sendText({
+          to: phone,
+          text: "Usage: *grouploan <group id> <amount> <months>* — e.g. *grouploan abc123 50000 3*",
+        });
+        break;
+      }
+      const applied = await applyGroupLoan(
+        member.cooperativeId,
+        groupId,
+        member.id,
+        amount,
+        months,
+      );
+      await sendText({ to: phone, text: applied.message });
       break;
     }
 

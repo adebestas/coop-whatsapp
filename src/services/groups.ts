@@ -4,6 +4,16 @@ import type { Prisma } from "@prisma/client";
 import { postJournal } from "./journal.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
+import {
+  LOAN_ADMIN_CHARGE,
+  annualRateFor,
+  calculateMonthlyPayment,
+  totalRepayable,
+} from "./loans.js";
+import { LIMITS } from "../lib/money.js";
+
+/** Regulatory ceiling on loan APR (CBN guidance), matching loans.ts. */
+const GROUP_LOAN_MAX_RATE = 10;
 
 export type GroupType = "rosca" | "vsla";
 
@@ -517,6 +527,147 @@ export async function closeGroupCycle(
     shareOutAmount: pot,
     payouts,
     nextCycleNumber: hasNext ? cycle.cycleNumber + 1 : undefined,
+  };
+}
+
+/**
+ * Apply for a joint-liability group loan. The group stands as the joint
+ * guarantor, so a loan from an active group starts already `guaranteed` and
+ * needs no individual guarantors before it can move through the approval chain.
+ */
+export async function applyGroupLoan(
+  coopId: string,
+  groupId: string,
+  memberId: string,
+  amount: number,
+  months: number,
+): Promise<{ ok: boolean; message: string; loanId?: string }> {
+  const group = await resolveGroup(coopId, groupId);
+  if (!group) return { ok: false, message: "Group not found." };
+  if (group.status !== "active") {
+    return { ok: false, message: `The group *${group.name}* is closed.` };
+  }
+
+  const membership = await prisma.groupMember.findUnique({
+    where: { groupId_memberId: { groupId: group.id, memberId } },
+  });
+  if (!membership || !membership.active) {
+    return { ok: false, message: "You are not a member of this group. Reply *joingroup <code>*." };
+  }
+
+  if (
+    !Number.isInteger(amount) ||
+    amount <= 0 ||
+    !Number.isFinite(months) ||
+    months < 1 ||
+    months > 12
+  ) {
+    return {
+      ok: false,
+      message: "Use the format *grouploan <group id> <amount> <months>*, e.g. *grouploan abc123 50000 3* (up to 12 months).",
+    };
+  }
+  if (amount < LIMITS.MIN_LOAN) {
+    return { ok: false, message: `Minimum loan amount is *${formatBalance(LIMITS.MIN_LOAN)}*.` };
+  }
+  if (amount > LIMITS.MAX_LOAN) {
+    return { ok: false, message: `Maximum loan amount is *${formatBalance(LIMITS.MAX_LOAN)}*.` };
+  }
+
+  // Joint liability: the group backs the loan, so it is not capped by the
+  // individual member's savings the way a personal loan is.
+  const interestRate = Math.min(annualRateFor(months), GROUP_LOAN_MAX_RATE);
+  const monthly = calculateMonthlyPayment(amount, months);
+  const total = totalRepayable(amount, months);
+
+  const pendingCount = await prisma.loan.count({
+    where: {
+      cooperativeId: coopId,
+      status: { in: ["pending", "guaranteed", "admin_approved", "super_approved_1"] },
+    },
+  });
+
+  const loan = await prisma.loan.create({
+    data: {
+      amount,
+      adminCharge: LOAN_ADMIN_CHARGE,
+      interestRate,
+      tenureMonths: months,
+      // The group is the joint guarantor, so the loan is born guaranteed and
+      // skips the individual-guarantor stage entirely.
+      status: "guaranteed",
+      balance: amount,
+      memberId,
+      cooperativeId: coopId,
+      groupId: group.id,
+      queuePosition: pendingCount + 1,
+      queueJoinedAt: new Date(),
+    },
+  });
+
+  await audit({
+    cooperativeId: coopId,
+    actorPhone: "",
+    actorId: memberId,
+    action: "group.loan_apply",
+    targetType: "loan",
+    targetId: loan.id,
+    amount,
+    detail: `Group ${group.code} joint-liability loan`,
+  }).catch(() => {});
+
+  return {
+    ok: true,
+    loanId: loan.id,
+    message:
+      `✅ Group loan application received for *${group.name}*.\n\n` +
+      `Amount: *${formatBalance(amount)}*\n` +
+      `Tenure: *${months} months*\n` +
+      `Interest: *${annualRateFor(months)}% APR* declining balance → repay *${formatBalance(Math.round(total))}*\n` +
+      `Monthly installment: *${formatBalance(Math.round(monthly))}*\n\n` +
+      `The group stands as *joint guarantor*, so no individual guarantors are needed. ` +
+      `It now awaits officer approval.`,
+  };
+}
+
+/** Group loans list for an admin — the joint-liability exposure of a group. */
+export async function groupLoans(
+  coopId: string,
+  groupId: string,
+): Promise<{
+  ok: boolean;
+  message: string;
+  group?: { id: string; name: string; code: string; status: string };
+  loans?: {
+    id: string;
+    memberId: string;
+    memberName: string;
+    amount: number;
+    balance: number;
+    status: string;
+  }[];
+}> {
+  const group = await resolveGroup(coopId, groupId);
+  if (!group) return { ok: false, message: "Group not found." };
+
+  const loans = await prisma.loan.findMany({
+    where: { groupId: group.id, cooperativeId: coopId },
+    include: { member: { select: { name: true } } },
+    orderBy: { createdAt: "desc" },
+  });
+
+  return {
+    ok: true,
+    message: `${group.name}: ${loans.length} group loan(s).`,
+    group: { id: group.id, name: group.name, code: group.code, status: group.status },
+    loans: loans.map((l) => ({
+      id: l.id,
+      memberId: l.memberId,
+      memberName: l.member.name,
+      amount: l.amount,
+      balance: l.balance,
+      status: l.status,
+    })),
   };
 }
 
