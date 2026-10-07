@@ -8,6 +8,7 @@ import { withdrawLimit, canWithdraw } from "../withdrawals.js";
 import { computeDividendPreview } from "../dividends.js";
 import { getQueuePosition } from "../loans.js";
 import { getShareAccount } from "../shares.js";
+import { applyGroupLoan } from "../groups.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 
 export async function handleBalance(
@@ -399,4 +400,24 @@ export async function handleBuyShares(phone: string, args: string[]): Promise<vo
     { shareCount: count },
     `Buy *${count}* share(s)? Enter your 4-digit PIN to confirm.`,
   );
+}
+
+export async function handleGroupLoan(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const groupId = args[0];
+  const amount = parseNaira(args[1]);
+  const months = args[2] ? parseInt(args[2], 10) : NaN;
+  if (!groupId || amount === null || !Number.isInteger(months) || months < 1) {
+    await sendText({
+      to: phone,
+      text: "Usage: *grouploan <group id> <amount> <months>* — e.g. *grouploan abc123 50000 3*",
+    });
+    return;
+  }
+  const applied = await applyGroupLoan(member.cooperativeId, groupId, member.id, amount, months);
+  await sendText({ to: phone, text: applied.message });
 }

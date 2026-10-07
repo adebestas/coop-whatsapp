@@ -46,9 +46,49 @@ export async function scanGuarantorDefaults(): Promise<number> {
       const share = Math.min(rawShare, loan.balance);
       if (share <= 0) continue;
 
-      for (const g of loan.guarantors) {
+      // Individual guarantors, or — for a joint-liability group loan — the
+      // group's active members, who share the recovery equally.
+      type Payable = {
+        memberId: string;
+        member: { name: string; phone: string };
+        amount: number;
+        joint: boolean;
+      };
+      const payables: Payable[] = [];
+
+      if (loan.guarantors.length > 0) {
+        for (const g of loan.guarantors) {
+          payables.push({ memberId: g.memberId, member: g.member, amount: share, joint: false });
+        }
+      } else if (loan.groupId) {
+        // A group loan has no individual Guarantor rows: the group is jointly
+        // liable, so every ACTIVE member absorbs an equal slice of the share.
+        const groupMembers = await prisma.groupMember.findMany({
+          where: { groupId: loan.groupId, active: true },
+          include: { member: true },
+          orderBy: { joinedAt: "asc" },
+        });
+        if (groupMembers.length > 0) {
+          // Split equally; the rounding remainder goes to the first member so
+          // the deductions always sum to the full share.
+          const base = Math.floor(share / groupMembers.length);
+          const remainder = share - base * groupMembers.length;
+          groupMembers.forEach((gm, i) => {
+            const amount = base + (i === 0 ? remainder : 0);
+            if (amount <= 0) return;
+            payables.push({
+              memberId: gm.memberId,
+              member: gm.member,
+              amount,
+              joint: true,
+            });
+          });
+        }
+      }
+
+      for (const p of payables) {
         const existing = await prisma.guarantorDeduction.findUnique({
-          where: { loanId_guarantorId: { loanId: loan.id, guarantorId: g.memberId } },
+          where: { loanId_guarantorId: { loanId: loan.id, guarantorId: p.memberId } },
         });
         if (existing && existing.status !== "cancelled") continue;
 
@@ -56,23 +96,26 @@ export async function scanGuarantorDefaults(): Promise<number> {
         deductAt.setDate(deductAt.getDate() + DEDUCTION_NOTICE_DAYS);
 
         await prisma.guarantorDeduction.upsert({
-          where: { loanId_guarantorId: { loanId: loan.id, guarantorId: g.memberId } },
+          where: { loanId_guarantorId: { loanId: loan.id, guarantorId: p.memberId } },
           create: {
             cooperativeId: loan.cooperativeId,
             loanId: loan.id,
-            guarantorId: g.memberId,
-            amount: share,
+            guarantorId: p.memberId,
+            amount: p.amount,
             noticeSentAt: new Date(),
             deductAt,
           },
           update: { status: "notified", deductAt },
         });
 
+        const who = p.joint
+          ? `As a member of the jointly liable group, *${formatBalance(p.amount)}*`
+          : `As guarantor, *${formatBalance(p.amount)}*`;
         await notifyMember(
-          g.member,
+          p.member,
           `⚠️ *10-day deduction notice*\n\n` +
             `${loan.member.name} has defaulted on loan *${loan.id.slice(-6)}* for ${DEFAULT_GRACE_MONTHS}+ months.\n` +
-            `As guarantor, *${formatBalance(share)}* (50% of the loan's declining balance interest) will be deducted from your savings on ` +
+            `${who} (50% of the loan's declining balance interest) will be deducted from your savings on ` +
             `*${deductAt.toISOString().slice(0, 10)}*.\n\n` +
             `If the borrower clears the arrears before then, the deduction is cancelled.`,
         ).catch(() => {});

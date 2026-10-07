@@ -15,13 +15,7 @@ import { validateDeviceSession } from "../lib/security-hardening.js";
 import { isFrozen, freezeMessage, unfreezeMessage } from "../lib/freeze.js";
 import { savePayee, listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js";
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
-import {
-  joinGroup,
-  contributeToGroup,
-  myGroups,
-  groupStatus,
-  applyGroupLoan,
-} from "./groups.js";
+import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js";
 import { requestPhoneChange } from "./phone-change.js";
 
 /** Session TTL — how long an awaiting state stays alive before reset. */
@@ -85,6 +79,7 @@ import {
   handleAnalytics,
   handleShares,
   handleBuyShares,
+  handleGroupLoan,
 } from "./handlers/money.js";
 import {
   handleValidateClaim,
@@ -517,7 +512,8 @@ async function handleMessageInner(
     case "loan":
     case "repay":
     case "withdraw":
-    case "buyshares": {
+    case "buyshares":
+    case "grouploan": {
       if (member && (member.status === "suspended" || member.status === "deceased")) {
         await sendText({
           to: phone,
@@ -542,7 +538,9 @@ async function handleMessageInner(
       // Tier-based transaction limit check. TIER_LIMITS and contribution
       // amounts are stored in KOBO, so parse the user's naira into kobo before
       // comparing (otherwise a naira-vs-kobo mismatch silently disables the cap).
-      const amt = parseNaira(args[0]);
+      // grouploan is *grouploan <group id> <amount> <months>* — its amount is
+      // the SECOND arg, so parse the right token for the tier cap.
+      const amt = parseNaira(cmd === "grouploan" ? args[1] : args[0]);
       if (cmd !== "buyshares" && amt !== null && member) {
         const tierError = await checkTierLimit(phone, amt, member.id);
         if (tierError) {
@@ -554,6 +552,7 @@ async function handleMessageInner(
       else if (cmd === "loan") await handleLoan(phone, args);
       else if (cmd === "repay") await handleRepay(phone, args);
       else if (cmd === "buyshares") await handleBuyShares(phone, args);
+      else if (cmd === "grouploan") await handleGroupLoan(phone, args);
       else await handleWithdraw(phone, args);
       break;
     }
@@ -1076,35 +1075,6 @@ async function handleMessageInner(
         amount,
       );
       await sendText({ to: phone, text: contributed.message });
-      break;
-    }
-
-    case "grouploan": {
-      if (!member) {
-        await sendText({
-          to: phone,
-          text: "You need to join a cooperative first. Reply *join <code>*.",
-        });
-        break;
-      }
-      const groupId = args[0];
-      const amount = parseNaira(args[1]);
-      const months = Number(args[2]);
-      if (!groupId || amount === null || !Number.isInteger(months) || months <= 0) {
-        await sendText({
-          to: phone,
-          text: "Usage: *grouploan <group id> <amount> <months>* — e.g. *grouploan abc123 50000 3*",
-        });
-        break;
-      }
-      const applied = await applyGroupLoan(
-        member.cooperativeId,
-        groupId,
-        member.id,
-        amount,
-        months,
-      );
-      await sendText({ to: phone, text: applied.message });
       break;
     }
 

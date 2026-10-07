@@ -17,10 +17,15 @@ import {
   groupLoans,
 } from "../src/services/groups.js";
 import { approveLoan } from "../src/services/loans.js";
+import {
+  scanGuarantorDefaults,
+  executeDueDeductions,
+} from "../src/services/guarantordeduction.js";
+import { handleMessage } from "../src/services/conversation.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
 import { handleAdminCommand } from "../src/services/admin.js";
 import { createUnit, setUnitAdmin } from "../src/services/units.js";
-import { sendText } from "../src/lib/messaging.js";
+import { sendText, notifyMember } from "../src/lib/messaging.js";
 
 const actor = (m: { id: string; phone: string; role: string }): {
   id: string;
@@ -400,6 +405,80 @@ describe("joint-liability group loans", () => {
     expect(listed.loans?.length).toBe(1);
     expect(listed.loans?.[0].memberName).toBe(a.name);
     expect(listed.loans?.[0].status).toBe("guaranteed");
+  });
+
+  it("recovers a defaulted group loan from the active members' savings", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-03-01T10:00:00Z"));
+      const coop = await createTestCoop("GRPDEF");
+      const admin = await createTestMember(coop.id, { phone: "2348000010450", role: "superadmin" });
+      const a = await createTestMember(coop.id, { phone: "2348000010451" });
+      const b = await createTestMember(coop.id, { phone: "2348000010452" });
+
+      const created = await createGroup(coop.id, "vsla", "Def", "DEF1", 50000, 6, actor(admin));
+      const groupId = created.groupId!;
+      await joinGroup(coop.id, "DEF1", a.id);
+      await joinGroup(coop.id, "DEF1", b.id);
+
+      const applied = await applyGroupLoan(coop.id, groupId, a.id, 500000, 11);
+      const loanId = applied.loanId!;
+      // Turn it into a disbursed loan that is 2+ months in arrears.
+      await prisma.loan.update({
+        where: { id: loanId },
+        data: { status: "disbursed", balance: 500000, dueDate: new Date("2025-12-15T10:00:00Z") },
+      });
+
+      await scanGuarantorDefaults();
+
+      const deductions = await prisma.guarantorDeduction.findMany({ where: { loanId } });
+      // One row per active group member, split equally, summing to the share.
+      expect(deductions.length).toBe(2);
+      const byMember = Object.fromEntries(deductions.map((d) => [d.guarantorId, d.amount]));
+      expect(byMember[a.id] + byMember[b.id]).toBe(deductions[0].amount + deductions[1].amount);
+      expect(Math.abs(byMember[a.id] - byMember[b.id])).toBeLessThanOrEqual(1);
+      expect(deductions.every((d) => d.status === "notified")).toBe(true);
+
+      const texts = vi
+        .mocked(notifyMember)
+        .mock.calls.map((c) => String(c[1]))
+        .join("\n");
+      expect(texts).toMatch(/jointly liable group/i);
+
+      // Fund both members, advance past the notice window, and collect.
+      const walletUpdate = { balance: 100000, totalSaved: 100000 };
+      await prisma.wallet.update({ where: { memberId: a.id }, data: walletUpdate });
+      await prisma.wallet.update({ where: { memberId: b.id }, data: walletUpdate });
+
+      vi.setSystemTime(new Date("2026-03-12T10:00:00Z"));
+      const res = await executeDueDeductions();
+      expect(res.deducted).toBe(2);
+      expect(await walletBalance(a.id)).toBeLessThan(100000);
+      expect(await walletBalance(b.id)).toBeLessThan(100000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("blocks a frozen member from originating a group loan", async () => {
+    const coop = await createTestCoop("GRPLOAN6");
+    const admin = await createTestMember(coop.id, { phone: "2348000010460", role: "superadmin" });
+    const a = await createTestMember(coop.id, { phone: "2348000010461" });
+
+    const created = await createGroup(coop.id, "vsla", "Frozen", "FRZ1", 50000, 6, actor(admin));
+    const groupId = created.groupId!;
+    await joinGroup(coop.id, "FRZ1", a.id);
+    await prisma.member.update({ where: { id: a.id }, data: { frozenAt: new Date() } });
+
+    vi.clearAllMocks();
+    await handleMessage(a.phone, `grouploan ${groupId} 50000 3`);
+
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(texts).toMatch(/frozen/i);
+    expect(await prisma.loan.count({ where: { memberId: a.id } })).toBe(0);
   });
 });
 
