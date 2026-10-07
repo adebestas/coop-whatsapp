@@ -149,6 +149,8 @@ export function buildFullMenu(
     `• *buypolls* / *votebuy <poll id> <option #>*\n` +
     `• *votediv <yes|no>* — dividend-rate vote\n` +
     `• *dividend <rate>* — dividend calculator\n` +
+    `• *meetings* — general meetings; *attend <id>* / *proxy <id> <code>*\n` +
+    `• *motions <meeting id>* / *motionvote <motion id> <yes\\|no\\|abstain>*\n` +
     `• *byelaws* / *grievance <msg>* / *reserveinfo*\n\n` +
     `*🎓 Learn*\n` +
     `• *class* / *next* — financial literacy lessons\n\n` +
@@ -200,6 +202,7 @@ export function buildAdminMenu(): string {
     `• *risk* — AI loan risk assessment\n\n` +
     `*Committees (super admin):* *addcommittee <credit\\|supervisory\\|board> <name> [size]*, *appoint <type> <member code> [chair]*, *removecommittee <type> <member code>*, *committees*\n` +
     `*Committees (members):* *cvote <loan id> approve\\|reject*, *committeequeue*, *supervisoryfreeze <member code> [reason]*, *supervisoryunfreeze <member code>*\n\n` +
+    `*Meetings:* *startmeeting <agm\\|sgm> <title> [quorum%]*, *openmeeting <id>*, *closemeeting <id>*, *addmotion <meeting id> <title> \\| <description> [kind]*, *closemotion <id>*, *meetingminutes <id>*\n\n` +
     `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *confirmname <code>*, *paydividend <rate%>*, *paysharedividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
 }

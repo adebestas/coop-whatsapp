@@ -112,6 +112,13 @@ import {
   handlePollResults,
   handleElections,
 } from "./handlers/voting.js";
+import {
+  assignProxy,
+  attendMeeting,
+  castMotionVote,
+  listMeetings,
+  listMotions,
+} from "./meetings.js";
 
 export type BotState =
   | "idle"
@@ -821,6 +828,99 @@ async function handleMessageInner(
     case "elections":
       await handleElections(phone);
       break;
+
+    case "meetings": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const meetings = await listMeetings(member.cooperativeId);
+      await sendText({ to: phone, text: meetings.message });
+      break;
+    }
+
+    case "attend": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const attendRef = args[0];
+      if (!attendRef) {
+        await sendText({ to: phone, text: "Usage: *attend <meeting id>*" });
+        break;
+      }
+      const attendRes = await attendMeeting(member.cooperativeId, attendRef, member.id);
+      await sendText({ to: phone, text: attendRes.message });
+      break;
+    }
+
+    case "proxy": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const proxyRef = args[0];
+      const proxyCode = args[1];
+      if (!proxyRef || !proxyCode) {
+        await sendText({
+          to: phone,
+          text: "Usage: *proxy <meeting id> <member code>* — carry an absent member's vote.",
+        });
+        break;
+      }
+      const proxyRes = await assignProxy(member.cooperativeId, proxyRef, member.id, proxyCode);
+      await sendText({ to: phone, text: proxyRes.message });
+      break;
+    }
+
+    case "motions": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const motionsRef = args[0];
+      if (!motionsRef) {
+        await sendText({ to: phone, text: "Usage: *motions <meeting id>*" });
+        break;
+      }
+      const motionsRes = await listMotions(member.cooperativeId, motionsRef);
+      await sendText({ to: phone, text: motionsRes.message });
+      break;
+    }
+
+    case "motionvote": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const motionRef = args[0];
+      const motionChoice = args[1];
+      if (!motionRef || !motionChoice) {
+        await sendText({
+          to: phone,
+          text: "Usage: *motionvote <motion id> <yes|no|abstain>*",
+        });
+        break;
+      }
+      const voteRes = await castMotionVote(member.cooperativeId, motionRef, member.id, motionChoice);
+      await sendText({ to: phone, text: voteRes.message });
+      break;
+    }
 
     case "votediv": {
       if (!member) {

@@ -28,6 +28,15 @@ import {
 } from "./committees.js";
 import { previewDividendRun, getFundBalances } from "./dividends.js";
 import {
+  addMotion,
+  closeMeeting,
+  closeMotion,
+  meetingMinutes,
+  MOTION_KINDS,
+  openMeeting,
+  startMeeting,
+} from "./meetings.js";
+import {
   approveWithdrawal,
   finalizeWithdrawal,
   rejectWithdrawal,
@@ -2835,6 +2844,136 @@ export async function handleAdminCommand(
           to: phone,
           text: `*Open Grievances*\n\n${gBody}\n\nResolve with *resolve <id> <response>*`,
         });
+        return true;
+      }
+
+      case "startmeeting": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can call meetings." });
+          return true;
+        }
+        const type = args[0]?.toLowerCase();
+        const rest = args.slice(1);
+        const lastArg = rest[rest.length - 1] ?? "";
+        const hasQuorum = /^\d+$/.test(lastArg);
+        const title = (hasQuorum ? rest.slice(0, -1) : rest).join(" ").trim();
+        if (!type || !title) {
+          await sendText({
+            to: phone,
+            text: "Usage: *startmeeting <agm|sgm> <title> [quorum%]* — e.g. *startmeeting agm 2026 Annual General Meeting 50*.",
+          });
+          return true;
+        }
+        const startRes = await startMeeting(coopId, type, title, hasQuorum ? Number(lastArg) : undefined, {
+          id: admin.id,
+          role: admin.role,
+          phone,
+        });
+        await sendText({ to: phone, text: startRes.message });
+        return true;
+      }
+
+      case "openmeeting": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can open meetings." });
+          return true;
+        }
+        const openId = args[0];
+        if (!openId) {
+          await sendText({ to: phone, text: "Usage: *openmeeting <meeting id>*" });
+          return true;
+        }
+        const openRes = await openMeeting(coopId, openId, {
+          id: admin.id,
+          role: admin.role,
+          phone,
+        });
+        await sendText({ to: phone, text: openRes.message });
+        return true;
+      }
+
+      case "closemeeting": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can close meetings." });
+          return true;
+        }
+        const closeId = args[0];
+        if (!closeId) {
+          await sendText({ to: phone, text: "Usage: *closemeeting <meeting id>*" });
+          return true;
+        }
+        const closeRes = await closeMeeting(coopId, closeId, {
+          id: admin.id,
+          role: admin.role,
+          phone,
+        });
+        await sendText({ to: phone, text: closeRes.message });
+        return true;
+      }
+
+      case "addmotion": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can add motions." });
+          return true;
+        }
+        const motionMeetingRef = args[0];
+        const rawMotion = args.slice(1).join(" ").trim();
+        const [titlePart, ...descParts] = rawMotion.split("|");
+        const motionTitle = titlePart.trim();
+        let motionDesc = descParts.join("|").trim();
+        let motionKind = "general";
+        const descWords = motionDesc.split(/\s+/).filter(Boolean);
+        const maybeKind = descWords[descWords.length - 1]?.toLowerCase();
+        if (maybeKind && (MOTION_KINDS as readonly string[]).includes(maybeKind)) {
+          motionKind = maybeKind;
+          motionDesc = descWords.slice(0, -1).join(" ").trim();
+        }
+        if (!motionMeetingRef || !motionTitle || !motionDesc) {
+          await sendText({
+            to: phone,
+            text: "Usage: *addmotion <meeting id> <title> | <description> [general|bylaw|dividend|election]*",
+          });
+          return true;
+        }
+        const addMotionRes = await addMotion(
+          coopId,
+          motionMeetingRef,
+          motionTitle,
+          motionDesc,
+          motionKind,
+          { id: admin.id, role: admin.role, phone },
+        );
+        await sendText({ to: phone, text: addMotionRes.message });
+        return true;
+      }
+
+      case "closemotion": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can close motions." });
+          return true;
+        }
+        const closeMotionId = args[0];
+        if (!closeMotionId) {
+          await sendText({ to: phone, text: "Usage: *closemotion <motion id>*" });
+          return true;
+        }
+        const closeMotionRes = await closeMotion(coopId, closeMotionId, {
+          id: admin.id,
+          role: admin.role,
+          phone,
+        });
+        await sendText({ to: phone, text: closeMotionRes.message });
+        return true;
+      }
+
+      case "meetingminutes": {
+        const minutesId = args[0];
+        if (!minutesId) {
+          await sendText({ to: phone, text: "Usage: *meetingminutes <meeting id>*" });
+          return true;
+        }
+        const minutesRes = await meetingMinutes(coopId, minutesId);
+        await sendText({ to: phone, text: minutesRes.message });
         return true;
       }
 
