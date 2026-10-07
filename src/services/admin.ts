@@ -58,6 +58,7 @@ import {
 import { startBuyPoll, addPollOption, closeBuyPoll, listBuyPolls } from "./buypoll.js";
 import { payrollOverview, runPayroll, setSalary } from "./payroll.js";
 import { runExport, exportMeetingMinutes, type ExportKind } from "./exports.js";
+import { createGroup, closeGroupCycle, listGroups } from "./groups.js";
 import { checkDailyPayoutLimit, checkVelocity } from "./fraud.js";
 import { runBackup } from "./backup.js";
 import { runReconciliation } from "./reconcile.js";
@@ -3476,6 +3477,65 @@ export async function handleAdminCommand(
             : "",
         ].filter(Boolean);
         await sendText({ to: phone, text: body.join("\n") });
+        return true;
+      }
+
+      case "newgroup": {
+        const [type, name, code, amountArg, cycleArg] = args;
+        const amount = toKobo(Number(amountArg));
+        const cycleLength = Number(cycleArg);
+        if (!type || !name || !code || !Number.isFinite(amount) || !Number.isFinite(cycleLength)) {
+          await sendText({
+            to: phone,
+            text: "Usage: *newgroup <rosca|vsla> <name> <code> <amount> <cycleLength>* — e.g. *newgroup rosca Family FAM1 5000 12*",
+          });
+          return true;
+        }
+        const created = await createGroup(coopId, type, name, code, amount, cycleLength, {
+          id: admin.id,
+          phone,
+          role: roleLabel(ctx),
+        });
+        await sendText({ to: phone, text: created.message });
+        return true;
+      }
+
+      case "closegroupcycle": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can close a group cycle." });
+          return true;
+        }
+        const id = args[0];
+        if (!id) {
+          await sendText({ to: phone, text: "Usage: *closegroupcycle <group id>*" });
+          return true;
+        }
+        const closed = await closeGroupCycle(coopId, id, {
+          id: admin.id,
+          phone,
+          role: roleLabel(ctx),
+        });
+        await sendText({ to: phone, text: closed.message });
+        return true;
+      }
+
+      case "groups": {
+        const listed = await listGroups(coopId);
+        if (!listed.groups || listed.groups.length === 0) {
+          await sendText({
+            to: phone,
+            text: "No savings groups yet. Create one with *newgroup <rosca|vsla> <name> <code> <amount> <cycleLength>*.",
+          });
+          return true;
+        }
+        const lines = ["*👥 Savings Groups*", ""];
+        for (const g of listed.groups) {
+          lines.push(
+            `• *${g.name}* (${g.code}) — ${g.type.toUpperCase()} — ${g.memberCount} member(s) — ${formatBalance(g.contributionAmount)} × ${g.cycleLength} — _${g.status}_`,
+            `  ID: ${g.id}`,
+          );
+        }
+        await sendText({ to: phone, text: lines.join("\n") });
         return true;
       }
 

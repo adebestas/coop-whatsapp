@@ -15,6 +15,7 @@ import { validateDeviceSession } from "../lib/security-hardening.js";
 import { isFrozen, freezeMessage, unfreezeMessage } from "../lib/freeze.js";
 import { savePayee, listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js";
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
+import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js";
 import { requestPhoneChange } from "./phone-change.js";
 
 /** Session TTL — how long an awaiting state stays alive before reset. */
@@ -1023,6 +1024,115 @@ async function handleMessageInner(
       const lines = [`*📜 Byelaws — ${coop?.name ?? "your cooperative"}*`, ""];
       for (const b of byelaws) {
         lines.push(`*${b.title}*`, b.content, "");
+      }
+      await sendText({ to: phone, text: lines.join("\n") });
+      break;
+    }
+
+    case "joingroup": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      if (!args[0]) {
+        await sendText({ to: phone, text: "Usage: *joingroup <group code>*" });
+        break;
+      }
+      const joined = await joinGroup(member.cooperativeId, args[0], member.id);
+      await sendText({ to: phone, text: joined.message });
+      break;
+    }
+
+    case "groupcontribute": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const groupId = args[0];
+      const amount = parseNaira(args[1]);
+      if (!groupId || amount === null) {
+        await sendText({
+          to: phone,
+          text: "Usage: *groupcontribute <group id> <amount>* — e.g. *groupcontribute abc123 5000*",
+        });
+        break;
+      }
+      const contributed = await contributeToGroup(
+        member.cooperativeId,
+        groupId,
+        member.id,
+        amount,
+      );
+      await sendText({ to: phone, text: contributed.message });
+      break;
+    }
+
+    case "mygroups": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const mine = await myGroups(member.cooperativeId, member.id);
+      if (!mine.groups || mine.groups.length === 0) {
+        await sendText({
+          to: phone,
+          text: "You have not joined any savings group yet. Reply *joingroup <code>* to join one.",
+        });
+        break;
+      }
+      const lines = ["*👥 Your Savings Groups*", ""];
+      for (const g of mine.groups) {
+        lines.push(
+          `• *${g.name}* (${g.code}) — ${g.type.toUpperCase()} — ${formatBalance(g.contributionAmount)} × ${g.cycleLength}`,
+          `  ID: ${g.id}`,
+        );
+      }
+      await sendText({ to: phone, text: lines.join("\n") });
+      break;
+    }
+
+    case "groupstatus": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      if (!args[0]) {
+        await sendText({ to: phone, text: "Usage: *groupstatus <group id>*" });
+        break;
+      }
+      const status = await groupStatus(member.cooperativeId, args[0]);
+      if (!status.ok || !status.group) {
+        await sendText({ to: phone, text: status.message });
+        break;
+      }
+      const lines = [
+        `*👥 ${status.group.name}* (${status.group.code}) — ${status.group.type.toUpperCase()}`,
+        "",
+        `• Contribution: *${formatBalance(status.group.contributionAmount)}* per round`,
+        `• Cycle length: *${status.group.cycleLength}* rounds`,
+        `• Pot: *${formatBalance(status.pot ?? 0)}*`,
+        status.cycle
+          ? `• Open cycle: *#${status.cycle.cycleNumber}*`
+          : `• Status: *${status.group.status}*`,
+        "",
+        `*Members (${status.members?.length ?? 0}):*`,
+      ];
+      for (const m of status.members ?? []) {
+        const pos = m.rotationPosition ? ` — pos #${m.rotationPosition}` : "";
+        const sh = m.shares > 0 ? ` — ${m.shares} share(s)` : "";
+        lines.push(`• ${m.name}${pos}${sh}`);
       }
       await sendText({ to: phone, text: lines.join("\n") });
       break;

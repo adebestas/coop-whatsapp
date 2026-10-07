@@ -136,6 +136,10 @@ export function buildFullMenu(
     `• *loan <amount> <months>* — apply (e.g. *loan 50000 3*)\n` +
     `• *repay* — pay your monthly installment\n` +
     `• *validate <claim id>* — validate a death claim (guarantors)\n\n` +
+    `*👥 Savings groups (ROSCA / VSLA)*\n` +
+    `• *joingroup <code>* — join a group\n` +
+    `• *groupcontribute <group id> <amount>* — pay into your group\n` +
+    `• *mygroups* / *groupstatus <group id>* — your groups\n\n` +
     `*📊 Account*\n` +
     `• *history* / *statement <month|year>* — transactions\n` +
     `• *analytics* — savings analytics\n` +
@@ -206,6 +210,7 @@ export function buildAdminMenu(): string {
     `*Committees (super admin):* *addcommittee <credit\\|supervisory\\|board> <name> [size]*, *appoint <type> <member code> [chair]*, *removecommittee <type> <member code>*, *committees*\n` +
     `*Committees (members):* *cvote <loan id> approve\\|reject*, *committeequeue*, *supervisoryfreeze <member code> [reason]*, *supervisoryunfreeze <member code>*\n\n` +
     `*Meetings:* *startmeeting <agm\\|sgm> <title> [quorum%]*, *openmeeting <id>*, *closemeeting <id>*, *addmotion <meeting id> <title> \\| <description> [kind]*, *closemotion <id>*, *meetingminutes <id>*\n\n` +
+    `*Savings groups:* *newgroup <rosca\\|vsla> <name> <code> <amount> <cycleLength>*, *closegroupcycle <group id>*, *groups*\n\n` +
     `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *confirmname <code>*, *paydividend <rate%>*, *paysharedividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
 }
