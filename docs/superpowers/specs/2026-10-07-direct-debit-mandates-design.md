@@ -70,9 +70,19 @@ When a member sets up a mandate, entering the bank account must be guided:
 5. The member **confirms** the name, and the mandate is created against that
    account.
 
-Scope: the **mandate flow only** (not the general bank-account setup or payees).
-The provider adapter gains a `listBanks()` method (Paystack `GET /bank`, Monnify
+Scope: **all member bank-account entry flows** — the mandate flow, the general
+bank-account setup (used for withdrawals), and saved payees (`addpayee`). The
+provider adapter gains a `listBanks()` method (Paystack `GET /bank`, Monnify
 bank list) with an in-process cache and static fallback.
+
+## Addendum 3 (user, 2026-10-07): account-name confirmation on all Monnify payouts
+
+Before **every payout/transfer made via Monnify** (withdrawals, refunds,
+dividends, pay-anyone), the system must resolve the recipient's account name
+(via the provider's `resolveAccount`) and confirm it before sending money. If
+the resolved name cannot be obtained, the payout is held (fail-closed) rather
+than sent blind. This extends the existing "Zero-BVN identity assurance" pattern
+(`Member.bankAccountName`) to every Monnify payout path.
 
 ## Non-goals
 

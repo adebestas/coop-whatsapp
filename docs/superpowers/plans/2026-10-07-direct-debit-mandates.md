@@ -780,13 +780,13 @@ git commit -m "fix(money): ensure every payment and deduction carries a descript
 
 ---
 
-### Task 11: Bank picker + account-name confirmation (mandate flow)
+### Task 11: Bank picker + account-name confirmation (all account-entry flows)
 
 **Files:**
 - Modify: `src/services/payments/index.ts`, `src/services/payments/monnify.ts`, `src/services/payments/paystack.ts`
 - Modify: `src/services/handlers/money.ts`, `src/services/handlers/session.ts`, `src/services/conversation.ts`
-- Modify: `src/services/mandates.ts`
-- Test: `tests/mandates.test.ts`
+- Modify: `src/services/mandates.ts`, `src/services/beneficiaries.ts`
+- Test: `tests/mandates.test.ts`, `tests/bank-picker.test.ts` (new)
 
 **Interfaces produced:**
 ```ts
@@ -794,40 +794,72 @@ export interface Bank { code: string; name: string; }
 // ProviderAdapter gains:
 listBanks?(): Promise<Bank[]>;
 ```
-And a mandate-flow state machine: `awaiting_mandate_account` → `awaiting_mandate_bank` → `awaiting_mandate_confirm` → create.
+And a reusable guided flow: `awaiting_bank_account` → `awaiting_bank_choice` → `awaiting_bank_confirm` → caller continues. Used by the mandate flow, the general bank-account setup, and `addpayee`.
 
 - [ ] **Step 1: Add `listBanks` to the provider adapter**
 
 Add `listBanks?(): Promise<Bank[]>` to `ProviderAdapter`. Implement for Paystack (`GET /bank?currency=NGN` → `data[].code/name`) and Monnify (bank list endpoint). Add a small in-process cache (e.g. 24h TTL) and a static fallback built from `BANK_CODES` in `src/lib/banks.ts` when the provider call fails. Write tests with mocked `fetch` asserting the mapping + fallback.
 
-- [ ] **Step 2: Write failing mandate-flow tests**
+- [ ] **Step 2: Write failing flow tests**
 
-- `mandate` starts a guided flow: the member is asked for the account number.
-- After the account number, the system lists banks (from `listBanks`) and asks the member to pick one (by number or name).
+- Entering an account number starts the guided flow: the system lists banks (from `listBanks`) and asks the member to pick one (by number or name substring).
 - After the bank is picked, the system calls `resolveAccount` and shows the resolved name, asking the member to confirm.
-- On confirm, `createMandate` runs with the account number + bank code + resolved name.
+- On confirm, the caller continues (mandate creation / bank-account save / payee save) with the account number + bank code + resolved name.
 - If `resolveAccount` fails, the member is told and can retry.
+- The same helper is exercised by the mandate flow, the general bank-account setup, and `addpayee`.
 
-Run: `npx vitest run tests/mandates.test.ts`
+Run: `npx vitest run tests/bank-picker.test.ts tests/mandates.test.ts`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement the guided flow**
+- [ ] **Step 3: Implement the reusable guided flow**
 
-Add the session states (`awaiting_mandate_account`, `awaiting_mandate_bank`, `awaiting_mandate_confirm`) in `session.ts`, the handlers in `money.ts`, and route them in `conversation.ts`. The bank list is presented as a numbered, searchable list (accept a number or a name substring). `createMandate` accepts the resolved `accountName` and stores it. Keep the existing PIN step.
+Add the session states (`awaiting_bank_account`, `awaiting_bank_choice`, `awaiting_bank_confirm`) in `session.ts`, the handlers in `money.ts`, and route them in `conversation.ts`. The bank list is presented as a numbered, searchable list (accept a number or a name substring). Wire it into: the mandate flow (keep the existing PIN step), the general bank-account setup, and `addpayee`. `createMandate` accepts the resolved `accountName` and stores it.
 
 - [ ] **Step 4: Run tests + gate, then commit**
 
-Run `npx vitest run tests/mandates.test.ts` → PASS; `npm run typecheck`; `npm run lint`; `npm test`.
+Run `npx vitest run tests/bank-picker.test.ts tests/mandates.test.ts` → PASS; `npm run typecheck`; `npm run lint`; `npm test`.
 ```bash
-git add src/services/payments/index.ts src/services/payments/monnify.ts src/services/payments/paystack.ts src/services/handlers/money.ts src/services/handlers/session.ts src/services/conversation.ts src/services/mandates.ts tests/mandates.test.ts
-git commit -m "feat(direct-debit): bank picker and account-name confirmation in the mandate flow"
+git add src/services/payments/index.ts src/services/payments/monnify.ts src/services/payments/paystack.ts src/services/handlers/money.ts src/services/handlers/session.ts src/services/conversation.ts src/services/mandates.ts src/services/beneficiaries.ts tests/mandates.test.ts tests/bank-picker.test.ts
+git commit -m "feat(direct-debit): bank picker and account-name confirmation across account-entry flows"
+```
+
+---
+
+### Task 12: Account-name confirmation on all Monnify payouts
+
+**Files:**
+- Modify: `src/services/disbursements.ts` (or the shared payout helper), `src/services/withdrawals.ts`, `src/services/refunds.ts`, `src/services/dividends.ts`, `src/services/payanyone.ts`
+- Test: `tests/payout-name-confirm.test.ts` (new)
+
+**Goal:** before every payout/transfer made via Monnify, resolve the recipient's account name and confirm it; hold (fail-closed) if it cannot be resolved.
+
+- [ ] **Step 1: Write failing tests**
+
+- A Monnify payout resolves the recipient account name first; on a name mismatch with the expected recipient, the payout is held (not sent) and alerted.
+- A Monnify payout whose name cannot be resolved is held (fail-closed).
+- A Paystack payout is unaffected (or uses its own resolve path).
+- The refund/withdrawal/dividend/pay-anyone paths all go through the confirmation.
+
+Run: `npx vitest run tests/payout-name-confirm.test.ts`
+Expected: FAIL.
+
+- [ ] **Step 2: Implement**
+
+Add the name-confirmation step to the shared payout path used by all four flows (find the common helper — likely `sendToBank` in `src/services/disbursements.ts`). Resolve via `resolveAccount`; compare against the expected recipient name (normalized); hold + alert on mismatch or resolution failure. Persist the resolved name where the schema supports it (`Member.bankAccountName`, `Payout.note`). Every payout carries a human-readable description.
+
+- [ ] **Step 3: Full gate + commit**
+
+Run `npm run typecheck` · `npm run lint` · `npm test`.
+```bash
+git add src/services/disbursements.ts src/services/withdrawals.ts src/services/refunds.ts src/services/dividends.ts src/services/payanyone.ts tests/payout-name-confirm.test.ts
+git commit -m "feat(payments): confirm account name on all Monnify payouts"
 ```
 
 ---
 
 ## Self-Review
 
-- **Spec coverage:** providers (Task 2), flexible cap (Tasks 1/3), all three purposes (Tasks 4/6/7), provider-hosted link (Tasks 2/3), retry-until-success once/day (Tasks 4/5), notify-after-only (Tasks 4/6/7), reminder suppression (Task 5), PIN (Task 3), accounting via existing services (Task 4), admin view + docs (Task 8). **Addendum:** pause whole mandate / per purpose / skip one debit (Tasks 3/5/8), refund maker-checker with bank payout (Task 9), every payment/deduction has a description (global constraint + Task 10 app-wide audit), bank picker + account-name confirmation in the mandate flow (Task 11). ✅
+- **Spec coverage:** providers (Task 2), flexible cap (Tasks 1/3), all three purposes (Tasks 4/6/7), provider-hosted link (Tasks 2/3), retry-until-success once/day (Tasks 4/5), notify-after-only (Tasks 4/6/7), reminder suppression (Task 5), PIN (Task 3), accounting via existing services (Task 4), admin view + docs (Task 8). **Addendum:** pause whole mandate / per purpose / skip one debit (Tasks 3/5/8), refund maker-checker with bank payout (Task 9), every payment/deduction has a description (global constraint + Task 10 app-wide audit), bank picker + account-name confirmation across all account-entry flows (Task 11), account-name confirmation on all Monnify payouts (Task 12). ✅
 - **Placeholder scan:** no TBD/TODO; every code step has real code or an exact file+pattern to follow.
 - **Type consistency:** `Mandate`/`MandateDebit` field names, `settleDebit`/`applyPurpose`/`runMandateDebits`/`runMandateRetries` signatures are consistent across tasks.
 - **Known risk:** Monnify's mandate path prefix (`/api/v1/...` vs `/v1/...`) must be verified against the adapter's `api()` base in Task 2 Step 1; the test pins the exact URL.
