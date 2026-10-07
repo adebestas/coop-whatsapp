@@ -180,6 +180,30 @@ describe("meeting service", () => {
     expect(row!.proxyForMemberId).toBe(a.id);
   });
 
+  it("counts only active members toward the quorum denominator", async () => {
+    const coop = await createTestCoop("MTG09");
+    const admin = await createTestMember(coop.id, SUPER);
+    const a = await createTestMember(coop.id, { phone: "2348010000060", name: "Ada" });
+    await createTestMember(coop.id, { phone: "2348010000061", name: "Bola" });
+    await createTestMember(coop.id, { phone: "2348010000062", name: "Chidi" });
+    // Pending/suspended members must not inflate the denominator.
+    for (const [i, status] of (["pending", "suspended", "pending"] as const).entries()) {
+      const m = await createTestMember(coop.id, { phone: `234801000006${3 + i}` });
+      await prisma.member.update({ where: { id: m.id }, data: { status } });
+    }
+    const actor = { phone: admin.phone, id: admin.id, role: "superadmin" };
+
+    const started = await startMeeting(coop.id, "agm", "Active-only Quorum", 25, actor);
+    const meetingId = started.meetingId!;
+    await openMeeting(coop.id, meetingId, actor);
+    await attendMeeting(coop.id, meetingId, a.id);
+
+    const q = await quorumMet(coop.id, meetingId);
+    expect(q.eligible).toBe(4);
+    expect(q.required).toBe(1);
+    expect(q.met).toBe(true);
+  });
+
   it("lists meetings and motions for members", async () => {
     const coop = await createTestCoop("MTG06");
     const admin = await createTestMember(coop.id, SUPER);

@@ -582,7 +582,7 @@ export async function quorumMet(coopId: string, meetingId: string): Promise<Quor
   }
 
   const [eligible, attendance] = await Promise.all([
-    prisma.member.count({ where: { cooperativeId: coopId, status: { not: "deceased" } } }),
+    prisma.member.count({ where: { cooperativeId: coopId, status: "active" } }),
     prisma.meetingAttendance.findMany({
       where: { meetingId: meeting.id, present: true },
       select: { memberId: true, proxyForMemberId: true },
