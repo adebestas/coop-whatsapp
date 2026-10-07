@@ -30,6 +30,7 @@ BEGIN
     'BrandingConfig','Broadcast','Byelaw','Committee','CommitteeDecision',
     'Contribution','CoopPost',
     'CooperativeConfig','DeathClaim','DeductionBatch','DevelopmentFund',
+    'Group','GroupCycle',
     'Dividend','DividendVote','EducationFund','ExternalPayment','Grievance',
     'GuarantorDeduction','JournalEntry','LedgerEntry','Loan','LoanProtection',
     'ManualCredit',
@@ -43,7 +44,8 @@ BEGIN
     'LoanRepayment','VoteBallot','VoteCandidate','PollBallot','PollOption',
     'DeathValidation','FavoritePayee','MemberProgress','ProvisionEntry',
     'CommitteeMember','CommitteeVote',
-    'MeetingAttendance','MotionVote'
+    'MeetingAttendance','MotionVote',
+    'GroupMember','GroupContribution'
   ]
   LOOP
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);

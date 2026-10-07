@@ -73,6 +73,8 @@ subscription       Subscription?
   committeeDecisions CommitteeDecision[]
   meetings           Meeting[]
   motions            Motion[]
+  groups             Group[]
+  groupCycles        GroupCycle[]
 
   @@index([status])
   @@index([code])
@@ -258,6 +260,10 @@ model Member {
   meetingAttendance       MeetingAttendance[] @relation("MeetingAttendance")
   meetingProxiesHeld      MeetingAttendance[] @relation("MeetingProxy")
   motionVotes             MotionVote[]        @relation("MotionVote")
+  groupsCreated           Group[]             @relation("GroupCreator")
+  groupMemberships        GroupMember[]       @relation("GroupMemberships")
+  groupCyclesPaidOut      GroupCycle[]        @relation("GroupCyclePayout")
+  groupContributions      GroupContribution[] @relation("GroupContributions")
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -380,12 +386,15 @@ model Loan {
   repayments         LoanRepayment[]
   protection         LoanProtection?
   provisionEntries   ProvisionEntry[]
+  groupId            String?
+  group              Group?          @relation(fields: [groupId], references: [id], onDelete: SetNull)
 
   @@index([memberId, status])
   @@index([cooperativeId, status])
   @@index([status, createdAt])
   @@index([cooperativeId, status, queuePosition])
   @@index([accountOfficerApprovedById])
+  @@index([groupId])
 }
 
 // ---- Guarantors ----
@@ -1510,4 +1519,79 @@ model ProvisionEntry {
 
   @@index([runId])
   @@index([loanId])
+}
+
+// ---- Groups (ROSCA / VSLA) ----
+// A savings group inside a cooperative. ROSCA rotates the pot to the next
+// member each round; VSLA accumulates shares and shares out at cycle close.
+model Group {
+  id                 String              @id @default(cuid())
+  cooperativeId      String
+  cooperative        Cooperative         @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  type               String // rosca | vsla
+  name               String
+  code               String
+  status             String              @default("active") // active | closed
+  contributionAmount Int // fixed contribution per round in kobo
+  cycleLength        Int // number of rounds per cycle
+  createdById        String
+  createdBy          Member             @relation("GroupCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt          DateTime            @default(now())
+  members            GroupMember[]
+  cycles             GroupCycle[]
+  contributions      GroupContribution[]
+  loans              Loan[]
+
+  @@unique([cooperativeId, code])
+  @@index([cooperativeId, status])
+}
+
+model GroupMember {
+  id               String   @id @default(cuid())
+  groupId          String
+  group            Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  memberId         String
+  member           Member   @relation("GroupMemberships", fields: [memberId], references: [id], onDelete: Cascade)
+  joinedAt         DateTime @default(now())
+  rotationPosition Int?
+  shares           Int      @default(0)
+  active           Boolean  @default(true)
+
+  @@unique([groupId, memberId])
+  @@index([memberId])
+}
+
+model GroupCycle {
+  id             String    @id @default(cuid())
+  groupId        String
+  group          Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  cooperativeId  String
+  cooperative    Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  cycleNumber    Int
+  status         String    @default("open") // open | closed
+  startedAt      DateTime  @default(now())
+  endedAt        DateTime?
+  payoutMemberId String?
+  payoutMember   Member?   @relation("GroupCyclePayout", fields: [payoutMemberId], references: [id], onDelete: SetNull)
+  shareOutAmount Int?
+  contributions  GroupContribution[]
+
+  @@unique([groupId, cycleNumber])
+  @@index([cooperativeId, status])
+}
+
+model GroupContribution {
+  id        String     @id @default(cuid())
+  groupId   String
+  group     Group      @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  cycleId   String
+  cycle     GroupCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  memberId  String
+  member    Member     @relation("GroupContributions", fields: [memberId], references: [id], onDelete: Cascade)
+  amount    Int // contribution amount in kobo
+  createdAt DateTime   @default(now())
+
+  @@index([groupId, createdAt])
+  @@index([cycleId])
+  @@index([memberId])
 }
