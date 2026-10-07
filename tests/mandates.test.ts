@@ -614,4 +614,23 @@ describe("mandate admin commands", () => {
     await handleAdminCommand(admin.phone, "pausemandate", [mandate.id.slice(-6)]);
     expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe("paused");
   });
+
+  it("rejects an unknown pause purpose", async () => {
+    const coop = await createTestCoop("MNADM7");
+    const admin = await createTestMember(coop.id, { phone: "2348000300061", role: "superadmin" });
+    const m = await createTestMember(coop.id, { phone: "2348000300062" });
+    const mandate = await seedMandate(coop.id, m.id);
+
+    vi.clearAllMocks();
+    await handleAdminCommand(admin.phone, "pausemandate", [mandate.id, "bogus"]);
+
+    const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.status).toBe("active");
+    expect(row?.pausedPurposes).toBe("");
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => String(c[0].text))
+      .join("\n");
+    expect(texts).toMatch(/use \*savings\*, \*loan\* or \*group\*/i);
+  });
 });

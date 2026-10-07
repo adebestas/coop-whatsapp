@@ -3002,6 +3002,13 @@ export async function handleAdminCommand(
           return true;
         }
         const purpose = args[1]?.trim().toLowerCase() || null;
+        if (purpose && !["savings", "loan", "group"].includes(purpose)) {
+          await sendText({
+            to: phone,
+            text: `Unknown purpose *${purpose}*. Use *savings*, *loan* or *group*.`,
+          });
+          return true;
+        }
         const mandateActor = { id: admin.id, phone, role: admin.role };
         const result =
           cmd === "pausemandate"

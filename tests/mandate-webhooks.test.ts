@@ -157,6 +157,27 @@ describe("mandate webhooks", () => {
     expect(journal?.description).toMatch(/savings/i);
   });
 
+  it("notifies the member after a successful savings debit", async () => {
+    const coop = await createTestCoop("MWH11");
+    const m = await createTestMember(coop.id, { phone: "2348000200012" });
+    const mandate = await seedMandate(coop.id, m.id);
+    await seedDebit(coop.id, m.id, mandate.id, { providerRef: "DD-SAV-NOTIFY-1" });
+
+    const res = await postMonnify({
+      eventType: "SUCCESSFUL_DISBURSEMENT",
+      eventData: { reference: "DD-SAV-NOTIFY-1", status: "SUCCESSFUL" },
+    });
+    expect(res.httpStatus).toBe(200);
+    expect(await walletBalance(m.id)).toBe(50_000);
+
+    // Savings is deposited by the wallet credit in settleDebit; applyPurpose
+    // still notifies the member so every debit (success or failure) is visible.
+    const notified = vi
+      .mocked(notifyMember)
+      .mock.calls.some((c) => /savings contribution/i.test(String(c[1])));
+    expect(notified).toBe(true);
+  });
+
   it("settles an overdue loan debit by repaying the target loan without inflating totalSaved", async () => {
     const coop = await createTestCoop("MWH9");
     const m = await createTestMember(coop.id, { phone: "2348000200010" });

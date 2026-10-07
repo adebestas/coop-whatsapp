@@ -212,6 +212,7 @@ export async function listCoopMandates(
   const rows = await prisma.mandate.findMany({
     where: { cooperativeId: coopId },
     orderBy: { createdAt: "desc" },
+    take: 50,
   });
   return {
     ok: true,
@@ -465,6 +466,13 @@ async function applyPurpose(
 ): Promise<void> {
   switch (debit.purpose) {
     case "savings":
+      // The wallet credit IS the savings deposit (settleDebit already credited
+      // it), but the member is still notified after every debit (success or
+      // failure) — there is no pre-debit notice.
+      await notifyMember(
+        await loadNotifiable(member.id),
+        `✅ Savings contribution of *${formatBalance(debit.amount)}* collected from your bank.`,
+      ).catch(() => {});
       return;
     case "loan": {
       const result = await repayLoan(
