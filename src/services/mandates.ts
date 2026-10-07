@@ -546,11 +546,15 @@ async function applyPurpose(
 }
 
 /**
- * Settle a mandate debit from a provider webhook. Idempotent: only a `pending`
- * debit is acted on. On success the wallet is credited through the SAME
- * balanced journal as a bank-transfer top-up, then the debit's purpose is
- * applied; on failure a retry is scheduled for +1 day. Every movement carries a
- * human-readable description. Never throws for an unknown/non-pending reference.
+ * Settle a mandate debit from a provider webhook. Idempotent. A `successful`
+ * webhook settles a `pending` OR `failed` row (a debit the reconciler aged out
+ * before the provider's delayed settlement arrived was still collected, so it
+ * must be credited exactly once; a row already `successful` is a no-op). A
+ * `failed` webhook only acts on a `pending` row. On success the wallet is
+ * credited through the SAME balanced journal as a bank-transfer top-up, then
+ * the debit's purpose is applied; on failure a retry is scheduled for +1 day.
+ * Every movement carries a human-readable description. Never throws for an
+ * unknown/terminal reference.
  */
 export async function settleDebit(
   provider: string,
@@ -568,9 +572,12 @@ export async function settleDebit(
     coopId,
     async (): Promise<"ok" | "ignored" | "no-wallet"> => {
       const debit = await prisma.mandateDebit.findUnique({ where: { providerRef: reference } });
-      if (!debit || debit.status !== "pending") return "ignored"; // idempotent
+      if (!debit) return "ignored";
 
       if (status === "failed") {
+        // A failure only moves a still-pending debit; a failed or successful
+        // row is terminal for this transition (idempotent).
+        if (debit.status !== "pending") return "ignored";
         await prisma.mandateDebit.update({
           where: { id: debit.id },
           data: {
@@ -585,6 +592,12 @@ export async function settleDebit(
         ).catch(() => {});
         return "ok";
       }
+
+      // Success may arrive LATE: the reconciler can have aged a still-pending
+      // debit to `failed` before the provider's settlement webhook landed. Such
+      // a row was collected, so credit it. Already-successful / skipped rows
+      // are terminal no-ops.
+      if (debit.status !== "pending" && debit.status !== "failed") return "ignored";
 
       const member = await prisma.member.findUnique({
         where: { id: debit.memberId },

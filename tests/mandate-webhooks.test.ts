@@ -436,4 +436,47 @@ describe("mandate webhooks", () => {
       .mock.calls.some((c) => /contributed/i.test(String(c[1])));
     expect(notified).toBe(true);
   });
+
+  it("credits the wallet when a successful webhook arrives after the reconciler aged the debit to failed", async () => {
+    const coop = await createTestCoop("MWH12");
+    const m = await createTestMember(coop.id, { phone: "2348000200013" });
+    const mandate = await seedMandate(coop.id, m.id);
+    // Seed an OLD pending debit, then let the real reconciler age it to failed.
+    await seedDebit(coop.id, m.id, mandate.id, {
+      providerRef: "DD-LATE-1",
+      createdAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+    const { reconcileStaleMandateDebits } = await import("../src/services/scheduler.js");
+    await reconcileStaleMandateDebits(new Date());
+    expect(
+      (await prisma.mandateDebit.findFirst({ where: { providerRef: "DD-LATE-1" } }))?.status,
+    ).toBe("failed");
+
+    // The provider's delayed settlement webhook now arrives. The money was
+    // collected, so the wallet MUST be credited exactly once — not dropped as
+    // a non-pending no-op.
+    const body = {
+      eventType: "SUCCESSFUL_DISBURSEMENT",
+      eventData: { reference: "DD-LATE-1", providerReference: "TRX-LATE", status: "SUCCESSFUL" },
+    };
+    const first = await postMonnify(body);
+    expect(first.httpStatus).toBe(200);
+    expect(first.body.status).toBe("ok");
+    expect(await walletBalance(m.id)).toBe(50_000);
+
+    const row = await prisma.mandateDebit.findFirst({ where: { providerRef: "DD-LATE-1" } });
+    expect(row?.status).toBe("successful");
+    expect(row?.providerTransactionId).toBe("TRX-LATE");
+
+    const postings = await prisma.posting.findMany();
+    expect(postings).toHaveLength(2); // exactly one debit + one credit
+    expect(
+      postings.filter((p) => p.direction === "CREDIT").reduce((s, p) => s + p.amount, 0),
+    ).toBe(50_000);
+
+    // A replayed delivery must not credit a second time.
+    const second = await postMonnify(body);
+    expect(second.body.status).toBe("duplicate");
+    expect(await walletBalance(m.id)).toBe(50_000);
+  });
 });
