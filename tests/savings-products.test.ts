@@ -9,6 +9,8 @@ import {
   matureProduct,
   listMemberProducts,
   productProgress,
+  openJuniorAccount,
+  canControl,
 } from "../src/services/savings-products.js";
 import { notifyMember, sendText } from "../src/lib/messaging.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
@@ -317,5 +319,134 @@ describe("savings product commands", () => {
 
     await handleMessage(m.phone, `openproduct ${product!.id}`);
     expect(await prisma.savingsAccount.count({ where: { memberId: m.id } })).toBe(1);
+  });
+
+  it("opens a junior account via the member command", async () => {
+    const coop = await createTestCoop("JNR4");
+    const admin = await createTestMember(coop.id, { phone: "2348000030031", role: "superadmin" });
+    const guardian = await createTestMember(coop.id, { phone: "2348000030032" });
+
+    await handleAdminCommand(admin.phone, "newproduct", ["junior", "Junior", "0", "12"]);
+    const product = await prisma.savingsProduct.findFirst({
+      where: { cooperativeId: coop.id, type: "junior" },
+    });
+    expect(product).toBeTruthy();
+
+    await handleMessage(guardian.phone, `openjunior ${product!.id} ada`);
+    const account = await prisma.savingsAccount.findFirst({
+      where: { guardianMemberId: guardian.id },
+    });
+    expect(account).toBeTruthy();
+    expect(account?.memberId).not.toBe(guardian.id);
+
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(texts).toMatch(/junior/i);
+  });
+});
+
+describe("junior savings accounts", () => {
+  it("lets a guardian open and fund a junior account and keeps control", async () => {
+    const coop = await createTestCoop("JNR1");
+    const admin = await createTestMember(coop.id, { phone: "2348000030001", role: "superadmin" });
+    const guardian = await createTestMember(coop.id, { phone: "2348000030002" });
+
+    const created = await createProduct(
+      coop.id,
+      "junior",
+      "Junior Saver",
+      { termMonths: 12 },
+      actor(admin),
+    );
+    expect(created.ok).toBe(true);
+
+    const opened = await openJuniorAccount(coop.id, created.productId!, guardian.id, "Ada");
+    expect(opened.ok).toBe(true);
+    expect(opened.accountId).toBeTruthy();
+    expect(opened.minorId).toBeTruthy();
+
+    const account = await prisma.savingsAccount.findUnique({ where: { id: opened.accountId! } });
+    expect(account?.guardianMemberId).toBe(guardian.id);
+    expect(account?.memberId).toBe(opened.minorId);
+    expect(account?.memberId).not.toBe(guardian.id);
+    expect(account?.maturesAt).toBeInstanceOf(Date);
+    expect(canControl(account!, guardian.id)).toBe(true);
+    expect(canControl(account!, account!.memberId)).toBe(false);
+
+    await fundWallet(guardian.id, 100000);
+    const dep = await depositToProduct(coop.id, opened.accountId!, guardian.id, 50000);
+    expect(dep.ok).toBe(true);
+    expect(await walletBalance(guardian.id)).toBe(50000);
+
+    const after = await prisma.savingsAccount.findUnique({ where: { id: opened.accountId! } });
+    expect(after?.balance).toBe(50000);
+
+    const books = await postingsBalance();
+    expect(books.debit).toBe(books.credit);
+  });
+
+  it("refuses the minor and any non-guardian from depositing or withdrawing", async () => {
+    const coop = await createTestCoop("JNR2");
+    const admin = await createTestMember(coop.id, { phone: "2348000030011", role: "superadmin" });
+    const guardian = await createTestMember(coop.id, { phone: "2348000030012" });
+    const stranger = await createTestMember(coop.id, { phone: "2348000030013" });
+
+    const created = await createProduct(coop.id, "junior", "Young Saver", {}, actor(admin));
+    const opened = await openJuniorAccount(coop.id, created.productId!, guardian.id, "Bola");
+    await fundWallet(guardian.id, 100000);
+    await depositToProduct(coop.id, opened.accountId!, guardian.id, 50000);
+
+    const minorId = (await prisma.savingsAccount.findUnique({ where: { id: opened.accountId! } }))!
+      .memberId;
+
+    const minorWd = await withdrawFromProduct(coop.id, opened.accountId!, minorId, 10000);
+    expect(minorWd.ok).toBe(false);
+
+    await fundWallet(stranger.id, 100000);
+    const strangerDep = await depositToProduct(coop.id, opened.accountId!, stranger.id, 10000);
+    expect(strangerDep.ok).toBe(false);
+    const strangerWd = await withdrawFromProduct(coop.id, opened.accountId!, stranger.id, 10000);
+    expect(strangerWd.ok).toBe(false);
+
+    const account = await prisma.savingsAccount.findUnique({ where: { id: opened.accountId! } });
+    expect(account?.balance).toBe(50000);
+  });
+
+  it("releases a matured junior balance to the minor's wallet", async () => {
+    const coop = await createTestCoop("JNR3");
+    const admin = await createTestMember(coop.id, { phone: "2348000030021", role: "superadmin" });
+    const guardian = await createTestMember(coop.id, { phone: "2348000030022" });
+
+    const created = await createProduct(
+      coop.id,
+      "junior",
+      "Teen Saver",
+      { termMonths: 12 },
+      actor(admin),
+    );
+    const opened = await openJuniorAccount(coop.id, created.productId!, guardian.id, "Chidi");
+    await fundWallet(guardian.id, 100000);
+    await depositToProduct(coop.id, opened.accountId!, guardian.id, 50000);
+    const minorId = (await prisma.savingsAccount.findUnique({ where: { id: opened.accountId! } }))!
+      .memberId;
+
+    await prisma.savingsAccount.update({
+      where: { id: opened.accountId! },
+      data: { maturesAt: new Date(Date.now() - 1000) },
+    });
+
+    const matured = await matureProduct(coop.id, opened.accountId!, guardian.id);
+    expect(matured.ok).toBe(true);
+    expect(await walletBalance(minorId)).toBe(50000);
+    expect(await walletBalance(guardian.id)).toBe(50000);
+
+    const account = await prisma.savingsAccount.findUnique({ where: { id: opened.accountId! } });
+    expect(account?.status).toBe("matured");
+    expect(account?.balance).toBe(0);
+
+    const books = await postingsBalance();
+    expect(books.debit).toBe(books.credit);
   });
 });

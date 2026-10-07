@@ -5,6 +5,8 @@ import { audit } from "./audit.js";
 import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "../lib/money.js";
 import { roundMoney } from "./money.js";
+import { generateMemberFileNumber } from "./cooperative.js";
+import { randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 
 export type SavingsProductType = "fixed" | "goal" | "seasonal" | "junior";
@@ -103,6 +105,20 @@ export function productProgress(account: MemberProductAccount): ProductProgress 
   };
 }
 
+/**
+ * Who may operate a savings account. A junior account is controlled by its
+ * guardian while a guardian is set; every other account belongs to its holder.
+ * While a guardian is set the minor (holder) is refused.
+ */
+export function canControl(
+  account: { memberId: string; guardianMemberId: string | null },
+  actorId: string,
+): boolean {
+  return account.guardianMemberId
+    ? account.guardianMemberId === actorId
+    : account.memberId === actorId;
+}
+
 function productMeta(p: { interestRate: number; termMonths: number | null; minAmount: number }) {
   const parts: string[] = [];
   if (p.termMonths) parts.push(`${p.termMonths} month(s)`);
@@ -178,6 +194,100 @@ export async function createProduct(
       `• ${productMeta({ interestRate, termMonths, minAmount })}\n` +
       `• Product ID: *${product.id}*`,
     productId: product.id,
+  };
+}
+
+/**
+ * Open a guardian-managed junior (youth) savings account for a minor. The
+ * account's `memberId` is the MINOR; `guardianMemberId` is the guardian who
+ * funds and controls it. When a real phone is supplied and already belongs to a
+ * member of the cooperative that member is the minor; otherwise a junior member
+ * record is created (with a generated placeholder channel phone when none is
+ * given). The balance is released to the minor at maturity.
+ */
+export async function openJuniorAccount(
+  coopId: string,
+  productId: string,
+  guardianMemberId: string,
+  minorName: string,
+  minorPhone?: string,
+): Promise<{ ok: boolean; message: string; accountId?: string; minorId?: string }> {
+  const product = await resolveProduct(coopId, productId);
+  if (!product) return { ok: false, message: "Savings product not found." };
+  if (product.type !== "junior") {
+    return { ok: false, message: "That is not a junior savings product." };
+  }
+  if (!product.active) return { ok: false, message: `The product *${product.name}* is closed.` };
+
+  const name = minorName.trim();
+  if (!name) {
+    return {
+      ok: false,
+      message: "Give the minor's name, e.g. *openjunior <id> Ada 08030000000*.",
+    };
+  }
+
+  let minor = minorPhone
+    ? await prisma.member.findUnique({
+        where: { cooperativeId_phone: { cooperativeId: coopId, phone: minorPhone } },
+      })
+    : null;
+
+  if (!minor) {
+    const coop = await prisma.cooperative.findUnique({
+      where: { id: coopId },
+      select: { code: true },
+    });
+    if (!coop) return { ok: false, message: "Cooperative not found." };
+    const code = await generateMemberFileNumber(coopId, coop.code);
+    minor = await prisma.member.create({
+      data: {
+        phone: minorPhone ?? `junior:${randomUUID()}`,
+        name,
+        code,
+        cooperativeId: coopId,
+        wallet: { create: {} },
+      },
+    });
+  }
+
+  const minorId = minor.id;
+  const maturesAt = product.termMonths ? addMonths(new Date(), product.termMonths) : null;
+  const account = await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    return tx.savingsAccount.create({
+      data: {
+        cooperativeId: coopId,
+        memberId: minorId,
+        guardianMemberId,
+        productId: product.id,
+        balance: 0,
+        status: "active",
+        maturesAt,
+      },
+    });
+  });
+
+  await audit({
+    cooperativeId: coopId,
+    actorPhone: "",
+    actorId: guardianMemberId,
+    action: "savings.account_open",
+    targetType: "savings_account",
+    targetId: account.id,
+    detail: `JUNIOR ${product.name} for ${name}`,
+  }).catch(() => {});
+
+  const maturityLine = maturesAt ? `\n• Matures: *${maturesAt.toDateString()}*` : "";
+  return {
+    ok: true,
+    message:
+      `✅ Opened junior savings *${product.name}* for *${name}*.${maturityLine}\n\n` +
+      `You are the guardian for this account. Fund it with *saveproduct ${account.id} <amount>*.\n` +
+      `At maturity the balance is released to *${name}*.\n` +
+      `Account ID: *${account.id}*`,
+    accountId: account.id,
+    minorId,
   };
 }
 
@@ -282,7 +392,7 @@ export async function depositToProduct(
     include: { product: true },
   });
   if (!account) return { ok: false, message: "Savings account not found." };
-  if (account.memberId !== memberId) {
+  if (!canControl(account, memberId)) {
     return { ok: false, message: "This savings account does not belong to you." };
   }
   if (account.status !== "active") {
@@ -391,7 +501,7 @@ export async function withdrawFromProduct(
     include: { product: true },
   });
   if (!account) return { ok: false, message: "Savings account not found." };
-  if (account.memberId !== memberId) {
+  if (!canControl(account, memberId)) {
     return { ok: false, message: "This savings account does not belong to you." };
   }
   if (account.status !== "active") {
@@ -483,8 +593,9 @@ export async function withdrawFromProduct(
 
 /**
  * Mature (or, for open-ended goals, close) a savings account. On maturity the
- * principal plus anything the product pays at maturity lands in the member's
- * wallet, and the account is marked `matured`.
+ * principal plus anything the product pays at maturity lands in the account
+ * HOLDER's wallet (the minor on a junior account), and the account is marked
+ * `matured`.
  */
 export async function matureProduct(
   coopId: string,
@@ -496,7 +607,7 @@ export async function matureProduct(
     include: { product: true },
   });
   if (!account) return { ok: false, message: "Savings account not found." };
-  if (account.memberId !== memberId) {
+  if (!canControl(account, memberId)) {
     return { ok: false, message: "This savings account does not belong to you." };
   }
   if (account.status !== "active") {
@@ -519,7 +630,10 @@ export async function matureProduct(
   const total = principal + interest;
   if (total <= 0) return { ok: false, message: "This savings account has no balance to mature." };
 
-  const wallet = await prisma.wallet.findUnique({ where: { memberId } });
+  // Maturity releases the funds to the account HOLDER (the minor on a junior
+  // account), not to the actor who matured it (the guardian).
+  const holderId = account.memberId;
+  const wallet = await prisma.wallet.findUnique({ where: { memberId: holderId } });
   if (!wallet) return { ok: false, message: "You need an active wallet to mature this deposit." };
 
   try {
@@ -532,12 +646,12 @@ export async function matureProduct(
       if (claimed.count === 0) throw new Error("ALREADY_MATURED");
       if (principal > 0) {
         await tx.savingsDeposit.create({
-          data: { accountId: account.id, memberId, amount: principal, kind: "withdrawal" },
+          data: { accountId: account.id, memberId: holderId, amount: principal, kind: "withdrawal" },
         });
       }
       if (interest > 0) {
         await tx.savingsDeposit.create({
-          data: { accountId: account.id, memberId, amount: interest, kind: "interest" },
+          data: { accountId: account.id, memberId: holderId, amount: interest, kind: "interest" },
         });
       }
       await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: total } } });
@@ -547,7 +661,7 @@ export async function matureProduct(
           account: `member_wallet:${wallet.id}`,
           direction: "CREDIT" as const,
           amount: total,
-          memberId,
+          memberId: holderId,
         },
       ];
       if (interest > 0) {
@@ -589,7 +703,7 @@ export async function matureProduct(
   }).catch(() => {});
 
   await notifyMember(
-    await loadNotifiable(memberId),
+    await loadNotifiable(holderId),
     interest > 0
       ? `🎉 *${account.product.name}* has matured! *${formatBalance(total)}* (principal *${formatBalance(principal)}* + interest *${formatBalance(interest)}*) was credited to your wallet.`
       : `🎉 *${account.product.name}* is complete! *${formatBalance(total)}* was credited to your wallet.`,

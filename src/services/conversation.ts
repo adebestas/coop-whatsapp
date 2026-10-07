@@ -86,6 +86,7 @@ import {
   handleWithdrawProduct,
   handleMyProducts,
   handleMatureProduct,
+  handleOpenJunior,
 } from "./handlers/money.js";
 import {
   handleValidateClaim,
@@ -520,6 +521,7 @@ async function handleMessageInner(
     case "withdraw":
     case "buyshares":
     case "openproduct":
+    case "openjunior":
     case "saveproduct":
     case "withdrawproduct":
     case "matureproduct":
@@ -567,6 +569,7 @@ async function handleMessageInner(
       else if (cmd === "repay") await handleRepay(phone, args);
       else if (cmd === "buyshares") await handleBuyShares(phone, args);
       else if (cmd === "openproduct") await handleOpenProduct(phone, args);
+      else if (cmd === "openjunior") await handleOpenJunior(phone, args);
       else if (cmd === "saveproduct") await handleSaveProduct(phone, args);
       else if (cmd === "withdrawproduct") await handleWithdrawProduct(phone, args);
       else if (cmd === "matureproduct") await handleMatureProduct(phone, args);

@@ -16,6 +16,7 @@ import {
   withdrawFromProduct,
   matureProduct,
   listMemberProducts,
+  openJuniorAccount,
 } from "../savings-products.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 
@@ -430,7 +431,7 @@ export async function handleGroupLoan(phone: string, args: string[]): Promise<vo
   await sendText({ to: phone, text: applied.message });
 }
 
-/** Browse the cooperative's fixed, goal and seasonal savings products. */
+/** Browse the cooperative's savings products. */
 export async function handleProducts(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
@@ -484,6 +485,38 @@ export async function handleOpenProduct(phone: string, args: string[]): Promise<
     productId,
     member.id,
     target === null ? undefined : target,
+  );
+  await sendText({ to: phone, text: opened.message });
+}
+
+/** Open a guardian-managed junior savings account for a minor. */
+export async function handleOpenJunior(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const productId = args[0];
+  const rest = args.slice(1);
+  // The optional trailing token is a phone number; everything before it is the
+  // minor's (possibly multi-word) name.
+  const last = rest[rest.length - 1] ?? "";
+  const hasPhone = rest.length > 1 && /^[+0-9][0-9]{6,}$/.test(last);
+  const minorName = (hasPhone ? rest.slice(0, -1) : rest).join(" ").trim();
+  const minorPhone = hasPhone ? last : undefined;
+  if (!productId || !minorName) {
+    await sendText({
+      to: phone,
+      text: "Usage: *openjunior <product id> <minor name> [minor phone]* — browse products with *products*.",
+    });
+    return;
+  }
+  const opened = await openJuniorAccount(
+    member.cooperativeId,
+    productId,
+    member.id,
+    minorName,
+    minorPhone,
   );
   await sendText({ to: phone, text: opened.message });
 }

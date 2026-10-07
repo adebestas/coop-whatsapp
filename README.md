@@ -347,6 +347,34 @@ kobo), configurable per cooperative via `CooperativeConfig.sharePrice`.
   — paid to shareholders by their shareholding (a bank payout). This is
   **distinct from `paydividend`**, which pays on **savings**.
 
+## Savings products
+
+Members can hold separate **savings product accounts** alongside their wallet
+through four product types:
+
+| Type | What it is |
+| --- | --- |
+| `fixed` | Fixed deposit — locked until it matures, earning `interestRate`% at maturity. |
+| `goal` | Goal/target savings — a target amount with live progress; reaching 100% notifies the member. |
+| `seasonal` | Seasonal savings — a term-locked product for festive/seasonal saving. |
+| `junior` | Junior/youth — a **guardian-managed** account for a minor. |
+
+- Admin: create with `newproduct <fixed|goal|seasonal|junior> <name> [rate] [termMonths]`; browse with `products`.
+- Member: `products` to browse, `openproduct <product id> [target]` to open, `saveproduct <account id> <amount>` to deposit, `withdrawproduct <account id> <amount>` to withdraw, `myproducts` to list, `matureproduct <account id>` to mature.
+- Money moves **wallet → product account** through balanced double-entry
+  (`member_wallet:<walletId>` ↔ `liability:savings_product:<accountId>`), and
+  every movement is audited. Fixed/seasonal accounts are term-locked until
+  `maturesAt`; at maturity the principal (plus interest) is credited to the
+  holder's wallet.
+- **Junior accounts.** `openjunior <product id> <minor name> [minor phone]`
+  opens a guardian-managed account: the opening guardian controls it — only the
+  guardian may deposit, withdraw or mature it while a guardian is set (the minor
+  holder is refused). The guardian funds it from their own wallet; on maturity
+  the balance is released to the **minor's** wallet. If `minor phone` matches an
+  existing member of the cooperative, that member is the holder; otherwise a
+  junior member record is created (with a generated placeholder channel phone
+  when none is given).
+
 ## Withdrawals
 
 - `withdraw <amount>` lets a member take out up to **45% of their current

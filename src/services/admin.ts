@@ -3595,7 +3595,7 @@ export async function handleAdminCommand(
         if (!type || !name) {
           await sendText({
             to: phone,
-            text: "Usage: *newproduct <fixed|goal|seasonal> <name> [rate] [termMonths]* — e.g. *newproduct fixed 12-Month 10 12*",
+            text: "Usage: *newproduct <fixed|goal|seasonal|junior> <name> [rate] [termMonths]* — e.g. *newproduct fixed 12-Month 10 12*",
           });
           return true;
         }
@@ -3622,7 +3622,7 @@ export async function handleAdminCommand(
         if (!listed.products || listed.products.length === 0) {
           await sendText({
             to: phone,
-            text: "No savings products yet. Create one with *newproduct <fixed|goal|seasonal> <name> [rate] [termMonths]*.",
+            text: "No savings products yet. Create one with *newproduct <fixed|goal|seasonal|junior> <name> [rate] [termMonths]*.",
           });
           return true;
         }
