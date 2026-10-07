@@ -63,6 +63,7 @@ import { runBackup } from "./backup.js";
 import { runReconciliation } from "./reconcile.js";
 import { runWalletReconciliation } from "./reconciliation.js";
 import { getReserveReport } from "./reconciliation.js";
+import { computePar, provisionRates, runProvision } from "./provisioning.js";
 import { resolveProvider } from "./payments/index.js";
 import {
   assertMoneyAuthorized,
@@ -1767,6 +1768,64 @@ export async function handleAdminCommand(
         }
         const report = await getReserveReport(coopId);
         await sendText({ to: phone, text: report });
+        return true;
+      }
+
+      case "par": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can view portfolio risk." });
+          return true;
+        }
+        const par = await computePar(coopId);
+        const parBody = [
+          `*📉 Portfolio At Risk (PAR)*`,
+          ``,
+          `• 1–30 days overdue: *${formatBalance(par.buckets["1-30"])}*`,
+          `• 31–90 days overdue: *${formatBalance(par.buckets["31-90"])}*`,
+          `• 91–180 days overdue: *${formatBalance(par.buckets["91-180"])}*`,
+          `• 180+ days overdue: *${formatBalance(par.buckets["180+"])}*`,
+          ``,
+          `Past-due total: *${formatBalance(par.total)}*`,
+          `PAR ratio: *${(par.parRatio * 100).toFixed(1)}%*`,
+          ``,
+          `_Run provisioning with *provision*._`,
+        ];
+        await sendText({ to: phone, text: parBody.join("\n") });
+        return true;
+      }
+
+      case "provisionrates": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can view provision rates." });
+          return true;
+        }
+        const rates = await provisionRates(coopId);
+        const ratesBody = [
+          `*Loan-loss provision rates*`,
+          ``,
+          `• 1–30 days overdue: *${rates["1-30"]}%*`,
+          `• 31–90 days overdue: *${rates["31-90"]}%*`,
+          `• 91–180 days overdue: *${rates["91-180"]}%*`,
+          `• 180+ days overdue: *${rates["180+"]}%*`,
+        ];
+        await sendText({ to: phone, text: ratesBody.join("\n") });
+        return true;
+      }
+
+      case "provision": {
+        if (!isSuper) {
+          await sendText({
+            to: phone,
+            text: "Only the *super admin* can run loan-loss provisioning.",
+          });
+          return true;
+        }
+        const provisionResult = await runProvision(coopId, {
+          id: admin.id,
+          phone,
+          role: admin.role,
+        });
+        await sendText({ to: phone, text: provisionResult.message });
         return true;
       }
 

@@ -199,7 +199,10 @@ export function buildAdminMenu(): string {
     `• *enable2fa* — protect your account\n` +
     `• *verifypin <pin>* — unlock big payouts (10 min)\n` +
     `• *insights* — AI financial analysis\n` +
-    `• *risk* — AI loan risk assessment\n\n` +
+    `• *risk* — AI loan risk assessment\n` +
+    `• *par* — portfolio-at-risk aging report\n` +
+    `• *provisionrates* — loan-loss provision rates\n` +
+    `• *provision* — run the monthly loan-loss provision (super admin)\n\n` +
     `*Committees (super admin):* *addcommittee <credit\\|supervisory\\|board> <name> [size]*, *appoint <type> <member code> [chair]*, *removecommittee <type> <member code>*, *committees*\n` +
     `*Committees (members):* *cvote <loan id> approve\\|reject*, *committeequeue*, *supervisoryfreeze <member code> [reason]*, *supervisoryunfreeze <member code>*\n\n` +
     `*Meetings:* *startmeeting <agm\\|sgm> <title> [quorum%]*, *openmeeting <id>*, *closemeeting <id>*, *addmotion <meeting id> <title> \\| <description> [kind]*, *closemotion <id>*, *meetingminutes <id>*\n\n` +
