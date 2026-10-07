@@ -133,6 +133,48 @@ describe("mandate scheduler debits", () => {
     expect(await prisma.mandateDebit.count()).toBe(0);
     expect(n).toBe(0);
   });
+
+  it("creates only one debit when the same due obligation is processed twice (overlapping ticks)", async () => {
+    const coop = await createTestCoop("MSCH8");
+    const m = await createTestMember(coop.id, { phone: "2348000300008" });
+    await enableDirectDebit(coop.id);
+    const due = new Date(Date.now() - 1000);
+    await setAutoSave(m.id, 50_000, due);
+    const mandate = await seedMandate(coop.id, m.id);
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const now = new Date();
+    await runMandateDebits(now);
+    // Simulate an overlapping tick that read the STALE (pre-advance) member row.
+    await prisma.member.update({ where: { id: m.id }, data: { autoSaveNextDue: due } });
+    await runMandateDebits(now);
+
+    expect(await prisma.mandateDebit.count({ where: { mandateId: mandate.id } })).toBe(1);
+    expect(vi.mocked(adapter.debitMandate)).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues to the next mandate when one mandate's debit persistence fails", async () => {
+    const coop = await createTestCoop("MSCH9");
+    const a = await createTestMember(coop.id, { phone: "2348000300009" });
+    const b = await createTestMember(coop.id, { phone: "2348000300010" });
+    await enableDirectDebit(coop.id);
+    await setAutoSave(a.id, 50_000, new Date(Date.now() - 1000));
+    await setAutoSave(b.id, 50_000, new Date(Date.now() - 1000));
+    await seedMandate(coop.id, a.id);
+    await seedMandate(coop.id, b.id);
+    // Remove one member so its mandate's related-member load fails mid-job.
+    // The loop must catch that per-mandate failure and carry on to the other.
+    await prisma.member.delete({ where: { id: b.id } });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const n = await runMandateDebits(new Date());
+
+    expect(n).toBe(1);
+    expect(await prisma.mandateDebit.count()).toBe(1);
+    expect(vi.mocked(adapter.debitMandate)).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("mandate scheduler retries", () => {

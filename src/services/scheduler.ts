@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { resolveProvider } from "./payments/index.js";
@@ -141,61 +140,81 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
     });
 
     for (const mandate of mandates) {
-      const member = mandate.member;
-      if (!member.autoSaveEnabled || !member.autoSaveNextDue) continue;
-      if (member.autoSaveNextDue > now) continue;
-      if (csvSet(mandate.pausedPurposes).has("savings")) continue;
-
-      const due = member.autoSaveAmount ?? 0;
-      if (due <= 0) continue;
-      const amount = Math.min(due, mandate.amountCap);
-      if (amount <= 0) continue;
-
-      const providerRef = `DD-${randomUUID()}`;
-      const debit = await prisma.mandateDebit.create({
-        data: {
-          mandateId: mandate.id,
-          cooperativeId: coopId,
-          memberId: member.id,
-          purpose: "savings",
-          amount,
-          status: "pending",
-          providerRef,
-        },
-      });
-      created++;
-
-      // Advance the schedule so this obligation is not re-created next tick.
-      const next = new Date(member.autoSaveNextDue);
-      next.setDate(next.getDate() + (member.autoSaveInterval === "weekly" ? 7 : 30));
-      await prisma.member.update({
-        where: { id: member.id },
-        data: { autoSaveNextDue: next },
-      });
-
-      const narration = `Savings contribution — ${formatBalance(amount)}`;
-      let result: { ok: boolean; error?: string } | undefined;
       try {
-        const provider = await resolveProvider(mandate.provider);
-        result = await provider.debitMandate?.({
-          providerMandateId: mandate.providerMandateId ?? "",
-          amount,
-          reference: providerRef,
-          narration,
-        });
-      } catch (err) {
-        result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
-      }
+        const member = mandate.member;
+        if (!member.autoSaveEnabled || !member.autoSaveNextDue) continue;
+        if (member.autoSaveNextDue > now) continue;
+        if (csvSet(mandate.pausedPurposes).has("savings")) continue;
 
-      if (!result?.ok) {
-        await prisma.mandateDebit.update({
-          where: { id: debit.id },
-          data: {
-            status: "failed",
-            failureReason: result?.error ?? "provider rejected the debit",
-            nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS),
-          },
+        const due = member.autoSaveAmount ?? 0;
+        if (due <= 0) continue;
+        const amount = Math.min(due, mandate.amountCap);
+        if (amount <= 0) continue;
+
+        // Deterministic reference keyed on the obligation (mandate id + due
+        // timestamp). Two overlapping ticks compute the SAME reference, so the
+        // second insert hits the unique constraint and is skipped instead of
+        // charging the member twice.
+        const providerRef = `DD-${mandate.id}-savings-${member.autoSaveNextDue.getTime()}`;
+        let debitId: string;
+        try {
+          const debit = await prisma.mandateDebit.create({
+            data: {
+              mandateId: mandate.id,
+              cooperativeId: coopId,
+              memberId: member.id,
+              purpose: "savings",
+              amount,
+              status: "pending",
+              providerRef,
+            },
+          });
+          debitId = debit.id;
+        } catch (err) {
+          if ((err as { code?: string })?.code === "P2002") continue; // already created
+          throw err;
+        }
+        created++;
+
+        // Advance the schedule so this obligation is not re-created next tick.
+        const next = new Date(member.autoSaveNextDue);
+        next.setDate(next.getDate() + (member.autoSaveInterval === "weekly" ? 7 : 30));
+        await prisma.member.update({
+          where: { id: member.id },
+          data: { autoSaveNextDue: next },
         });
+
+        const narration = `Savings contribution — ${formatBalance(amount)}`;
+        let result: { ok: boolean; error?: string } | undefined;
+        try {
+          const provider = await resolveProvider(mandate.provider);
+          result = await provider.debitMandate?.({
+            providerMandateId: mandate.providerMandateId ?? "",
+            amount,
+            reference: providerRef,
+            narration,
+          });
+        } catch (err) {
+          result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
+        }
+
+        if (!result?.ok) {
+          await prisma.mandateDebit.update({
+            where: { id: debitId },
+            data: {
+              status: "failed",
+              failureReason: result?.error ?? "provider rejected the debit",
+              nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS),
+            },
+          });
+        }
+      } catch (err) {
+        // One mandate's failure (DB or provider) must not abort the whole run.
+        log.error("[scheduler] mandate debit failed", {
+          mandateId: mandate.id,
+          err: String(err),
+        });
+        continue;
       }
     }
   });
