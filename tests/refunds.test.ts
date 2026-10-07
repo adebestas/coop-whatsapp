@@ -1,6 +1,31 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanupDatabase, createTestCoop, createTestMember, prisma } from "./setup.js";
 import { recommendRefund, approveRefund, rejectRefund } from "../src/services/refunds.js";
+import { resolveProvider } from "../src/services/payments/index.js";
+
+/**
+ * Capture the provider `payout` call so tests can assert the transfer targets
+ * the member's SAVED bank account (the key correctness property). tests/setup.ts
+ * owns the payments mock, so we override `resolveProvider` for this file.
+ */
+const payoutSpy = vi.fn();
+
+beforeEach(() => {
+  payoutSpy.mockReset();
+  payoutSpy.mockResolvedValue({ ok: true, providerRef: "trx-1" });
+  vi.mocked(resolveProvider).mockImplementation(
+    () =>
+      ({
+        name: "monnify",
+        createVirtualAccount: vi.fn(async () => ({ accountNumber: "1234567890" })),
+        payout: payoutSpy,
+        resolveAccount: vi.fn(async () => ({ ok: true, name: "ADA OBI" })),
+        getTransferStatus: vi.fn(async () => ({ status: "successful" })),
+        verifyWebhook: () => true,
+        parseNotification: () => null,
+      }) as unknown as ReturnType<typeof resolveProvider>,
+  );
+});
 
 /**
  * Maker-checker refunds: an admin recommends a refund, a super admin approves
@@ -73,6 +98,15 @@ describe("refund maker-checker", () => {
     expect(row!.paidAt).toBeInstanceOf(Date);
     expect(row!.payoutRef).toBeTruthy();
     expect(await prisma.payout.count()).toBe(1);
+    // The transfer must target the member's SAVED bank account.
+    expect(payoutSpy).toHaveBeenCalledTimes(1);
+    expect(payoutSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        amount: 500000,
+        bankAccountNumber: "0123456789",
+        bankCode: "058",
+      }),
+    );
   });
 
   it("approveRefund by a non-super-admin is refused", async () => {
@@ -110,5 +144,20 @@ describe("refund maker-checker", () => {
     const row = await prisma.refundRequest.findUnique({ where: { id: rec.refundId! } });
     expect(row!.status).toBe("pending");
     expect(await prisma.payout.count()).toBe(0);
+  });
+
+  it("rejects a refund reason over 200 characters", async () => {
+    const { coop, member, recommendActor } = await setup();
+
+    const res = await recommendRefund(
+      coop.id,
+      member.id,
+      50000,
+      "x".repeat(201),
+      recommendActor,
+    );
+
+    expect(res.ok).toBe(false);
+    expect(await prisma.refundRequest.count()).toBe(0);
   });
 });

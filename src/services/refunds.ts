@@ -59,6 +59,9 @@ export async function recommendRefund(
   if (trimmed.length < 3) {
     return { ok: false, message: "Give a short reason for the refund (at least 3 characters)." };
   }
+  if (trimmed.length > 200) {
+    return { ok: false, message: "Keep the refund reason under 200 characters." };
+  }
   const member = await resolveMember(coopId, memberId);
   if (!member) return { ok: false, message: "Member not found in your cooperative." };
 
@@ -125,10 +128,14 @@ export async function approveRefund(
     };
   }
 
-  // ATOMIC CLAIM — exactly one approver proceeds to the provider.
-  const claimed = await prisma.refundRequest.updateMany({
-    where: { id: refund.id, status: "pending" },
-    data: { status: "approved", approvedById: actor.id, approvedAt: new Date() },
+  // ATOMIC CLAIM — exactly one approver proceeds to the provider. Runs inside a
+  // cooperative-context transaction so Stage-2 FORCE RLS can resolve the tenant.
+  const claimed = await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    return tx.refundRequest.updateMany({
+      where: { id: refund.id, status: "pending" },
+      data: { status: "approved", approvedById: actor.id, approvedAt: new Date() },
+    });
   });
   if (claimed.count === 0) {
     return { ok: false, message: "This refund was just handled — check its current state." };
@@ -152,9 +159,12 @@ export async function approveRefund(
   });
 
   if (payout.status === "unsure") {
-    await prisma.refundRequest.updateMany({
-      where: { id: refund.id, status: "approved" },
-      data: { status: "failed", payoutRef: `unsure: ${payout.message}`.slice(0, 200) },
+    await withTx(async (tx) => {
+      await setCoopContext(tx as never, coopId);
+      await tx.refundRequest.updateMany({
+        where: { id: refund.id, status: "approved" },
+        data: { status: "failed", payoutRef: `unsure: ${payout.message}`.slice(0, 200) },
+      });
     });
     await alertSupers(
       coopId,
@@ -179,9 +189,12 @@ export async function approveRefund(
   }
 
   if (!payout.ok) {
-    await prisma.refundRequest.updateMany({
-      where: { id: refund.id, status: "approved" },
-      data: { status: "failed", payoutRef: payout.message.slice(0, 200) },
+    await withTx(async (tx) => {
+      await setCoopContext(tx as never, coopId);
+      await tx.refundRequest.updateMany({
+        where: { id: refund.id, status: "approved" },
+        data: { status: "failed", payoutRef: payout.message.slice(0, 200) },
+      });
     });
     await alertSupers(
       coopId,
@@ -229,9 +242,12 @@ export async function approveRefund(
     ).catch(() => {});
   }
 
-  await prisma.refundRequest.updateMany({
-    where: { id: refund.id, status: "approved" },
-    data: { status: "paid", paidAt: new Date(), payoutRef: reference },
+  await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    await tx.refundRequest.updateMany({
+      where: { id: refund.id, status: "approved" },
+      data: { status: "paid", paidAt: new Date(), payoutRef: reference },
+    });
   });
 
   await audit({
@@ -273,12 +289,15 @@ export async function rejectRefund(
   }
   const trimmed = (reason ?? "").trim();
 
-  const moved = await prisma.refundRequest.updateMany({
-    where: { id: refund.id, status: "pending" },
-    data: {
-      status: "rejected",
-      reason: trimmed ? `${refund.reason} (rejected: ${trimmed})` : refund.reason,
-    },
+  const moved = await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    return tx.refundRequest.updateMany({
+      where: { id: refund.id, status: "pending" },
+      data: {
+        status: "rejected",
+        reason: trimmed ? `${refund.reason} (rejected: ${trimmed})` : refund.reason,
+      },
+    });
   });
   if (moved.count === 0) {
     return { ok: false, message: "This refund just changed state — check its current state." };

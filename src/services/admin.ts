@@ -3051,10 +3051,10 @@ export async function handleAdminCommand(
         const target = args[0];
         const amount = toKobo(Number(args[1]));
         const reason = args.slice(2).join(" ").trim();
-        if (!target || !Number.isFinite(amount) || amount <= 0 || reason.length < 3) {
+        if (!target || !Number.isFinite(amount) || amount <= 0 || reason.length < 3 || reason.length > 200) {
           await sendText({
             to: phone,
-            text: "Usage: *recommendrefund <member code|id> <amount> <reason>* — e.g. *recommendrefund MEM001 5000 Double payment*.",
+            text: "Usage: *recommendrefund <member code|id> <amount> <reason>* — e.g. *recommendrefund MEM001 5000 Double payment* (reason up to 200 characters).",
           });
           return true;
         }
