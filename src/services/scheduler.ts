@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
+import { resolveProvider } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
 import { showHistory } from "./statements.js";
 import { runAllAlerts } from "../lib/ai-alerts.js";
@@ -67,6 +69,9 @@ export async function runAutoSaveReminders(now = new Date()): Promise<number> {
         autoSaveEnabled: true,
         autoSaveNextDue: { lte: now },
         consentAt: { not: null },
+        // A member with an active direct-debit mandate is collected from
+        // automatically — do not nag them (the scheduler's mandate job owns it).
+        mandates: { none: { cooperativeId: coopId, status: "active" } },
       },
     });
     for (const m of due) {
@@ -86,6 +91,178 @@ export async function runAutoSaveReminders(now = new Date()): Promise<number> {
     }
   });
   return sent;
+}
+
+/** Split a CSV column (e.g. Mandate.pausedPurposes) into an order-preserving set. */
+function csvSet(value: string | null | undefined): Set<string> {
+  return new Set(
+    (value ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
+/** One day, in milliseconds — the retry cadence ("at most once per day"). */
+const RETRY_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Create due savings debits for members with an active direct-debit mandate.
+ *
+ * For every cooperative with direct debit enabled, each active mandate whose
+ * member has a due recurring contribution gets a `pending` `MandateDebit`
+ * (amount = min(due, mandate cap)) and a provider debit call. On a synchronous
+ * hard failure the debit is marked `failed` with a `nextRetryAt` of +1 day.
+ *
+ * The member's `autoSaveNextDue` is advanced as soon as the obligation is
+ * picked up, so an outstanding (pending/failed) debit is never duplicated on
+ * the next tick — retries own the failure path from there. Returns the number
+ * of debits created.
+ */
+export async function runMandateDebits(now = new Date()): Promise<number> {
+  let created = 0;
+  await forEachCoop(async (coopId) => {
+    const config = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
+    if (!config?.directDebitEnabled) return;
+
+    const mandates = await prisma.mandate.findMany({
+      where: { cooperativeId: coopId, status: "active" },
+      include: {
+        member: {
+          select: {
+            id: true,
+            autoSaveEnabled: true,
+            autoSaveAmount: true,
+            autoSaveInterval: true,
+            autoSaveNextDue: true,
+          },
+        },
+      },
+    });
+
+    for (const mandate of mandates) {
+      const member = mandate.member;
+      if (!member.autoSaveEnabled || !member.autoSaveNextDue) continue;
+      if (member.autoSaveNextDue > now) continue;
+      if (csvSet(mandate.pausedPurposes).has("savings")) continue;
+
+      const due = member.autoSaveAmount ?? 0;
+      if (due <= 0) continue;
+      const amount = Math.min(due, mandate.amountCap);
+      if (amount <= 0) continue;
+
+      const providerRef = `DD-${randomUUID()}`;
+      const debit = await prisma.mandateDebit.create({
+        data: {
+          mandateId: mandate.id,
+          cooperativeId: coopId,
+          memberId: member.id,
+          purpose: "savings",
+          amount,
+          status: "pending",
+          providerRef,
+        },
+      });
+      created++;
+
+      // Advance the schedule so this obligation is not re-created next tick.
+      const next = new Date(member.autoSaveNextDue);
+      next.setDate(next.getDate() + (member.autoSaveInterval === "weekly" ? 7 : 30));
+      await prisma.member.update({
+        where: { id: member.id },
+        data: { autoSaveNextDue: next },
+      });
+
+      const narration = `Savings contribution — ${formatBalance(amount)}`;
+      let result: { ok: boolean; error?: string } | undefined;
+      try {
+        const provider = await resolveProvider(mandate.provider);
+        result = await provider.debitMandate?.({
+          providerMandateId: mandate.providerMandateId ?? "",
+          amount,
+          reference: providerRef,
+          narration,
+        });
+      } catch (err) {
+        result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
+      }
+
+      if (!result?.ok) {
+        await prisma.mandateDebit.update({
+          where: { id: debit.id },
+          data: {
+            status: "failed",
+            failureReason: result?.error ?? "provider rejected the debit",
+            nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS),
+          },
+        });
+      }
+    }
+  });
+  return created;
+}
+
+/**
+ * Retry `failed` mandate debits whose `nextRetryAt` has passed — at most once a
+ * day per debit. A `skipped` debit is never selected (only `failed`), a paused
+ * mandate or a paused purpose is skipped, and on another failure `nextRetryAt`
+ * advances by one day. A successful retry returns the debit to `pending` so the
+ * settlement webhook can credit the wallet. Returns the number retried.
+ */
+export async function runMandateRetries(now = new Date()): Promise<number> {
+  let retried = 0;
+  await forEachCoop(async (coopId) => {
+    const failed = await prisma.mandateDebit.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "failed",
+        nextRetryAt: { lte: now },
+      },
+      include: { mandate: true },
+    });
+
+    for (const debit of failed) {
+      if (debit.mandate.status !== "active") continue;
+      if (csvSet(debit.mandate.pausedPurposes).has(debit.purpose)) continue;
+
+      const narration = `Direct debit retry — ${debit.purpose} (${formatBalance(debit.amount)})`;
+      let result: { ok: boolean; error?: string } | undefined;
+      try {
+        const provider = await resolveProvider(debit.mandate.provider);
+        result = await provider.debitMandate?.({
+          providerMandateId: debit.mandate.providerMandateId ?? "",
+          amount: debit.amount,
+          reference: debit.providerRef,
+          narration,
+        });
+      } catch (err) {
+        result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
+      }
+      retried++;
+
+      if (result?.ok) {
+        await prisma.mandateDebit.update({
+          where: { id: debit.id },
+          data: {
+            status: "pending",
+            attempts: { increment: 1 },
+            nextRetryAt: null,
+            failureReason: null,
+          },
+        });
+      } else {
+        await prisma.mandateDebit.update({
+          where: { id: debit.id },
+          data: {
+            attempts: { increment: 1 },
+            failureReason: result?.error ?? "retry failed",
+            nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS),
+          },
+        });
+      }
+    }
+  });
+  return retried;
 }
 
 /** Set the cooperative's monthly loan interest rate (admin only). */
@@ -456,6 +633,12 @@ export async function runSchedulerTick(): Promise<void> {
 
   await runAutoSaveReminders().catch((err) =>
     log.error("[scheduler] auto-save reminders failed", { err: String(err) }),
+  );
+  await runMandateDebits().catch((err) =>
+    log.error("[scheduler] mandate debits failed", { err: String(err) }),
+  );
+  await runMandateRetries().catch((err) =>
+    log.error("[scheduler] mandate retries failed", { err: String(err) }),
   );
   await runMonthlyStatements().catch((err) =>
     log.error("[scheduler] monthly statements failed", { err: String(err) }),
