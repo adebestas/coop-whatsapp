@@ -91,7 +91,14 @@ export const ownerPrisma = new PrismaClient({
 export async function withTx<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
   const existing = txStorage.getStore();
   if (existing) return fn(existing);
-  return base.$transaction((tx) => txStorage.run(tx, () => fn(tx)));
+  return base.$transaction((tx) => txStorage.run(tx, () => fn(tx)), {
+    // Prisma's default interactive-transaction timeout is 5s, which a busy
+    // database (or a test run under load) can exceed, aborting legitimate
+    // transactions. 20s is generous for this workload while still bounding a
+    // stuck transaction. maxWait bounds how long to wait for a free connection.
+    timeout: Number(process.env.PRISMA_TX_TIMEOUT_MS ?? 20000),
+    maxWait: Number(process.env.PRISMA_TX_MAXWAIT_MS ?? 10000),
+  });
 }
 
 /**
