@@ -244,4 +244,54 @@ describe("mandate webhooks", () => {
     expect(credit.body.status).toBe("ok");
     expect(await walletBalance(m.id)).toBe(50_000);
   });
+
+  it("processes an ACTIVATED then a later CANCELLED webhook for the same mandate", async () => {
+    const coop = await createTestCoop("MWH7");
+    const m = await createTestMember(coop.id, { phone: "2348000200007" });
+    const mandate = await seedMandate(coop.id, m.id, { status: "pending" });
+
+    const activated = await postMonnify({
+      eventType: "MANDATE_UPDATE",
+      eventData: { mandateCode: "MTDD|X", mandateStatus: "ACTIVATED" },
+    });
+    expect(activated.body.status).toBe("ok");
+    expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe("active");
+
+    // The lifecycle event id must include the status, or this cancels is
+    // deduped against the activation and the mandate keeps collecting money.
+    const cancelled = await postMonnify({
+      eventType: "MANDATE_UPDATE",
+      eventData: { mandateCode: "MTDD|X", mandateStatus: "CANCELLED" },
+    });
+    expect(cancelled.body.status).toBe("ok");
+    expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe(
+      "cancelled",
+    );
+    expect(await prisma.webhookEvent.count()).toBe(2);
+  });
+
+  it("fails and alerts when a settled debit's member has no wallet instead of stranding it", async () => {
+    const coop = await createTestCoop("MWH8");
+    const admin = await createTestMember(coop.id, { phone: "2348000200008", role: "superadmin" });
+    const m = await createTestMember(coop.id, { phone: "2348000200009" });
+    const mandate = await seedMandate(coop.id, m.id);
+    const debit = await seedDebit(coop.id, m.id, mandate.id, { providerRef: "DD-NOWALLET-1" });
+    await prisma.wallet.delete({ where: { memberId: m.id } });
+
+    const res = await postMonnify({
+      eventType: "SUCCESSFUL_DISBURSEMENT",
+      eventData: { reference: "DD-NOWALLET-1", status: "SUCCESSFUL" },
+    });
+
+    // Never silently ack: the event is marked failed (retryable) and a super
+    // admin is alerted.
+    expect(res.httpStatus).toBe(500);
+    expect((await prisma.mandateDebit.findUnique({ where: { id: debit.id } }))?.status).toBe(
+      "pending",
+    );
+    const alerted = vi
+      .mocked(notifyMember)
+      .mock.calls.some((c) => (c[0] as { phone?: string }).phone === admin.phone);
+    expect(alerted).toBe(true);
+  });
 });

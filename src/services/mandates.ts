@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { prisma, withTx } from "../lib/prisma.js";
-import { setCoopContext, withCoopContext } from "../lib/tenant-context.js";
+import {
+  setCoopContext,
+  withCoopContext,
+  resolveCoopByMandateDebitRef,
+} from "../lib/tenant-context.js";
 import { audit } from "./audit.js";
 import { formatBalance } from "../lib/money.js";
 import { postJournal } from "./journal.js";
 import { notifyMember } from "../lib/messaging.js";
+import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { resolveProvider, markProviderUp, markProviderDown } from "./payments/index.js";
 
 export interface MandateActor {
@@ -467,77 +472,96 @@ export async function settleDebit(
   providerTransactionId?: string,
   reason?: string,
 ): Promise<void> {
-  const debit = await prisma.mandateDebit.findUnique({ where: { providerRef: reference } });
-  if (!debit || debit.status !== "pending") return; // idempotent
+  // Resolve the owning cooperative FIRST (SECURITY DEFINER resolver bypasses
+  // RLS), so the MandateDebit read below runs inside the tenant's RLS context.
+  const coopId = await resolveCoopByMandateDebitRef(reference);
+  if (!coopId) return; // unknown reference — nothing to settle (idempotent)
 
-  if (status === "failed") {
-    await prisma.mandateDebit.update({
-      where: { id: debit.id },
-      data: {
-        status: "failed",
-        failureReason: reason ?? "debit failed",
-        nextRetryAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      },
-    });
-    await notifyMember(
-      await loadNotifiable(debit.memberId),
-      `⚠️ We couldn't collect *${formatBalance(debit.amount)}* from your bank today. We'll try again tomorrow.`,
+  const outcome = await withCoopContext(
+    coopId,
+    async (): Promise<"ok" | "ignored" | "no-wallet"> => {
+      const debit = await prisma.mandateDebit.findUnique({ where: { providerRef: reference } });
+      if (!debit || debit.status !== "pending") return "ignored"; // idempotent
+
+      if (status === "failed") {
+        await prisma.mandateDebit.update({
+          where: { id: debit.id },
+          data: {
+            status: "failed",
+            failureReason: reason ?? "debit failed",
+            nextRetryAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          },
+        });
+        await notifyMember(
+          await loadNotifiable(debit.memberId),
+          `⚠️ We couldn't collect *${formatBalance(debit.amount)}* from your bank today. We'll try again tomorrow.`,
+        ).catch(() => {});
+        return "ok";
+      }
+
+      const member = await prisma.member.findUnique({
+        where: { id: debit.memberId },
+        include: { wallet: true },
+      });
+      // A pending debit we cannot credit must NOT be silently acked (that would
+      // strand it): report "no-wallet" so the caller alerts and retries.
+      if (!member?.wallet) return "no-wallet";
+
+      const description = `Direct debit — ${debit.purpose} via ${provider} (${formatBalance(debit.amount)})`;
+      await withTx(async (tx) => {
+        await postJournal(
+          {
+            cooperativeId: debit.cooperativeId,
+            txRef: `DD-${reference}`,
+            description,
+            postings: [
+              { account: "assets:bank", direction: "DEBIT", amount: debit.amount },
+              {
+                account: `member_wallet:${member.wallet!.id}`,
+                direction: "CREDIT",
+                amount: debit.amount,
+                memberId: member.id,
+              },
+            ],
+            throwOnDuplicate: true,
+          },
+          tx as never,
+        );
+        await tx.wallet.update({
+          where: { id: member.wallet!.id },
+          data: { balance: { increment: debit.amount }, totalSaved: { increment: debit.amount } },
+        });
+        await tx.mandateDebit.update({
+          where: { id: debit.id },
+          data: { status: "successful", settledAt: new Date(), providerTransactionId },
+        });
+        await tx.mandate.update({
+          where: { id: debit.mandateId },
+          data: { lastDebitAt: new Date() },
+        });
+      });
+      await applyPurpose(debit, member);
+
+      await audit({
+        cooperativeId: debit.cooperativeId,
+        actorPhone: "",
+        actorId: debit.memberId,
+        action: "mandate.debit",
+        targetType: "mandate_debit",
+        targetId: debit.id,
+        amount: debit.amount,
+        detail: description,
+      }).catch(() => {});
+      return "ok";
+    },
+  );
+
+  if (outcome === "no-wallet") {
+    await alertSupers(
+      coopId,
+      `Direct-debit ${reference} settled at the provider but the member has no wallet — the debit is stranded and will be retried.`,
+      AlertSeverity.CRITICAL,
     ).catch(() => {});
-    return;
+    throw new Error(`mandate debit ${reference}: member has no wallet`);
   }
-
-  const description = `Direct debit — ${debit.purpose} via ${provider} (${formatBalance(debit.amount)})`;
-
-  // Success: credit the wallet exactly like a top-up, then apply the purpose.
-  await withCoopContext(debit.cooperativeId, async () => {
-    const member = await prisma.member.findUnique({
-      where: { id: debit.memberId },
-      include: { wallet: true },
-    });
-    if (!member?.wallet) return;
-    await withTx(async (tx) => {
-      await postJournal(
-        {
-          cooperativeId: debit.cooperativeId,
-          txRef: `DD-${reference}`,
-          description,
-          postings: [
-            { account: "assets:bank", direction: "DEBIT", amount: debit.amount },
-            {
-              account: `member_wallet:${member.wallet!.id}`,
-              direction: "CREDIT",
-              amount: debit.amount,
-              memberId: member.id,
-            },
-          ],
-          throwOnDuplicate: true,
-        },
-        tx as never,
-      );
-      await tx.wallet.update({
-        where: { id: member.wallet!.id },
-        data: { balance: { increment: debit.amount }, totalSaved: { increment: debit.amount } },
-      });
-      await tx.mandateDebit.update({
-        where: { id: debit.id },
-        data: { status: "successful", settledAt: new Date(), providerTransactionId },
-      });
-      await tx.mandate.update({
-        where: { id: debit.mandateId },
-        data: { lastDebitAt: new Date() },
-      });
-    });
-    await applyPurpose(debit, member);
-  });
-
-  await audit({
-    cooperativeId: debit.cooperativeId,
-    actorPhone: "",
-    actorId: debit.memberId,
-    action: "mandate.debit",
-    targetType: "mandate_debit",
-    targetId: debit.id,
-    amount: debit.amount,
-    detail: description,
-  }).catch(() => {});
 }

@@ -6,6 +6,7 @@ import { handlePaymentNotification } from "./payments/topup.js";
 import type { PaymentNotification, ProviderAdapter } from "./payments/index.js";
 import { applyDividendPayoutUpdate } from "./dividends.js";
 import { applyMandateStatus, settleDebit } from "./mandates.js";
+import { withCoopContext, resolveCoopByMandateDebitRef } from "../lib/tenant-context.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { log } from "../lib/logger.js";
 import { incCounter } from "../lib/metrics.js";
@@ -165,7 +166,9 @@ export async function processPaymentWebhook(
     const mandate = adapter.parseMandateNotification?.(parsedBody) ?? null;
     if (mandate) {
       return recordAndProcess({
-        eventId: `${providerName}:mandate:${mandate.providerMandateId}`,
+        // Include the status so a later lifecycle event (e.g. ACTIVATED then
+        // CANCELLED) is not suppressed as a duplicate of the earlier one.
+        eventId: `${providerName}:mandate:${mandate.providerMandateId}:${mandate.status}`,
         kind: "mandate_update",
         rawBody,
         providerName,
@@ -330,14 +333,21 @@ export async function processPayoutWebhook(
   }
 
   // A Monnify mandate DEBIT shares the DISBURSEMENT event set with a
-  // coop-initiated payout. If this reference belongs to a MandateDebit it is NOT
-  // a dividend payout — yield with "ignored" so the combined route falls through
-  // to the mandate/credit pipeline, which settles it correctly.
-  const mandateDebit = await prisma.mandateDebit
-    .findUnique({ where: { providerRef: update.reference }, select: { id: true } })
-    .catch(() => null);
-  if (mandateDebit) {
-    return { httpStatus: 200, body: { status: "ignored" } };
+  // coop-initiated payout. Resolve the owning cooperative first (SECURITY DEFINER
+  // resolver bypasses RLS), then confirm inside that tenant's context: if this
+  // reference belongs to a MandateDebit it is NOT a dividend payout — yield with
+  // "ignored" so the combined route falls through to the mandate/credit pipeline.
+  const mandateCoopId = await resolveCoopByMandateDebitRef(update.reference);
+  if (mandateCoopId) {
+    const mandateDebit = await withCoopContext(mandateCoopId, () =>
+      prisma.mandateDebit.findUnique({
+        where: { providerRef: update.reference },
+        select: { id: true },
+      }),
+    );
+    if (mandateDebit) {
+      return { httpStatus: 200, body: { status: "ignored" } };
+    }
   }
 
   // Include the status in the event id so a failed->success transition (if the

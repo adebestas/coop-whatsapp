@@ -155,6 +155,24 @@ export async function resolveCoopByPayoutReference(reference: string): Promise<s
 }
 
 /**
+ * Resolve the cooperative that owns a mandate-debit reference.
+ */
+export async function resolveCoopByMandateDebitRef(reference: string): Promise<string | null> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const row = await prisma.mandateDebit.findFirst({
+      where: { providerRef: reference },
+      select: { cooperativeId: true },
+    });
+    return row?.cooperativeId ?? null;
+  }
+  const rows = await prisma.$queryRaw<{ coop: string | null }[]>`
+    SELECT app.resolve_coop_by_mandate_debit_ref(${reference}) AS coop
+  `;
+  return rows[0]?.coop ?? null;
+}
+
+/**
  * Resolve the cooperative by its join code.
  */
 export async function resolveCoopByCode(code: string): Promise<string | null> {
