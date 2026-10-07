@@ -20,6 +20,7 @@
 - Every money movement posts a balanced `postJournal` pair and calls `audit()`.
 - Mandate create/cancel require the transaction PIN; rate-limited; blocked when frozen/suspended.
 - Retry cadence: at most once per day.
+- **Every payment and deduction carries a human-readable description** — in the `postJournal` `description`, the `audit()` `detail`, the provider `narration` (where the API accepts one), and the member notification/statement line. No money movement may be posted with an empty or generic description.
 - Verification per task: `npm run typecheck` clean · `npm run lint` 0 errors · targeted tests green · full suite green (`npm test`) · schema-sync green.
 
 ---
@@ -749,9 +750,39 @@ git commit -m "feat(direct-debit): refund flow (admin recommend, super admin app
 
 ---
 
+### Task 10: App-wide payment/deduction description audit
+
+**Files:**
+- Modify: any money-path service found missing a description (e.g. `src/services/payments/topup.ts`, `src/services/withdrawals.ts`, `src/services/disbursements.ts`, `src/services/dividends.ts`, `src/services/guarantordeduction.ts`, `src/services/payroll.ts`, `src/services/payanyone.ts`, `src/services/loans.ts`, `src/services/groups.ts`, `src/services/shares.ts`, `src/services/savings-products.ts`)
+- Test: `tests/money-invariants.test.ts` (existing) + a new focused test if needed
+
+**Goal:** every payment and deduction across the app carries a human-readable description in the journal, audit, provider narration, and member-facing line.
+
+- [ ] **Step 1: Inventory the money paths**
+
+Grep every `postJournal(` call and every `audit(` call with a money `action`. For each, confirm the `description`/`detail` is present and specific (names the member, the purpose, and the amount). List any that are empty, generic ("transaction"), or missing.
+
+- [ ] **Step 2: Write a failing invariant test**
+
+Add a test that asserts each money-path journal entry has a non-empty, non-generic `description` (e.g. a table of representative flows: topup, withdrawal, payout, dividend, guarantor deduction, payroll, loan repayment, group contribution, share purchase, savings deposit/maturity, direct debit, refund). Run it and watch it fail for any path missing a description.
+
+- [ ] **Step 3: Fix the gaps**
+
+Add/repair descriptions on the failing paths. Keep them specific and member-facing (e.g. `Loan repayment — ₦5,000 (installment 3/11)`), not generic.
+
+- [ ] **Step 4: Full gate + commit**
+
+Run `npm run typecheck` · `npm run lint` · `npm test`.
+```bash
+git add -A
+git commit -m "fix(money): ensure every payment and deduction carries a description"
+```
+
+---
+
 ## Self-Review
 
-- **Spec coverage:** providers (Task 2), flexible cap (Tasks 1/3), all three purposes (Tasks 4/6/7), provider-hosted link (Tasks 2/3), retry-until-success once/day (Tasks 4/5), notify-after-only (Tasks 4/6/7), reminder suppression (Task 5), PIN (Task 3), accounting via existing services (Task 4), admin view + docs (Task 8). **Addendum:** pause whole mandate / per purpose / skip one debit (Tasks 3/5/8), refund maker-checker with bank payout (Task 9). ✅
+- **Spec coverage:** providers (Task 2), flexible cap (Tasks 1/3), all three purposes (Tasks 4/6/7), provider-hosted link (Tasks 2/3), retry-until-success once/day (Tasks 4/5), notify-after-only (Tasks 4/6/7), reminder suppression (Task 5), PIN (Task 3), accounting via existing services (Task 4), admin view + docs (Task 8). **Addendum:** pause whole mandate / per purpose / skip one debit (Tasks 3/5/8), refund maker-checker with bank payout (Task 9), every payment/deduction has a description (global constraint + Task 10 app-wide audit). ✅
 - **Placeholder scan:** no TBD/TODO; every code step has real code or an exact file+pattern to follow.
 - **Type consistency:** `Mandate`/`MandateDebit` field names, `settleDebit`/`applyPurpose`/`runMandateDebits`/`runMandateRetries` signatures are consistent across tasks.
 - **Known risk:** Monnify's mandate path prefix (`/api/v1/...` vs `/v1/...`) must be verified against the adapter's `api()` base in Task 2 Step 1; the test pins the exact URL.
