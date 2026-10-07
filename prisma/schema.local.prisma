@@ -76,6 +76,8 @@ subscription       Subscription?
   motions            Motion[]
   groups             Group[]
   groupCycles        GroupCycle[]
+  savingsProducts    SavingsProduct[]
+  savingsAccounts    SavingsAccount[]
 
   @@index([status])
   @@index([code])
@@ -265,6 +267,10 @@ model Member {
   groupMemberships        GroupMember[]       @relation("GroupMemberships")
   groupCyclesPaidOut      GroupCycle[]        @relation("GroupCyclePayout")
   groupContributions      GroupContribution[] @relation("GroupContributions")
+  savingsProductsCreated  SavingsProduct[]    @relation("SavingsProductCreator")
+  savingsAccounts         SavingsAccount[]    @relation("SavingsAccountHolder")
+  savingsAccountsGuarded  SavingsAccount[]    @relation("SavingsAccountGuardian")
+  savingsDeposits         SavingsDeposit[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -1595,4 +1601,61 @@ model GroupContribution {
   @@index([groupId, createdAt])
   @@index([cycleId])
   @@index([memberId])
+}
+
+// ---- Savings products (Feature 7) ----
+// A per-cooperative product definition. Members open product accounts against
+// these; money leaves the wallet into a dedicated product-account balance.
+model SavingsProduct {
+  id            String         @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative    @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  type          String // fixed | goal | seasonal | junior
+  name          String
+  interestRate  Int            @default(0) // percentage paid at maturity (fixed deposits)
+  termMonths    Int? // term length in months (fixed/seasonal); null = open-ended
+  minAmount     Int            @default(0) // minimum opening/deposit amount in kobo
+  active        Boolean        @default(true)
+  createdById   String
+  createdBy     Member         @relation("SavingsProductCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt     DateTime       @default(now())
+  accounts      SavingsAccount[]
+
+  @@unique([cooperativeId, type, name])
+}
+
+// A member's (or guardian's) instance of a savings product, with its own
+// balance, lifecycle and optional maturity.
+model SavingsAccount {
+  id               String         @id @default(cuid())
+  cooperativeId    String
+  cooperative      Cooperative    @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId         String
+  member           Member         @relation("SavingsAccountHolder", fields: [memberId], references: [id], onDelete: Restrict)
+  productId        String
+  product          SavingsProduct @relation(fields: [productId], references: [id], onDelete: Restrict)
+  balance          Int            @default(0) // kobo
+  targetAmount     Int? // goal savings target in kobo
+  status           String         @default("active") // active | matured | closed
+  guardianMemberId String?
+  guardianMember   Member?        @relation("SavingsAccountGuardian", fields: [guardianMemberId], references: [id], onDelete: SetNull)
+  openedAt         DateTime       @default(now())
+  maturesAt        DateTime?
+  createdAt        DateTime       @default(now())
+  deposits         SavingsDeposit[]
+
+  @@index([cooperativeId, memberId])
+}
+
+// A movement into/out of a savings account — a deposit, a withdrawal or the
+// interest credited at maturity.
+model SavingsDeposit {
+  id        String         @id @default(cuid())
+  accountId String
+  account   SavingsAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  memberId  String
+  member    Member         @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  amount    Int // kobo
+  kind      String // deposit | withdrawal | interest
+  createdAt DateTime       @default(now())
 }
