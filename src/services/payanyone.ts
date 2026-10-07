@@ -1,6 +1,8 @@
 import { prisma, withTxBatch } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { resolveProvider, markProviderDown } from "./payments/index.js";
+import { confirmAccountName } from "./disbursements.js";
+import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
@@ -306,6 +308,39 @@ async function payExternal(
     return { ok: false, message: "No payment provider configured — money not sent." };
   }
 
+  // Confirm the destination account's name BEFORE sending (fail-closed). If the
+  // provider cannot resolve it, or it doesn't match the beneficiary on record,
+  // the transfer is HELD — never sent blind.
+  const confirm = await confirmAccountName({
+    provider,
+    accountNumber: payment.bankAccountNumber,
+    bankCode: payment.bankCode,
+    expectedName: payment.beneficiaryName,
+  });
+  if (!confirm.ok) {
+    await prisma.externalPayment.updateMany({
+      where: { id: payment.id, status: "processing" },
+      data: {
+        status: "approved2",
+        approved3ById: null,
+        payoutReference: `held: ${confirm.status}`.slice(0, 200),
+      },
+    });
+    const reason =
+      confirm.status === "name_mismatch"
+        ? `the account name (*${confirm.name}*) does not match the beneficiary (*${payment.beneficiaryName}*)`
+        : `the account name could not be resolved (${confirm.error ?? "unknown error"})`;
+    await alertSupers(
+      payment.cooperativeId,
+      `🛑 Pay-anyone *${payment.id.slice(-6)}* held — ${reason}. Money NOT sent. Verify the bank details, then a super admin can retry the final approval.`,
+      AlertSeverity.CRITICAL,
+    ).catch(() => {});
+    return {
+      ok: false,
+      message: `⛔ Payout held (fail-closed): ${reason}. No money moved — verify the bank details and retry the final approval.`,
+    };
+  }
+
   try {
     const result = await provider.payout({
       amount: payment.amount,
@@ -341,7 +376,7 @@ async function payExternal(
             status: "successful",
             provider: provider.name,
             providerRef: result.providerRef,
-            note: `Pay-anyone → ${payment.beneficiaryName}${payment.purpose ? ` (${payment.purpose})` : ""}`,
+            note: `Pay-anyone → ${payment.beneficiaryName}${payment.purpose ? ` (${payment.purpose})` : ""} · confirmed: ${confirm.name}`,
             memberId: payment.initiatedById, // bookkeeping anchor
             cooperativeId: payment.cooperativeId,
           },

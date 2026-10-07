@@ -1,7 +1,12 @@
 import { prisma, withTx } from "../lib/prisma.js";
 import { setCoopContext } from "../lib/tenant-context.js";
 import { notifyMember } from "../lib/messaging.js";
-import { resolveProvider, markProviderDown, markProviderUp } from "./payments/index.js";
+import {
+  resolveProvider,
+  markProviderDown,
+  markProviderUp,
+  type ProviderAdapter,
+} from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
 import { maskId } from "../lib/security.js";
 import { recordLedger } from "./ledger.js";
@@ -47,6 +52,57 @@ interface SendToBankOpts {
   onFailure?: (status: string, error: string) => Promise<void>;
 }
 
+/** Outcome of a bank-account name confirmation. */
+export interface NameConfirmResult {
+  /** True only when the name was resolved and (unless skipped) matched. */
+  ok: boolean;
+  status: "confirmed" | "name_mismatch" | "unresolved";
+  /** Provider-resolved account name, when the provider returned one. */
+  name?: string;
+  /** Provider error when the account could not be resolved. */
+  error?: string;
+}
+
+/**
+ * Resolve a bank account's registered name via the provider and confirm it
+ * against the expected recipient's name. Fail-closed: when the provider cannot
+ * resolve the account (or has no resolver), the result is `unresolved` and the
+ * caller MUST hold the payout rather than send it blind.
+ *
+ * This is the single name-confirmation step shared by every payout path:
+ * `sendToBank` (withdrawals, refunds, dividends, loan disbursements) and the
+ * pay-anyone flow. Non-Monnify providers use their own `resolveAccount`.
+ */
+export async function confirmAccountName(params: {
+  provider: Pick<ProviderAdapter, "name" | "resolveAccount">;
+  accountNumber: string;
+  bankCode: string;
+  expectedName: string;
+  /** Skip the comparison (e.g. death-claim payouts to a family member). */
+  skip?: boolean;
+}): Promise<NameConfirmResult> {
+  const { provider, accountNumber, bankCode, expectedName, skip } = params;
+
+  if (!provider.resolveAccount) {
+    if (skip) return { ok: true, status: "confirmed" };
+    return { ok: false, status: "unresolved", error: "provider has no resolver" };
+  }
+
+  const resolved = await provider.resolveAccount({ accountNumber, bankCode });
+  if (skip) {
+    // Death claims etc. — the money goes to a family member, not the account
+    // holder. Security comes from the validations + super admin approval.
+    return { ok: true, status: "confirmed", name: resolved.ok ? resolved.name : undefined };
+  }
+  if (!resolved.ok || !resolved.name) {
+    return { ok: false, status: "unresolved", error: resolved.error ?? "resolution failed" };
+  }
+  if (!namesMatch(resolved.name, expectedName)) {
+    return { ok: false, status: "name_mismatch", name: resolved.name };
+  }
+  return { ok: true, status: "confirmed", name: resolved.name };
+}
+
 /**
  * Verify the account holder's name against the member's registered name, then
  * send the money. Shared by loan disbursements and member withdrawals.
@@ -68,36 +124,40 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
   }
 
   // 1. Verify the account holder's name matches the member's registered name.
-  const resolved = await provider.resolveAccount!({
+  const confirm = await confirmAccountName({
+    provider,
     accountNumber: opts.bankAccountNumber,
     bankCode: opts.bankCode,
+    expectedName: member.name,
+    skip: opts.skipNameCheck,
   });
-  if (opts.skipNameCheck) {
-    // Death claims etc. — the money goes to a family member, not the account
-    // holder. Security comes from the validations + super admin approval.
-    return payOut(opts, member, resolved.ok ? (resolved.name ?? null) : null);
-  }
-  if (!resolved.ok || !resolved.name) {
-    const msg = `Not paid out: could not verify the account (${resolved.error ?? "unknown error"}). Check the bank details.`;
-    await opts.onFailure?.("failed", resolved.error ?? "resolution failed");
-    await notify(member, msg);
-    return { ok: false, status: "failed", message: msg };
+  if (confirm.ok) {
+    // 2. Names match — send the money.
+    return payOut(opts, member, confirm.name ?? null);
   }
 
-  if (!namesMatch(resolved.name, member.name)) {
-    const msg = `Not paid out: the account name (*${resolved.name}*) does not match your registered name (*${member.name}*). Admin must verify before paying.`;
-    await opts.onFailure?.("name_mismatch", `account name is "${resolved.name}"`);
+  if (confirm.status === "name_mismatch") {
+    const msg = `Not paid out: the account name (*${confirm.name}*) does not match your registered name (*${member.name}*). Admin must verify before paying.`;
+    await opts.onFailure?.("name_mismatch", `account name is "${confirm.name}"`);
     await notify(member, msg);
     return { ok: false, status: "name_mismatch", message: msg };
   }
 
-  // 2. Names match — send the money.
-  return payOut(opts, member, resolved.name);
+  const msg = `Not paid out: could not verify the account (${confirm.error ?? "unknown error"}). Check the bank details.`;
+  await opts.onFailure?.("failed", confirm.error ?? "resolution failed");
+  await notify(member, msg);
+  return { ok: false, status: "failed", message: msg };
 }
 
 async function payOut(
   opts: SendToBankOpts,
-  member: { id: string; name: string; cooperativeId: string; phone: string },
+  member: {
+    id: string;
+    name: string;
+    cooperativeId: string;
+    phone: string;
+    bankAccountName?: string | null;
+  },
   verifiedName: string | null,
 ): Promise<DisbursementResult> {
   const provider = await resolveProvider();
@@ -180,6 +240,14 @@ async function payOut(
         };
       }
       throw err;
+    }
+
+    // Persist the provider-verified account name once (Zero-BVN assurance), so
+    // later payouts to the same destination can trust it.
+    if (verifiedName && !member.bankAccountName) {
+      await prisma.member
+        .update({ where: { id: member.id }, data: { bankAccountName: verifiedName } })
+        .catch(() => {});
     }
 
     // Double-entry: expense leaves the cooperative bank account. Withdrawn by

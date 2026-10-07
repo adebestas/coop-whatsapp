@@ -16,6 +16,7 @@ const PHONE = "2348010000001";
 
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { requestExternalPayment, approveExternalPayment } from "../src/services/payanyone.js";
+import { paymentState } from "./payment-state.js";
 import { recordLedger, computePnl } from "../src/services/ledger.js";
 import { audit, verifyAuditChain } from "../src/services/audit.js";
 import { scanGuarantorDefaults, executeDueDeductions } from "../src/services/guarantordeduction.js";
@@ -68,6 +69,9 @@ async function makeMember(
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  paymentState.resolveName = "ADA OBI";
+  paymentState.resolveFails = false;
+  paymentState.payoutFails = false;
   for (const m of [
     "coopPost",
     "deductionItem",
@@ -124,6 +128,9 @@ describe("pay anyone (3-super approval)", () => {
       role: string;
       cooperativeId: string;
     }) => m;
+    // Pay-anyone confirms the destination account name before paying; the
+    // provider must report the beneficiary's name for the payout to proceed.
+    paymentState.resolveName = "Vic Ventures";
     const req = await requestExternalPayment(actorOf(admin), {
       beneficiaryName: "Vic Ventures",
       accountNumber: "0123456789",
