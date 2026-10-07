@@ -256,9 +256,12 @@ export async function attendMeeting(
 
   const member = await prisma.member.findFirst({
     where: { id: memberId, cooperativeId: coopId },
-    select: { id: true, name: true },
+    select: { id: true, name: true, status: true },
   });
   if (!member) return { ok: false, message: "You're not a member of this cooperative." };
+  if (member.status !== "active") {
+    return { ok: false, message: "Only *active* members can attend a meeting." };
+  }
 
   const existing = await prisma.meetingAttendance.findUnique({
     where: { meetingId_memberId: { meetingId: meeting.id, memberId: member.id } },
@@ -587,15 +590,24 @@ export async function quorumMet(coopId: string, meetingId: string): Promise<Quor
     prisma.member.count({ where: { cooperativeId: coopId, status: "active" } }),
     prisma.meetingAttendance.findMany({
       where: { meetingId: meeting.id, present: true },
-      select: { memberId: true, proxyForMemberId: true },
+      select: {
+        memberId: true,
+        proxyForMemberId: true,
+        member: { select: { status: true } },
+        proxyForMember: { select: { status: true } },
+      },
     }),
   ]);
 
-  // A member counts once whether present in person or represented by proxy.
+  // A member counts once whether present in person or represented by proxy,
+  // and only if they are currently active — a suspended/pending member must
+  // never inflate the numerator beyond the active-only denominator.
   const represented = new Set<string>();
   for (const row of attendance) {
-    represented.add(row.memberId);
-    if (row.proxyForMemberId) represented.add(row.proxyForMemberId);
+    if (row.member?.status === "active") represented.add(row.memberId);
+    if (row.proxyForMemberId && row.proxyForMember?.status === "active") {
+      represented.add(row.proxyForMemberId);
+    }
   }
   const present = represented.size;
   const required = Math.ceil((eligible * meeting.quorumPercent) / 100);

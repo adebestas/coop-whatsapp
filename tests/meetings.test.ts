@@ -262,6 +262,35 @@ describe("meeting service", () => {
     expect(closed.message.toLowerCase()).toContain("passed");
   });
 
+  it("ignores non-active members when counting quorum attendance", async () => {
+    const coop = await createTestCoop("MTG14");
+    const admin = await createTestMember(coop.id, SUPER);
+    const a = await createTestMember(coop.id, { phone: "2348010000100", name: "Ada" });
+    const suspended = await createTestMember(coop.id, { phone: "2348010000101", name: "Sam" });
+    await prisma.member.update({ where: { id: suspended.id }, data: { status: "suspended" } });
+    const actor = { phone: admin.phone, id: admin.id, role: "superadmin" };
+
+    const started = await startMeeting(coop.id, "agm", "Active Quorum", 50, actor);
+    const meetingId = started.meetingId!;
+    await openMeeting(coop.id, meetingId, actor);
+
+    // A suspended member cannot mark themselves present.
+    const denied = await attendMeeting(coop.id, meetingId, suspended.id);
+    expect(denied.ok).toBe(false);
+    expect(await prisma.meetingAttendance.count({ where: { meetingId } })).toBe(0);
+
+    await attendMeeting(coop.id, meetingId, a.id);
+    // Simulate a stale/injected attendance row for the suspended member.
+    await prisma.meetingAttendance.create({
+      data: { meetingId, memberId: suspended.id, present: true },
+    });
+
+    const q = await quorumMet(coop.id, meetingId);
+    expect(q.eligible).toBe(2); // admin + Ada only
+    expect(q.present).toBe(1); // suspended row ignored
+    expect(q.met).toBe(true);
+  });
+
   it("lists meetings and motions for members", async () => {
     const coop = await createTestCoop("MTG06");
     const admin = await createTestMember(coop.id, SUPER);
@@ -349,8 +378,17 @@ describe("meeting minutes", () => {
     expect(res.message).toContain("/api/export/");
     expect(res.files?.length).toBeGreaterThan(0);
     const { stat } = await import("node:fs/promises");
+    const { basename } = await import("node:path");
     for (const f of res.files ?? []) {
       expect((await stat(f)).size).toBeGreaterThan(100);
+      // The route's cross-coop check derives the coop id from the filename's
+      // first hyphen-delimited segment, and its allow-list only accepts that
+      // segment as lowercase alphanumerics — so the filename must be
+      // coop-scoped and still match the serving route's contract.
+      const name = basename(f);
+      expect(name.split("-")[0]).toBe(coop.id);
+      expect(name).toMatch(/^[a-z0-9]+(-[a-z]+)*-([a-f0-9]{8,32})\.(xlsx|pdf)$/);
+      expect(res.message).toContain(name);
     }
   });
 });

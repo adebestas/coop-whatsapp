@@ -128,7 +128,7 @@ export async function exportMeetingMinutes(
   const coop = await prisma.cooperative.findUnique({ where: { id: requester.cooperativeId } });
   const sheet = await minutesData(meeting);
 
-  const base = `meetingminutes-${token.slice(0, 8)}`;
+  const base = `${requester.cooperativeId}-minutes-${token.slice(0, 8)}`;
   const xlsxName = `${base}.xlsx`;
   const pdfName = `${base}.pdf`;
 

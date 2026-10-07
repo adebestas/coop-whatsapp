@@ -65,22 +65,23 @@ export const serveExportFile = (app: FastifyInstance): void => {
     if (!live) {
       return reply.code(401).send({ error: "Not authorized" });
     }
-    // Coop‑scoped check: the filename must encode the caller's cooperative ID.
+    // Coop‑scoped check: coop‑scoped filenames lead with the cooperative id
+    // (`<coopId>-<type...>-<hex>.<ext>`), and cooperative ids are ~25-char
+    // cuids that never contain a hyphen. Legacy filenames (`<type>-<hex>.<ext>`)
+    // carry no coop id and are allowed for backward compatibility.
     const { filename } = req.params as { filename: string };
-    const coopIdFromFilename = filename.match(/^([a-z]+)-/);
-    if (coopIdFromFilename && coopIdFromFilename[1] !== payload.cooperativeId) {
+    const coopPrefix = filename.split("-")[0];
+    if (coopPrefix.length >= 20 && coopPrefix !== payload.cooperativeId) {
       return reply.code(403).send({ error: "Export file does not belong to your cooperative." });
     }
-    // If the filename has no coop prefix (old format), allow for backward
-    // compatibility — these files will be cleaned up by pruneExports().
 
     // Strict allow-list matching the real generated filenames:
     //   `members-<hex>`, `transactions-<hex>`, `pnl-<hex>`,
     //   `str-compliance-<hex>`, `paye-compliance-<hex>`,
-    //   `election-results-<hex>` + safe extension.
+    //   `election-results-<hex>`, `<coopId>-minutes-<hex>` + safe extension.
     // No slashes or `..` are allowed, so path traversal is impossible;
     // basename() further strips any directory prefix.
-    if (!/^[a-z]+(-[a-z]+)*-([a-f0-9]{8,32})\.(xlsx|pdf)$/.test(filename)) {
+    if (!/^[a-z0-9]+(-[a-z]+)*-([a-f0-9]{8,32})\.(xlsx|pdf)$/.test(filename)) {
       return reply.code(404).send({ error: "Not found" });
     }
     const full = join(process.cwd(), EXPORT_DIR, basename(filename));
