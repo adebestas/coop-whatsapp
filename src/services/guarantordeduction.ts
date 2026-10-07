@@ -62,18 +62,24 @@ export async function scanGuarantorDefaults(): Promise<number> {
         }
       } else if (loan.groupId) {
         // A group loan has no individual Guarantor rows: the group is jointly
-        // liable, so every ACTIVE member absorbs an equal slice of the share.
+        // liable, so every ACTIVE member EXCEPT the borrower absorbs an equal
+        // slice of the share. Charging the borrower too would be double
+        // recovery — they already owe the full loan as the defaulter.
         const groupMembers = await prisma.groupMember.findMany({
           where: { groupId: loan.groupId, active: true },
           include: { member: true },
           orderBy: { joinedAt: "asc" },
         });
-        if (groupMembers.length > 0) {
+        const liable = groupMembers.filter((gm) => gm.memberId !== loan.memberId);
+        if (liable.length > 0) {
+          // Kobo are integers, so round the per-group share before splitting
+          // (the raw 50%-interest share can land on a half-kobo).
+          const groupShare = Math.round(share);
           // Split equally; the rounding remainder goes to the first member so
           // the deductions always sum to the full share.
-          const base = Math.floor(share / groupMembers.length);
-          const remainder = share - base * groupMembers.length;
-          groupMembers.forEach((gm, i) => {
+          const base = Math.floor(groupShare / liable.length);
+          const remainder = groupShare - base * liable.length;
+          liable.forEach((gm, i) => {
             const amount = base + (i === 0 ? remainder : 0);
             if (amount <= 0) return;
             payables.push({

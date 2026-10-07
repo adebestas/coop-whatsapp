@@ -16,7 +16,7 @@ import {
   applyGroupLoan,
   groupLoans,
 } from "../src/services/groups.js";
-import { approveLoan } from "../src/services/loans.js";
+import { approveLoan, totalRepayable } from "../src/services/loans.js";
 import {
   scanGuarantorDefaults,
   executeDueDeductions,
@@ -431,12 +431,16 @@ describe("joint-liability group loans", () => {
 
       await scanGuarantorDefaults();
 
+      // The borrower is the defaulter and must NOT be charged their own
+      // recovery; only the OTHER active members cover the joint liability.
+      const totalInterest = totalRepayable(500000, 11) - 500000;
+      const expectedShare = Math.min(Math.round(totalInterest * 0.5), 500000);
+
       const deductions = await prisma.guarantorDeduction.findMany({ where: { loanId } });
-      // One row per active group member, split equally, summing to the share.
-      expect(deductions.length).toBe(2);
-      const byMember = Object.fromEntries(deductions.map((d) => [d.guarantorId, d.amount]));
-      expect(byMember[a.id] + byMember[b.id]).toBe(deductions[0].amount + deductions[1].amount);
-      expect(Math.abs(byMember[a.id] - byMember[b.id])).toBeLessThanOrEqual(1);
+      expect(deductions.length).toBe(1);
+      expect(deductions[0].guarantorId).toBe(b.id);
+      expect(deductions.reduce((s, d) => s + d.amount, 0)).toBe(expectedShare);
+      expect(await prisma.guarantorDeduction.findFirst({ where: { loanId, guarantorId: a.id } })).toBeNull();
       expect(deductions.every((d) => d.status === "notified")).toBe(true);
 
       const texts = vi
@@ -452,9 +456,10 @@ describe("joint-liability group loans", () => {
 
       vi.setSystemTime(new Date("2026-03-12T10:00:00Z"));
       const res = await executeDueDeductions();
-      expect(res.deducted).toBe(2);
-      expect(await walletBalance(a.id)).toBeLessThan(100000);
-      expect(await walletBalance(b.id)).toBeLessThan(100000);
+      expect(res.deducted).toBe(1);
+      // Only the non-borrower's savings are touched.
+      expect(await walletBalance(a.id)).toBe(100000);
+      expect(await walletBalance(b.id)).toBe(100000 - expectedShare);
     } finally {
       vi.useRealTimers();
     }
