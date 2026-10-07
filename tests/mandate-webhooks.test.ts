@@ -349,4 +349,70 @@ describe("mandate webhooks", () => {
       .mock.calls.some((c) => (c[0] as { phone?: string }).phone === admin.phone);
     expect(alerted).toBe(true);
   });
+
+  it("settles a group debit by contributing to the group and increasing the pot", async () => {
+    const coop = await createTestCoop("MWH10");
+    const m = await createTestMember(coop.id, { phone: "2348000200011" });
+    const mandate = await seedMandate(coop.id, m.id);
+    const group = await prisma.group.create({
+      data: {
+        cooperativeId: coop.id,
+        type: "rosca",
+        name: "Harvest ROSCA",
+        code: "HROS1",
+        contributionAmount: 200_000,
+        cycleLength: 5,
+        createdById: m.id,
+      },
+    });
+    const cycle = await prisma.groupCycle.create({
+      data: { groupId: group.id, cooperativeId: coop.id, cycleNumber: 1, status: "open" },
+    });
+    await prisma.groupMember.create({
+      data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
+    });
+    const debit = await seedDebit(coop.id, m.id, mandate.id, {
+      purpose: "group",
+      targetId: group.id,
+      amount: 200_000,
+      providerRef: "DD-GROUP-1",
+    });
+
+    const res = await postMonnify({
+      eventType: "SUCCESSFUL_DISBURSEMENT",
+      eventData: { reference: "DD-GROUP-1", status: "SUCCESSFUL" },
+    });
+    expect(res.httpStatus).toBe(200);
+    expect(res.body.status).toBe("ok");
+
+    expect((await prisma.mandateDebit.findUnique({ where: { id: debit.id } }))?.status).toBe(
+      "successful",
+    );
+
+    // contributeToGroup recorded the contribution for the open cycle.
+    const contributions = await prisma.groupContribution.findMany({ where: { cycleId: cycle.id } });
+    expect(contributions).toHaveLength(1);
+    expect(contributions[0].memberId).toBe(m.id);
+    expect(contributions[0].amount).toBe(200_000);
+
+    // The group pot grew by the contribution (journal CREDIT to the pot account).
+    const postings = await prisma.posting.findMany({
+      where: { entry: { cooperativeId: coop.id }, account: `liability:group_pot:${group.id}` },
+    });
+    const credits = postings
+      .filter((p) => p.direction === "CREDIT")
+      .reduce((s, p) => s + p.amount, 0);
+    expect(credits).toBe(200_000);
+
+    // Group money is not savings: the wallet nets out and totalSaved is untouched.
+    const wallet = await prisma.wallet.findUnique({ where: { memberId: m.id } });
+    expect(wallet?.balance).toBe(0);
+    expect(wallet?.totalSaved).toBe(0);
+
+    // The member is told the contribution happened.
+    const notified = vi
+      .mocked(notifyMember)
+      .mock.calls.some((c) => /contributed/i.test(String(c[1])));
+    expect(notified).toBe(true);
+  });
 });

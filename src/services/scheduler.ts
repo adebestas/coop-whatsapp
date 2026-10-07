@@ -247,6 +247,68 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
             );
           }
         }
+
+        // ---- Group: a contribution due in the group's current open cycle. ----
+        if (!paused.has("group")) {
+          const memberships = await prisma.groupMember.findMany({
+            where: {
+              memberId: member.id,
+              active: true,
+              group: { cooperativeId: coopId, status: "active" },
+            },
+            include: { group: true },
+          });
+          for (const membership of memberships) {
+            const group = membership.group;
+            const cycle = await prisma.groupCycle.findFirst({
+              where: { groupId: group.id, status: "open" },
+              orderBy: { cycleNumber: "desc" },
+            });
+            if (!cycle) continue;
+            // One contribution per member per cycle: a settled debit creates the
+            // GroupContribution, so its absence means this round is still due.
+            const already = await prisma.groupContribution.findFirst({
+              where: { cycleId: cycle.id, memberId: member.id },
+            });
+            if (already) continue;
+
+            const amount = group.contributionAmount;
+            if (amount <= 0) continue;
+            if (amount > mandate.amountCap) {
+              // Never create a partial contribution: tell the member to pay
+              // directly or raise their cap instead.
+              await notifyMember(
+                member,
+                `⚠️ Your contribution of *${formatBalance(amount)}* to the group *${group.name}* is due, but it is above your direct-debit cap of *${formatBalance(mandate.amountCap)}*. Reply *contribute ${group.code} ${Math.round(amount / 100)}* to pay it now, or raise your mandate cap.`,
+              ).catch(() => {});
+              continue;
+            }
+            // Keyed on the mandate + group + open cycle: while the cycle is open
+            // the reference repeats, so overlapping ticks skip instead of
+            // double-charging. Settlement (contributeToGroup) writes the
+            // GroupContribution, which is what makes the round no longer due.
+            const providerRef = `DD-${mandate.id}-group-${group.id}-${cycle.id}`;
+            const debitId = await createDebitOrSkip({
+              mandateId: mandate.id,
+              cooperativeId: coopId,
+              memberId: member.id,
+              purpose: "group",
+              targetId: group.id,
+              amount,
+              providerRef,
+            });
+            if (!debitId) continue; // already created by an overlapping tick
+            created++;
+            await dispatchMandateDebit(
+              mandate,
+              amount,
+              providerRef,
+              `Group contribution — ${formatBalance(amount)} (${group.name})`,
+              debitId,
+              now,
+            );
+          }
+        }
       } catch (err) {
         // One mandate's failure (DB or provider) must not abort the whole run.
         log.error("[scheduler] mandate debit failed", {

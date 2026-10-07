@@ -305,6 +305,172 @@ describe("mandate scheduler debits", () => {
   });
 });
 
+/** Seed an active ROSCA group with a single open cycle. */
+async function seedGroup(
+  coopId: string,
+  createdById: string,
+  overrides: { contributionAmount?: number; code?: string; cycleStatus?: string } = {},
+) {
+  const group = await prisma.group.create({
+    data: {
+      cooperativeId: coopId,
+      type: "rosca",
+      name: "Harvest ROSCA",
+      code: overrides.code ?? `G${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+      contributionAmount: overrides.contributionAmount ?? 200_000,
+      cycleLength: 5,
+      createdById,
+    },
+  });
+  const cycle = await prisma.groupCycle.create({
+    data: {
+      groupId: group.id,
+      cooperativeId: coopId,
+      cycleNumber: 1,
+      status: overrides.cycleStatus ?? "open",
+    },
+  });
+  return { group, cycle };
+}
+
+describe("mandate scheduler group contributions", () => {
+  it("creates a group debit for an active membership with an unfulfilled open cycle", async () => {
+    const coop = await createTestCoop("MSCH14");
+    const m = await createTestMember(coop.id, { phone: "2348000300015" });
+    await enableDirectDebit(coop.id);
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 300_000 });
+    const { group } = await seedGroup(coop.id, m.id, { contributionAmount: 200_000 });
+    await prisma.groupMember.create({
+      data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
+    });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const n = await runMandateDebits(new Date());
+
+    const debit = await prisma.mandateDebit.findFirst({
+      where: { mandateId: mandate.id, purpose: "group" },
+    });
+    expect(debit).toBeTruthy();
+    expect(debit?.status).toBe("pending");
+    expect(debit?.targetId).toBe(group.id);
+    expect(debit?.amount).toBe(200_000);
+    expect(n).toBe(1);
+
+    const call = vi.mocked(adapter.debitMandate).mock.calls[0][0] as {
+      amount: number;
+      narration?: string;
+      reference?: string;
+    };
+    expect(call.amount).toBe(200_000);
+    expect(call.narration).toMatch(/group/i);
+    expect(call.reference).toContain(`DD-${mandate.id}-group-${group.id}`);
+  });
+
+  it("does not create a group debit when the member already contributed this cycle", async () => {
+    const coop = await createTestCoop("MSCH15");
+    const m = await createTestMember(coop.id, { phone: "2348000300016" });
+    await enableDirectDebit(coop.id);
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 300_000 });
+    const { group, cycle } = await seedGroup(coop.id, m.id);
+    await prisma.groupMember.create({
+      data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
+    });
+    await prisma.groupContribution.create({
+      data: { groupId: group.id, cycleId: cycle.id, memberId: m.id, amount: 200_000 },
+    });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const n = await runMandateDebits(new Date());
+
+    expect(await prisma.mandateDebit.count({ where: { purpose: "group" } })).toBe(0);
+    expect(vi.mocked(adapter.debitMandate)).not.toHaveBeenCalled();
+    expect(n).toBe(0);
+  });
+
+  it("skips a group contribution above the mandate cap and notifies the member", async () => {
+    const coop = await createTestCoop("MSCH16");
+    const m = await createTestMember(coop.id, { phone: "2348000300017" });
+    await enableDirectDebit(coop.id);
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 100_000 });
+    const { group } = await seedGroup(coop.id, m.id, { contributionAmount: 200_000 });
+    await prisma.groupMember.create({
+      data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
+    });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+    vi.mocked(notifyMember).mockClear();
+
+    const n = await runMandateDebits(new Date());
+
+    expect(await prisma.mandateDebit.count({ where: { mandateId: mandate.id } })).toBe(0);
+    expect(vi.mocked(adapter.debitMandate)).not.toHaveBeenCalled();
+    expect(n).toBe(0);
+    const told = vi
+      .mocked(notifyMember)
+      .mock.calls.some((c) => /cap|contribution/i.test(String(c[1])));
+    expect(told).toBe(true);
+  });
+
+  it("does not create a group debit when group is a paused purpose", async () => {
+    const coop = await createTestCoop("MSCH17");
+    const m = await createTestMember(coop.id, { phone: "2348000300018" });
+    await enableDirectDebit(coop.id);
+    await seedMandate(coop.id, m.id, { pausedPurposes: "group" });
+    const { group } = await seedGroup(coop.id, m.id);
+    await prisma.groupMember.create({
+      data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
+    });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const n = await runMandateDebits(new Date());
+
+    expect(await prisma.mandateDebit.count({ where: { purpose: "group" } })).toBe(0);
+    expect(vi.mocked(adapter.debitMandate)).not.toHaveBeenCalled();
+    expect(n).toBe(0);
+  });
+
+  it("creates only one group debit when the same open cycle is processed twice", async () => {
+    const coop = await createTestCoop("MSCH18");
+    const m = await createTestMember(coop.id, { phone: "2348000300019" });
+    await enableDirectDebit(coop.id);
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 300_000 });
+    const { group } = await seedGroup(coop.id, m.id);
+    await prisma.groupMember.create({
+      data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
+    });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const now = new Date();
+    await runMandateDebits(now);
+    await runMandateDebits(now);
+
+    expect(await prisma.mandateDebit.count({ where: { mandateId: mandate.id } })).toBe(1);
+    expect(vi.mocked(adapter.debitMandate)).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a group membership whose group has no open cycle", async () => {
+    const coop = await createTestCoop("MSCH19");
+    const m = await createTestMember(coop.id, { phone: "2348000300020" });
+    await enableDirectDebit(coop.id);
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 300_000 });
+    const { group } = await seedGroup(coop.id, m.id, { cycleStatus: "closed" });
+    await prisma.groupMember.create({
+      data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
+    });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const n = await runMandateDebits(new Date());
+
+    expect(await prisma.mandateDebit.count({ where: { mandateId: mandate.id } })).toBe(0);
+    expect(n).toBe(0);
+  });
+});
+
 describe("mandate scheduler retries", () => {
   it("retries a due failed debit and advances nextRetryAt by one day", async () => {
     const coop = await createTestCoop("MSCH4");

@@ -13,6 +13,7 @@ import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { log } from "../lib/logger.js";
 import { resolveProvider, markProviderUp, markProviderDown } from "./payments/index.js";
 import { repayLoan } from "./loans.js";
+import { contributeToGroup } from "./groups.js";
 
 export interface MandateActor {
   id: string;
@@ -455,11 +456,11 @@ async function loadNotifiable(memberId: string) {
 /**
  * Apply a settled debit to the obligation it was collected for. `savings` is a
  * no-op — the wallet credit IS the savings deposit. `loan` repays the target
- * loan from the just-credited wallet; `group` routes to the contribution service
- * in Task 7.
+ * loan from the just-credited wallet; `group` contributes to the target group
+ * from the just-credited wallet.
  */
 async function applyPurpose(
-  debit: { purpose: string; targetId: string | null; cooperativeId: string },
+  debit: { purpose: string; targetId: string | null; cooperativeId: string; amount: number },
   member: { id: string; phone: string },
 ): Promise<void> {
   switch (debit.purpose) {
@@ -479,8 +480,22 @@ async function applyPurpose(
       }
       return;
     }
-    case "group":
-      return; // Task 7
+    case "group": {
+      // The wallet was just credited by settleDebit; contributeToGroup moves it
+      // into the group pot. A failure here leaves the money on the wallet, so
+      // surface it (the caller alerts) rather than swallow it.
+      const result = await contributeToGroup(
+        debit.cooperativeId,
+        debit.targetId!,
+        member.id,
+        debit.amount,
+      );
+      await notifyMember(await loadNotifiable(member.id), result.message).catch(() => {});
+      if (!result.ok) {
+        throw new Error(`group contribution failed: ${result.message}`);
+      }
+      return;
+    }
     default:
       return;
   }
