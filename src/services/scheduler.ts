@@ -359,6 +359,21 @@ async function dispatchMandateDebit(
   debitId: string,
   now: Date,
 ): Promise<void> {
+  // Fail-closed: a Paystack mandate has no authorization code until its
+  // activation webhook lands, and a partial debit keyed on an empty code is
+  // invalid (and could charge the wrong authorization). Never dispatch it.
+  if (mandate.provider === "paystack" && !mandate.providerMandateId) {
+    await prisma.mandateDebit.update({
+      where: { id: debitId },
+      data: {
+        status: "failed",
+        failureReason: "paystack mandate is not activated (no authorization code)",
+        nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS),
+      },
+    });
+    return;
+  }
+
   let result: { ok: boolean; error?: string } | undefined;
   try {
     const provider = await resolveProvider(mandate.provider);
@@ -406,6 +421,10 @@ export async function runMandateRetries(now = new Date()): Promise<number> {
     for (const debit of failed) {
       if (debit.mandate.status !== "active") continue;
       if (csvSet(debit.mandate.pausedPurposes).has(debit.purpose)) continue;
+      // Fail-closed: never retry a Paystack debit until its authorization code
+      // is resolved. Leave nextRetryAt untouched so it is re-evaluated (and can
+      // run) once the activation webhook has stored the code.
+      if (debit.mandate.provider === "paystack" && !debit.mandate.providerMandateId) continue;
 
       // Atomic claim BEFORE the provider call, so two overlapping retries can
       // only charge once. The `nextRetryAt <= now` predicate is the guard: the

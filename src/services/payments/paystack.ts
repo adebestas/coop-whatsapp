@@ -65,7 +65,11 @@ function getSecret(): string {
   return key;
 }
 
-async function api<T>(path: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<T> {
+async function api<T>(
+  path: string,
+  method: "GET" | "POST" | "PUT" | "DELETE",
+  body?: unknown,
+): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: {
@@ -288,14 +292,19 @@ export const paystackAdapter: ProviderAdapter = {
 
   async createMandate(params: CreateMandateParams): Promise<MandateResult> {
     try {
+      // The webhook (`direct_debit.authorization.created`) only echoes
+      // `data.customer.email`, so we pass a DETERMINISTIC email derived from our
+      // reference. The webhook handler derives the reference back from that email
+      // and joins the authorization to our mandate.
       const res = await api<any>("/customer/authorization/initialize", "POST", {
-        email: params.memberEmail,
+        email: `${params.reference}@coop.local`,
         channel: "direct_debit",
         callback_url: params.redirectUrl,
       });
+      // No providerMandateId: the authorization_code only arrives on the
+      // webhook. The mandate stays fail-closed for debits until then.
       return {
         ok: true,
-        providerMandateId: res.data?.reference,
         authorizationUrl: res.data?.redirect_url,
         status: "pending",
       };
@@ -304,8 +313,43 @@ export const paystackAdapter: ProviderAdapter = {
     }
   },
 
+  async triggerActivationCharge(params) {
+    try {
+      const customerId = params.providerCustomerId;
+      if (!customerId) {
+        return { ok: false, error: "missing Paystack customer code for activation" };
+      }
+      // Paystack's activation endpoints are customer-scoped and take the numeric
+      // authorization_id, which we resolve from the mandate-authorizations list.
+      const list = await api<any>(
+        `/customer/${encodeURIComponent(customerId)}/directdebit-mandate-authorizations`,
+        "GET",
+      );
+      const entries: Array<{ authorization_id?: unknown; authorization_code?: string }> =
+        Array.isArray(list.data) ? list.data : [];
+      const match = entries.find((e) => e.authorization_code === params.providerMandateId);
+      if (!match?.authorization_id) {
+        return { ok: false, error: "authorization not found for activation charge" };
+      }
+      await api<any>(
+        `/customer/${encodeURIComponent(customerId)}/directdebit-activation-charge`,
+        "PUT",
+        { authorization_id: match.authorization_id },
+      );
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message ?? "activation charge failed" };
+    }
+  },
+
   async debitMandate(params: DebitMandateParams): Promise<DebitResult> {
     try {
+      // Fail-closed: a Paystack debit needs the resolved authorization_code. An
+      // empty id means the mandate never activated — never send it (a charge on
+      // the wrong key risks collecting the wrong authorization).
+      if (!params.providerMandateId?.trim()) {
+        return { ok: false, error: "mandate has no resolved authorization code" };
+      }
       const res = await api<any>("/transaction/partial_debit", "POST", {
         authorization_code: params.providerMandateId,
         currency: "NGN",
@@ -338,9 +382,20 @@ export const paystackAdapter: ProviderAdapter = {
     if (b?.event !== "direct_debit.authorization.created") return null;
     const code = b.data?.authorization_code;
     if (!code) return null;
+    // Join key: the webhook echoes back the email we sent to initialize, which
+    // is `${our reference}@coop.local`. Derive our reference from it so the
+    // mandate can be matched before any authorization_code is stored. An email
+    // we did not mint leaves the reference unset (fail-closed downstream).
+    const email = typeof b.data?.customer?.email === "string" ? b.data.customer.email : "";
+    const suffix = "@coop.local";
+    const providerReference = email.endsWith(suffix) ? email.slice(0, -suffix.length) : undefined;
     return {
       providerMandateId: String(code),
-      status: b.data?.active ? "active" : "failed",
+      // `active: false` is normal initially — Paystack then requires an
+      // activation charge, so this is a pending mandate, not a failure.
+      status: b.data?.active ? "active" : "pending",
+      providerReference,
+      providerCustomerId: b.data?.customer?.code ? String(b.data.customer.code) : undefined,
       provider: "paystack",
       raw: body,
     };

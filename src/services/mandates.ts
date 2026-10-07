@@ -5,6 +5,7 @@ import {
   withCoopContext,
   resolveCoopByMandateDebitRef,
   resolveCoopByMandateProviderId,
+  resolveCoopByMandateReference,
 } from "../lib/tenant-context.js";
 import { audit } from "./audit.js";
 import { formatBalance } from "../lib/money.js";
@@ -127,19 +128,6 @@ export async function createMandate(
   }
 
   const provider = await resolveProvider();
-
-  // Paystack direct debit is feature-gated fail-closed. Its activation webhook
-  // yields an `authorization_code`, but its initialize response only gives a
-  // `reference`, so a created Paystack mandate could never activate — and the
-  // debit path would then mis-key (the reference is not a valid
-  // authorization_code), risking a double charge. Refuse until the contract is
-  // verified end-to-end against live Paystack.
-  if (provider.name === "paystack") {
-    return {
-      ok: false,
-      message: "Paystack direct debit is not yet enabled. Please use Monnify or try again later.",
-    };
-  }
 
   const providerReference = `MAN-${randomUUID()}`;
   const result = await provider.createMandate?.({
@@ -308,12 +296,26 @@ export async function cancelMandate(
   return { ok: true, message: "✅ Mandate cancelled. No further debits will be collected." };
 }
 
+/** Join context a mandate webhook carries to match a Paystack authorization. */
+export interface MandateStatusContext {
+  /** Our deterministic reference (Paystack: derived from `customer.email`). */
+  providerReference?: string;
+  /** The provider's customer id (Paystack: needed for the activation charge). */
+  providerCustomerId?: string;
+}
+
 /** Flip a mandate's status from a provider webhook; stamp `authorizedAt` on activation. */
 export async function applyMandateStatus(
   provider: string,
   providerMandateId: string,
   status: string,
+  context: MandateStatusContext = {},
 ): Promise<void> {
+  if (provider === "paystack") {
+    await applyPaystackMandateStatus(providerMandateId, status, context);
+    return;
+  }
+
   // A webhook has no coop context, so resolve the owning tenant FIRST via the
   // SECURITY DEFINER resolver (bypasses RLS). Unknown/ambiguous -> nothing to
   // do (fail-closed). Without this the update matched zero rows under enforced
@@ -330,6 +332,61 @@ export async function applyMandateStatus(
       },
     });
   });
+}
+
+/**
+ * Apply a Paystack authorization webhook. Paystack knows the `authorization_code`
+ * (our providerMandateId) only at webhook time, so the mandate is matched by our
+ * deterministic `providerReference` (derived from the webhook's customer email)
+ * and the `authorization_code` is persisted. When the authorization is not yet
+ * `active`, Paystack requires an activation charge before it can be debited.
+ */
+async function applyPaystackMandateStatus(
+  authorizationCode: string,
+  status: string,
+  context: MandateStatusContext,
+): Promise<void> {
+  const providerReference = context.providerReference;
+  // Fail-closed: without the join key we cannot match a mandate, and a guess
+  // could activate the wrong member's mandate.
+  if (!providerReference) return;
+
+  const coopId = await resolveCoopByMandateReference(providerReference);
+  if (!coopId) return;
+
+  await withCoopContext(coopId, async () => {
+    await prisma.mandate.updateMany({
+      where: { provider: "paystack", providerReference },
+      data: {
+        providerMandateId: authorizationCode,
+        status,
+        ...(status === "active" ? { authorizedAt: new Date() } : {}),
+      },
+    });
+  });
+
+  // An inactive authorization must be activated before any debit can be pulled.
+  if (status !== "pending") return;
+  try {
+    const provider = await resolveProvider("paystack");
+    const result = await provider.triggerActivationCharge?.({
+      providerMandateId: authorizationCode,
+      providerCustomerId: context.providerCustomerId,
+    });
+    if (result && !result.ok) {
+      log.error("[mandates] Paystack activation charge failed", {
+        providerReference,
+        err: result.error,
+      });
+    }
+  } catch (err) {
+    // A provider-side hiccup must not 500 the webhook (redelivery storm). The
+    // authorization is already recorded as pending, so nothing is debited.
+    log.error("[mandates] Paystack activation charge threw", {
+      providerReference,
+      err: String(err),
+    });
+  }
 }
 
 /**

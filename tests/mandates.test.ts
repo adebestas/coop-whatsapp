@@ -186,7 +186,10 @@ describe("paystack mandate adapter", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.providerMandateId).toBe("AUTH_REF");
+    // The authorization_code arrives later, on the webhook — so initialize
+    // conveys no providerMandateId yet (fail-closed until it is resolved).
+    expect(result.providerMandateId).toBeUndefined();
+    expect(result.status).toBe("pending");
     expect(result.authorizationUrl).toBe("https://paystack.test/redirect");
     const call = calls.find((c) => c.url === `${PAYSTACK_BASE}/customer/authorization/initialize`);
     expect(call).toBeDefined();
@@ -194,7 +197,10 @@ describe("paystack mandate adapter", () => {
     const body = bodyOf(call!.init);
     expect(body.channel).toBe("direct_debit");
     expect(body.callback_url).toBe("https://coop.test/cb");
-    expect(body.email).toBe("ada@coop.local");
+    // Deterministic join key: the webhook echoes this email back in
+    // `data.customer.email`, letting applyMandateStatus match the authorization
+    // to our mandate by reference.
+    expect(body.email).toBe("MAN-1@coop.local");
   });
 
   it("debitMandate POSTs /transaction/partial_debit with the authorization code", async () => {
@@ -222,6 +228,19 @@ describe("paystack mandate adapter", () => {
     expect(body.reference).toBe("DD-1");
   });
 
+  it("debitMandate fail-closes when no authorization code is resolved", async () => {
+    const calls = stubFetch(() => ({ status: true, data: { reference: "PDF-1" } }));
+
+    const result = await paystackAdapter.debitMandate!({
+      providerMandateId: "",
+      amount: 250_000,
+      reference: "DD-1",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls.some((c) => c.url === `${PAYSTACK_BASE}/transaction/partial_debit`)).toBe(false);
+  });
+
   it("cancelMandate DELETEs /customer/authorization/{code}", async () => {
     const calls = stubFetch(() => ({ status: true, data: {} }));
 
@@ -233,16 +252,67 @@ describe("paystack mandate adapter", () => {
     expect(call!.init?.method).toBe("DELETE");
   });
 
-  it("parseMandateNotification maps direct_debit.authorization.created", () => {
+  it("parseMandateNotification maps direct_debit.authorization.created and derives the join key", () => {
     const parsed = paystackAdapter.parseMandateNotification!({
       event: "direct_debit.authorization.created",
-      data: { authorization_code: "AUTH_X", active: true },
+      data: {
+        authorization_code: "AUTH_X",
+        active: true,
+        customer: { code: "CUS_X", email: "MAN-1@coop.local" },
+      },
     });
     expect(parsed).toMatchObject({
       providerMandateId: "AUTH_X",
       status: "active",
       provider: "paystack",
+      providerReference: "MAN-1",
+      providerCustomerId: "CUS_X",
     });
+  });
+
+  it("parseMandateNotification maps an inactive authorization to pending (activation due)", () => {
+    const parsed = paystackAdapter.parseMandateNotification!({
+      event: "direct_debit.authorization.created",
+      data: {
+        authorization_code: "AUTH_X",
+        active: false,
+        customer: { code: "CUS_X", email: "MAN-1@coop.local" },
+      },
+    });
+    expect(parsed).toMatchObject({
+      providerMandateId: "AUTH_X",
+      status: "pending",
+      providerReference: "MAN-1",
+      providerCustomerId: "CUS_X",
+    });
+  });
+
+  it("triggerActivationCharge resolves the authorization_id then PUTs the activation charge", async () => {
+    const calls = stubFetch((url) => {
+      if (url.endsWith("/customer/CUS_X/directdebit-mandate-authorizations")) {
+        return {
+          status: true,
+          data: [
+            { authorization_id: 111, authorization_code: "OTHER" },
+            { authorization_id: 222, authorization_code: "AUTH_X" },
+          ],
+        };
+      }
+      return { status: true, data: {} };
+    });
+
+    const result = await paystackAdapter.triggerActivationCharge!({
+      providerMandateId: "AUTH_X",
+      providerCustomerId: "CUS_X",
+    });
+
+    expect(result.ok).toBe(true);
+    const call = calls.find((c) =>
+      c.url.endsWith("/customer/CUS_X/directdebit-activation-charge"),
+    );
+    expect(call).toBeDefined();
+    expect(call!.init?.method).toBe("PUT");
+    expect(bodyOf(call!.init)).toEqual({ authorization_id: 222 });
   });
 
   it("parseDebitNotification maps a partial_debit success", () => {
@@ -436,11 +506,80 @@ describe("mandate lifecycle service", () => {
     expect(rows.every((r) => r.status === "pending")).toBe(true);
   });
 
-  it("refuses to create a Paystack mandate rather than risk a double charge", async () => {
-    // Paystack's activation webhook yields an authorization_code while
-    // createMandate stores the initialize reference, so the mandate could never
-    // activate and the debit path would mis-key. Gated fail-closed until the
-    // reconciliation contract is verified against the live provider.
+  it("activates a Paystack mandate by providerReference and persists the authorization code", async () => {
+    const coop = await createTestCoop("MNDPS2");
+    const m = await createTestMember(coop.id, { phone: "2348000500002" });
+    const mandate = await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: null,
+      providerReference: "MAN-ps-2",
+      status: "pending",
+    });
+
+    await applyMandateStatus("paystack", "AUTH_PS_2", "active", {
+      providerReference: "MAN-ps-2",
+      providerCustomerId: "CUS_PS_2",
+    });
+
+    const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.providerMandateId).toBe("AUTH_PS_2");
+    expect(row?.status).toBe("active");
+    expect(row?.authorizedAt).toBeInstanceOf(Date);
+  });
+
+  it("fail-closes a Paystack status flip when the join email is unrecognised", async () => {
+    const coop = await createTestCoop("MNDPS3");
+    const m = await createTestMember(coop.id, { phone: "2348000500003" });
+    const mandate = await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: null,
+      providerReference: "MAN-ps-3",
+      status: "pending",
+    });
+
+    // No providerReference (unknown email) -> cannot join to a mandate: neither
+    // the status nor the authorization_code may be written.
+    await applyMandateStatus("paystack", "AUTH_PS_3", "active", {});
+
+    const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.providerMandateId).toBeNull();
+    expect(row?.status).toBe("pending");
+  });
+
+  it("triggers the Paystack activation charge when the authorization is not yet active", async () => {
+    const coop = await createTestCoop("MNDPS4");
+    const m = await createTestMember(coop.id, { phone: "2348000500004" });
+    const mandate = await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: null,
+      providerReference: "MAN-ps-4",
+      status: "pending",
+    });
+    const adapter = fakeAdapter({
+      name: "paystack",
+      triggerActivationCharge: vi.fn(async () => ({ ok: true })),
+    });
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    await applyMandateStatus("paystack", "AUTH_PS_4", "pending", {
+      providerReference: "MAN-ps-4",
+      providerCustomerId: "CUS_PS_4",
+    });
+
+    const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.providerMandateId).toBe("AUTH_PS_4");
+    expect(row?.status).toBe("pending");
+    expect(vi.mocked(adapter.triggerActivationCharge)).toHaveBeenCalledWith({
+      providerMandateId: "AUTH_PS_4",
+      providerCustomerId: "CUS_PS_4",
+    });
+  });
+
+  it("creates a Paystack mandate storing the deterministic reference and no authorization code yet", async () => {
+    // Paystack's activation webhook yields the authorization_code while
+    // initialize returns only a reference; the webhook email joins back to our
+    // deterministic reference, so a created Paystack mandate starts pending
+    // with a null providerMandateId and is filled in on activation.
     const coop = await createTestCoop("MNDPS1");
     const m = await createTestMember(coop.id, { phone: "2348000500001" });
     await enableDirectDebit(coop.id);
@@ -449,18 +588,22 @@ describe("mandate lifecycle service", () => {
       name: "paystack",
       createMandate: vi.fn(async () => ({
         ok: true,
-        providerMandateId: "AUTH_REF",
         authorizationUrl: "https://paystack.test/redirect",
+        status: "pending",
       })),
     });
     vi.mocked(resolveProvider).mockResolvedValue(adapter);
 
     const res = await createMandate(coop.id, m.id, 100_000, actor(m));
-    expect(res.ok).toBe(false);
-    expect(res.message).toMatch(/paystack/i);
-    expect(res.message).toMatch(/not yet enabled|not enabled/i);
-    expect(vi.mocked(adapter.createMandate)).not.toHaveBeenCalled();
-    expect(await prisma.mandate.count()).toBe(0);
+    expect(res.ok).toBe(true);
+    expect(res.authorizationUrl).toBe("https://paystack.test/redirect");
+    expect(vi.mocked(adapter.createMandate)).toHaveBeenCalledTimes(1);
+
+    const row = await prisma.mandate.findUnique({ where: { id: res.mandateId! } });
+    expect(row?.provider).toBe("paystack");
+    expect(row?.status).toBe("pending");
+    expect(row?.providerMandateId).toBeNull();
+    expect(row?.providerReference.startsWith("MAN-")).toBe(true);
   });
 
   it("pauses and resumes the whole mandate", async () => {

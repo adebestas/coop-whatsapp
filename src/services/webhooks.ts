@@ -174,7 +174,10 @@ export async function processPaymentWebhook(
         providerName,
         endpoint: "credit",
         run: () =>
-          applyMandateStatus(mandate.provider, mandate.providerMandateId, mandate.status),
+          applyMandateStatus(mandate.provider, mandate.providerMandateId, mandate.status, {
+            providerReference: mandate.providerReference,
+            providerCustomerId: mandate.providerCustomerId,
+          }),
       });
     }
 

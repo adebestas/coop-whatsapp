@@ -198,6 +198,30 @@ export async function resolveCoopByMandateProviderId(
 }
 
 /**
+ * Resolve the cooperative that owns a mandate, by our own provider reference.
+ * A Paystack authorization webhook carries only the customer email; the
+ * reference derived from it discovers the tenant before the RLS GUC is set.
+ * Fails closed (null) when the reference is unknown OR ambiguous.
+ */
+export async function resolveCoopByMandateReference(
+  providerReference: string,
+): Promise<string | null> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const rows = await prisma.mandate.findMany({
+      where: { providerReference },
+      select: { cooperativeId: true },
+      take: 2,
+    });
+    return rows.length === 1 ? rows[0].cooperativeId : null;
+  }
+  const rows = await prisma.$queryRaw<{ coop: string | null }[]>`
+    SELECT app.resolve_coop_by_mandate_reference(${providerReference}) AS coop
+  `;
+  return rows[0]?.coop ?? null;
+}
+
+/**
  * Resolve the cooperative by its join code.
  */
 export async function resolveCoopByCode(code: string): Promise<string | null> {

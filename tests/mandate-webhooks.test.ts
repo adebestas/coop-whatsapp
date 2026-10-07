@@ -479,4 +479,81 @@ describe("mandate webhooks", () => {
     expect(second.body.status).toBe("duplicate");
     expect(await walletBalance(m.id)).toBe(50_000);
   });
+
+  it("activates a Paystack mandate from the webhook email join key", async () => {
+    const coop = await createTestCoop("MWHPS1");
+    const m = await createTestMember(coop.id, { phone: "2348000200021" });
+    const mandate = await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: null,
+      providerReference: "MAN-ps-w1",
+      status: "pending",
+    });
+
+    const res = await postPaystack({
+      event: "direct_debit.authorization.created",
+      data: {
+        authorization_code: "AUTH_W1",
+        active: true,
+        customer: { code: "CUS_W1", email: "MAN-ps-w1@coop.local" },
+      },
+    });
+
+    expect(res.httpStatus).toBe(200);
+    expect(res.body.status).toBe("ok");
+    const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.status).toBe("active");
+    expect(row?.providerMandateId).toBe("AUTH_W1");
+    expect(row?.authorizedAt).toBeInstanceOf(Date);
+    const events = await prisma.webhookEvent.findMany();
+    expect(events[0].kind).toBe("mandate_update");
+  });
+
+  it("records a Paystack inactive authorization as pending and stores the authorization code", async () => {
+    const coop = await createTestCoop("MWHPS2");
+    const m = await createTestMember(coop.id, { phone: "2348000200022" });
+    const mandate = await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: null,
+      providerReference: "MAN-ps-w2",
+      status: "pending",
+    });
+
+    const res = await postPaystack({
+      event: "direct_debit.authorization.created",
+      data: {
+        authorization_code: "AUTH_W2",
+        active: false,
+        customer: { code: "CUS_W2", email: "MAN-ps-w2@coop.local" },
+      },
+    });
+
+    expect(res.httpStatus).toBe(200);
+    expect(res.body.status).toBe("ok");
+    const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.status).toBe("pending");
+    expect(row?.providerMandateId).toBe("AUTH_W2");
+  });
+
+  it("settles a Paystack mandate debit by our reference", async () => {
+    const coop = await createTestCoop("MWHPS3");
+    const m = await createTestMember(coop.id, { phone: "2348000200023" });
+    const mandate = await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: "AUTH_W3",
+    });
+    const debit = await seedDebit(coop.id, m.id, mandate.id, { providerRef: "DD-PS-1" });
+
+    const res = await postPaystack({
+      event: "partial_debit.success",
+      data: { reference: "DD-PS-1", id: 4242 },
+    });
+
+    expect(res.httpStatus).toBe(200);
+    expect(res.body.status).toBe("ok");
+    expect(await walletBalance(m.id)).toBe(50_000);
+    const row = await prisma.mandateDebit.findUnique({ where: { id: debit.id } });
+    expect(row?.status).toBe("successful");
+    expect(row?.providerTransactionId).toBe("4242");
+  });
 });

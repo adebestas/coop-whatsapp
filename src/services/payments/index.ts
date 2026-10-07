@@ -139,10 +139,33 @@ export interface CancelMandateParams {
   providerMandateId: string;
 }
 
+/**
+ * Trigger a provider-side activation charge for an authorization that came back
+ * inactive. Paystack requires this before a direct-debit authorization can be
+ * debited (the `authorization_code` is not usable while `active` is false).
+ */
+export interface TriggerActivationChargeParams {
+  /** The resolved authorization code for the mandate. */
+  providerMandateId: string;
+  /**
+   * The provider's customer id, when the webhook exposed it. Paystack's
+   * activation endpoints are customer-scoped, so this is required for Paystack.
+   */
+  providerCustomerId?: string;
+}
+
 export interface MandateNotification {
   providerMandateId: string;
-  status: "active" | "cancelled" | "failed" | "expired";
+  status: "active" | "cancelled" | "failed" | "expired" | "pending";
   provider: string;
+  /**
+   * Our deterministic provider reference, when the webhook can be joined back
+   * to it (Paystack derives this from `data.customer.email`). Used to match the
+   * authorization to the mandate before any providerMandateId is stored.
+   */
+  providerReference?: string;
+  /** The provider's customer id, when exposed (Paystack: `data.customer.code`). */
+  providerCustomerId?: string;
   raw: unknown;
 }
 
@@ -189,6 +212,13 @@ export interface ProviderAdapter {
   debitMandate?(params: DebitMandateParams): Promise<DebitResult>;
   /** Cancel an existing mandate at the provider. */
   cancelMandate?(params: CancelMandateParams): Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Trigger a provider activation charge for an authorization that is not yet
+   * active (Paystack: `PUT /customer/{code}/directdebit-activation-charge`).
+   */
+  triggerActivationCharge?(
+    params: TriggerActivationChargeParams,
+  ): Promise<{ ok: boolean; error?: string }>;
   /** Parse a mandate status webhook into a MandateNotification, or null if irrelevant. */
   parseMandateNotification?(body: unknown): MandateNotification | null;
   /** Parse a debit result webhook into a DebitNotification, or null if irrelevant. */

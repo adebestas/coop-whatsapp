@@ -103,6 +103,28 @@ describe("mandate scheduler debits", () => {
     expect(call.narration).toMatch(/savings/i);
   });
 
+  it("fail-closes a Paystack debit when the mandate has no authorization code yet", async () => {
+    const coop = await createTestCoop("MSCHPS1");
+    const m = await createTestMember(coop.id, { phone: "2348000300091" });
+    await enableDirectDebit(coop.id);
+    await setAutoSave(m.id, 50_000, new Date(Date.now() - 1000));
+    await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: null,
+      status: "active",
+    });
+    const adapter = fakeAdapter({ name: "paystack" });
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    await runMandateDebits(new Date());
+
+    // The provider must never be called without a resolved authorization code.
+    expect(vi.mocked(adapter.debitMandate)).not.toHaveBeenCalled();
+    const debit = await prisma.mandateDebit.findFirst();
+    expect(debit?.status).toBe("failed");
+    expect(debit?.failureReason).toMatch(/not activated|authorization code/i);
+  });
+
   it("skips a paused mandate entirely", async () => {
     const coop = await createTestCoop("MSCH5");
     const m = await createTestMember(coop.id, { phone: "2348000300005" });
@@ -504,6 +526,37 @@ describe("mandate scheduler retries", () => {
     expect(retry).toBeGreaterThanOrEqual(now.getTime() + 23 * 60 * 60 * 1000);
     expect(retry).toBeLessThanOrEqual(now.getTime() + 25 * 60 * 60 * 1000);
     expect(n).toBe(1);
+  });
+
+  it("fail-closes a Paystack retry when the mandate has no authorization code yet", async () => {
+    const coop = await createTestCoop("MSCHPS2");
+    const m = await createTestMember(coop.id, { phone: "2348000300092" });
+    const mandate = await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: null,
+    });
+    const debit = await prisma.mandateDebit.create({
+      data: {
+        mandateId: mandate.id,
+        cooperativeId: coop.id,
+        memberId: m.id,
+        purpose: "savings",
+        amount: 50_000,
+        status: "failed",
+        providerRef: "DD-PS-FAILED-1",
+        nextRetryAt: new Date(Date.now() - 60_000),
+      },
+    });
+    const adapter = fakeAdapter({ name: "paystack" });
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const n = await runMandateRetries(new Date());
+
+    expect(vi.mocked(adapter.debitMandate)).not.toHaveBeenCalled();
+    expect(
+      (await prisma.mandateDebit.findUnique({ where: { id: debit.id } }))?.status,
+    ).toBe("failed");
+    expect(n).toBe(0);
   });
 
   it("never selects a skipped debit for retry", async () => {
