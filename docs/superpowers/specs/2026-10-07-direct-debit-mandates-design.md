@@ -57,6 +57,23 @@ the auto-debit and, if the debit also pulled, refund the member.
 - Refund is a payout from the coop's bank/settlement account to the member's bank
   account; every step is audited.
 
+## Addendum 2 (user, 2026-10-07): bank picker + account-name confirmation
+
+When a member sets up a mandate, entering the bank account must be guided:
+1. The member enters their **account number**.
+2. The system shows a **searchable list of all banks** (live from the payment
+   provider, cached; falls back to the static `BANK_CODES` map when the provider
+   is down).
+3. The member picks their bank.
+4. The system **auto-resolves the account name** (name enquiry via the provider's
+   `resolveAccount`) and shows it.
+5. The member **confirms** the name, and the mandate is created against that
+   account.
+
+Scope: the **mandate flow only** (not the general bank-account setup or payees).
+The provider adapter gains a `listBanks()` method (Paystack `GET /bank`, Monnify
+bank list) with an in-process cache and static fallback.
+
 ## Non-goals
 
 - No USSD/SMS (WhatsApp-only program constraint).
