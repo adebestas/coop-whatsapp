@@ -69,6 +69,8 @@ subscription       Subscription?
   loanProtections    LoanProtection[]
   committees         Committee[]
   committeeDecisions CommitteeDecision[]
+  meetings           Meeting[]
+  motions            Motion[]
 
   @@index([status])
   @@index([code])
@@ -250,6 +252,10 @@ model Member {
   committeeMemberships    CommitteeMember[] @relation("CommitteeMemberships")
   committeeAppointments   CommitteeMember[] @relation("CommitteeAppointer")
   committeeVotes          CommitteeVote[]   @relation("CommitteeVotes")
+  meetingsCreated         Meeting[]           @relation("MeetingCreator")
+  meetingAttendance       MeetingAttendance[] @relation("MeetingAttendance")
+  meetingProxiesHeld      MeetingAttendance[] @relation("MeetingProxy")
+  motionVotes             MotionVote[]        @relation("MotionVote")
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -1147,6 +1153,7 @@ model CooperativeConfig {
   creditCommitteeSize      Int      @default(3)
   supervisoryCommitteeSize Int      @default(3)
   boardSize                Int      @default(5)
+  agmQuorumPercent         Int      @default(25)
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
@@ -1395,5 +1402,76 @@ model CommitteeVote {
   createdAt  DateTime @default(now())
 
   @@unique([decisionId, memberId])
+  @@index([memberId])
+}
+
+// ---- General meetings (AGM / SGM) ----
+// A cooperative's general meetings record attendance (including proxies),
+// the motions put to the floor, and each member's recorded vote.
+model Meeting {
+  id            String   @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  type          String   // agm | sgm
+  title         String
+  status        String   @default("scheduled") // scheduled | open | closed
+  scheduledAt   DateTime
+  openedAt      DateTime?
+  closedAt      DateTime?
+  quorumPercent Int      @default(25)
+  createdById   String
+  createdBy     Member   @relation("MeetingCreator", fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
+  attendance    MeetingAttendance[]
+  motions       Motion[]
+
+  @@index([cooperativeId, status])
+  @@index([cooperativeId, scheduledAt])
+}
+
+model MeetingAttendance {
+  id               String   @id @default(cuid())
+  meetingId        String
+  meeting          Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  memberId         String
+  member           Member   @relation("MeetingAttendance", fields: [memberId], references: [id], onDelete: Cascade)
+  present          Boolean  @default(true)
+  proxyForMemberId String?
+  proxyForMember   Member?  @relation("MeetingProxy", fields: [proxyForMemberId], references: [id], onDelete: SetNull)
+  createdAt        DateTime @default(now())
+
+  @@unique([meetingId, memberId])
+  @@index([memberId])
+}
+
+model Motion {
+  id            String    @id @default(cuid())
+  meetingId     String
+  meeting       Meeting   @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  title         String
+  description   String
+  kind          String    @default("general") // general | bylaw | dividend | election
+  status        String    @default("open") // open | passed | rejected
+  createdAt     DateTime  @default(now())
+  closedAt      DateTime?
+  votes         MotionVote[]
+
+  @@index([meetingId])
+  @@index([cooperativeId, status])
+}
+
+model MotionVote {
+  id        String   @id @default(cuid())
+  motionId  String
+  motion    Motion   @relation(fields: [motionId], references: [id], onDelete: Cascade)
+  memberId  String
+  member    Member   @relation("MotionVote", fields: [memberId], references: [id], onDelete: Cascade)
+  choice    String   // yes | no | abstain
+  viaProxy  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@unique([motionId, memberId])
   @@index([memberId])
 }

@@ -36,12 +36,14 @@ BEGIN
     'Member','PAYERecord','Payout','PurchasePoll','ReconciliationLog',
     'ReserveAllocation','STR','StatusPost','Subscription','SupportTicket',
     'ShareAccount','ShareTransaction',
+    'Meeting','Motion',
     'Unit','Vote','WithdrawalRequest',
     -- Child tables reached through a tenant parent.
     'Wallet','Posting','DividendEntry','DeductionItem','Guarantor',
     'LoanRepayment','VoteBallot','VoteCandidate','PollBallot','PollOption',
     'DeathValidation','FavoritePayee','MemberProgress',
-    'CommitteeMember','CommitteeVote'
+    'CommitteeMember','CommitteeVote',
+    'MeetingAttendance','MotionVote'
   ]
   LOOP
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
