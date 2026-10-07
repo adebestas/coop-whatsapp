@@ -27,6 +27,7 @@ model Cooperative {
   dailyPayoutLimit   Int                 @default(100000000) // fraud guard: max total money-out per day in kobo (₦1M)
   reserveFundBalance Int                 @default(0) // statutory reserve fund balance in kobo
   protectionFundBalance Int              @default(0) // self-insured loan-protection fund balance in kobo
+  loanLossProvisionBalance Int            @default(0) // accumulated loan-loss provision reserve in kobo
   memberSeq          Int                 @default(0) // atomic per-coop member sequence used for file numbers (COOP/YYY/seq)
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
@@ -68,6 +69,7 @@ subscription       Subscription?
   shareAccounts      ShareAccount[]
   shareTransactions  ShareTransaction[]
   loanProtections    LoanProtection[]
+  provisionRuns      ProvisionRun[]
   committees         Committee[]
   committeeDecisions CommitteeDecision[]
   meetings           Meeting[]
@@ -378,6 +380,7 @@ model Loan {
   guarantorVerifications GuarantorVerification[]
   repayments         LoanRepayment[]
   protection         LoanProtection?
+  provisionEntries   ProvisionEntry[]
 
   @@index([memberId, status])
   @@index([cooperativeId, status])
@@ -1151,6 +1154,7 @@ model CooperativeConfig {
   allowShareRedemption     Boolean  @default(false)
   loanProtectionPercent    Int      @default(1) // % of loan principal withheld as protection premium
   loanProtectionEnabled    Boolean  @default(true)
+  provisionRates           String   @default("{\"1-30\":1,\"31-90\":5,\"91-180\":20,\"180+\":50}")
   creditCommitteeSize      Int      @default(3)
   supervisoryCommitteeSize Int      @default(3)
   boardSize                Int      @default(5)
@@ -1475,4 +1479,36 @@ model MotionVote {
 
   @@unique([motionId, memberId])
   @@index([memberId])
+}
+
+// ---- Loan-loss provisioning (Feature 5) ----
+// A periodic run computes the expected loan-loss reserve per arrears bucket
+// using the rates in CooperativeConfig.provisionRates. The run's total is the
+// current provision carried on Cooperative.loanLossProvisionBalance.
+model ProvisionRun {
+  id             String           @id @default(cuid())
+  cooperativeId  String
+  cooperative    Cooperative      @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  period         String // YYYY-MM
+  totalProvision Int
+  createdById    String
+  createdAt      DateTime         @default(now())
+  entries        ProvisionEntry[]
+
+  @@unique([cooperativeId, period])
+  @@index([cooperativeId, createdAt])
+}
+
+model ProvisionEntry {
+  id        String       @id @default(cuid())
+  runId     String
+  run       ProvisionRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  loanId    String
+  loan      Loan         @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  bucket    String // 1-30 | 31-90 | 91-180 | 180+
+  amount    Int
+  createdAt DateTime     @default(now())
+
+  @@index([runId])
+  @@index([loanId])
 }

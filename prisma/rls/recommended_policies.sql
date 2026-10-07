@@ -33,7 +33,7 @@ BEGIN
     'Dividend','DividendVote','EducationFund','ExternalPayment','Grievance',
     'GuarantorDeduction','JournalEntry','LedgerEntry','Loan','LoanProtection',
     'ManualCredit',
-    'Member','PAYERecord','Payout','PurchasePoll','ReconciliationLog',
+    'Member','PAYERecord','Payout','ProvisionRun','PurchasePoll','ReconciliationLog',
     'ReserveAllocation','STR','StatusPost','Subscription','SupportTicket',
     'ShareAccount','ShareTransaction',
     'Meeting','Motion',
@@ -41,7 +41,7 @@ BEGIN
     -- Child tables reached through a tenant parent.
     'Wallet','Posting','DividendEntry','DeductionItem','Guarantor',
     'LoanRepayment','VoteBallot','VoteCandidate','PollBallot','PollOption',
-    'DeathValidation','FavoritePayee','MemberProgress',
+    'DeathValidation','FavoritePayee','MemberProgress','ProvisionEntry',
     'CommitteeMember','CommitteeVote',
     'MeetingAttendance','MotionVote'
   ]
