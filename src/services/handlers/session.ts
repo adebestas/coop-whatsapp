@@ -1176,6 +1176,19 @@ export async function handleAwaitingInput(
     }
 
     case "awaiting_mandate_pin": {
+      const input = text.trim();
+      if (input.toLowerCase() === "menu" || input.toLowerCase() === "cancel") {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({
+          to: phone,
+          text: "Mandate setup cancelled. Reply *menu* to start something else.",
+        });
+        return;
+      }
       const member = await getMemberByPhone(phone);
       if (!member) {
         await sendText({
@@ -1184,7 +1197,7 @@ export async function handleAwaitingInput(
         });
         return;
       }
-      const pinCheck = await verifyMemberPin(member, text.trim());
+      const pinCheck = await verifyMemberPin(member, input);
       if (!pinCheck.ok) {
         const msg = pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel.";
         await sendText({ to: phone, text: msg });
@@ -1206,6 +1219,19 @@ export async function handleAwaitingInput(
     }
 
     case "awaiting_cancelmandate_pin": {
+      const input = text.trim();
+      if (input.toLowerCase() === "menu" || input.toLowerCase() === "cancel") {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({
+          to: phone,
+          text: "Mandate cancellation cancelled. Reply *menu* to start something else.",
+        });
+        return;
+      }
       const member = await getMemberByPhone(phone);
       if (!member) {
         await sendText({
@@ -1214,7 +1240,7 @@ export async function handleAwaitingInput(
         });
         return;
       }
-      const pinCheck = await verifyMemberPin(member, text.trim());
+      const pinCheck = await verifyMemberPin(member, input);
       if (!pinCheck.ok) {
         const msg = pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel.";
         await sendText({ to: phone, text: msg });

@@ -206,8 +206,17 @@ export async function cancelMandate(
   mandateId: string,
   actor: MandateActor,
 ): Promise<{ ok: boolean; message: string }> {
+  if (!mandateId) return { ok: false, message: "Mandate not found." };
   const mandate = await prisma.mandate.findFirst({
-    where: { id: mandateId, cooperativeId: coopId, memberId: actor.id },
+    where: {
+      cooperativeId: coopId,
+      memberId: actor.id,
+      OR: [
+        { id: mandateId },
+        { id: { startsWith: mandateId } },
+        { id: { endsWith: mandateId } },
+      ],
+    },
   });
   if (!mandate) return { ok: false, message: "Mandate not found." };
   if (mandate.status === "cancelled") {

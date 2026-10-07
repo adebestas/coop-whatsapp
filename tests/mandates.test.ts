@@ -9,6 +9,8 @@ import { monnifyAdapter } from "../src/services/payments/monnify.js";
 import { paystackAdapter } from "../src/services/payments/paystack.js";
 import { resolveProvider } from "../src/services/payments/index.js";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
+import { handleMessage } from "../src/services/conversation.js";
+import { sendText } from "../src/lib/messaging.js";
 import {
   createMandate,
   listMandates,
@@ -449,6 +451,20 @@ describe("mandate lifecycle service", () => {
     );
   });
 
+  it("cancels a mandate by an id prefix or suffix", async () => {
+    const coop = await createTestCoop("MND12");
+    const m = await createTestMember(coop.id, { phone: "2348000100012" });
+    const mandate = await seedMandate(coop.id, m.id);
+    vi.mocked(resolveProvider).mockResolvedValue(fakeAdapter());
+
+    const suffix = mandate.id.slice(-5);
+    const res = await cancelMandate(coop.id, suffix, actor(m));
+    expect(res.ok).toBe(true);
+    expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe(
+      "cancelled",
+    );
+  });
+
   it("lists a member's mandates and the cooperative's mandates", async () => {
     const coop = await createTestCoop("MND10");
     const m = await createTestMember(coop.id, { phone: "2348000100010" });
@@ -461,5 +477,24 @@ describe("mandate lifecycle service", () => {
     const all = await listCoopMandates(coop.id);
     expect(all.ok).toBe(true);
     expect(all.mandates?.length).toBe(1);
+  });
+
+  it("lets a member set a mandate cap above their per-transaction tier limit", async () => {
+    const coop = await createTestCoop("MND11");
+    const m = await createTestMember(coop.id, { phone: "2348000100011" });
+    await enableDirectDebit(coop.id, 100_000_000); // ₦1,000,000 coop cap
+    await setBank(m.id);
+
+    // ₦60,000 is above the ₦50,000 tier-1 per-transaction limit, but a mandate
+    // cap is a recurring ceiling, not a single movement, so it must be allowed.
+    await handleMessage(m.phone, "mandate 60000");
+
+    const session = await prisma.session.findUnique({ where: { phone: m.phone } });
+    expect(session?.state).toBe("awaiting_mandate_pin");
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => String(c[0].text))
+      .join("\n");
+    expect(texts).not.toMatch(/tier/i);
   });
 });

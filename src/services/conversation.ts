@@ -565,13 +565,15 @@ async function handleMessageInner(
       // amounts are stored in KOBO, so parse the user's naira into kobo before
       // comparing (otherwise a naira-vs-kobo mismatch silently disables the cap).
       // grouploan is *grouploan <group id> <amount> <months>* — its amount is
-      // the SECOND arg, so parse the right token for the tier cap.
+      // the SECOND arg, so parse the right token for the tier cap. `mandate` is
+      // exempt: its arg is a RECURRING CAP, not a single movement, so it is
+      // bounded by `directDebitMaxCap` inside createMandate instead.
       const amt = parseNaira(
         cmd === "grouploan" || cmd === "saveproduct" || cmd === "withdrawproduct"
           ? args[1]
           : args[0],
       );
-      if (cmd !== "buyshares" && amt !== null && member) {
+      if (cmd !== "buyshares" && cmd !== "mandate" && amt !== null && member) {
         const tierError = await checkTierLimit(phone, amt, member.id);
         if (tierError) {
           await sendText({ to: phone, text: `⛔ ${tierError}` });
