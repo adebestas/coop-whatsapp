@@ -77,6 +77,7 @@ subscription       Subscription?
   groupCycles        GroupCycle[]
   savingsProducts    SavingsProduct[]
   savingsAccounts    SavingsAccount[]
+  mandates           Mandate[]
 
   @@index([status])
   @@index([code])
@@ -270,6 +271,7 @@ model Member {
   savingsAccounts         SavingsAccount[]    @relation("SavingsAccountHolder")
   savingsAccountsGuarded  SavingsAccount[]    @relation("SavingsAccountGuardian")
   savingsDeposits         SavingsDeposit[]
+  mandates                Mandate[]           @relation("MemberMandates")
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -1173,6 +1175,8 @@ model CooperativeConfig {
   supervisoryCommitteeSize Int      @default(3)
   boardSize                Int      @default(5)
   agmQuorumPercent         Int      @default(25)
+  directDebitEnabled       Boolean  @default(false)
+  directDebitMaxCap        Int      @default(0) // kobo; 0 = no extra coop cap
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
@@ -1657,4 +1661,57 @@ model SavingsDeposit {
   amount    Int // kobo
   kind      String // deposit | withdrawal | interest
   createdAt DateTime       @default(now())
+}
+
+// A member's direct-debit authorization on their own bank account. One flexible
+// mandate per member with a per-debit cap; each debit carries a purpose.
+model Mandate {
+  id                String    @id @default(cuid())
+  cooperativeId     String
+  cooperative       Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId          String
+  member            Member    @relation("MemberMandates", fields: [memberId], references: [id], onDelete: Cascade)
+  provider          String // monnify | paystack
+  providerMandateId String? // Monnify mandateCode / Paystack authorization_code
+  providerReference String    @unique // our reference (idempotency)
+  status            String    @default("pending") // pending | active | cancelled | failed | expired
+  amountCap         Int // kobo; max per debit
+  bankAccountNumber String
+  bankCode          String
+  bankName          String?
+  accountName       String?
+  authorizationUrl  String?
+  purposes          String    @default("savings,loan,group") // CSV of enabled purposes
+  createdAt         DateTime  @default(now())
+  authorizedAt      DateTime?
+  cancelledAt       DateTime?
+  lastDebitAt       DateTime?
+  debits            MandateDebit[]
+
+  @@index([cooperativeId, memberId])
+  @@index([cooperativeId, status])
+}
+
+// One attempt to pull money under a mandate, tagged with its purpose.
+model MandateDebit {
+  id                    String    @id @default(cuid())
+  mandateId             String
+  mandate               Mandate   @relation(fields: [mandateId], references: [id], onDelete: Cascade)
+  cooperativeId         String
+  memberId              String
+  purpose               String // savings | loan | group
+  targetId              String? // loanId / groupId; null for savings
+  amount                Int // kobo
+  status                String    @default("pending") // pending | successful | failed
+  providerRef           String    @unique // our debit reference
+  providerTransactionId String?
+  attempts              Int       @default(0)
+  nextRetryAt           DateTime?
+  failureReason         String?
+  createdAt             DateTime  @default(now())
+  settledAt             DateTime?
+
+  @@index([mandateId, status])
+  @@index([cooperativeId, status])
+  @@index([status, nextRetryAt])
 }

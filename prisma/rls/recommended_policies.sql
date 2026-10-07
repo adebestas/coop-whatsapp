@@ -38,6 +38,7 @@ BEGIN
     'ReserveAllocation','STR','StatusPost','Subscription','SupportTicket',
     'ShareAccount','ShareTransaction',
     'SavingsProduct','SavingsAccount',
+    'Mandate','MandateDebit',
     'Meeting','Motion',
     'Unit','Vote','WithdrawalRequest',
     -- Child tables reached through a tenant parent.
