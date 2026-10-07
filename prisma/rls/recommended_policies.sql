@@ -39,6 +39,7 @@ BEGIN
     'ShareAccount','ShareTransaction',
     'SavingsProduct','SavingsAccount',
     'Mandate','MandateDebit',
+    'RefundRequest',
     'Meeting','Motion',
     'Unit','Vote','WithdrawalRequest',
     -- Child tables reached through a tenant parent.

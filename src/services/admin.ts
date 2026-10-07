@@ -48,6 +48,7 @@ import { approvePhoneChange, rejectPhoneChange } from "./phone-change.js";
 import { requestManualCredit, approveManualCredit, rejectManualCredit } from "./manualcredit.js";
 import { startDeathClaim, setClaimBank, approveClaim, rejectClaim } from "./deathclaims.js";
 import { listCoopMandates, pauseMandate, resumeMandate, skipDebit } from "./mandates.js";
+import { recommendRefund, approveRefund, rejectRefund } from "./refunds.js";
 import { audit, recentAudit } from "./audit.js";
 import { computePnl, getMonthlySummary, recordLedger } from "./ledger.js";
 import {
@@ -97,6 +98,7 @@ const MONEY_OUT_COMMANDS = new Set([
   "payout",
   "approveclaim",
   "approvepay",
+  "approverefund",
   "runpayroll",
   "paydividend",
   "paysharedividend",
@@ -3035,6 +3037,68 @@ export async function handleAdminCommand(
           return true;
         }
         const result = await skipDebit(coopId, target.id, {
+          id: admin.id,
+          phone,
+          role: admin.role,
+        });
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "recommendrefund": {
+        // Maker step: an admin recommends a refund the coop owes a member (e.g.
+        // a double payment: bank/cheque + direct debit). A super admin approves.
+        const target = args[0];
+        const amount = toKobo(Number(args[1]));
+        const reason = args.slice(2).join(" ").trim();
+        if (!target || !Number.isFinite(amount) || amount <= 0 || reason.length < 3) {
+          await sendText({
+            to: phone,
+            text: "Usage: *recommendrefund <member code|id> <amount> <reason>* — e.g. *recommendrefund MEM001 5000 Double payment*.",
+          });
+          return true;
+        }
+        const result = await recommendRefund(coopId, target, amount, reason, {
+          id: admin.id,
+          phone,
+          role: admin.role,
+        });
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "approverefund": {
+        // Checker step: only a super admin approves and pays the refund.
+        if (!isSuper) {
+          await sendText({ to: phone, text: "Only the *super admin* can approve a refund." });
+          return true;
+        }
+        const id = args[0];
+        if (!id) {
+          await sendText({ to: phone, text: "Usage: *approverefund <refund id>*" });
+          return true;
+        }
+        const result = await approveRefund(coopId, id, {
+          id: admin.id,
+          phone,
+          role: admin.role,
+        });
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "rejectrefund": {
+        if (!isSuper) {
+          await sendText({ to: phone, text: "Only the *super admin* can reject a refund." });
+          return true;
+        }
+        const id = args[0];
+        const reason = args.slice(1).join(" ").trim();
+        if (!id) {
+          await sendText({ to: phone, text: "Usage: *rejectrefund <refund id> [reason]*" });
+          return true;
+        }
+        const result = await rejectRefund(coopId, id, reason, {
           id: admin.id,
           phone,
           role: admin.role,

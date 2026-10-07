@@ -206,6 +206,8 @@ export function buildAdminMenu(): string {
     `• *mandates* — list members' direct-debit mandates\n` +
     `• *pausemandate <id> [purpose]* / *resumemandate <id> [purpose]* — pause/resume debits\n` +
     `• *skipdebit <id>* — skip one pending direct debit\n` +
+    `• *recommendrefund <member code|id> <amount> <reason>* — recommend a refund\n` +
+    `• *approverefund <id>* / *rejectrefund <id> [reason]* — approve/reject a refund (super admin)\n` +
     `• *resolve <id> <response>* — resolve ticket/grievance\n` +
     `• *startvote unit|exec ...* — start an election\n` +
     `• *candidate* — add election candidate\n` +

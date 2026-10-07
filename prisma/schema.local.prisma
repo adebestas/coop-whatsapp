@@ -79,6 +79,7 @@ subscription       Subscription?
   savingsProducts    SavingsProduct[]
   savingsAccounts    SavingsAccount[]
   mandates           Mandate[]
+  refunds            RefundRequest[]
 
   @@index([status])
   @@index([code])
@@ -273,6 +274,7 @@ model Member {
   savingsAccountsGuarded  SavingsAccount[]    @relation("SavingsAccountGuardian")
   savingsDeposits         SavingsDeposit[]
   mandates                Mandate[]           @relation("MemberMandates")
+  refunds                 RefundRequest[]     @relation("MemberRefunds")
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -1716,4 +1718,27 @@ model MandateDebit {
   @@index([mandateId, status])
   @@index([cooperativeId, status])
   @@index([status, nextRetryAt])
+}
+
+// A refund the coop owes a member (e.g. a double payment: bank/cheque + direct
+// debit). Admin recommends; a super admin approves and pays out.
+model RefundRequest {
+  id              String    @id @default(cuid())
+  cooperativeId   String
+  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId        String
+  member          Member    @relation("MemberRefunds", fields: [memberId], references: [id], onDelete: Cascade)
+  mandateDebitId  String?
+  amount          Int // kobo
+  reason          String
+  status          String    @default("pending") // pending | approved | rejected | paid | failed
+  recommendedById String
+  approvedById    String?
+  createdAt       DateTime  @default(now())
+  approvedAt      DateTime?
+  paidAt          DateTime?
+  payoutRef       String?
+
+  @@index([cooperativeId, status])
+  @@index([cooperativeId, memberId])
 }

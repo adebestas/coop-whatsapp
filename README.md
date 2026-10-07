@@ -360,6 +360,26 @@ member's own mandate cap.
   other movement — **Monnify** primary, **Paystack** fallback — behind the
   existing circuit-breaker failover (`resolveProvider`).
 
+## Refunds
+
+Sometimes a member has **already paid** (say, by bank transfer or cheque) and the
+direct debit also pulled — a double payment. A refund is a **maker-checker** flow
+so no single person can move money back out to a member:
+
+- **Admin** `recommendrefund <member code|id> <amount> <reason>` — creates a
+  `pending` `RefundRequest` the cooperative owes the member.
+- **Super admin** `approverefund <id>` — approves and initiates a **payout to the
+  member's saved bank account** through the same payout path as withdrawals
+  (idempotent `Payout` row + a balanced `expense:refund` / `assets:bank` journal).
+  On success the request is marked `paid`; on failure it is marked `failed` and
+  super admins are alerted.
+- **Super admin** `rejectrefund <id> [reason]` — rejects a pending request.
+
+Approval refuses if the member has **no saved bank account**, and the refund only
+pays out from the cooperative's bank/settlement account — never the member's
+wallet. Every step (recommend / approve / reject / paid / failed) is audited with
+a human-readable description.
+
 ## Dividends
 
 Profit comes from the **ledger**: loan interest, fines and admin charges in;
