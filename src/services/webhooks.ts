@@ -54,6 +54,27 @@ export interface WebhookOutcome {
 }
 
 /**
+ * True when `reference` belongs to one of OUR direct-debit mandate debits
+ * (matched by `MandateDebit.providerRef`). Paystack can deliver a partial debit
+ * shaped as a `charge.success`, which the credit parser matches first — this
+ * lets us route that event to `settleDebit` instead of the top-up path (where an
+ * unknown virtual account would silently no-op and the debit would be retried
+ * and re-charged).
+ */
+async function isMandateDebitReference(reference: string | undefined): Promise<boolean> {
+  if (!reference) return false;
+  const coopId = await resolveCoopByMandateDebitRef(reference);
+  if (!coopId) return false;
+  return withCoopContext(coopId, async () => {
+    const debit = await prisma.mandateDebit.findUnique({
+      where: { providerRef: reference },
+      select: { id: true },
+    });
+    return Boolean(debit);
+  });
+}
+
+/**
  * INSERT-first idempotency + synchronous processing for a single webhook
  * branch. The composite event id is globally unique, so replays are acknowledged
  * but never reprocessed; only fully-`processed` events are acked as duplicates
@@ -256,7 +277,20 @@ export async function processPaymentWebhook(
   // provider's own retry (or a manual re-delivery) reprocesses it below; only
   // fully-processed events are acked as "duplicate".
   try {
-    await handlePaymentNotification(notification as PaymentNotification);
+    // A direct-debit settlement can arrive shaped as `charge.success`. Its
+    // reference is one of OUR mandate-debit refs, so settle it rather than
+    // treating it as a wallet top-up (the credit path would find no virtual
+    // account and silently no-op, leaving the debit pending for a re-charge).
+    if (notification.reference && (await isMandateDebitReference(notification.reference))) {
+      await settleDebit(
+        notification.provider,
+        notification.reference,
+        "successful",
+        notification.transactionId,
+      );
+    } else {
+      await handlePaymentNotification(notification as PaymentNotification);
+    }
     await prisma.webhookEvent.update({
       where: { id: eventId },
       data: { status: "processed", processedAt: new Date() },

@@ -354,19 +354,37 @@ async function applyPaystackMandateStatus(
   const coopId = await resolveCoopByMandateReference(providerReference);
   if (!coopId) return;
 
-  await withCoopContext(coopId, async () => {
-    await prisma.mandate.updateMany({
-      where: { provider: "paystack", providerReference },
-      data: {
-        providerMandateId: authorizationCode,
-        status,
-        ...(status === "active" ? { authorizedAt: new Date() } : {}),
-      },
+  // Activation is terminal: persist the authorization_code and stamp it active.
+  if (status === "active") {
+    await withCoopContext(coopId, async () => {
+      await prisma.mandate.updateMany({
+        where: { provider: "paystack", providerReference },
+        data: {
+          providerMandateId: authorizationCode,
+          status: "active",
+          authorizedAt: new Date(),
+        },
+      });
     });
-  });
+    return;
+  }
 
-  // An inactive authorization must be activated before any debit can be pulled.
   if (status !== "pending") return;
+
+  // An inactive authorization only concerns a still-pending mandate. A late or
+  // out-of-order inactive event must never regress an active (or paused/
+  // cancelled) mandate back to pending, and must not re-fire activation.
+  const current = await withCoopContext(coopId, async () =>
+    prisma.mandate.findFirst({
+      where: { provider: "paystack", providerReference },
+      select: { status: true, providerMandateId: true },
+    }),
+  );
+  if (!current || current.status !== "pending" || current.providerMandateId) return;
+
+  // Trigger the activation charge BEFORE persisting the code, so a failure
+  // leaves the mandate untouched and the provider's redelivery re-runs
+  // activation instead of the mandate being stuck pending forever.
   try {
     const provider = await resolveProvider("paystack");
     const result = await provider.triggerActivationCharge?.({
@@ -374,19 +392,29 @@ async function applyPaystackMandateStatus(
       providerCustomerId: context.providerCustomerId,
     });
     if (result && !result.ok) {
-      log.error("[mandates] Paystack activation charge failed", {
-        providerReference,
-        err: result.error,
-      });
+      throw new Error(result.error ?? "activation charge failed");
     }
   } catch (err) {
-    // A provider-side hiccup must not 500 the webhook (redelivery storm). The
-    // authorization is already recorded as pending, so nothing is debited.
-    log.error("[mandates] Paystack activation charge threw", {
-      providerReference,
-      err: String(err),
-    });
+    const msg = err instanceof Error ? err.message : String(err);
+    const failure = new Error(`Paystack activation charge failed: ${msg}`);
+    await alertSupers(
+      coopId,
+      `Paystack direct-debit activation charge failed for mandate ${providerReference}: ${msg}. The webhook will be retried.`,
+      AlertSeverity.CRITICAL,
+    ).catch(() => {});
+    // Re-throw so the webhook is marked `failed` (not `processed`) and Paystack
+    // redelivers — otherwise the mandate could never be activated or debited.
+    throw failure;
   }
+
+  // Activation accepted: persist the resolved authorization_code (status stays
+  // pending until Paystack confirms the authorization is active).
+  await withCoopContext(coopId, async () => {
+    await prisma.mandate.updateMany({
+      where: { provider: "paystack", providerReference },
+      data: { providerMandateId: authorizationCode },
+    });
+  });
 }
 
 /**

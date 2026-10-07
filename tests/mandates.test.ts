@@ -11,7 +11,7 @@ import { resolveProvider } from "../src/services/payments/index.js";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { handleAdminCommand } from "../src/services/admin.js";
-import { sendText } from "../src/lib/messaging.js";
+import { sendText, notifyMember } from "../src/lib/messaging.js";
 import {
   createMandate,
   listMandates,
@@ -573,6 +573,79 @@ describe("mandate lifecycle service", () => {
       providerMandateId: "AUTH_PS_4",
       providerCustomerId: "CUS_PS_4",
     });
+  });
+
+  it("ignores a late inactive Paystack event after activation (no regression, no re-activation)", async () => {
+    const coop = await createTestCoop("MNDPS5");
+    const m = await createTestMember(coop.id, { phone: "2348000500005" });
+    const mandate = await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: null,
+      providerReference: "MAN-ps-5",
+      status: "pending",
+    });
+    const adapter = fakeAdapter({
+      name: "paystack",
+      triggerActivationCharge: vi.fn(async () => ({ ok: true })),
+    });
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    await applyMandateStatus("paystack", "AUTH_PS_5", "active", {
+      providerReference: "MAN-ps-5",
+      providerCustomerId: "CUS_PS_5",
+    });
+    // A redelivered/out-of-order inactive event must not regress the mandate.
+    await applyMandateStatus("paystack", "AUTH_PS_5", "pending", {
+      providerReference: "MAN-ps-5",
+      providerCustomerId: "CUS_PS_5",
+    });
+
+    const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.status).toBe("active");
+    expect(vi.mocked(adapter.triggerActivationCharge)).not.toHaveBeenCalled();
+  });
+
+  it("rethrows and alerts on a Paystack activation failure so the webhook retries", async () => {
+    const coop = await createTestCoop("MNDPS6");
+    const admin = await createTestMember(coop.id, { phone: "2348000500096", role: "superadmin" });
+    const m = await createTestMember(coop.id, { phone: "2348000500006" });
+    const mandate = await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: null,
+      providerReference: "MAN-ps-6",
+      status: "pending",
+    });
+    let fail = true;
+    const triggerActivationCharge = vi.fn(async () =>
+      fail ? { ok: false, error: "paystack boom" } : { ok: true },
+    );
+    const adapter = fakeAdapter({ name: "paystack", triggerActivationCharge });
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    await expect(
+      applyMandateStatus("paystack", "AUTH_PS_6", "pending", {
+        providerReference: "MAN-ps-6",
+        providerCustomerId: "CUS_PS_6",
+      }),
+    ).rejects.toThrow(/activation/i);
+
+    // The code must NOT be persisted, so a redelivery re-runs activation.
+    const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.status).toBe("pending");
+    expect(row?.providerMandateId).toBeNull();
+    // Super admins are alerted.
+    const notifyArgs = vi.mocked(notifyMember).mock.calls.map((c) => c[0] as { phone?: string });
+    expect(notifyArgs.some((a) => a.phone === admin.phone)).toBe(true);
+
+    // A retry (now succeeding) resolves and persists the authorization code.
+    fail = false;
+    await applyMandateStatus("paystack", "AUTH_PS_6", "pending", {
+      providerReference: "MAN-ps-6",
+      providerCustomerId: "CUS_PS_6",
+    });
+    const after2 = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(after2?.status).toBe("pending");
+    expect(after2?.providerMandateId).toBe("AUTH_PS_6");
   });
 
   it("creates a Paystack mandate storing the deterministic reference and no authorization code yet", async () => {

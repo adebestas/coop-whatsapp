@@ -556,4 +556,41 @@ describe("mandate webhooks", () => {
     expect(row?.status).toBe("successful");
     expect(row?.providerTransactionId).toBe("4242");
   });
+
+  it("settles a Paystack partial-debit delivered as charge.success (not as a top-up)", async () => {
+    // Paystack may report a partial debit as `charge.success`. The credit parser
+    // matches it first, but its reference is one of OUR mandate-debit refs, so it
+    // must be routed to settleDebit — never swallowed as an unknown-account
+    // top-up (which would leave the debit pending and let the retry re-charge).
+    const coop = await createTestCoop("MWHPS4");
+    const m = await createTestMember(coop.id, { phone: "2348000200024" });
+    const mandate = await seedMandate(coop.id, m.id, {
+      provider: "paystack",
+      providerMandateId: "AUTH_W4",
+    });
+    const debit = await seedDebit(coop.id, m.id, mandate.id, { providerRef: "DD-CS-1" });
+
+    const res = await postPaystack({
+      event: "charge.success",
+      data: {
+        id: "TX-CS-1",
+        status: "success",
+        amount: 50_000,
+        reference: "DD-CS-1",
+        currency: "NGN",
+        account: { number: "" },
+      },
+    });
+
+    expect(res.httpStatus).toBe(200);
+    expect(res.body.status).toBe("ok");
+    expect(await walletBalance(m.id)).toBe(50_000);
+    const row = await prisma.mandateDebit.findUnique({ where: { id: debit.id } });
+    expect(row?.status).toBe("successful");
+
+    // It must NOT have gone through the top-up path (which creates a contribution).
+    expect(await prisma.contribution.count()).toBe(0);
+    const journal = await prisma.journalEntry.findFirst();
+    expect(journal?.description).toMatch(/direct debit/i);
+  });
 });
