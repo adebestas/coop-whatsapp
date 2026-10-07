@@ -4,6 +4,7 @@ import {
   setCoopContext,
   withCoopContext,
   resolveCoopByMandateDebitRef,
+  resolveCoopByMandateProviderId,
 } from "../lib/tenant-context.js";
 import { audit } from "./audit.js";
 import { formatBalance } from "../lib/money.js";
@@ -126,6 +127,20 @@ export async function createMandate(
   }
 
   const provider = await resolveProvider();
+
+  // Paystack direct debit is feature-gated fail-closed. Its activation webhook
+  // yields an `authorization_code`, but its initialize response only gives a
+  // `reference`, so a created Paystack mandate could never activate — and the
+  // debit path would then mis-key (the reference is not a valid
+  // authorization_code), risking a double charge. Refuse until the contract is
+  // verified end-to-end against live Paystack.
+  if (provider.name === "paystack") {
+    return {
+      ok: false,
+      message: "Paystack direct debit is not yet enabled. Please use Monnify or try again later.",
+    };
+  }
+
   const providerReference = `MAN-${randomUUID()}`;
   const result = await provider.createMandate?.({
     memberName: member.name,
@@ -299,12 +314,21 @@ export async function applyMandateStatus(
   providerMandateId: string,
   status: string,
 ): Promise<void> {
-  await prisma.mandate.updateMany({
-    where: { provider, providerMandateId },
-    data: {
-      status,
-      ...(status === "active" ? { authorizedAt: new Date() } : {}),
-    },
+  // A webhook has no coop context, so resolve the owning tenant FIRST via the
+  // SECURITY DEFINER resolver (bypasses RLS). Unknown/ambiguous -> nothing to
+  // do (fail-closed). Without this the update matched zero rows under enforced
+  // RLS and the mandate silently stayed `pending` while the event was acked.
+  const coopId = await resolveCoopByMandateProviderId(providerMandateId);
+  if (!coopId) return;
+
+  await withCoopContext(coopId, async () => {
+    await prisma.mandate.updateMany({
+      where: { provider, providerMandateId },
+      data: {
+        status,
+        ...(status === "active" ? { authorizedAt: new Date() } : {}),
+      },
+    });
   });
 }
 

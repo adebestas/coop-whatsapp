@@ -160,4 +160,44 @@ describe("refund maker-checker", () => {
     expect(res.ok).toBe(false);
     expect(await prisma.refundRequest.count()).toBe(0);
   });
+
+  it("re-approves a refund the provider explicitly declined (safe to retry)", async () => {
+    const { coop, member, recommendActor, superActor } = await setup();
+    const rec = await recommendRefund(coop.id, member.id, 500000, "Double payment", recommendActor);
+    // An explicit decline means NO money moved and no Payout row exists, so the
+    // deterministic TFR-REFUND key makes a retry safe.
+    await prisma.refundRequest.update({
+      where: { id: rec.refundId! },
+      data: {
+        status: "failed",
+        payoutRef: "Not paid out: provider error (declined). No money moved.",
+      },
+    });
+
+    const res = await approveRefund(coop.id, rec.refundId!, superActor);
+
+    expect(res.ok).toBe(true);
+    const row = await prisma.refundRequest.findUnique({ where: { id: rec.refundId! } });
+    expect(row!.status).toBe("paid");
+    expect(row!.paidAt).toBeInstanceOf(Date);
+    expect(payoutSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to re-approve a refund whose payout outcome is unconfirmed", async () => {
+    const { coop, member, recommendActor, superActor } = await setup();
+    const rec = await recommendRefund(coop.id, member.id, 500000, "Double payment", recommendActor);
+    // The provider may have accepted the transfer already; retrying could
+    // double-pay. This must stay blocked until a human reconciles.
+    await prisma.refundRequest.update({
+      where: { id: rec.refundId! },
+      data: { status: "failed", payoutRef: "unsure: awaiting provider authorization" },
+    });
+
+    const res = await approveRefund(coop.id, rec.refundId!, superActor);
+
+    expect(res.ok).toBe(false);
+    const row = await prisma.refundRequest.findUnique({ where: { id: rec.refundId! } });
+    expect(row!.status).toBe("failed");
+    expect(payoutSpy).not.toHaveBeenCalled();
+  });
 });

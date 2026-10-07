@@ -217,6 +217,9 @@ describe("paystack mandate adapter", () => {
     expect(body.authorization_code).toBe("AUTH_X");
     expect(body.amount).toBe(250_000); // Paystack keeps kobo
     expect(body.currency).toBe("NGN");
+    // Our deterministic reference must travel with the charge so the settlement
+    // webhook settles THIS debit (and the provider gets an idempotency key).
+    expect(body.reference).toBe("DD-1");
   });
 
   it("cancelMandate DELETEs /customer/authorization/{code}", async () => {
@@ -413,6 +416,51 @@ describe("mandate lifecycle service", () => {
     const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
     expect(row?.status).toBe("active");
     expect(row?.authorizedAt).toBeInstanceOf(Date);
+  });
+
+  it("fail-closes a mandate status flip when the provider id is ambiguous across coops", async () => {
+    // A webhook has no coop context. The RLS-scoped applyMandateStatus must
+    // resolve the owning tenant first; an id shared by two coops is ambiguous,
+    // so it must update NEITHER (never cross-tenant, never guess).
+    const coopA = await createTestCoop("MNDRLS1");
+    const coopB = await createTestCoop("MNDRLS2");
+    const a = await createTestMember(coopA.id, { phone: "2348000400001" });
+    const b = await createTestMember(coopB.id, { phone: "2348000400002" });
+    await seedMandate(coopA.id, a.id, { status: "pending", providerMandateId: "MTDD|DUP" });
+    await seedMandate(coopB.id, b.id, { status: "pending", providerMandateId: "MTDD|DUP" });
+
+    await applyMandateStatus("monnify", "MTDD|DUP", "active");
+
+    const rows = await prisma.mandate.findMany({ where: { providerMandateId: "MTDD|DUP" } });
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.status === "pending")).toBe(true);
+  });
+
+  it("refuses to create a Paystack mandate rather than risk a double charge", async () => {
+    // Paystack's activation webhook yields an authorization_code while
+    // createMandate stores the initialize reference, so the mandate could never
+    // activate and the debit path would mis-key. Gated fail-closed until the
+    // reconciliation contract is verified against the live provider.
+    const coop = await createTestCoop("MNDPS1");
+    const m = await createTestMember(coop.id, { phone: "2348000500001" });
+    await enableDirectDebit(coop.id);
+    await setBank(m.id);
+    const adapter = fakeAdapter({
+      name: "paystack",
+      createMandate: vi.fn(async () => ({
+        ok: true,
+        providerMandateId: "AUTH_REF",
+        authorizationUrl: "https://paystack.test/redirect",
+      })),
+    });
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const res = await createMandate(coop.id, m.id, 100_000, actor(m));
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/paystack/i);
+    expect(res.message).toMatch(/not yet enabled|not enabled/i);
+    expect(vi.mocked(adapter.createMandate)).not.toHaveBeenCalled();
+    expect(await prisma.mandate.count()).toBe(0);
   });
 
   it("pauses and resumes the whole mandate", async () => {

@@ -311,6 +311,9 @@ export const paystackAdapter: ProviderAdapter = {
         currency: "NGN",
         amount: forProvider(params.amount, "paystack"),
         email: params.memberEmail ?? "member@coop.local",
+        // Our deterministic debit reference doubles as the idempotency key and
+        // is what the debit webhook echoes back, so settleDebit can match it.
+        reference: params.reference,
       });
       return { ok: true, providerRef: res.data?.reference, status: res.data?.status };
     } catch (err: any) {

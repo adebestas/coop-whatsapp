@@ -173,6 +173,31 @@ export async function resolveCoopByMandateDebitRef(reference: string): Promise<s
 }
 
 /**
+ * Resolve the cooperative that owns a mandate, by the provider's mandate id
+ * (Monnify mandateCode / Paystack authorization_code). A mandate webhook
+ * carries no coop context, so this SECURITY DEFINER resolver discovers the
+ * tenant before the RLS GUC can be set. Fails closed (null) when the id is
+ * unknown OR ambiguous across cooperatives.
+ */
+export async function resolveCoopByMandateProviderId(
+  providerMandateId: string,
+): Promise<string | null> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const rows = await prisma.mandate.findMany({
+      where: { providerMandateId },
+      select: { cooperativeId: true },
+      take: 2,
+    });
+    return rows.length === 1 ? rows[0].cooperativeId : null;
+  }
+  const rows = await prisma.$queryRaw<{ coop: string | null }[]>`
+    SELECT app.resolve_coop_by_mandate_provider_id(${providerMandateId}) AS coop
+  `;
+  return rows[0]?.coop ?? null;
+}
+
+/**
  * Resolve the cooperative by its join code.
  */
 export async function resolveCoopByCode(code: string): Promise<string | null> {

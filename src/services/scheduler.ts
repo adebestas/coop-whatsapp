@@ -407,6 +407,16 @@ export async function runMandateRetries(now = new Date()): Promise<number> {
       if (debit.mandate.status !== "active") continue;
       if (csvSet(debit.mandate.pausedPurposes).has(debit.purpose)) continue;
 
+      // Atomic claim BEFORE the provider call, so two overlapping retries can
+      // only charge once. The `nextRetryAt <= now` predicate is the guard: the
+      // winner pushes nextRetryAt forward, and the loser's claim matches zero.
+      const claim = await prisma.mandateDebit.updateMany({
+        where: { id: debit.id, status: "failed", nextRetryAt: { lte: now } },
+        data: { nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS) },
+      });
+      if (claim.count === 0) continue;
+      retried++;
+
       const narration = `Direct debit retry — ${debit.purpose} (${formatBalance(debit.amount)})`;
       let result: { ok: boolean; error?: string } | undefined;
       try {
@@ -420,7 +430,6 @@ export async function runMandateRetries(now = new Date()): Promise<number> {
       } catch (err) {
         result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
       }
-      retried++;
 
       if (result?.ok) {
         await prisma.mandateDebit.update({
@@ -445,6 +454,35 @@ export async function runMandateRetries(now = new Date()): Promise<number> {
     }
   });
   return retried;
+}
+
+/** A `pending` debit older than this is presumed to have lost its webhook. */
+const STALE_PENDING_MS = 30 * 60 * 1000;
+
+/**
+ * Reconcile `pending` mandate debits that never received a settlement webhook.
+ * The scheduler inserts `pending` and dispatches; if the process dies or the
+ * webhook is lost, the row would stay `pending` forever (retries only select
+ * `failed`) and the deterministic reference would skip the obligation for
+ * good. Age such rows out to `failed` with a scheduled retry so the retry job
+ * — protected by the deterministic reference — can safely collect again.
+ * Returns the number of rows reconciled.
+ */
+export async function reconcileStaleMandateDebits(now = new Date()): Promise<number> {
+  let reconciled = 0;
+  const cutoff = new Date(now.getTime() - STALE_PENDING_MS);
+  await forEachCoop(async (coopId) => {
+    const { count } = await prisma.mandateDebit.updateMany({
+      where: { cooperativeId: coopId, status: "pending", createdAt: { lt: cutoff } },
+      data: {
+        status: "failed",
+        failureReason: "stale pending — no settlement webhook received",
+        nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS),
+      },
+    });
+    reconciled += count;
+  });
+  return reconciled;
 }
 
 /** Set the cooperative's monthly loan interest rate (admin only). */
@@ -818,6 +856,9 @@ export async function runSchedulerTick(): Promise<void> {
   );
   await runMandateDebits().catch((err) =>
     log.error("[scheduler] mandate debits failed", { err: String(err) }),
+  );
+  await reconcileStaleMandateDebits().catch((err) =>
+    log.error("[scheduler] mandate pending reconciliation failed", { err: String(err) }),
   );
   await runMandateRetries().catch((err) =>
     log.error("[scheduler] mandate retries failed", { err: String(err) }),

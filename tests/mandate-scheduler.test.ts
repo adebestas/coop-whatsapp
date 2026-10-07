@@ -10,6 +10,7 @@ import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./set
 import {
   runMandateDebits,
   runMandateRetries,
+  reconcileStaleMandateDebits,
   runAutoSaveReminders,
 } from "../src/services/scheduler.js";
 import { resolveProvider } from "../src/services/payments/index.js";
@@ -531,6 +532,92 @@ describe("mandate scheduler retries", () => {
       "skipped",
     );
     expect(n).toBe(0);
+  });
+
+  it("issues only one provider debit when two retries overlap", async () => {
+    const coop = await createTestCoop("MSCH20");
+    const m = await createTestMember(coop.id, { phone: "2348000300021" });
+    const mandate = await seedMandate(coop.id, m.id);
+    await prisma.mandateDebit.create({
+      data: {
+        mandateId: mandate.id,
+        cooperativeId: coop.id,
+        memberId: m.id,
+        purpose: "savings",
+        amount: 50_000,
+        status: "failed",
+        providerRef: "DD-RACE-1",
+        nextRetryAt: new Date(Date.now() - 60_000),
+      },
+    });
+
+    // Hold the provider call open so BOTH ticks definitely reach it before
+    // either writes its post-call state — reproducing the overlap a fast
+    // provider would otherwise hide.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const adapter = fakeAdapter({
+      debitMandate: vi.fn(async () => {
+        await gate;
+        return { ok: true, providerRef: "TRX-1", status: "SUCCESSFUL" };
+      }),
+    });
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const now = new Date();
+    const first = runMandateRetries(now);
+    const second = runMandateRetries(now);
+    // Let both ticks read the failed row and attempt their claim.
+    await new Promise((r) => setTimeout(r, 100));
+    release();
+    await Promise.all([first, second]);
+
+    // The atomic claim lets exactly one tick proceed to the provider.
+    expect(vi.mocked(adapter.debitMandate)).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("mandate scheduler stale-pending reconciliation", () => {
+  it("ages a stale pending debit out to failed so it can be retried", async () => {
+    const coop = await createTestCoop("MSCH21");
+    const m = await createTestMember(coop.id, { phone: "2348000300022" });
+    const mandate = await seedMandate(coop.id, m.id);
+    const stale = await prisma.mandateDebit.create({
+      data: {
+        mandateId: mandate.id,
+        cooperativeId: coop.id,
+        memberId: m.id,
+        purpose: "savings",
+        amount: 50_000,
+        status: "pending",
+        providerRef: "DD-STALE-1",
+        createdAt: new Date(Date.now() - 60 * 60 * 1000),
+      },
+    });
+    const fresh = await prisma.mandateDebit.create({
+      data: {
+        mandateId: mandate.id,
+        cooperativeId: coop.id,
+        memberId: m.id,
+        purpose: "savings",
+        amount: 50_000,
+        status: "pending",
+        providerRef: "DD-FRESH-1",
+      },
+    });
+
+    const n = await reconcileStaleMandateDebits(new Date());
+
+    const staleRow = await prisma.mandateDebit.findUnique({ where: { id: stale.id } });
+    expect(staleRow?.status).toBe("failed");
+    expect(staleRow?.nextRetryAt).toBeInstanceOf(Date);
+    expect(staleRow?.failureReason).toMatch(/stale|unconfirmed|no webhook/i);
+    expect((await prisma.mandateDebit.findUnique({ where: { id: fresh.id } }))?.status).toBe(
+      "pending",
+    );
+    expect(n).toBe(1);
   });
 });
 

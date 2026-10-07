@@ -116,8 +116,18 @@ export async function approveRefund(
   }
   const refund = await resolveRefund(coopId, refundId);
   if (!refund) return { ok: false, message: "Refund request not found." };
-  if (refund.status !== "pending") {
-    return { ok: false, message: `This refund is already ${refund.status}.` };
+  // A `failed` refund is retryable ONLY when the provider explicitly declined
+  // (no money moved; the deterministic TFR-REFUND key keeps the retry safe).
+  // An `unsure` outcome may already have sent the transfer, so re-approving it
+  // could double-pay — that stays blocked until a human reconciles.
+  const unsure = refund.status === "failed" && (refund.payoutRef ?? "").startsWith("unsure:");
+  if (refund.status !== "pending" && (refund.status !== "failed" || unsure)) {
+    return {
+      ok: false,
+      message: unsure
+        ? "This refund's payout outcome is unconfirmed — reconcile with the provider before retrying."
+        : `This refund is already ${refund.status}.`,
+    };
   }
   const member = await prisma.member.findUnique({ where: { id: refund.memberId } });
   if (!member) return { ok: false, message: "Member not found." };
@@ -133,7 +143,7 @@ export async function approveRefund(
   const claimed = await withTx(async (tx) => {
     await setCoopContext(tx as never, coopId);
     return tx.refundRequest.updateMany({
-      where: { id: refund.id, status: "pending" },
+      where: { id: refund.id, status: refund.status },
       data: { status: "approved", approvedById: actor.id, approvedAt: new Date() },
     });
   });
