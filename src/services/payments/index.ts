@@ -91,6 +91,63 @@ export interface ResolveAccountResult {
   error?: string;
 }
 
+// ===== Direct-debit mandates =====
+
+export interface CreateMandateParams {
+  memberName: string;
+  memberEmail: string;
+  memberPhone: string;
+  accountNumber: string;
+  bankCode: string;
+  accountName: string;
+  amountCap: number; // kobo
+  reference: string;
+  narration?: string;
+  redirectUrl?: string;
+}
+
+export interface MandateResult {
+  ok: boolean;
+  providerMandateId?: string;
+  authorizationUrl?: string;
+  status?: string;
+  error?: string;
+}
+
+export interface DebitMandateParams {
+  providerMandateId: string;
+  amount: number; // kobo
+  reference: string;
+  narration?: string;
+}
+
+export interface DebitResult {
+  ok: boolean;
+  providerRef?: string;
+  status?: string;
+  error?: string;
+}
+
+export interface CancelMandateParams {
+  providerMandateId: string;
+}
+
+export interface MandateNotification {
+  providerMandateId: string;
+  status: "active" | "cancelled" | "failed" | "expired";
+  provider: string;
+  raw: unknown;
+}
+
+export interface DebitNotification {
+  reference: string;
+  status: "successful" | "failed";
+  providerTransactionId?: string;
+  reason?: string;
+  provider: string;
+  raw: unknown;
+}
+
 export interface ProviderAdapter {
   name: string;
   createVirtualAccount(params: CreateVirtualAccountParams): Promise<VirtualAccountData>;
@@ -117,6 +174,16 @@ export interface ProviderAdapter {
    * a webhook that may never arrive.
    */
   getTransferStatus?(reference: string): Promise<TransferStatus>;
+  /** Create a direct-debit mandate authorization; returns the consent link. */
+  createMandate?(params: CreateMandateParams): Promise<MandateResult>;
+  /** Pull a variable amount (≤ mandate cap) under an active mandate. */
+  debitMandate?(params: DebitMandateParams): Promise<DebitResult>;
+  /** Cancel an existing mandate at the provider. */
+  cancelMandate?(params: CancelMandateParams): Promise<{ ok: boolean; error?: string }>;
+  /** Parse a mandate status webhook into a MandateNotification, or null if irrelevant. */
+  parseMandateNotification?(body: unknown): MandateNotification | null;
+  /** Parse a debit result webhook into a DebitNotification, or null if irrelevant. */
+  parseDebitNotification?(body: unknown): DebitNotification | null;
 }
 
 export interface TransferStatus {

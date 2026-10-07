@@ -11,6 +11,13 @@ import type {
   PayoutParams,
   PayoutResult,
   TransferStatus,
+  CreateMandateParams,
+  MandateResult,
+  DebitMandateParams,
+  DebitResult,
+  CancelMandateParams,
+  MandateNotification,
+  DebitNotification,
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
 import { forProvider } from "../../lib/money.js";
@@ -57,7 +64,7 @@ function getSecret(): string {
   return key;
 }
 
-async function api<T>(path: string, method: string, body?: unknown): Promise<T> {
+async function api<T>(path: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: {
@@ -264,6 +271,84 @@ export const paystackAdapter: ProviderAdapter = {
       // Unconfigured or HTTP error — treat as unknown, never guess.
       return { status: "unknown", error: String(err?.message ?? err) };
     }
+  },
+
+  async createMandate(params: CreateMandateParams): Promise<MandateResult> {
+    try {
+      const res = await api<any>("/customer/authorization/initialize", "POST", {
+        email: params.memberEmail,
+        channel: "direct_debit",
+        callback_url: params.redirectUrl,
+      });
+      return {
+        ok: true,
+        providerMandateId: res.data?.reference,
+        authorizationUrl: res.data?.redirect_url,
+        status: "pending",
+      };
+    } catch (err: any) {
+      return { ok: false, error: err.message ?? "mandate failed" };
+    }
+  },
+
+  async debitMandate(params: DebitMandateParams): Promise<DebitResult> {
+    try {
+      const res = await api<any>("/transaction/partial_debit", "POST", {
+        authorization_code: params.providerMandateId,
+        currency: "NGN",
+        amount: forProvider(params.amount, "paystack"),
+        email: params.narration ?? "member@coop.local",
+      });
+      return { ok: true, providerRef: res.data?.reference, status: res.data?.status };
+    } catch (err: any) {
+      return { ok: false, error: err.message ?? "debit failed" };
+    }
+  },
+
+  async cancelMandate(params: CancelMandateParams): Promise<{ ok: boolean; error?: string }> {
+    try {
+      await api<any>(
+        `/customer/authorization/${encodeURIComponent(params.providerMandateId)}`,
+        "DELETE",
+      );
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message ?? "cancel failed" };
+    }
+  },
+
+  parseMandateNotification(body: unknown): MandateNotification | null {
+    const b: any = body;
+    if (b?.event !== "direct_debit.authorization.created") return null;
+    const code = b.data?.authorization_code;
+    if (!code) return null;
+    return {
+      providerMandateId: String(code),
+      status: b.data?.active ? "active" : "failed",
+      provider: "paystack",
+      raw: body,
+    };
+  },
+
+  parseDebitNotification(body: unknown): DebitNotification | null {
+    const b: any = body;
+    const event = String(b?.event ?? "").toLowerCase();
+    if (!event.includes("partial_debit") && !event.includes("charge")) return null;
+    const reference = b.data?.reference;
+    if (!reference) return null;
+    const status: DebitNotification["status"] | null = event.includes("success")
+      ? "successful"
+      : event.includes("fail")
+        ? "failed"
+        : null;
+    if (!status) return null;
+    return {
+      reference,
+      status,
+      providerTransactionId: b.data?.id !== undefined ? String(b.data.id) : undefined,
+      provider: "paystack",
+      raw: body,
+    };
   },
 };
 

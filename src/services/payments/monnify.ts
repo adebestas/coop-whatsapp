@@ -11,6 +11,13 @@ import type {
   PayoutParams,
   PayoutResult,
   TransferStatus,
+  CreateMandateParams,
+  MandateResult,
+  DebitMandateParams,
+  DebitResult,
+  CancelMandateParams,
+  MandateNotification,
+  DebitNotification,
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
 import { forProvider } from "../../lib/money.js";
@@ -106,13 +113,13 @@ async function accessToken(): Promise<string> {
   return cachedToken.token;
 }
 
-async function api<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+async function api<T>(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<T> {
   const token = await accessToken();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
   const res = await fetch(`${BASE_URL}${path}`, {
     method,
     headers,
-    body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
+    body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
   });
   const json = (await res.json()) as T;
   return json;
@@ -334,5 +341,126 @@ export const monnifyAdapter: ProviderAdapter = {
         error: err?.message ?? "monnify payout failed",
       };
     }
+  },
+
+  async createMandate(params: CreateMandateParams): Promise<MandateResult> {
+    if (!configured()) return { ok: false, error: "Monnify is not configured" };
+    try {
+      const res = await api<
+        MonnifyResponse<{
+          mandateCode: string;
+          authorizationLink?: string;
+          mandateStatus?: string;
+        }>
+      >("POST", "/api/v1/disbursements/mandate", {
+        customerName: params.memberName,
+        customerEmail: params.memberEmail,
+        customerPhoneNumber: params.memberPhone,
+        customerAccountDetails: {
+          accountNumber: params.accountNumber,
+          bankCode: params.bankCode,
+          accountName: params.accountName,
+        },
+        mandateDate: new Date().toISOString().slice(0, 10),
+        mandateAmount: forProvider(params.amountCap, "monnify"),
+        narration: params.narration ?? "Cooperative savings/loan mandate",
+        redirectUrl: params.redirectUrl,
+      });
+      if (!res.requestSuccessful) {
+        return { ok: false, error: res.responseMessage ?? "mandate rejected" };
+      }
+      return {
+        ok: true,
+        providerMandateId: res.responseBody.mandateCode,
+        authorizationUrl: res.responseBody.authorizationLink,
+        status: res.responseBody.mandateStatus,
+      };
+    } catch (err: any) {
+      return { ok: false, error: err?.message ?? "mandate failed" };
+    }
+  },
+
+  async debitMandate(params: DebitMandateParams): Promise<DebitResult> {
+    if (!configured()) return { ok: false, error: "Monnify is not configured" };
+    try {
+      const res = await api<
+        MonnifyResponse<{ transactionReference: string; debitStatus: string }>
+      >("POST", "/api/v1/disbursements/debit", {
+        mandateId: params.providerMandateId,
+        amount: forProvider(params.amount, "monnify"),
+        reference: params.reference,
+        narration: params.narration,
+      });
+      if (!res.requestSuccessful) {
+        return { ok: false, error: res.responseMessage ?? "debit rejected" };
+      }
+      return {
+        ok: true,
+        providerRef: res.responseBody.transactionReference,
+        status: res.responseBody.debitStatus,
+      };
+    } catch (err: any) {
+      return { ok: false, error: err?.message ?? "debit failed" };
+    }
+  },
+
+  async cancelMandate(params: CancelMandateParams): Promise<{ ok: boolean; error?: string }> {
+    if (!configured()) return { ok: false, error: "Monnify is not configured" };
+    try {
+      const res = await api<MonnifyResponse<unknown>>(
+        "PUT",
+        `/api/v1/disbursements/mandate/${encodeURIComponent(params.providerMandateId)}`,
+        { action: "CANCEL" },
+      );
+      return {
+        ok: res.requestSuccessful,
+        error: res.requestSuccessful ? undefined : res.responseMessage,
+      };
+    } catch (err: any) {
+      return { ok: false, error: err?.message ?? "cancel failed" };
+    }
+  },
+
+  parseMandateNotification(body: unknown): MandateNotification | null {
+    const b: any = body;
+    if (String(b?.eventType ?? "").toUpperCase() !== "MANDATE_UPDATE") return null;
+    const d = b.eventData ?? {};
+    const map: Record<string, MandateNotification["status"]> = {
+      ACTIVATED: "active",
+      CANCELLED: "cancelled",
+      FAILED: "failed",
+      EXPIRED: "expired",
+    };
+    const status = map[String(d.mandateStatus ?? "").toUpperCase()];
+    if (!status || !d.mandateCode) return null;
+    return {
+      providerMandateId: String(d.mandateCode),
+      status,
+      provider: "monnify",
+      raw: body,
+    };
+  },
+
+  parseDebitNotification(body: unknown): DebitNotification | null {
+    const b: any = body;
+    const eventType = String(b?.eventType ?? b?.type ?? "").toUpperCase();
+    if (!eventType.includes("DISBURSEMENT")) return null;
+    const d = b.eventData ?? {};
+    const reference = d.reference ?? d.paymentReference;
+    if (!reference) return null;
+    const status: DebitNotification["status"] | null = eventType.includes("SUCCESS")
+      ? "successful"
+      : eventType.includes("FAIL") || eventType.includes("REVERS")
+        ? "failed"
+        : null;
+    if (!status) return null;
+    return {
+      reference,
+      status,
+      providerTransactionId: d.providerReference,
+      reason: d.status,
+      provider: "monnify",
+      raw: body,
+    };
   },
 };
