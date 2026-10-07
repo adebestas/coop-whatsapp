@@ -29,6 +29,34 @@ and group (VSLA/ROSCA) contributions** — instead of today's reminder-and-reply
    **skipped** by `runAutoSaveReminders`; members without a mandate keep today's flow.
 8. **PIN:** mandate **create** and **cancel** require the member's transaction PIN.
 
+## Addendum (user, 2026-10-07): pause controls & refunds
+
+A member may have **already paid by bank/cheque**, so the coop must be able to stop
+the auto-debit and, if the debit also pulled, refund the member.
+
+### Pause controls (all three)
+- **Pause the whole mandate:** `Mandate.status` gains `paused`; admin `pausemandate <id>`
+  / `resumemandate <id>`.
+- **Pause one purpose:** new `Mandate.pausedPurposes` (CSV); admin
+  `pausemandate <id> <savings|loan|group>` / `resumemandate <id> <purpose>`.
+- **Skip a single pending debit:** `MandateDebit.status` gains `skipped`; admin
+  `skipdebit <id>` marks a pending debit skipped so it is never retried.
+- The scheduler (`runMandateDebits` / `runMandateRetries`) must skip a mandate whose
+  status is `paused`, skip a purpose listed in `pausedPurposes`, and never retry a
+  `skipped` debit.
+
+### Refund flow (maker-checker)
+- New model `RefundRequest`: `cooperativeId`, `memberId`, `mandateDebitId?`, `amount`,
+  `reason`, `status` (`pending|approved|rejected|paid|failed`), `recommendedById`,
+  `approvedById?`, `createdAt`, `approvedAt?`, `paidAt?`, `payoutRef?`.
+- **Admin** `recommendrefund <member code|id> <amount> <reason>` → creates a `pending`
+  `RefundRequest`.
+- **Super admin** `approverefund <id>` → approves and initiates a **payout to the
+  member's saved bank account** (reusing the existing payout path); `rejectrefund <id>
+  <reason>`.
+- Refund is a payout from the coop's bank/settlement account to the member's bank
+  account; every step is audited.
+
 ## Non-goals
 
 - No USSD/SMS (WhatsApp-only program constraint).

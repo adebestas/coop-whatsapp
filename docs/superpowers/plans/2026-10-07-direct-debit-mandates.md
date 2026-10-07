@@ -404,7 +404,20 @@ export async function listMandates(coopId: string, memberId: string): Promise<{ 
 export async function listCoopMandates(coopId: string): Promise<{ ok: boolean; message: string; mandates?: MandateSummary[] }>;
 export async function cancelMandate(coopId: string, mandateId: string, actor: { id: string; phone: string; role?: string | null }): Promise<{ ok: boolean; message: string }>;
 export async function applyMandateStatus(provider: string, providerMandateId: string, status: string): Promise<void>;
+export async function pauseMandate(coopId: string, mandateId: string, purpose: string | null, actor: { id: string; phone: string; role?: string | null }): Promise<{ ok: boolean; message: string }>;
+export async function resumeMandate(coopId: string, mandateId: string, purpose: string | null, actor: { id: string; phone: string; role?: string | null }): Promise<{ ok: boolean; message: string }>;
+export async function skipDebit(coopId: string, debitId: string, actor: { id: string; phone: string; role?: string | null }): Promise<{ ok: boolean; message: string }>;
 ```
+
+**Pause semantics (addendum):** `pauseMandate(id, null)` sets `Mandate.status = "paused"`; `pauseMandate(id, purpose)` adds the purpose to `Mandate.pausedPurposes` (CSV). `resumeMandate(id, null)` sets status back to `active`; `resumeMandate(id, purpose)` removes it from `pausedPurposes`. `skipDebit(id)` sets a `pending` `MandateDebit.status = "skipped"` so it is never retried.
+
+- [ ] **Step 0: Schema delta migration for pause**
+
+Add `pausedPurposes String @default("")` to `Mandate` in BOTH schemas, and create `prisma/migrations/20261033000000_mandate_pause/migration.sql`:
+```sql
+ALTER TABLE "Mandate" ADD COLUMN "pausedPurposes" TEXT NOT NULL DEFAULT '';
+```
+Run `npm run prisma:generate:local` and `npx prisma db push --schema prisma/schema.local.prisma --skip-generate`.
 
 - [ ] **Step 1: Write failing service tests**
 
@@ -426,6 +439,7 @@ Follow the structure of `src/services/savings-products.ts` (read it): `withTx` +
 - `listMandates` / `listCoopMandates`: query + map to `MandateSummary`.
 - `cancelMandate`: load mandate scoped to coop+member; if `providerMandateId` call `cancelMandate`; set `status: "cancelled"`, `cancelledAt`; audit.
 - `applyMandateStatus`: `prisma.mandate.updateMany({ where: { provider, providerMandateId }, data: { status, authorizedAt: status === "active" ? new Date() : undefined } })`.
+- `pauseMandate` / `resumeMandate` / `skipDebit`: implement per the pause semantics above; each audits (`mandate.pause` / `mandate.resume` / `mandate.debit_skip`).
 
 - [ ] **Step 3: Wire commands**
 
@@ -544,6 +558,8 @@ Expected: FAIL.
 
 In `scheduler.ts`, follow the `forEachCoop` pattern used by `cleanupExpiredVirtualAccounts`. For each coop with `directDebitEnabled`, find active mandates; for each, find due savings obligations (`autoSaveEnabled && autoSaveNextDue <= now`); create a `pending` `MandateDebit` with `providerRef = \`DD-${cuid()}\`` and call `resolveProvider().debitMandate(...)`; on a synchronous hard failure mark `failed` + `nextRetryAt`. `runMandateRetries` selects `failed` debits with `nextRetryAt <= now`, re-calls `debitMandate`, and sets `nextRetryAt = now + 1 day` on failure. Wire both into `runSchedulerTick`.
 
+**Pause (addendum):** only consider mandates with `status === "active"` (a `paused` mandate is skipped entirely); skip a purpose listed in `Mandate.pausedPurposes`; and never select a `skipped` debit in `runMandateRetries` (only `failed`).
+
 - [ ] **Step 3: Suppress reminders for mandated members**
 
 In `runAutoSaveReminders`, exclude members that have an active mandate (add a relation filter or a pre-query of active-mandate member ids per coop).
@@ -625,19 +641,21 @@ git commit -m "feat(direct-debit): group contribution purpose"
 - Modify: `src/services/admin.ts`, `README.md`
 - Test: `tests/mandates.test.ts`
 
-**Interfaces produced:** admin commands `mandates` (coop-wide list) and `pausemandate <id>` (sets `status: "cancelled"` + provider cancel).
+**Interfaces produced:** admin commands `mandates` (coop-wide list), `pausemandate <id> [purpose]`, `resumemandate <id> [purpose]`, `skipdebit <id>`.
 
 - [ ] **Step 1: Write failing tests**
 
 - `handleAdminCommand("mandates")` lists the coop's mandates.
-- `handleAdminCommand("pausemandate <id>")` cancels the mandate and calls the provider cancel.
+- `handleAdminCommand("pausemandate <id>")` sets the mandate `paused`; `pausemandate <id> savings` adds `savings` to `pausedPurposes`.
+- `handleAdminCommand("resumemandate <id>")` sets it back to `active`.
+- `handleAdminCommand("skipdebit <id>")` marks a pending debit `skipped`.
 
 Run: `npx vitest run tests/mandates.test.ts`
 Expected: FAIL.
 
 - [ ] **Step 2: Implement admin commands**
 
-Add `case "mandates"` and `case "pausemandate"` to `handleAdminCommand` in `admin.ts` (follow the `grievances` case pattern), gated to admin/superadmin. Add the admin menu line in `session.ts`.
+Add `case "mandates"`, `case "pausemandate"`, `case "resumemandate"`, `case "skipdebit"` to `handleAdminCommand` in `admin.ts` (follow the `grievances` case pattern), gated to admin/superadmin, calling the Task 3 service functions. Add the admin menu lines in `session.ts`.
 
 - [ ] **Step 3: Add the README section**
 
@@ -654,9 +672,86 @@ git commit -m "feat(direct-debit): admin view and docs"
 
 ---
 
+### Task 9: Refund flow (maker-checker)
+
+**Files:**
+- Modify: `prisma/schema.prisma`, `prisma/schema.local.prisma`
+- Create: `prisma/migrations/20261034000000_refund_requests/migration.sql`
+- Create: `prisma/migrations/20261035000000_refund_requests_rls/migration.sql`
+- Modify: `prisma/rls/recommended_policies.sql`
+- Create: `src/services/refunds.ts`
+- Modify: `src/services/admin.ts`, `src/services/handlers/session.ts`, `README.md`
+- Test: `tests/refunds.test.ts` (new)
+
+**Interfaces produced:**
+```ts
+export async function recommendRefund(coopId: string, memberId: string, amount: number, reason: string, actor: { id: string; phone: string; role?: string | null }): Promise<{ ok: boolean; message: string; refundId?: string }>;
+export async function approveRefund(coopId: string, refundId: string, actor: { id: string; phone: string; role?: string | null }): Promise<{ ok: boolean; message: string }>;
+export async function rejectRefund(coopId: string, refundId: string, reason: string, actor: { id: string; phone: string; role?: string | null }): Promise<{ ok: boolean; message: string }>;
+```
+
+- [ ] **Step 1: Add the `RefundRequest` model + migration + RLS**
+
+Add to both schemas:
+```prisma
+// A refund the coop owes a member (e.g. a double payment: bank/cheque + direct
+// debit). Admin recommends; a super admin approves and pays out.
+model RefundRequest {
+  id              String    @id @default(cuid())
+  cooperativeId   String
+  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId        String
+  member          Member    @relation("MemberRefunds", fields: [memberId], references: [id], onDelete: Cascade)
+  mandateDebitId  String?
+  amount          Int // kobo
+  reason          String
+  status          String    @default("pending") // pending | approved | rejected | paid | failed
+  recommendedById String
+  approvedById    String?
+  createdAt       DateTime  @default(now())
+  approvedAt      DateTime?
+  paidAt          DateTime?
+  payoutRef       String?
+
+  @@index([cooperativeId, status])
+  @@index([cooperativeId, memberId])
+}
+```
+Add `refunds RefundRequest[]` to `Cooperative` and `refunds RefundRequest[] @relation("MemberRefunds")` to `Member`. Migration `20261034000000_refund_requests` creates the table + indexes + FKs (mirror the `Mandate` migration style). RLS migration `20261035000000_refund_requests_rls` mirrors the savings-products RLS pattern; add `RefundRequest` to the FORCE list. Run `npm run prisma:generate:local`, `npx prisma db push --schema prisma/schema.local.prisma --skip-generate`, `npx vitest run tests/schema-sync.test.ts`.
+
+- [ ] **Step 2: Write failing refund tests**
+
+In `tests/refunds.test.ts`:
+- `recommendRefund` creates a `pending` `RefundRequest` with the amount + reason.
+- `approveRefund` by a super admin initiates a payout to the member's saved bank account (mock the payout path), sets `status: "paid"`, `approvedById`, `paidAt`, `payoutRef`.
+- `approveRefund` by a non-super-admin is refused.
+- `rejectRefund` sets `status: "rejected"` + reason.
+- A member with no saved bank account → `approveRefund` refuses.
+
+Run: `npx vitest run tests/refunds.test.ts`
+Expected: FAIL.
+
+- [ ] **Step 3: Implement `src/services/refunds.ts`**
+
+Follow the `savings-products.ts` structure (`withTx` + `setCoopContext`, `audit`, `formatBalance`). `approveRefund` reuses the existing payout path (read `src/services/payanyone.ts` / `src/services/withdrawals.ts` for the exact payout helper and journal pair) to pay the member's `bankAccountNumber`/`bankCode`; on success mark `paid`; on failure mark `failed` and alert. Every step audited.
+
+- [ ] **Step 4: Wire commands**
+
+Admin: `recommendrefund <member code|id> <amount> <reason>` in `handleAdminCommand`. Super admin: `approverefund <id>`, `rejectrefund <id> <reason>`. Add menu lines in `session.ts`.
+
+- [ ] **Step 5: README + full gate + commit**
+
+Add a `## Refunds` subsection to the README. Run `npm run typecheck` · `npm run lint` · `npm test` · `npx vitest run tests/schema-sync.test.ts`.
+```bash
+git add prisma/schema.prisma prisma/schema.local.prisma prisma/migrations/20261034000000_refund_requests prisma/migrations/20261035000000_refund_requests_rls prisma/rls/recommended_policies.sql src/services/refunds.ts src/services/admin.ts src/services/handlers/session.ts README.md tests/refunds.test.ts
+git commit -m "feat(direct-debit): refund flow (admin recommend, super admin approve)"
+```
+
+---
+
 ## Self-Review
 
-- **Spec coverage:** providers (Task 2), flexible cap (Tasks 1/3), all three purposes (Tasks 4/6/7), provider-hosted link (Tasks 2/3), retry-until-success once/day (Tasks 4/5), notify-after-only (Tasks 4/6/7), reminder suppression (Task 5), PIN (Task 3), accounting via existing services (Task 4), admin view + docs (Task 8). ✅
+- **Spec coverage:** providers (Task 2), flexible cap (Tasks 1/3), all three purposes (Tasks 4/6/7), provider-hosted link (Tasks 2/3), retry-until-success once/day (Tasks 4/5), notify-after-only (Tasks 4/6/7), reminder suppression (Task 5), PIN (Task 3), accounting via existing services (Task 4), admin view + docs (Task 8). **Addendum:** pause whole mandate / per purpose / skip one debit (Tasks 3/5/8), refund maker-checker with bank payout (Task 9). ✅
 - **Placeholder scan:** no TBD/TODO; every code step has real code or an exact file+pattern to follow.
 - **Type consistency:** `Mandate`/`MandateDebit` field names, `settleDebit`/`applyPurpose`/`runMandateDebits`/`runMandateRetries` signatures are consistent across tasks.
 - **Known risk:** Monnify's mandate path prefix (`/api/v1/...` vs `/v1/...`) must be verified against the adapter's `api()` base in Task 2 Step 1; the test pins the exact URL.
