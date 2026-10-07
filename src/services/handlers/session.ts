@@ -980,22 +980,8 @@ export async function handleAwaitingInput(
           "Enter your 4-digit PIN to confirm the withdrawal.",
         );
       } else {
-        await prisma.session.upsert({
-          where: { phone },
-          create: {
-            phone,
-            state: "awaiting_withdraw_account",
-            data: JSON.stringify({ ...data, withdrawAmount: amount }),
-          },
-          update: {
-            state: "awaiting_withdraw_account",
-            data: JSON.stringify({ ...data, withdrawAmount: amount }),
-          },
-        });
-        await sendText({
-          to: phone,
-          text: `Your savings will go to your bank account. What's your *bank account number*? (10 digits, e.g. *0123456789*)`,
-        });
+        const { startBankFlow } = await import("./money.js");
+        await startBankFlow(phone, "withdraw", { ...data, withdrawAmount: amount });
       }
       break;
     }

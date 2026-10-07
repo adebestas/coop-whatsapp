@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { monnifyAdapter } from "../src/services/payments/monnify.js";
 import { paystackAdapter } from "../src/services/payments/paystack.js";
 import { listBanks, staticBanks, clearBankCache } from "../src/services/payments/index.js";
+import { resolveProvider } from "../src/services/payments/index.js";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { sendText } from "../src/lib/messaging.js";
@@ -62,6 +63,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // Restore the setup.ts default resolveProvider after any per-test override.
+  vi.mocked(resolveProvider).mockReset();
 });
 
 describe("provider listBanks", () => {
@@ -234,7 +237,7 @@ describe("guided bank picker flow", () => {
     expect(payee?.bankCode).toBe("044");
   });
 
-  it("cancels the flow on anything other than an explicit yes", async () => {
+  it("re-prompts on an unrecognized reply and cancels on an explicit cancel", async () => {
     const coop = await createTestCoop("BKP6");
     const m = await createTestMember(coop.id, { phone: "2348000400006" });
 
@@ -242,8 +245,68 @@ describe("guided bank picker flow", () => {
     await handleMessage(m.phone, "access");
     await handleMessage(m.phone, "no");
 
+    // An unrecognized reply must keep the flow alive and re-ask for confirmation.
+    expect(await sessionState(m.phone)).toBe("awaiting_bank_confirm");
+    expect(textsSent()).toMatch(/reply \*yes\*/i);
+    expect(await prisma.favoritePayee.count()).toBe(0);
+
+    await handleMessage(m.phone, "cancel");
     expect(await sessionState(m.phone)).toBe("idle");
     expect(await prisma.favoritePayee.count()).toBe(0);
+  });
+
+  it("prefers an exact bank-code match over a list number", async () => {
+    const coop = await createTestCoop("BKP8");
+    const m = await createTestMember(coop.id, { phone: "2348000400008" });
+    // A live-length list where entry #44 is NOT code "044", so a naive
+    // number-first match would pick the wrong bank.
+    const banks = Array.from({ length: 60 }, (_, i) => ({
+      code: String(900 + i),
+      name: `Filler Bank ${i + 1}`,
+    }));
+    banks[43] = { code: "999", name: "Forty-Fourth Bank" };
+    banks.push({ code: "044", name: "Access Bank" });
+    vi.mocked(resolveProvider).mockResolvedValue({
+      name: "monnify",
+      listBanks: vi.fn(async () => banks),
+      resolveAccount: vi.fn(async () => ({ ok: true, name: "ADA OBI" })),
+      verifyWebhook: () => true,
+      parseNotification: () => null,
+    } as never);
+
+    await handleMessage(m.phone, "addpayee mama-ngozi 0123456789");
+    await handleMessage(m.phone, "044");
+    await handleMessage(m.phone, "yes");
+
+    const payee = await prisma.favoritePayee.findFirst({ where: { memberId: m.id } });
+    expect(payee?.bankCode).toBe("044");
+    expect(payee?.bankName).toBe("Access Bank");
+  });
+
+  it("starts the guided bank flow when a member replies `withdraw` without an amount", async () => {
+    const coop = await createTestCoop("BKP9");
+    const m = await createTestMember(coop.id, { phone: "2348000400009" });
+    await prisma.wallet.update({ where: { memberId: m.id }, data: { balance: 5_000_000 } });
+
+    await handleMessage(m.phone, "withdraw"); // no amount -> prompt for it
+    expect(await sessionState(m.phone)).toBe("awaiting_withdraw_amount");
+
+    await handleMessage(m.phone, "20000"); // amount -> no saved bank -> guided flow
+    expect(await sessionState(m.phone)).toBe("awaiting_bank_account");
+
+    await handleMessage(m.phone, "0123456789");
+    expect(await sessionState(m.phone)).toBe("awaiting_bank_choice");
+
+    await handleMessage(m.phone, "access");
+    expect(await sessionState(m.phone)).toBe("awaiting_bank_confirm");
+
+    await handleMessage(m.phone, "yes");
+    expect(await sessionState(m.phone)).toBe("awaiting_withdraw_pin");
+
+    await handleMessage(m.phone, "1234");
+    const req = await prisma.withdrawalRequest.findFirst({ where: { memberId: m.id } });
+    expect(req?.bankCode).toBe("044");
+    expect(req?.bankAccountNumber).toBe("0123456789");
   });
 
   it("re-prompts when the account number is not 10 digits", async () => {

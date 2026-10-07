@@ -723,16 +723,20 @@ function bankListText(banks: Bank[]): string {
   );
 }
 
-/** Match a reply (list number, raw bank code, or a name substring) against the list. */
+/** Match a reply (raw bank code, list number, or a name substring) against the list. */
 function matchBank(banks: Bank[], input: string): Bank | null {
   const q = input.trim().toLowerCase();
   if (!q) return null;
+  // An exact bank-code match wins over list-number interpretation, so typing a
+  // real code like "044" does not select the 44th bank.
+  const byCode = banks.find((b) => b.code.toLowerCase() === q);
+  if (byCode) return byCode;
   if (/^\d+$/.test(q)) {
     const idx = parseInt(q, 10);
     if (idx >= 1 && idx <= banks.length) return banks[idx - 1];
-    return banks.find((b) => b.code === q) ?? null;
+    return null;
   }
-  return banks.find((b) => b.name.toLowerCase().includes(q) || b.code === q) ?? null;
+  return banks.find((b) => b.name.toLowerCase().includes(q)) ?? null;
 }
 
 /** Fetch the bank list (cached, static fallback) and ask the member to pick one. */
@@ -832,9 +836,18 @@ export async function handleBankConfirmStep(
   data: FlowData,
 ): Promise<void> {
   const answer = text.trim().toLowerCase();
-  if (answer !== "yes" && answer !== "y") {
+  // Explicit escape words cancel; anything else that is not a "yes" re-prompts
+  // rather than silently abandoning the flow.
+  if (["cancel", "menu", "quit", "exit", "back"].includes(answer)) {
     await setSession(phone, "idle", {});
     await sendText({ to: phone, text: "Cancelled. Reply *menu* to see options." });
+    return;
+  }
+  if (answer !== "yes" && answer !== "y") {
+    await sendText({
+      to: phone,
+      text: `Please reply *yes* to confirm *${data.bankAccountName}* or *cancel* to stop.`,
+    });
     return;
   }
 
