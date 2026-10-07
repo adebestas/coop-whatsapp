@@ -864,7 +864,7 @@ export async function repayLoan(
             amount: fine,
             status: "confirmed",
             reference: `FINE-${loan.id.slice(-6)}-${Date.now()}`,
-            note: `Late fine on loan ${loan.id.slice(-6)}`,
+          note: `Loan repayment by ${member.name}: late fine ${formatBalance(fine)} on loan ${loan.id.slice(-6)}`,
           },
         });
       }
@@ -876,7 +876,7 @@ export async function repayLoan(
         type: "income",
         category: "interest",
         amount: interestPortion,
-        note: `Installment interest on loan ${loan.id.slice(-6)}`,
+        note: `Loan repayment by ${member.name}: interest ${formatBalance(interestPortion)} on loan ${loan.id.slice(-6)}`,
         reference: loan.id,
         fundType: "operational",
         tx,
@@ -890,7 +890,7 @@ export async function repayLoan(
           type: "balance_sheet",
           category: "assets:loan_portfolio",
           amount: principalPortion,
-          note: `Principal repayment on loan ${loan.id.slice(-6)}`,
+          note: `Loan repayment by ${member.name}: principal ${formatBalance(principalPortion)} on loan ${loan.id.slice(-6)}`,
           reference: loan.id,
           fundType: "member",
           tx,

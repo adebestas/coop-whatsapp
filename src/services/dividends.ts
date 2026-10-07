@@ -735,7 +735,7 @@ export async function distributeDividend(
     targetType: "dividend",
     targetId: dividend.id,
     amount: pool,
-    detail: `Bank payouts: settled ${settled}, held ${held.length}, failed ${failed}`,
+    detail: `Dividend distribution of ${formatBalance(pool)}: settled ${settled}, held ${held.length}, failed ${failed}`,
   }).catch(() => {});
 
   const poolLabel = basis === "shares" ? "Shareholders pool" : "Member pool";

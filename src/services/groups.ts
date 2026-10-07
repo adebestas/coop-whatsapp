@@ -133,7 +133,7 @@ export async function createGroup(
     action: "group.create",
     targetType: "group",
     targetId: group.id,
-    detail: `${normalizedType.toUpperCase()} ${groupName} (${groupCode}) @ ${contributionAmount} kobo × ${cycleLength}`,
+    detail: `${normalizedType.toUpperCase()} ${groupName} (${groupCode}) @ ${formatBalance(contributionAmount)} × ${cycleLength}`,
   }).catch(() => {});
 
   return {
@@ -230,6 +230,11 @@ export async function contributeToGroup(
   if (!membership || !membership.active) {
     return { ok: false, message: "You are not a member of this group. Reply *joingroup <code>*." };
   }
+  const contributingMember = await prisma.member.findUnique({
+    where: { id: memberId },
+    select: { name: true },
+  });
+  const contributorName = contributingMember?.name ?? "member";
 
   let shareDelta = 0;
   if (group.type === "rosca") {
@@ -306,7 +311,7 @@ export async function contributeToGroup(
         {
           cooperativeId: coopId,
           txRef,
-          description: `Group contribution: ${group.code} cycle ${cycle.cycleNumber}`,
+          description: `Group contribution: ${contributorName} paid ${formatBalance(amount)} to ${group.code} cycle ${cycle.cycleNumber}`,
           postings: [
             { account: `member_wallet:${wallet.id}`, direction: "DEBIT", amount, memberId },
             { account: potAccount(group.id), direction: "CREDIT", amount },
@@ -331,7 +336,7 @@ export async function contributeToGroup(
     targetType: "group",
     targetId: group.id,
     amount,
-    detail: `${group.code} cycle ${cycle.cycleNumber}`,
+    detail: `${contributorName} contributed ${formatBalance(amount)} to ${group.code} cycle ${cycle.cycleNumber}`,
   }).catch(() => {});
 
   const pot = await potForGroup(coopId, group.id);
@@ -399,7 +404,7 @@ export async function closeGroupCycle(
           {
             cooperativeId: coopId,
             txRef: `grp_payout_${cycle.id}`,
-            description: `ROSCA payout: ${group.code} cycle ${cycle.cycleNumber}`,
+            description: `ROSCA payout: ${formatBalance(pot)} to member ${beneficiary.memberId.slice(-6)} — ${group.code} cycle ${cycle.cycleNumber}`,
             postings: [
               { account: potAccount(group.id), direction: "DEBIT", amount: pot },
               {
@@ -451,7 +456,7 @@ export async function closeGroupCycle(
             {
               cooperativeId: coopId,
               txRef: `grp_shareout_${cycle.id}_${a.member.id}`,
-              description: `VSLA share-out: ${group.code} cycle ${cycle.cycleNumber}`,
+              description: `VSLA share-out: ${formatBalance(a.amount)} to member ${a.member.memberId.slice(-6)} — ${group.code} cycle ${cycle.cycleNumber}`,
               postings: [
                 { account: potAccount(group.id), direction: "DEBIT", amount: a.amount },
                 {
@@ -507,7 +512,7 @@ export async function closeGroupCycle(
     targetType: "group",
     targetId: group.id,
     amount: pot,
-    detail: `${group.code} cycle ${cycle.cycleNumber} ${group.type.toUpperCase()} ${
+    detail: `${group.code} cycle ${cycle.cycleNumber} ${group.type.toUpperCase()} ${formatBalance(pot)} ${
       group.type === "rosca" ? `paid ${payoutMemberId ?? "n/a"}` : "share-out"
     }`,
   }).catch(() => {});
@@ -613,7 +618,7 @@ export async function applyGroupLoan(
     targetType: "loan",
     targetId: loan.id,
     amount,
-    detail: `Group ${group.code} joint-liability loan`,
+    detail: `Group ${group.code} joint-liability loan of ${formatBalance(amount)} applied by member ${memberId.slice(-6)}`,
   }).catch(() => {});
 
   return {

@@ -108,7 +108,7 @@ export async function buyShares(
         {
           cooperativeId: member.cooperativeId,
           txRef: reference,
-          description: `Share purchase: ${count} share(s)`,
+          description: `Share purchase: ${count} share(s) by ${member.name} — ${formatBalance(cost)}`,
           postings: [
             { account: `member_wallet:${walletId}`, direction: "DEBIT", amount: cost, memberId },
             { account: "equity:share_capital", direction: "CREDIT", amount: cost },
@@ -135,7 +135,7 @@ export async function buyShares(
     targetType: "share_account",
     targetId: account.id,
     amount: cost,
-    detail: `${count} share(s) @ ${price} kobo`,
+    detail: `${member.name} bought ${count} share(s) for ${formatBalance(cost)}`,
   }).catch(() => {});
 
   const newShares = account.shares + count;

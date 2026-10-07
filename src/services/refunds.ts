@@ -288,6 +288,10 @@ export async function rejectRefund(
     return { ok: false, message: `This refund is already ${refund.status}.` };
   }
   const trimmed = (reason ?? "").trim();
+  const rejectedMember = await prisma.member.findUnique({
+    where: { id: refund.memberId },
+    select: { name: true },
+  });
 
   const moved = await withTx(async (tx) => {
     await setCoopContext(tx as never, coopId);
@@ -312,7 +316,7 @@ export async function rejectRefund(
     targetType: "refund",
     targetId: refund.id,
     amount: refund.amount,
-    detail: `Refund rejected${trimmed ? `: ${trimmed}` : ""}`,
+    detail: `Refund to ${rejectedMember?.name ?? "member"} of ${formatBalance(refund.amount)} rejected${trimmed ? `: ${trimmed}` : ""}`,
   }).catch(() => {});
 
   return {

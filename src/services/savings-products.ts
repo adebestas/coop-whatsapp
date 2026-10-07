@@ -389,7 +389,7 @@ export async function depositToProduct(
 ): Promise<{ ok: boolean; message: string; balance?: number; progress?: ProductProgress }> {
   const account = await prisma.savingsAccount.findFirst({
     where: { id: accountId, cooperativeId: coopId },
-    include: { product: true },
+    include: { product: true, member: { select: { name: true } } },
   });
   if (!account) return { ok: false, message: "Savings account not found." };
   if (!canControl(account, memberId)) {
@@ -439,7 +439,7 @@ export async function depositToProduct(
         {
           cooperativeId: coopId,
           txRef: `sav_dep_${dep.id}`,
-          description: `Savings deposit: ${account.product.name}`,
+          description: `Savings deposit of ${formatBalance(amount)} to ${account.product.name} by ${account.member.name}`,
           postings: [
             { account: `member_wallet:${wallet.id}`, direction: "DEBIT", amount, memberId },
             { account: productLiability(account.id), direction: "CREDIT", amount },
@@ -464,7 +464,7 @@ export async function depositToProduct(
     targetType: "savings_account",
     targetId: account.id,
     amount,
-    detail: account.product.name,
+    detail: `Deposited ${formatBalance(amount)} into ${account.product.name} for ${account.member.name}`,
   }).catch(() => {});
 
   const progress = productProgress({ balance: newBalance, targetAmount: account.targetAmount });
@@ -498,7 +498,7 @@ export async function withdrawFromProduct(
 ): Promise<{ ok: boolean; message: string; balance?: number }> {
   const account = await prisma.savingsAccount.findFirst({
     where: { id: accountId, cooperativeId: coopId },
-    include: { product: true },
+    include: { product: true, member: { select: { name: true } } },
   });
   if (!account) return { ok: false, message: "Savings account not found." };
   if (!canControl(account, memberId)) {
@@ -551,7 +551,7 @@ export async function withdrawFromProduct(
         {
           cooperativeId: coopId,
           txRef: `sav_wd_${dep.id}`,
-          description: `Savings withdrawal: ${account.product.name}`,
+          description: `Savings withdrawal of ${formatBalance(amount)} from ${account.product.name} by ${account.member.name}`,
           postings: [
             { account: productLiability(account.id), direction: "DEBIT", amount },
             { account: `member_wallet:${wallet.id}`, direction: "CREDIT", amount, memberId },
@@ -581,7 +581,7 @@ export async function withdrawFromProduct(
     targetType: "savings_account",
     targetId: account.id,
     amount,
-    detail: account.product.name,
+    detail: `Withdrew ${formatBalance(amount)} from ${account.product.name} for ${account.member.name}`,
   }).catch(() => {});
 
   return {
@@ -604,7 +604,7 @@ export async function matureProduct(
 ): Promise<{ ok: boolean; message: string; credited?: number }> {
   const account = await prisma.savingsAccount.findFirst({
     where: { id: accountId, cooperativeId: coopId },
-    include: { product: true },
+    include: { product: true, member: { select: { name: true } } },
   });
   if (!account) return { ok: false, message: "Savings account not found." };
   if (!canControl(account, memberId)) {
@@ -675,7 +675,7 @@ export async function matureProduct(
         {
           cooperativeId: coopId,
           txRef: `sav_mature_${account.id}`,
-          description: `Savings maturity: ${account.product.name}`,
+          description: `Savings maturity of ${formatBalance(total)} for ${account.product.name} (holder ${account.member.name})`,
           postings,
         },
         tx as never,
@@ -699,7 +699,7 @@ export async function matureProduct(
     targetType: "savings_account",
     targetId: account.id,
     amount: total,
-    detail: `${account.product.name}${interest > 0 ? ` +${interest} interest` : ""}`,
+    detail: `Matured ${account.product.name} for ${account.member.name} — ${formatBalance(total)} credited${interest > 0 ? ` (incl. ${formatBalance(interest)} interest)` : ""}`,
   }).catch(() => {});
 
   await notifyMember(

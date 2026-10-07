@@ -146,7 +146,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
         {
           cooperativeId: member.cooperativeId,
           txRef: `TOPUP-${reference}`,
-          description: `Wallet top-up via ${n.provider} (${n.transactionId})`,
+          description: `Wallet top-up of ${formatBalance(amount)} by ${member.name} via ${n.provider} (${n.transactionId})`,
           postings: [
             { account: "assets:bank", direction: "DEBIT" as const, amount },
             {
@@ -224,7 +224,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
       actorRole: member.role,
       action: "topup.credit",
       targetType: "contribution",
-      detail: `${amount} ${n.currency} via ${n.provider} (${n.transactionId})`,
+      detail: `Wallet top-up of ${formatBalance(amount)} by ${member.name} via ${n.provider} (${n.transactionId})`,
     });
   } catch (err) {
     console.error("[topup] credit audit failed:", err);
