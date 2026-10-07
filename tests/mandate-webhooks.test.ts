@@ -157,6 +157,53 @@ describe("mandate webhooks", () => {
     expect(journal?.description).toMatch(/savings/i);
   });
 
+  it("settles a loan debit by repaying the target loan and reducing its balance", async () => {
+    const coop = await createTestCoop("MWH9");
+    const m = await createTestMember(coop.id, { phone: "2348000200010" });
+    const mandate = await seedMandate(coop.id, m.id);
+    const loan = await prisma.loan.create({
+      data: {
+        amount: 100_000,
+        balance: 100_000,
+        monthlyPayment: 50_000,
+        tenureMonths: 1,
+        status: "disbursed",
+        dueDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
+        memberId: m.id,
+        cooperativeId: coop.id,
+      },
+    });
+    const debit = await seedDebit(coop.id, m.id, mandate.id, {
+      purpose: "loan",
+      targetId: loan.id,
+      amount: 50_000,
+      providerRef: "DD-LOAN-1",
+    });
+
+    const res = await postMonnify({
+      eventType: "SUCCESSFUL_DISBURSEMENT",
+      eventData: { reference: "DD-LOAN-1", status: "SUCCESSFUL" },
+    });
+    expect(res.httpStatus).toBe(200);
+    expect(res.body.status).toBe("ok");
+
+    // repayLoan debited the wallet (which settleDebit had just credited), so
+    // the loan's outstanding balance must drop and a repayment must be booked.
+    const after = await prisma.loan.findUnique({ where: { id: loan.id } });
+    expect(after!.balance).toBeLessThan(100_000);
+    const repayments = await prisma.loanRepayment.findMany({ where: { loanId: loan.id } });
+    expect(repayments).toHaveLength(1);
+    expect(repayments[0].amount).toBe(50_000);
+    expect((await prisma.mandateDebit.findUnique({ where: { id: debit.id } }))?.status).toBe(
+      "successful",
+    );
+    // The member is told the repayment happened.
+    const notified = vi
+      .mocked(notifyMember)
+      .mock.calls.some((c) => /repaid|loan/i.test(String(c[1])));
+    expect(notified).toBe(true);
+  });
+
   it("marks a debit failed, schedules a retry, and does not credit the wallet", async () => {
     const coop = await createTestCoop("MWH3");
     const m = await createTestMember(coop.id, { phone: "2348000200003" });

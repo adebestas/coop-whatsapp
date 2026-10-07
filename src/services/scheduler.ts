@@ -142,71 +142,92 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
     for (const mandate of mandates) {
       try {
         const member = mandate.member;
-        if (!member.autoSaveEnabled || !member.autoSaveNextDue) continue;
-        if (member.autoSaveNextDue > now) continue;
-        if (csvSet(mandate.pausedPurposes).has("savings")) continue;
+        const paused = csvSet(mandate.pausedPurposes);
 
-        const due = member.autoSaveAmount ?? 0;
-        if (due <= 0) continue;
-        const amount = Math.min(due, mandate.amountCap);
-        if (amount <= 0) continue;
-
-        // Deterministic reference keyed on the obligation (mandate id + due
-        // timestamp). Two overlapping ticks compute the SAME reference, so the
-        // second insert hits the unique constraint and is skipped instead of
-        // charging the member twice.
-        const providerRef = `DD-${mandate.id}-savings-${member.autoSaveNextDue.getTime()}`;
-        let debitId: string;
-        try {
-          const debit = await prisma.mandateDebit.create({
-            data: {
+        // ---- Savings: a due recurring contribution. ----
+        if (
+          !paused.has("savings") &&
+          member.autoSaveEnabled &&
+          member.autoSaveNextDue &&
+          member.autoSaveNextDue <= now
+        ) {
+          const due = member.autoSaveAmount ?? 0;
+          const amount = due > 0 ? Math.min(due, mandate.amountCap) : 0;
+          if (amount > 0) {
+            // Deterministic reference keyed on the obligation (mandate id + due
+            // timestamp). Two overlapping ticks compute the SAME reference, so the
+            // second insert hits the unique constraint and is skipped instead of
+            // charging the member twice.
+            const providerRef = `DD-${mandate.id}-savings-${member.autoSaveNextDue.getTime()}`;
+            const debitId = await createDebitOrSkip({
               mandateId: mandate.id,
               cooperativeId: coopId,
               memberId: member.id,
               purpose: "savings",
+              targetId: null,
               amount,
-              status: "pending",
               providerRef,
-            },
-          });
-          debitId = debit.id;
-        } catch (err) {
-          if ((err as { code?: string })?.code === "P2002") continue; // already created
-          throw err;
-        }
-        created++;
-
-        // Advance the schedule so this obligation is not re-created next tick.
-        const next = new Date(member.autoSaveNextDue);
-        next.setDate(next.getDate() + (member.autoSaveInterval === "weekly" ? 7 : 30));
-        await prisma.member.update({
-          where: { id: member.id },
-          data: { autoSaveNextDue: next },
-        });
-
-        const narration = `Savings contribution — ${formatBalance(amount)}`;
-        let result: { ok: boolean; error?: string } | undefined;
-        try {
-          const provider = await resolveProvider(mandate.provider);
-          result = await provider.debitMandate?.({
-            providerMandateId: mandate.providerMandateId ?? "",
-            amount,
-            reference: providerRef,
-            narration,
-          });
-        } catch (err) {
-          result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
+            });
+            if (debitId) {
+              created++;
+              // Advance the schedule so this obligation is not re-created next tick.
+              const next = new Date(member.autoSaveNextDue);
+              next.setDate(next.getDate() + (member.autoSaveInterval === "weekly" ? 7 : 30));
+              await prisma.member.update({
+                where: { id: member.id },
+                data: { autoSaveNextDue: next },
+              });
+              await dispatchMandateDebit(
+                mandate,
+                amount,
+                providerRef,
+                `Savings contribution — ${formatBalance(amount)}`,
+                debitId,
+                now,
+              );
+            }
+          }
         }
 
-        if (!result?.ok) {
-          await prisma.mandateDebit.update({
-            where: { id: debitId },
-            data: {
-              status: "failed",
-              failureReason: result?.error ?? "provider rejected the debit",
-              nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS),
+        // ---- Loan: an active loan installment now due. ----
+        if (!paused.has("loan")) {
+          const loans = await prisma.loan.findMany({
+            where: {
+              memberId: member.id,
+              cooperativeId: coopId,
+              status: "disbursed",
+              balance: { gt: 0 },
+              dueDate: { lte: now },
             },
           });
+          for (const loan of loans) {
+            const installment = loan.monthlyPayment ?? loan.balance;
+            const amount = Math.min(installment, loan.balance, mandate.amountCap);
+            if (amount <= 0 || !loan.dueDate) continue;
+            // Keyed on the loan's due timestamp: while the due date is unchanged
+            // the reference repeats, so overlapping ticks skip instead of
+            // double-charging. Settlement (repayLoan) advances `dueDate`.
+            const providerRef = `DD-${mandate.id}-loan-${loan.id}-${loan.dueDate.getTime()}`;
+            const debitId = await createDebitOrSkip({
+              mandateId: mandate.id,
+              cooperativeId: coopId,
+              memberId: member.id,
+              purpose: "loan",
+              targetId: loan.id,
+              amount,
+              providerRef,
+            });
+            if (!debitId) continue; // already created by an overlapping tick
+            created++;
+            await dispatchMandateDebit(
+              mandate,
+              amount,
+              providerRef,
+              `Loan repayment — ${formatBalance(amount)}`,
+              debitId,
+              now,
+            );
+          }
         }
       } catch (err) {
         // One mandate's failure (DB or provider) must not abort the whole run.
@@ -219,6 +240,68 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
     }
   });
   return created;
+}
+
+/**
+ * Insert a `pending` mandate debit. Returns its id, or `null` when a deterministic
+ * `providerRef` already exists (P2002) — the idempotent overlapping-tick path.
+ */
+async function createDebitOrSkip(data: {
+  mandateId: string;
+  cooperativeId: string;
+  memberId: string;
+  purpose: string;
+  targetId: string | null;
+  amount: number;
+  providerRef: string;
+}): Promise<string | null> {
+  try {
+    const debit = await prisma.mandateDebit.create({
+      data: { ...data, status: "pending" },
+    });
+    return debit.id;
+  } catch (err) {
+    if ((err as { code?: string })?.code === "P2002") return null; // already created
+    throw err;
+  }
+}
+
+/**
+ * Ask the provider to collect a debit; on a synchronous hard failure mark the
+ * debit `failed` with a retry scheduled for +1 day. Never throws for a provider
+ * error (the per-mandate try/catch owns unexpected failures).
+ */
+async function dispatchMandateDebit(
+  mandate: { provider: string; providerMandateId: string | null },
+  amount: number,
+  providerRef: string,
+  narration: string,
+  debitId: string,
+  now: Date,
+): Promise<void> {
+  let result: { ok: boolean; error?: string } | undefined;
+  try {
+    const provider = await resolveProvider(mandate.provider);
+    result = await provider.debitMandate?.({
+      providerMandateId: mandate.providerMandateId ?? "",
+      amount,
+      reference: providerRef,
+      narration,
+    });
+  } catch (err) {
+    result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
+  }
+
+  if (!result?.ok) {
+    await prisma.mandateDebit.update({
+      where: { id: debitId },
+      data: {
+        status: "failed",
+        failureReason: result?.error ?? "provider rejected the debit",
+        nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS),
+      },
+    });
+  }
 }
 
 /**

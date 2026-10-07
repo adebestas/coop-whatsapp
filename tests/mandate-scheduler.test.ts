@@ -175,6 +175,129 @@ describe("mandate scheduler debits", () => {
     expect(await prisma.mandateDebit.count()).toBe(1);
     expect(vi.mocked(adapter.debitMandate)).toHaveBeenCalledTimes(1);
   });
+
+  it("creates a loan debit for an active loan whose installment is due", async () => {
+    const coop = await createTestCoop("MSCH10");
+    const m = await createTestMember(coop.id, { phone: "2348000300011" });
+    await enableDirectDebit(coop.id);
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 200_000 });
+    const loan = await prisma.loan.create({
+      data: {
+        amount: 500_000,
+        balance: 120_000,
+        monthlyPayment: 500_000,
+        tenureMonths: 1,
+        status: "disbursed",
+        dueDate: new Date(Date.now() - 1000),
+        memberId: m.id,
+        cooperativeId: coop.id,
+      },
+    });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const n = await runMandateDebits(new Date());
+
+    const debit = await prisma.mandateDebit.findFirst({
+      where: { mandateId: mandate.id, purpose: "loan" },
+    });
+    expect(debit).toBeTruthy();
+    expect(debit?.status).toBe("pending");
+    expect(debit?.targetId).toBe(loan.id);
+    // amount = min(installment 500k, balance 120k, cap 200k)
+    expect(debit?.amount).toBe(120_000);
+    expect(n).toBe(1);
+
+    const call = vi.mocked(adapter.debitMandate).mock.calls[0][0] as {
+      amount: number;
+      narration?: string;
+    };
+    expect(call.amount).toBe(120_000);
+    expect(call.narration).toMatch(/loan/i);
+  });
+
+  it("caps a loan debit at the mandate amountCap", async () => {
+    const coop = await createTestCoop("MSCH11");
+    const m = await createTestMember(coop.id, { phone: "2348000300012" });
+    await enableDirectDebit(coop.id);
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 100_000 });
+    await prisma.loan.create({
+      data: {
+        amount: 300_000,
+        balance: 300_000,
+        monthlyPayment: 300_000,
+        tenureMonths: 1,
+        status: "disbursed",
+        dueDate: new Date(Date.now() - 1000),
+        memberId: m.id,
+        cooperativeId: coop.id,
+      },
+    });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    await runMandateDebits(new Date());
+
+    const debit = await prisma.mandateDebit.findFirst({
+      where: { mandateId: mandate.id, purpose: "loan" },
+    });
+    expect(debit?.amount).toBe(100_000);
+  });
+
+  it("creates only one loan debit when the same due obligation is processed twice", async () => {
+    const coop = await createTestCoop("MSCH12");
+    const m = await createTestMember(coop.id, { phone: "2348000300013" });
+    await enableDirectDebit(coop.id);
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 200_000 });
+    await prisma.loan.create({
+      data: {
+        amount: 100_000,
+        balance: 100_000,
+        monthlyPayment: 50_000,
+        tenureMonths: 1,
+        status: "disbursed",
+        dueDate: new Date(Date.now() - 1000),
+        memberId: m.id,
+        cooperativeId: coop.id,
+      },
+    });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const now = new Date();
+    await runMandateDebits(now);
+    await runMandateDebits(now);
+
+    expect(await prisma.mandateDebit.count({ where: { mandateId: mandate.id } })).toBe(1);
+    expect(vi.mocked(adapter.debitMandate)).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not create a loan debit when loan is a paused purpose", async () => {
+    const coop = await createTestCoop("MSCH13");
+    const m = await createTestMember(coop.id, { phone: "2348000300014" });
+    await enableDirectDebit(coop.id);
+    await seedMandate(coop.id, m.id, { pausedPurposes: "loan" });
+    await prisma.loan.create({
+      data: {
+        amount: 100_000,
+        balance: 100_000,
+        monthlyPayment: 50_000,
+        tenureMonths: 1,
+        status: "disbursed",
+        dueDate: new Date(Date.now() - 1000),
+        memberId: m.id,
+        cooperativeId: coop.id,
+      },
+    });
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const n = await runMandateDebits(new Date());
+
+    expect(await prisma.mandateDebit.count({ where: { purpose: "loan" } })).toBe(0);
+    expect(vi.mocked(adapter.debitMandate)).not.toHaveBeenCalled();
+    expect(n).toBe(0);
+  });
 });
 
 describe("mandate scheduler retries", () => {

@@ -11,6 +11,7 @@ import { postJournal } from "./journal.js";
 import { notifyMember } from "../lib/messaging.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { resolveProvider, markProviderUp, markProviderDown } from "./payments/index.js";
+import { repayLoan } from "./loans.js";
 
 export interface MandateActor {
   id: string;
@@ -439,18 +440,26 @@ async function loadNotifiable(memberId: string) {
 
 /**
  * Apply a settled debit to the obligation it was collected for. `savings` is a
- * no-op — the wallet credit IS the savings deposit. `loan`/`group` route to the
- * existing repayment/contribution services in Tasks 6/7.
+ * no-op — the wallet credit IS the savings deposit. `loan` repays the target
+ * loan from the just-credited wallet; `group` routes to the contribution service
+ * in Task 7.
  */
 async function applyPurpose(
-  debit: { purpose: string; targetId: string | null },
-  _member: { id: string },
+  debit: { purpose: string; targetId: string | null; cooperativeId: string },
+  member: { id: string; phone: string },
 ): Promise<void> {
   switch (debit.purpose) {
     case "savings":
       return;
-    case "loan":
-      return; // Task 6
+    case "loan": {
+      const result = await repayLoan(
+        member.phone,
+        debit.targetId ?? undefined,
+        debit.cooperativeId,
+      );
+      await notifyMember(await loadNotifiable(member.id), result.message).catch(() => {});
+      return;
+    }
     case "group":
       return; // Task 7
     default:
