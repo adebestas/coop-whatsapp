@@ -386,6 +386,7 @@ export async function closeGroupCycle(
       const members = await tx.groupMember.findMany({
         where: { groupId: group.id, active: true },
         orderBy: { rotationPosition: "asc" },
+        include: { member: { select: { name: true } } },
       });
       const positioned = members.find((m) => m.rotationPosition === cycle.cycleNumber);
       const fallback =
@@ -404,7 +405,7 @@ export async function closeGroupCycle(
           {
             cooperativeId: coopId,
             txRef: `grp_payout_${cycle.id}`,
-            description: `ROSCA payout: ${formatBalance(pot)} to member ${beneficiary.memberId.slice(-6)} — ${group.code} cycle ${cycle.cycleNumber}`,
+            description: `ROSCA payout: ${formatBalance(pot)} to ${beneficiary.member.name} — ${group.code} cycle ${cycle.cycleNumber}`,
             postings: [
               { account: potAccount(group.id), direction: "DEBIT", amount: pot },
               {
@@ -423,6 +424,7 @@ export async function closeGroupCycle(
       const members = await tx.groupMember.findMany({
         where: { groupId: group.id, active: true },
         orderBy: { rotationPosition: "asc" },
+        include: { member: { select: { name: true } } },
       });
       const eligible = members.filter((m) => m.shares > 0);
       const totalShares = eligible.reduce((s, m) => s + m.shares, 0);
@@ -456,7 +458,7 @@ export async function closeGroupCycle(
             {
               cooperativeId: coopId,
               txRef: `grp_shareout_${cycle.id}_${a.member.id}`,
-              description: `VSLA share-out: ${formatBalance(a.amount)} to member ${a.member.memberId.slice(-6)} — ${group.code} cycle ${cycle.cycleNumber}`,
+              description: `VSLA share-out: ${formatBalance(a.amount)} to ${a.member.member.name} — ${group.code} cycle ${cycle.cycleNumber}`,
               postings: [
                 { account: potAccount(group.id), direction: "DEBIT", amount: a.amount },
                 {
@@ -560,6 +562,12 @@ export async function applyGroupLoan(
     return { ok: false, message: "You are not a member of this group. Reply *joingroup <code>*." };
   }
 
+  const applyingMember = await prisma.member.findUnique({
+    where: { id: memberId },
+    select: { name: true },
+  });
+  const applicantName = applyingMember?.name ?? "member";
+
   if (
     !Number.isInteger(amount) ||
     amount <= 0 ||
@@ -618,7 +626,7 @@ export async function applyGroupLoan(
     targetType: "loan",
     targetId: loan.id,
     amount,
-    detail: `Group ${group.code} joint-liability loan of ${formatBalance(amount)} applied by member ${memberId.slice(-6)}`,
+    detail: `Group ${group.code} joint-liability loan of ${formatBalance(amount)} applied by ${applicantName}`,
   }).catch(() => {});
 
   return {

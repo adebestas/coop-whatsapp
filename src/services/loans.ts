@@ -864,7 +864,7 @@ export async function repayLoan(
             amount: fine,
             status: "confirmed",
             reference: `FINE-${loan.id.slice(-6)}-${Date.now()}`,
-          note: `Loan repayment by ${member.name}: late fine ${formatBalance(fine)} on loan ${loan.id.slice(-6)}`,
+            note: `Loan repayment by ${member.name}: late fine ${formatBalance(fine)} on loan ${loan.id.slice(-6)}`,
           },
         });
       }
