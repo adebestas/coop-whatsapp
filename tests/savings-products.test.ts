@@ -197,7 +197,7 @@ describe("savings products", () => {
     const admin = await createTestMember(coop.id, { phone: "2348000020051", role: "superadmin" });
     const m = await createTestMember(coop.id, { phone: "2348000020052" });
 
-    const created = await createProduct(coop.id, "seasonal", "Harvest", { termMonths: 6 }, actor(admin));
+    const created = await createProduct(coop.id, "junior", "Harvest", {}, actor(admin));
     expect(created.ok).toBe(true);
     const products = await listProducts(coop.id);
     expect(products.ok).toBe(true);
@@ -216,6 +216,76 @@ describe("savings products", () => {
 
     const books = await postingsBalance();
     expect(books.debit).toBe(books.credit);
+  });
+
+  it("locks a fixed deposit until maturity, then allows withdrawal", async () => {
+    const coop = await createTestCoop("SAVE8");
+    const admin = await createTestMember(coop.id, { phone: "2348000020071", role: "superadmin" });
+    const m = await createTestMember(coop.id, { phone: "2348000020072" });
+
+    const created = await createProduct(
+      coop.id,
+      "fixed",
+      "Locked",
+      { interestRate: 10, termMonths: 12 },
+      actor(admin),
+    );
+    const opened = await openProduct(coop.id, created.productId!, m.id);
+    await fundWallet(m.id, 200000);
+    await depositToProduct(coop.id, opened.accountId!, m.id, 200000);
+
+    const early = await withdrawFromProduct(coop.id, opened.accountId!, m.id, 100000);
+    expect(early.ok).toBe(false);
+    expect(early.message).toMatch(/matur/i);
+    expect(await walletBalance(m.id)).toBe(0);
+
+    await prisma.savingsAccount.update({
+      where: { id: opened.accountId! },
+      data: { maturesAt: new Date(Date.now() - 1000) },
+    });
+    const late = await withdrawFromProduct(coop.id, opened.accountId!, m.id, 100000);
+    expect(late.ok).toBe(true);
+    expect(await walletBalance(m.id)).toBe(100000);
+  });
+
+  it("maps a concurrent withdraw race to a clean message instead of throwing", async () => {
+    const coop = await createTestCoop("SAVE9");
+    const admin = await createTestMember(coop.id, { phone: "2348000020081", role: "superadmin" });
+    const m = await createTestMember(coop.id, { phone: "2348000020082" });
+
+    const created = await createProduct(coop.id, "goal", "Race", {}, actor(admin));
+    const opened = await openProduct(coop.id, created.productId!, m.id, 200000);
+    await fundWallet(m.id, 100000);
+    await depositToProduct(coop.id, opened.accountId!, m.id, 100000);
+
+    const results = await Promise.all([
+      withdrawFromProduct(coop.id, opened.accountId!, m.id, 100000),
+      withdrawFromProduct(coop.id, opened.accountId!, m.id, 100000),
+    ]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    const failed = results.find((r) => !r.ok)!;
+    expect(failed.message).toMatch(/withdraw/i);
+    expect(await walletBalance(m.id)).toBe(100000);
+  });
+
+  it("maps a concurrent mature race to a clean message instead of throwing", async () => {
+    const coop = await createTestCoop("SAVE10");
+    const admin = await createTestMember(coop.id, { phone: "2348000020091", role: "superadmin" });
+    const m = await createTestMember(coop.id, { phone: "2348000020092" });
+
+    const created = await createProduct(coop.id, "goal", "Complete", {}, actor(admin));
+    const opened = await openProduct(coop.id, created.productId!, m.id, 200000);
+    await fundWallet(m.id, 100000);
+    await depositToProduct(coop.id, opened.accountId!, m.id, 100000);
+
+    const results = await Promise.all([
+      matureProduct(coop.id, opened.accountId!, m.id),
+      matureProduct(coop.id, opened.accountId!, m.id),
+    ]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    const failed = results.find((r) => !r.ok)!;
+    expect(failed.message).toMatch(/matured/i);
+    expect(await walletBalance(m.id)).toBe(100000);
   });
 });
 

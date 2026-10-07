@@ -397,6 +397,19 @@ export async function withdrawFromProduct(
   if (account.status !== "active") {
     return { ok: false, message: "This savings account is no longer active." };
   }
+  // Fixed/seasonal deposits are term-locked: they cannot be drained before
+  // maturity. Goal, junior and open-ended products stay withdrawable.
+  const isTermProduct = account.product.type === "fixed" || account.product.type === "seasonal";
+  if (
+    isTermProduct &&
+    account.maturesAt &&
+    Date.now() < account.maturesAt.getTime()
+  ) {
+    return {
+      ok: false,
+      message: `This *${account.product.name}* deposit matures on *${account.maturesAt.toDateString()}*. It cannot be withdrawn before then.`,
+    };
+  }
   if (!Number.isInteger(amount) || amount <= 0) {
     return { ok: false, message: "Enter a positive withdrawal amount." };
   }
@@ -411,32 +424,44 @@ export async function withdrawFromProduct(
   if (!wallet) return { ok: false, message: "You need an active wallet to withdraw." };
 
   let newBalance = account.balance;
-  await withTx(async (tx) => {
-    await setCoopContext(tx as never, coopId);
-    const claimed = await tx.savingsAccount.updateMany({
-      where: { id: account.id, status: "active", balance: { gte: amount } },
-      data: { balance: { decrement: amount } },
+  try {
+    await withTx(async (tx) => {
+      await setCoopContext(tx as never, coopId);
+      const claimed = await tx.savingsAccount.updateMany({
+        where: { id: account.id, status: "active", balance: { gte: amount } },
+        data: { balance: { decrement: amount } },
+      });
+      if (claimed.count === 0) throw new Error("INSUFFICIENT_BALANCE");
+      const dep = await tx.savingsDeposit.create({
+        data: { accountId: account.id, memberId, amount, kind: "withdrawal" },
+      });
+      newBalance = account.balance - amount;
+      await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: amount } } });
+      const posted = await postJournal(
+        {
+          cooperativeId: coopId,
+          txRef: `sav_wd_${dep.id}`,
+          description: `Savings withdrawal: ${account.product.name}`,
+          postings: [
+            { account: productLiability(account.id), direction: "DEBIT", amount },
+            { account: `member_wallet:${wallet.id}`, direction: "CREDIT", amount, memberId },
+          ],
+        },
+        tx as never,
+      );
+      if (!posted.posted) throw new Error(`savings withdrawal journal not posted: ${posted.reason}`);
     });
-    if (claimed.count === 0) throw new Error("INSUFFICIENT_BALANCE");
-    const dep = await tx.savingsDeposit.create({
-      data: { accountId: account.id, memberId, amount, kind: "withdrawal" },
-    });
-    newBalance = account.balance - amount;
-    await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: amount } } });
-    const posted = await postJournal(
-      {
-        cooperativeId: coopId,
-        txRef: `sav_wd_${dep.id}`,
-        description: `Savings withdrawal: ${account.product.name}`,
-        postings: [
-          { account: productLiability(account.id), direction: "DEBIT", amount },
-          { account: `member_wallet:${wallet.id}`, direction: "CREDIT", amount, memberId },
-        ],
-      },
-      tx as never,
-    );
-    if (!posted.posted) throw new Error(`savings withdrawal journal not posted: ${posted.reason}`);
-  });
+  } catch (err) {
+    // A concurrent withdrawal drained the balance between our read and write —
+    // surface the same friendly limit message instead of a raw sentinel.
+    if (err instanceof Error && err.message === "INSUFFICIENT_BALANCE") {
+      return {
+        ok: false,
+        message: `You can withdraw at most *${formatBalance(account.balance)}* from this account.`,
+      };
+    }
+    throw err;
+  }
 
   await audit({
     cooperativeId: coopId,
@@ -497,51 +522,60 @@ export async function matureProduct(
   const wallet = await prisma.wallet.findUnique({ where: { memberId } });
   if (!wallet) return { ok: false, message: "You need an active wallet to mature this deposit." };
 
-  await withTx(async (tx) => {
-    await setCoopContext(tx as never, coopId);
-    const claimed = await tx.savingsAccount.updateMany({
-      where: { id: account.id, status: "active" },
-      data: { status: "matured", balance: 0 },
+  try {
+    await withTx(async (tx) => {
+      await setCoopContext(tx as never, coopId);
+      const claimed = await tx.savingsAccount.updateMany({
+        where: { id: account.id, status: "active" },
+        data: { status: "matured", balance: 0 },
+      });
+      if (claimed.count === 0) throw new Error("ALREADY_MATURED");
+      if (principal > 0) {
+        await tx.savingsDeposit.create({
+          data: { accountId: account.id, memberId, amount: principal, kind: "withdrawal" },
+        });
+      }
+      if (interest > 0) {
+        await tx.savingsDeposit.create({
+          data: { accountId: account.id, memberId, amount: interest, kind: "interest" },
+        });
+      }
+      await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: total } } });
+      const postings = [
+        { account: productLiability(account.id), direction: "DEBIT" as const, amount: principal },
+        {
+          account: `member_wallet:${wallet.id}`,
+          direction: "CREDIT" as const,
+          amount: total,
+          memberId,
+        },
+      ];
+      if (interest > 0) {
+        postings.push({
+          account: "expense:savings_interest",
+          direction: "DEBIT" as const,
+          amount: interest,
+        });
+      }
+      const posted = await postJournal(
+        {
+          cooperativeId: coopId,
+          txRef: `sav_mature_${account.id}`,
+          description: `Savings maturity: ${account.product.name}`,
+          postings,
+        },
+        tx as never,
+      );
+      if (!posted.posted) throw new Error(`savings maturity journal not posted: ${posted.reason}`);
     });
-    if (claimed.count === 0) throw new Error("ALREADY_MATURED");
-    if (principal > 0) {
-      await tx.savingsDeposit.create({
-        data: { accountId: account.id, memberId, amount: principal, kind: "withdrawal" },
-      });
+  } catch (err) {
+    // A concurrent request already matured this account — tell the member so
+    // rather than surfacing the raw sentinel.
+    if (err instanceof Error && err.message === "ALREADY_MATURED") {
+      return { ok: false, message: "This savings account has already been matured." };
     }
-    if (interest > 0) {
-      await tx.savingsDeposit.create({
-        data: { accountId: account.id, memberId, amount: interest, kind: "interest" },
-      });
-    }
-    await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: total } } });
-    const postings = [
-      { account: productLiability(account.id), direction: "DEBIT" as const, amount: principal },
-      {
-        account: `member_wallet:${wallet.id}`,
-        direction: "CREDIT" as const,
-        amount: total,
-        memberId,
-      },
-    ];
-    if (interest > 0) {
-      postings.push({
-        account: "expense:savings_interest",
-        direction: "DEBIT" as const,
-        amount: interest,
-      });
-    }
-    const posted = await postJournal(
-      {
-        cooperativeId: coopId,
-        txRef: `sav_mature_${account.id}`,
-        description: `Savings maturity: ${account.product.name}`,
-        postings,
-      },
-      tx as never,
-    );
-    if (!posted.posted) throw new Error(`savings maturity journal not posted: ${posted.reason}`);
-  });
+    throw err;
+  }
 
   await audit({
     cooperativeId: coopId,
