@@ -3481,6 +3481,10 @@ export async function handleAdminCommand(
       }
 
       case "newgroup": {
+        if (unitAdmin) {
+          await sendText({ to: phone, text: "Only the cooperative admin can create savings groups." });
+          return true;
+        }
         const [type, name, code, amountArg, cycleArg] = args;
         const amount = toKobo(Number(amountArg));
         const cycleLength = Number(cycleArg);
@@ -3520,6 +3524,13 @@ export async function handleAdminCommand(
       }
 
       case "groups": {
+        if (unitAdmin) {
+          await sendText({
+            to: phone,
+            text: "Only the cooperative admin can view all savings groups.",
+          });
+          return true;
+        }
         const listed = await listGroups(coopId);
         if (!listed.groups || listed.groups.length === 0) {
           await sendText({

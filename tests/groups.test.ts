@@ -15,12 +15,23 @@ import {
   myGroups,
 } from "../src/services/groups.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
+import { handleAdminCommand } from "../src/services/admin.js";
+import { createUnit, setUnitAdmin } from "../src/services/units.js";
+import { sendText } from "../src/lib/messaging.js";
 
 const actor = (m: { id: string; phone: string; role: string }): {
   id: string;
   phone: string;
   role: string;
 } => ({ id: m.id, phone: m.phone, role: m.role });
+
+async function fundWallet(memberId: string, kobo: number) {
+  await prisma.wallet.update({ where: { memberId }, data: { balance: kobo } });
+}
+
+async function walletBalance(memberId: string): Promise<number> {
+  return (await prisma.wallet.findUnique({ where: { memberId } }))?.balance ?? 0;
+}
 
 async function postingsBalance(): Promise<{ debit: number; credit: number }> {
   const postings = await prisma.posting.findMany();
@@ -39,7 +50,7 @@ beforeEach(async () => {
 afterAll(cleanupDatabase);
 
 describe("ROSCA groups", () => {
-  it("creates a ROSCA, rotates the pot and advances the cycle", async () => {
+  it("creates a ROSCA, rotates the pot through member wallets and advances the cycle", async () => {
     const coop = await createTestCoop("ROSCA1");
     const admin = await createTestMember(coop.id, { phone: "2348000010001", role: "superadmin" });
     const a = await createTestMember(coop.id, { phone: "2348000010002" });
@@ -56,15 +67,12 @@ describe("ROSCA groups", () => {
     );
     expect(created.ok).toBe(true);
     const groupId = created.groupId!;
-    expect(groupId).toBeTruthy();
 
-    // A default open cycle #1 is created with the group.
     const cycles0 = await prisma.groupCycle.findMany({ where: { groupId } });
     expect(cycles0).toHaveLength(1);
     expect(cycles0[0].cycleNumber).toBe(1);
     expect(cycles0[0].status).toBe("open");
 
-    // Members join and rotation positions are assigned in order.
     expect((await joinGroup(coop.id, "FAM1", a.id)).ok).toBe(true);
     expect((await joinGroup(coop.id, "FAM1", b.id)).ok).toBe(true);
     const ma = await prisma.groupMember.findFirst({ where: { groupId, memberId: a.id } });
@@ -72,24 +80,26 @@ describe("ROSCA groups", () => {
     expect(ma?.rotationPosition).toBe(1);
     expect(mb?.rotationPosition).toBe(2);
 
-    // Each member contributes the fixed amount, crediting the group pot.
+    await fundWallet(a.id, 500000);
+    await fundWallet(b.id, 500000);
+
+    // Contributions debit the member's wallet.
     expect((await contributeToGroup(coop.id, groupId, a.id, 500000)).ok).toBe(true);
     expect((await contributeToGroup(coop.id, groupId, b.id, 500000)).ok).toBe(true);
+    expect(await walletBalance(a.id)).toBe(0);
+    expect(await walletBalance(b.id)).toBe(0);
 
     const status = await groupStatus(coop.id, groupId);
     expect(status.ok).toBe(true);
     expect(status.pot).toBe(1000000);
 
-    const potCredit = await prisma.posting.findFirst({
-      where: { account: `liability:group_pot:${groupId}`, direction: "CREDIT" },
-    });
-    expect(potCredit).not.toBeNull();
-
-    // Closing cycle 1 pays position 1 (a) the whole pot and opens cycle 2.
+    // Cycle 1 pays position 1 (a): the pot lands in a's wallet.
     const closed = await closeGroupCycle(coop.id, groupId, actor(admin));
     expect(closed.ok).toBe(true);
     expect(closed.payoutMemberId).toBe(a.id);
     expect(closed.shareOutAmount).toBe(1000000);
+    expect(await walletBalance(a.id)).toBe(1000000);
+    expect(await walletBalance(b.id)).toBe(0);
 
     const cycles = await prisma.groupCycle.findMany({
       where: { groupId },
@@ -97,16 +107,18 @@ describe("ROSCA groups", () => {
     });
     expect(cycles).toHaveLength(2);
     expect(cycles[0].status).toBe("closed");
-    expect(cycles[0].payoutMemberId).toBe(a.id);
     expect(cycles[1].status).toBe("open");
     expect(cycles[1].cycleNumber).toBe(2);
 
-    // Closing cycle 2 advances the rotation to position 2 (b).
+    // Cycle 2 advances the rotation to position 2 (b).
+    await fundWallet(b.id, 500000);
     expect((await contributeToGroup(coop.id, groupId, a.id, 500000)).ok).toBe(true);
     expect((await contributeToGroup(coop.id, groupId, b.id, 500000)).ok).toBe(true);
     const closed2 = await closeGroupCycle(coop.id, groupId, actor(admin));
     expect(closed2.ok).toBe(true);
     expect(closed2.payoutMemberId).toBe(b.id);
+    expect(await walletBalance(b.id)).toBe(1000000);
+    expect(await walletBalance(a.id)).toBe(500000);
 
     const group = await prisma.group.findUnique({ where: { id: groupId } });
     expect(group?.status).toBe("closed");
@@ -116,7 +128,7 @@ describe("ROSCA groups", () => {
     expect(debit).toBeGreaterThan(0);
   });
 
-  it("refuses a duplicate join and a non-member contribution", async () => {
+  it("refuses a duplicate join, a non-member contribution and a second round contribution", async () => {
     const coop = await createTestCoop("ROSCA2");
     const admin = await createTestMember(coop.id, { phone: "2348000010010", role: "superadmin" });
     const a = await createTestMember(coop.id, { phone: "2348000010011" });
@@ -131,11 +143,25 @@ describe("ROSCA groups", () => {
     expect(dup.message).toMatch(/already/i);
 
     // An outsider (not a group member) may not contribute.
+    await fundWallet(outsider.id, 100000);
     const notMember = await contributeToGroup(coop.id, groupId, outsider.id, 100000);
     expect(notMember.ok).toBe(false);
     expect(
       await prisma.groupContribution.findFirst({ where: { groupId, memberId: outsider.id } }),
     ).toBeNull();
+    expect(await walletBalance(outsider.id)).toBe(100000);
+
+    // A member may contribute only once per ROSCA round.
+    await fundWallet(a.id, 500000);
+    expect((await contributeToGroup(coop.id, groupId, a.id, 100000)).ok).toBe(true);
+    const again = await contributeToGroup(coop.id, groupId, a.id, 100000);
+    expect(again.ok).toBe(false);
+    expect(again.message).toMatch(/already/i);
+    const cycle = await prisma.groupCycle.findFirst({ where: { groupId, status: "open" } });
+    expect(
+      await prisma.groupContribution.count({ where: { cycleId: cycle!.id, memberId: a.id } }),
+    ).toBe(1);
+    expect(await walletBalance(a.id)).toBe(400000);
   });
 
   it("validates the fixed contribution amount for a ROSCA", async () => {
@@ -144,51 +170,98 @@ describe("ROSCA groups", () => {
     const a = await createTestMember(coop.id, { phone: "2348000010021" });
     const created = await createGroup(coop.id, "rosca", "Fixed", "FIX1", 100000, 3, actor(admin));
     await joinGroup(coop.id, "FIX1", a.id);
+    await fundWallet(a.id, 100000);
 
     const wrong = await contributeToGroup(coop.id, created.groupId!, a.id, 50000);
     expect(wrong.ok).toBe(false);
+    expect(await walletBalance(a.id)).toBe(100000);
   });
 });
 
 describe("VSLA groups", () => {
-  it("buys shares and shares out the pot by shareholding", async () => {
+  it("shares out by largest remainder and credits each member wallet", async () => {
     const coop = await createTestCoop("VSLA1");
     const admin = await createTestMember(coop.id, { phone: "2348000010100", role: "superadmin" });
     const a = await createTestMember(coop.id, { phone: "2348000010101" });
     const b = await createTestMember(coop.id, { phone: "2348000010102" });
+    const c = await createTestMember(coop.id, { phone: "2348000010103" });
 
-    // ₦1,000 (100000 kobo) buys one share.
     const created = await createGroup(coop.id, "vsla", "Market", "MKT1", 100000, 4, actor(admin));
-    expect(created.ok).toBe(true);
     const groupId = created.groupId!;
-
     await joinGroup(coop.id, "MKT1", a.id);
     await joinGroup(coop.id, "MKT1", b.id);
+    await joinGroup(coop.id, "MKT1", c.id);
 
-    // a buys 3 shares, b buys 1 share.
-    expect((await contributeToGroup(coop.id, groupId, a.id, 300000)).ok).toBe(true);
-    expect((await contributeToGroup(coop.id, groupId, b.id, 100000)).ok).toBe(true);
+    for (const m of [a, b, c]) {
+      await fundWallet(m.id, 100000);
+      expect((await contributeToGroup(coop.id, groupId, m.id, 100000)).ok).toBe(true);
+    }
 
-    const ma = await prisma.groupMember.findFirst({ where: { groupId, memberId: a.id } });
-    const mb = await prisma.groupMember.findFirst({ where: { groupId, memberId: b.id } });
-    expect(ma?.shares).toBe(3);
-    expect(mb?.shares).toBe(1);
+    // Force a non-divisible split: 3/2/2 shares over a 300,000 pot (total 7).
+    for (const [m, shares] of [
+      [a, 3],
+      [b, 2],
+      [c, 2],
+    ] as const) {
+      const gm = await prisma.groupMember.findFirst({ where: { groupId, memberId: m.id } });
+      await prisma.groupMember.update({ where: { id: gm!.id }, data: { shares } });
+    }
 
     const closed = await closeGroupCycle(coop.id, groupId, actor(admin));
     expect(closed.ok).toBe(true);
-    expect(closed.shareOutAmount).toBe(400000);
-    expect(closed.payouts?.length).toBe(2);
-    const payoutA = closed.payouts?.find((p) => p.memberId === a.id);
-    const payoutB = closed.payouts?.find((p) => p.memberId === b.id);
-    expect(payoutA?.amount).toBe(300000);
-    expect(payoutB?.amount).toBe(100000);
+    expect(closed.shareOutAmount).toBe(300000);
+    const byId = Object.fromEntries((closed.payouts ?? []).map((p) => [p.memberId, p.amount]));
+    // 300000 * 3/7 = 128571.43 -> 128571, remainder 3 (largest) takes the extra kobo
+    // 300000 * 2/7 =  85714.29 ->  85714, remainder 2
+    expect(byId[a.id]).toBe(128572);
+    expect(byId[b.id]).toBe(85714);
+    expect(byId[c.id]).toBe(85714);
+    expect(byId[a.id] + byId[b.id] + byId[c.id]).toBe(300000);
 
-    // The share-out drains the pot to zero.
-    const status = await groupStatus(coop.id, groupId);
-    expect(status.pot).toBe(0);
+    expect(await walletBalance(a.id)).toBe(128572);
+    expect(await walletBalance(b.id)).toBe(85714);
+    expect(await walletBalance(c.id)).toBe(85714);
+
+    // Shares are redeemed (reset) at share-out.
+    const members = await prisma.groupMember.findMany({ where: { groupId } });
+    expect(members.every((m) => m.shares === 0)).toBe(true);
 
     const { debit, credit } = await postingsBalance();
     expect(debit).toBe(credit);
+  });
+
+  it("shares out only the new contributions in the second cycle (shares reset)", async () => {
+    const coop = await createTestCoop("VSLA2");
+    const admin = await createTestMember(coop.id, { phone: "2348000010110", role: "superadmin" });
+    const a = await createTestMember(coop.id, { phone: "2348000010111" });
+    const b = await createTestMember(coop.id, { phone: "2348000010112" });
+
+    const created = await createGroup(coop.id, "vsla", "Round", "RND1", 100000, 2, actor(admin));
+    const groupId = created.groupId!;
+    await joinGroup(coop.id, "RND1", a.id);
+    await joinGroup(coop.id, "RND1", b.id);
+    await fundWallet(a.id, 1000000);
+    await fundWallet(b.id, 1000000);
+
+    // Cycle 1: a buys 3 shares, b buys 1.
+    expect((await contributeToGroup(coop.id, groupId, a.id, 300000)).ok).toBe(true);
+    expect((await contributeToGroup(coop.id, groupId, b.id, 100000)).ok).toBe(true);
+    const closed1 = await closeGroupCycle(coop.id, groupId, actor(admin));
+    expect(closed1.shareOutAmount).toBe(400000);
+    expect((await prisma.groupMember.findMany({ where: { groupId } })).every((m) => m.shares === 0)).toBe(
+      true,
+    );
+
+    // Cycle 2: both buy one share each. Only 200,000 is in the fresh pot.
+    expect((await contributeToGroup(coop.id, groupId, a.id, 100000)).ok).toBe(true);
+    expect((await contributeToGroup(coop.id, groupId, b.id, 100000)).ok).toBe(true);
+    const closed2 = await closeGroupCycle(coop.id, groupId, actor(admin));
+    expect(closed2.shareOutAmount).toBe(200000);
+    const byId = Object.fromEntries((closed2.payouts ?? []).map((p) => [p.memberId, p.amount]));
+    expect(byId[a.id]).toBe(100000);
+    expect(byId[b.id]).toBe(100000);
+    expect(await walletBalance(a.id)).toBe(1000000);
+    expect(await walletBalance(b.id)).toBe(1000000);
   });
 
   it("lists groups and the caller's memberships", async () => {
@@ -216,5 +289,42 @@ describe("VSLA groups", () => {
     expect(first.ok).toBe(true);
     const second = await createGroup(coop.id, "vsla", "Two", "DUP1", 50000, 6, actor(admin));
     expect(second.ok).toBe(false);
+  });
+});
+
+describe("group command gating", () => {
+  it("a unit admin cannot create or list coop-wide groups", async () => {
+    const coop = await createTestCoop("GRPCMD");
+    const superAdmin = await createTestMember(coop.id, {
+      phone: "2348000010300",
+      role: "superadmin",
+    });
+    const coopAdmin = await createTestMember(coop.id, { phone: "2348000010301", role: "admin" });
+    const unitAdmin = await createTestMember(coop.id, { phone: "2348000010302" });
+
+    expect((await createUnit(coopAdmin.phone, "Lagos Office", "LAG01")).ok).toBe(true);
+    expect((await setUnitAdmin(coopAdmin.phone, "LAG01", unitAdmin.code)).ok).toBe(true);
+
+    vi.clearAllMocks();
+    await handleAdminCommand(unitAdmin.phone, "newgroup", ["rosca", "Unit", "UNIT1", "5000", "3"]);
+    let texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(texts).toMatch(/Only the cooperative admin/i);
+    expect(await prisma.group.count({ where: { cooperativeId: coop.id } })).toBe(0);
+
+    vi.clearAllMocks();
+    await handleAdminCommand(unitAdmin.phone, "groups", []);
+    texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(texts).toMatch(/Only the cooperative admin/i);
+
+    // A super admin can create groups.
+    vi.clearAllMocks();
+    await handleAdminCommand(superAdmin.phone, "newgroup", ["rosca", "Main", "MAIN1", "5000", "3"]);
+    expect(await prisma.group.count({ where: { cooperativeId: coop.id } })).toBe(1);
   });
 });

@@ -245,33 +245,73 @@ export async function contributeToGroup(
   });
   if (!cycle) return { ok: false, message: "No open cycle for this group." };
 
-  const reference = `grp_contrib_${cycle.id}_${memberId}_${Date.now()}`;
-  const contribution = await withTx(async (tx) => {
-    await setCoopContext(tx as never, coopId);
-    const c = await tx.groupContribution.create({
-      data: { groupId: group.id, cycleId: cycle.id, memberId, amount },
+  // A ROSCA round is a single fixed payment per member — reject a second one.
+  if (group.type === "rosca") {
+    const already = await prisma.groupContribution.findFirst({
+      where: { cycleId: cycle.id, memberId },
     });
-    if (shareDelta > 0) {
-      await tx.groupMember.update({
-        where: { id: membership.id },
-        data: { shares: { increment: shareDelta } },
-      });
+    if (already) {
+      return { ok: false, message: "You have already contributed for this round." };
     }
-    const posted = await postJournal(
-      {
-        cooperativeId: coopId,
-        txRef: reference,
-        description: `Group contribution: ${group.code} cycle ${cycle.cycleNumber}`,
-        postings: [
-          { account: "assets:cash", direction: "DEBIT", amount, memberId },
-          { account: potAccount(group.id), direction: "CREDIT", amount },
-        ],
-      },
-      tx as never,
-    );
-    if (!posted.posted) throw new Error(`group contribution journal not posted: ${posted.reason}`);
-    return c;
-  });
+  }
+
+  const wallet = await prisma.wallet.findUnique({ where: { memberId } });
+  if (!wallet) {
+    return { ok: false, message: "You need an active wallet to contribute. Reply *join <code>*." };
+  }
+  const insufficientMessage =
+    `Your wallet balance is *${formatBalance(wallet.balance)}*, less than the *${formatBalance(amount)}* contribution.\n\n` +
+    `Reply *save <amount>* to top up first.`;
+  if (wallet.balance < amount) {
+    return { ok: false, message: insufficientMessage };
+  }
+
+  let contributionId = "";
+  try {
+    await withTx(async (tx) => {
+      await setCoopContext(tx as never, coopId);
+      // Move money out of the member's wallet into the group pot. The race
+      // guard only debits while the wallet still covers the amount.
+      const claimed = await tx.wallet.updateMany({
+        where: { id: wallet.id, balance: { gte: amount } },
+        data: { balance: { decrement: amount } },
+      });
+      if (claimed.count === 0) throw new Error("INSUFFICIENT_BALANCE");
+      const c = await tx.groupContribution.create({
+        data: { groupId: group.id, cycleId: cycle.id, memberId, amount },
+      });
+      contributionId = c.id;
+      if (shareDelta > 0) {
+        await tx.groupMember.update({
+          where: { id: membership.id },
+          data: { shares: { increment: shareDelta } },
+        });
+      }
+      // ROSCA: one fixed contribution per member per cycle, so the ref is
+      // stable/idempotent. VSLA: members may buy shares more than once in a
+      // cycle, so key the ref on the contribution row to stay unique.
+      const txRef =
+        group.type === "rosca" ? `grp_contrib_${cycle.id}_${memberId}` : `grp_contrib_${c.id}`;
+      const posted = await postJournal(
+        {
+          cooperativeId: coopId,
+          txRef,
+          description: `Group contribution: ${group.code} cycle ${cycle.cycleNumber}`,
+          postings: [
+            { account: `member_wallet:${wallet.id}`, direction: "DEBIT", amount, memberId },
+            { account: potAccount(group.id), direction: "CREDIT", amount },
+          ],
+        },
+        tx as never,
+      );
+      if (!posted.posted) throw new Error(`group contribution journal not posted: ${posted.reason}`);
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "INSUFFICIENT_BALANCE") {
+      return { ok: false, message: insufficientMessage };
+    }
+    throw err;
+  }
 
   await audit({
     cooperativeId: coopId,
@@ -290,7 +330,7 @@ export async function contributeToGroup(
   return {
     ok: true,
     message: `✅ Contributed *${formatBalance(amount)}* to *${group.name}*.${shareNote}`,
-    contributionId: contribution.id,
+    contributionId,
     pot,
     shares,
   };
@@ -338,6 +378,13 @@ export async function closeGroupCycle(
       const beneficiary = positioned ?? fallback;
       if (beneficiary && pot > 0) {
         payoutMemberId = beneficiary.memberId;
+        const wallet = await tx.wallet.findUnique({ where: { memberId: beneficiary.memberId } });
+        if (wallet) {
+          await tx.wallet.update({
+            where: { id: wallet.id },
+            data: { balance: { increment: pot } },
+          });
+        }
         const posted = await postJournal(
           {
             cooperativeId: coopId,
@@ -346,7 +393,7 @@ export async function closeGroupCycle(
             postings: [
               { account: potAccount(group.id), direction: "DEBIT", amount: pot },
               {
-                account: payoutAccount(beneficiary.memberId),
+                account: wallet ? `member_wallet:${wallet.id}` : payoutAccount(beneficiary.memberId),
                 direction: "CREDIT",
                 amount: pot,
                 memberId: beneficiary.memberId,
@@ -365,28 +412,43 @@ export async function closeGroupCycle(
       const eligible = members.filter((m) => m.shares > 0);
       const totalShares = eligible.reduce((s, m) => s + m.shares, 0);
       if (pot > 0 && totalShares > 0) {
-        let distributed = 0;
-        for (let i = 0; i < eligible.length; i++) {
-          const m = eligible[i];
-          const amount =
-            i === eligible.length - 1
-              ? pot - distributed
-              : Math.floor((pot * m.shares) / totalShares);
-          if (amount <= 0) continue;
-          distributed += amount;
-          payouts.push({ memberId: m.memberId, amount });
+        // Largest-remainder method: floor each member's exact share of the pot,
+        // then hand the leftover kobos to the largest fractional remainders so
+        // the whole pot is distributed without rounding loss.
+        const allocations = eligible.map((m) => ({
+          member: m,
+          amount: Math.floor((pot * m.shares) / totalShares),
+          remainder: (pot * m.shares) % totalShares,
+        }));
+        let leftover = pot - allocations.reduce((s, a) => s + a.amount, 0);
+        const byRemainder = [...allocations].sort((a, b) => b.remainder - a.remainder);
+        for (const a of byRemainder) {
+          if (leftover <= 0) break;
+          a.amount += 1;
+          leftover -= 1;
+        }
+        for (const a of allocations) {
+          if (a.amount <= 0) continue;
+          payouts.push({ memberId: a.member.memberId, amount: a.amount });
+          const wallet = await tx.wallet.findUnique({ where: { memberId: a.member.memberId } });
+          if (wallet) {
+            await tx.wallet.update({
+              where: { id: wallet.id },
+              data: { balance: { increment: a.amount } },
+            });
+          }
           const posted = await postJournal(
             {
               cooperativeId: coopId,
-              txRef: `grp_shareout_${cycle.id}_${m.id}`,
+              txRef: `grp_shareout_${cycle.id}_${a.member.id}`,
               description: `VSLA share-out: ${group.code} cycle ${cycle.cycleNumber}`,
               postings: [
-                { account: potAccount(group.id), direction: "DEBIT", amount },
+                { account: potAccount(group.id), direction: "DEBIT", amount: a.amount },
                 {
-                  account: payoutAccount(m.memberId),
+                  account: wallet ? `member_wallet:${wallet.id}` : payoutAccount(a.member.memberId),
                   direction: "CREDIT",
-                  amount,
-                  memberId: m.memberId,
+                  amount: a.amount,
+                  memberId: a.member.memberId,
                 },
               ],
             },
@@ -394,6 +456,10 @@ export async function closeGroupCycle(
           );
           if (!posted.posted) throw new Error(`vsla share-out journal not posted: ${posted.reason}`);
         }
+        // VSLA members buy shares fresh each cycle, so redeem them now that the
+        // pot has been shared out — otherwise cumulative shares would keep
+        // earning against every later pot.
+        await tx.groupMember.updateMany({ where: { groupId: group.id }, data: { shares: 0 } });
       }
     }
 
