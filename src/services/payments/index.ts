@@ -119,6 +119,7 @@ export interface DebitMandateParams {
   amount: number; // kobo
   reference: string;
   narration?: string;
+  memberEmail?: string;
 }
 
 export interface DebitResult {

@@ -1,0 +1,1 @@
+ALTER TABLE "Mandate" ADD COLUMN "pausedPurposes" TEXT NOT NULL DEFAULT '';

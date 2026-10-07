@@ -18,6 +18,7 @@ import {
   listMemberProducts,
   openJuniorAccount,
 } from "../savings-products.js";
+import { listMandates } from "../mandates.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 
 export async function handleBalance(
@@ -604,4 +605,117 @@ export async function handleMatureProduct(phone: string, args: string[]): Promis
   }
   const result = await matureProduct(member.cooperativeId, accountId, member.id);
   await sendText({ to: phone, text: result.message });
+}
+
+/** Start a direct-debit mandate: PIN-confirmed, then returns the provider link. */
+export async function handleMandate(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const cap = parseNaira(args[0]);
+  if (cap === null) {
+    await sendText({
+      to: phone,
+      text: "How much should we be able to collect at most each time? Reply *mandate <amount>*, e.g. *mandate 5000*.",
+    });
+    return;
+  }
+  await issueSecretChallenge(
+    phone,
+    "awaiting_mandate_pin",
+    { mandateCap: cap },
+    `Authorize automatic debits of up to *${formatBalance(cap)}* per collection? Enter your 4-digit PIN to confirm.`,
+  );
+}
+
+/** List the member's direct-debit mandates. */
+export async function handleMandates(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const listed = await listMandates(member.cooperativeId, member.id);
+  if (!listed.mandates || listed.mandates.length === 0) {
+    await sendText({
+      to: phone,
+      text: "You have no direct-debit mandates. Set one up with *mandate <cap>*, e.g. *mandate 5000*.",
+    });
+    return;
+  }
+  const lines = ["*🔁 Your Direct-Debit Mandates*", ""];
+  for (const m of listed.mandates) {
+    const paused = m.pausedPurposes ? ` — paused: ${m.pausedPurposes}` : "";
+    lines.push(
+      `• _${m.status}_ — up to *${formatBalance(m.amountCap)}*/debit`,
+      `  ${m.provider} • bank ****${m.bankAccountNumber.slice(-4)}${paused}`,
+      `  ID: ${m.id}`,
+    );
+  }
+  await sendText({ to: phone, text: lines.join("\n") });
+}
+
+/** Show one mandate's details. */
+export async function handleMandateStatus(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const idRef = args[0];
+  if (!idRef) {
+    await sendText({ to: phone, text: "Usage: *mandatestatus <mandate id>* — list them with *mandates*." });
+    return;
+  }
+  const listed = await listMandates(member.cooperativeId, member.id);
+  const mandate = listed.mandates?.find(
+    (m) => m.id === idRef || m.id.startsWith(idRef) || m.id.endsWith(idRef),
+  );
+  if (!mandate) {
+    await sendText({ to: phone, text: "Mandate not found. Reply *mandates* to see your list." });
+    return;
+  }
+  const authorized = mandate.authorizedAt
+    ? mandate.authorizedAt.toDateString()
+    : "not authorized yet";
+  const cancelled = mandate.cancelledAt ? mandate.cancelledAt.toDateString() : "—";
+  const link = mandate.authorizationUrl ? `\n• Authorize: ${mandate.authorizationUrl}` : "";
+  const paused = mandate.pausedPurposes ? `\n• Paused purposes: *${mandate.pausedPurposes}*` : "";
+  await sendText({
+    to: phone,
+    text:
+      `*🔁 Mandate ${mandate.id}*\n\n` +
+      `• Status: *${mandate.status}*\n` +
+      `• Cap: *${formatBalance(mandate.amountCap)}*/debit\n` +
+      `• Provider: ${mandate.provider}\n` +
+      `• Bank: ${mandate.bankName ?? mandate.bankCode} ****${mandate.bankAccountNumber.slice(-4)}\n` +
+      `• Authorized: ${authorized}\n` +
+      `• Cancelled: ${cancelled}${link}${paused}\n\n` +
+      `Reply *cancelmandate ${mandate.id}* to stop it.`,
+  });
+}
+
+/** Cancel a mandate: PIN-confirmed. */
+export async function handleCancelMandate(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const mandateId = args[0];
+  if (!mandateId) {
+    await sendText({
+      to: phone,
+      text: "Usage: *cancelmandate <mandate id>* — list them with *mandates*.",
+    });
+    return;
+  }
+  await issueSecretChallenge(
+    phone,
+    "awaiting_cancelmandate_pin",
+    { mandateId },
+    `Cancel mandate *${mandateId}*? No further debits will be collected. Enter your 4-digit PIN to confirm.`,
+  );
 }

@@ -1683,6 +1683,7 @@ model Mandate {
   accountName       String?
   authorizationUrl  String?
   purposes          String    @default("savings,loan,group") // CSV of enabled purposes
+  pausedPurposes    String    @default("") // CSV of individually-paused purposes
   createdAt         DateTime  @default(now())
   authorizedAt      DateTime?
   cancelledAt       DateTime?

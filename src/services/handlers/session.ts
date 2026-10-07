@@ -28,6 +28,7 @@ import { getActiveElectionsForNewMember } from "../votes.js";
 import { createCooperative, generateMemberFileNumber } from "../cooperative.js";
 import { confirmDividendDistribution } from "../dividends.js";
 import { hashPin, verifyPin } from "../../lib/security.js";
+import { createMandate, cancelMandate } from "../mandates.js";
 
 /** A half-finished flow expires after this long. */
 /** OTP codes expire after this long. */
@@ -148,6 +149,10 @@ export function buildFullMenu(
     `• *saveproduct <account id> <amount>* — deposit\n` +
     `• *withdrawproduct <account id> <amount>* — withdraw\n` +
     `• *myproducts* / *matureproduct <account id>* — your product savings\n\n` +
+    `*🔁 Auto-debit mandate*\n` +
+    `• *mandate <cap>* — authorize automatic debits\n` +
+    `• *mandates* / *mandatestatus <id>* — view your mandates\n` +
+    `• *cancelmandate <id>* — stop automatic debits\n\n` +
     `*📊 Account*\n` +
     `• *history* / *statement <month|year>* — transactions\n` +
     `• *analytics* — savings analytics\n` +
@@ -1167,6 +1172,66 @@ export async function handleAwaitingInput(
         to: phone,
         text: result.message + "\n\nReply *menu* to see other options.",
       });
+      break;
+    }
+
+    case "awaiting_mandate_pin": {
+      const member = await getMemberByPhone(phone);
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+        });
+        return;
+      }
+      const pinCheck = await verifyMemberPin(member, text.trim());
+      if (!pinCheck.ok) {
+        const msg = pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel.";
+        await sendText({ to: phone, text: msg });
+        await issueSecretChallenge(phone, "awaiting_mandate_pin", data, msg);
+        return;
+      }
+      const result = await createMandate(member.cooperativeId, member.id, data.mandateCap ?? 0, {
+        id: member.id,
+        phone,
+        role: member.role,
+      });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle", data: "{}" },
+      });
+      await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
+      break;
+    }
+
+    case "awaiting_cancelmandate_pin": {
+      const member = await getMemberByPhone(phone);
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+        });
+        return;
+      }
+      const pinCheck = await verifyMemberPin(member, text.trim());
+      if (!pinCheck.ok) {
+        const msg = pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel.";
+        await sendText({ to: phone, text: msg });
+        await issueSecretChallenge(phone, "awaiting_cancelmandate_pin", data, msg);
+        return;
+      }
+      const result = await cancelMandate(member.cooperativeId, data.mandateId ?? "", {
+        id: member.id,
+        phone,
+        role: member.role,
+      });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle", data: "{}" },
+      });
+      await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
       break;
     }
 

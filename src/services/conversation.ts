@@ -87,6 +87,10 @@ import {
   handleMyProducts,
   handleMatureProduct,
   handleOpenJunior,
+  handleMandate,
+  handleMandates,
+  handleMandateStatus,
+  handleCancelMandate,
 } from "./handlers/money.js";
 import {
   handleValidateClaim,
@@ -157,6 +161,8 @@ export type BotState =
   | "awaiting_withdraw_pin"
   | "awaiting_repay_pin"
   | "awaiting_buyshares_pin"
+  | "awaiting_mandate_pin"
+  | "awaiting_cancelmandate_pin"
   | "awaiting_death_cert"
   | "awaiting_ai_confirm"
   | "awaiting_ai_query_confirm"
@@ -196,6 +202,8 @@ export const FlowDataSchema = z.object({
   loanId: z.string().optional(),
   withdrawAmount: z.number().positive().optional(),
   shareCount: z.number().positive().optional(),
+  mandateCap: z.number().positive().optional(),
+  mandateId: z.string().optional(),
   withdrawAccount: z.string().optional(),
   withdrawBankCode: z.string().optional(),
   withdrawBankName: z.string().optional(),
@@ -224,6 +232,8 @@ export const SECRET_STATES: BotState[] = [
   "awaiting_withdraw_pin",
   "awaiting_repay_pin",
   "awaiting_buyshares_pin",
+  "awaiting_mandate_pin",
+  "awaiting_cancelmandate_pin",
   "awaiting_delete_account_pin",
 ];
 
@@ -525,6 +535,10 @@ async function handleMessageInner(
     case "saveproduct":
     case "withdrawproduct":
     case "matureproduct":
+    case "mandate":
+    case "mandates":
+    case "mandatestatus":
+    case "cancelmandate":
     case "grouploan": {
       if (member && (member.status === "suspended" || member.status === "deceased")) {
         await sendText({
@@ -573,6 +587,10 @@ async function handleMessageInner(
       else if (cmd === "saveproduct") await handleSaveProduct(phone, args);
       else if (cmd === "withdrawproduct") await handleWithdrawProduct(phone, args);
       else if (cmd === "matureproduct") await handleMatureProduct(phone, args);
+      else if (cmd === "mandate") await handleMandate(phone, args);
+      else if (cmd === "mandates") await handleMandates(phone);
+      else if (cmd === "mandatestatus") await handleMandateStatus(phone, args);
+      else if (cmd === "cancelmandate") await handleCancelMandate(phone, args);
       else if (cmd === "grouploan") await handleGroupLoan(phone, args);
       else await handleWithdraw(phone, args);
       break;

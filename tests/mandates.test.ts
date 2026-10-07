@@ -7,6 +7,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { monnifyAdapter } from "../src/services/payments/monnify.js";
 import { paystackAdapter } from "../src/services/payments/paystack.js";
+import { resolveProvider } from "../src/services/payments/index.js";
+import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
+import {
+  createMandate,
+  listMandates,
+  listCoopMandates,
+  cancelMandate,
+  applyMandateStatus,
+  pauseMandate,
+  resumeMandate,
+  skipDebit,
+} from "../src/services/mandates.js";
 
 const MONNIFY_BASE = "https://sandbox.monnify.com";
 const MONNIFY_MANDATE_URL = `${MONNIFY_BASE}/api/v1/disbursements/mandate`;
@@ -233,5 +245,221 @@ describe("paystack mandate adapter", () => {
       data: { reference: "DD-1", id: 99 },
     });
     expect(parsed).toMatchObject({ reference: "DD-1", status: "successful", provider: "paystack" });
+  });
+});
+
+// ===== Task 3: mandate lifecycle service =====
+
+const actor = (m: { id: string; phone: string; role: string }) => ({
+  id: m.id,
+  phone: m.phone,
+  role: m.role,
+});
+
+/** A fake provider adapter; only the mandate methods this service calls. */
+function fakeAdapter(overrides: Record<string, unknown> = {}) {
+  return {
+    name: "monnify",
+    createMandate: vi.fn(async () => ({
+      ok: true,
+      providerMandateId: "MTDD|X",
+      authorizationUrl: "https://monnify.test/consent",
+      status: "PENDING_AUTHORIZATION",
+    })),
+    cancelMandate: vi.fn(async () => ({ ok: true })),
+    debitMandate: vi.fn(async () => ({ ok: true, providerRef: "TRX-1", status: "SUCCESSFUL" })),
+    verifyWebhook: () => true,
+    parseNotification: () => null,
+    ...overrides,
+  } as never;
+}
+
+async function enableDirectDebit(coopId: string, maxCap = 0) {
+  await prisma.cooperativeConfig.create({
+    data: { cooperativeId: coopId, directDebitEnabled: true, directDebitMaxCap: maxCap },
+  });
+}
+
+async function setBank(memberId: string) {
+  await prisma.member.update({
+    where: { id: memberId },
+    data: {
+      bankAccountNumber: "0123456789",
+      bankCode: "044",
+      bankName: "GTB",
+      email: "ada@coop.local",
+    },
+  });
+}
+
+async function seedMandate(
+  coopId: string,
+  memberId: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return prisma.mandate.create({
+    data: {
+      cooperativeId: coopId,
+      memberId,
+      provider: "monnify",
+      providerMandateId: "MTDD|X",
+      providerReference: `MAN-${Math.random().toString(36).slice(2)}`,
+      status: "active",
+      amountCap: 100_000,
+      bankAccountNumber: "0123456789",
+      bankCode: "044",
+      ...overrides,
+    },
+  });
+}
+
+describe("mandate lifecycle service", () => {
+  beforeEach(async () => {
+    await cleanupDatabase();
+  });
+
+  it("refuses to create a mandate when direct debit is not enabled", async () => {
+    const coop = await createTestCoop("MND1");
+    const m = await createTestMember(coop.id, { phone: "2348000100001" });
+
+    const res = await createMandate(coop.id, m.id, 100_000, actor(m));
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/not enabled/i);
+    expect(await prisma.mandate.count()).toBe(0);
+  });
+
+  it("refuses to create a mandate when the member has no saved bank account", async () => {
+    const coop = await createTestCoop("MND2");
+    const m = await createTestMember(coop.id, { phone: "2348000100002" });
+    await enableDirectDebit(coop.id);
+
+    const res = await createMandate(coop.id, m.id, 100_000, actor(m));
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/bank account/i);
+  });
+
+  it("creates a pending mandate and returns the provider authorization link", async () => {
+    const coop = await createTestCoop("MND3");
+    const m = await createTestMember(coop.id, { phone: "2348000100003" });
+    await enableDirectDebit(coop.id);
+    await setBank(m.id);
+    vi.mocked(resolveProvider).mockResolvedValue(fakeAdapter());
+
+    const res = await createMandate(coop.id, m.id, 100_000, actor(m));
+    expect(res.ok).toBe(true);
+    expect(res.authorizationUrl).toBe("https://monnify.test/consent");
+    expect(res.mandateId).toBeTruthy();
+
+    const row = await prisma.mandate.findUnique({ where: { id: res.mandateId! } });
+    expect(row?.status).toBe("pending");
+    expect(row?.authorizationUrl).toBe("https://monnify.test/consent");
+    expect(row?.providerMandateId).toBe("MTDD|X");
+    expect(row?.providerReference.startsWith("MAN-")).toBe(true);
+  });
+
+  it("refuses a cap above the cooperative's directDebitMaxCap", async () => {
+    const coop = await createTestCoop("MND4");
+    const m = await createTestMember(coop.id, { phone: "2348000100004" });
+    await enableDirectDebit(coop.id, 100_000);
+    await setBank(m.id);
+
+    const res = await createMandate(coop.id, m.id, 200_000, actor(m));
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/cap|limit|most/i);
+    expect(await prisma.mandate.count()).toBe(0);
+  });
+
+  it("cancels a mandate and calls the provider cancel", async () => {
+    const coop = await createTestCoop("MND5");
+    const m = await createTestMember(coop.id, { phone: "2348000100005" });
+    const mandate = await seedMandate(coop.id, m.id);
+    const adapter = fakeAdapter();
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    const res = await cancelMandate(coop.id, mandate.id, actor(m));
+    expect(res.ok).toBe(true);
+    expect(vi.mocked(adapter.cancelMandate)).toHaveBeenCalledTimes(1);
+
+    const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.status).toBe("cancelled");
+    expect(row?.cancelledAt).toBeInstanceOf(Date);
+  });
+
+  it("applies a webhook status flip and stamps authorizedAt on activation", async () => {
+    const coop = await createTestCoop("MND6");
+    const m = await createTestMember(coop.id, { phone: "2348000100006" });
+    const mandate = await seedMandate(coop.id, m.id, { status: "pending" });
+
+    await applyMandateStatus("monnify", "MTDD|X", "active");
+
+    const row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.status).toBe("active");
+    expect(row?.authorizedAt).toBeInstanceOf(Date);
+  });
+
+  it("pauses and resumes the whole mandate", async () => {
+    const coop = await createTestCoop("MND7");
+    const m = await createTestMember(coop.id, { phone: "2348000100007" });
+    const mandate = await seedMandate(coop.id, m.id);
+
+    const paused = await pauseMandate(coop.id, mandate.id, null, actor(m));
+    expect(paused.ok).toBe(true);
+    expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe("paused");
+
+    const resumed = await resumeMandate(coop.id, mandate.id, null, actor(m));
+    expect(resumed.ok).toBe(true);
+    expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe("active");
+  });
+
+  it("pauses and resumes a single purpose", async () => {
+    const coop = await createTestCoop("MND8");
+    const m = await createTestMember(coop.id, { phone: "2348000100008" });
+    const mandate = await seedMandate(coop.id, m.id);
+
+    await pauseMandate(coop.id, mandate.id, "savings", actor(m));
+    let row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.pausedPurposes.split(",")).toContain("savings");
+    expect(row?.status).toBe("active");
+
+    await resumeMandate(coop.id, mandate.id, "savings", actor(m));
+    row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.pausedPurposes.split(",")).not.toContain("savings");
+  });
+
+  it("skips a pending debit so it is never retried", async () => {
+    const coop = await createTestCoop("MND9");
+    const m = await createTestMember(coop.id, { phone: "2348000100009" });
+    const mandate = await seedMandate(coop.id, m.id);
+    const debit = await prisma.mandateDebit.create({
+      data: {
+        mandateId: mandate.id,
+        cooperativeId: coop.id,
+        memberId: m.id,
+        purpose: "savings",
+        amount: 50_000,
+        status: "pending",
+        providerRef: "DD-SKIP-1",
+      },
+    });
+
+    const res = await skipDebit(coop.id, debit.id, actor(m));
+    expect(res.ok).toBe(true);
+    expect((await prisma.mandateDebit.findUnique({ where: { id: debit.id } }))?.status).toBe(
+      "skipped",
+    );
+  });
+
+  it("lists a member's mandates and the cooperative's mandates", async () => {
+    const coop = await createTestCoop("MND10");
+    const m = await createTestMember(coop.id, { phone: "2348000100010" });
+    await seedMandate(coop.id, m.id);
+
+    const mine = await listMandates(coop.id, m.id);
+    expect(mine.ok).toBe(true);
+    expect(mine.mandates?.length).toBe(1);
+
+    const all = await listCoopMandates(coop.id);
+    expect(all.ok).toBe(true);
+    expect(all.mandates?.length).toBe(1);
   });
 });

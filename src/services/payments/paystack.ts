@@ -297,7 +297,7 @@ export const paystackAdapter: ProviderAdapter = {
         authorization_code: params.providerMandateId,
         currency: "NGN",
         amount: forProvider(params.amount, "paystack"),
-        email: params.narration ?? "member@coop.local",
+        email: params.memberEmail ?? "member@coop.local",
       });
       return { ok: true, providerRef: res.data?.reference, status: res.data?.status };
     } catch (err: any) {
