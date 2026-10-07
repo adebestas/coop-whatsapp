@@ -50,7 +50,12 @@ export async function savePayee(
   if (!ACCT_RE.test(accountNumber.replace(/\s/g, ""))) {
     return { ok: false, message: "Please provide a valid 10-digit bank account number." };
   }
-  const resolved = resolveBankCode(bankCode) ?? { code: bankCode, name: bankName ?? null };
+  const looked = resolveBankCode(bankCode);
+  // Prefer the explicit bank name (the guided picker supplies the provider's
+  // display name); fall back to whatever resolveBankCode inferred.
+  const resolved = looked
+    ? { code: looked.code, name: bankName ?? looked.name }
+    : { code: bankCode, name: bankName ?? null };
   if (!resolved.code) {
     return { ok: false, message: "Please provide a valid bank code." };
   }
@@ -87,14 +92,14 @@ export function listPayees(memberId: string): Promise<FavoritePayeeRecord[]> {
 
 export function getPayeesText(payees: FavoritePayeeRecord[]): string {
   if (payees.length === 0) {
-    return "You haven't saved any payees yet. Reply *addpayee <name> <account> <bank>* to save one.";
+    return "You haven't saved any payees yet. Reply *addpayee <name> <account>* to save one.";
   }
   const lines = payees.map((p, i) => {
     const bank = p.bankName ? p.bankName : p.bankCode;
     const last = p.useCount > 0 ? ` · used ${p.useCount}x` : "";
     return `${i + 1}. *${p.name}* — ${bank} ****${p.accountNumber.slice(-4)}${last}`;
   });
-  return `*👥 Your saved payees*\n\n${lines.join("\n")}\n\nReply *addpayee <name> <account> <bank>*, or a number to use one.`;
+  return `*👥 Your saved payees*\n\n${lines.join("\n")}\n\nReply *addpayee <name> <account>*, or a number to use one.`;
 }
 
 export async function resolvePayee(

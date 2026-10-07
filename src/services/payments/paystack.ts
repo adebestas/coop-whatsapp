@@ -8,6 +8,7 @@ import type {
   PayoutNotification,
   ResolveAccountParams,
   ResolveAccountResult,
+  Bank,
   PayoutParams,
   PayoutResult,
   TransferStatus,
@@ -98,6 +99,18 @@ export const paystackAdapter: ProviderAdapter = {
       return { ok: true, name: res.data?.account_name ?? undefined };
     } catch (err: any) {
       return { ok: false, error: err.message ?? "account resolution failed" };
+    }
+  },
+
+  async listBanks(): Promise<Bank[]> {
+    try {
+      const res = await api<any>("/bank?currency=NGN", "GET");
+      if (!Array.isArray(res.data)) return [];
+      return res.data
+        .map((b: any) => ({ code: String(b.code ?? ""), name: String(b.name ?? "") }))
+        .filter((b: Bank) => b.code && b.name);
+    } catch {
+      return [];
     }
   },
 

@@ -91,6 +91,12 @@ export interface ResolveAccountResult {
   error?: string;
 }
 
+/** A bank the member can pick from when entering an account number. */
+export interface Bank {
+  code: string;
+  name: string;
+}
+
 // ===== Direct-debit mandates =====
 
 export interface CreateMandateParams {
@@ -156,6 +162,8 @@ export interface ProviderAdapter {
   payout?(params: PayoutParams): Promise<PayoutResult>;
   /** Resolve an account and return the registered account name */
   resolveAccount?(params: ResolveAccountParams): Promise<ResolveAccountResult>;
+  /** List the provider's supported banks (for the guided account-entry flow). */
+  listBanks?(): Promise<Bank[]>;
   /**
    * Validate an incoming webhook request. `rawBody` is the EXACT bytes the
    * provider sent (captured before JSON parsing) — signatures must be
@@ -197,6 +205,7 @@ import { timingSafeEqual } from "node:crypto";
 import { monnifyAdapter } from "./monnify.js";
 import { paystackAdapter } from "./paystack.js";
 import { RedisCircuitBreaker } from "../../lib/redis-mutex.js";
+import { BANK_CODES } from "../../lib/banks.js";
 
 /** Constant-time string comparison for signature checks (anti-timing-attack). */
 export function signaturesMatch(expected: string, received: string): boolean {
@@ -251,4 +260,85 @@ export async function resolveProvider(preferred?: string): Promise<ProviderAdapt
   // Everything is marked down — fall back to the configured one and let the
   // caller surface the error.
   return adapterFor(configured) ?? monnifyAdapter;
+}
+
+// ===== Bank list (guided account entry) =====
+
+/** Pretty display names for the banks in the static BANK_CODES fallback. */
+const BANK_DISPLAY_NAMES: Record<string, string> = {
+  "044": "Access Bank",
+  "058": "GTBank",
+  "057": "Zenith Bank",
+  "033": "UBA",
+  "011": "First Bank",
+  "032": "Union Bank",
+  "070": "Fidelity Bank",
+  "214": "FCMB",
+  "221": "Stanbic IBTC",
+  "050": "Ecobank",
+  "232": "Sterling Bank",
+  "035": "Wema Bank",
+  "076": "Polaris Bank",
+  "082": "Keystone Bank",
+  "215": "Unity Bank",
+  "301": "Jaiz Bank",
+  "101": "Providus Bank",
+  "50211": "Kuda",
+  "50212": "OPay",
+  "999992": "PalmPay",
+  "50515": "Moniepoint",
+  "51318": "FairMoney",
+  "030": "Globus Bank",
+  "302": "Taj Bank",
+  "090": "XPension",
+  "100": "Paycom",
+};
+
+function titleCase(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+/**
+ * The static fallback bank list, built from the `BANK_CODES` name→code map,
+ * de-duplicated by code and given a human-readable name where we have one.
+ * Used whenever the provider's bank list cannot be fetched.
+ */
+export function staticBanks(): Bank[] {
+  const seen = new Set<string>();
+  const banks: Bank[] = [];
+  for (const [key, code] of Object.entries(BANK_CODES)) {
+    if (seen.has(code)) continue;
+    seen.add(code);
+    banks.push({ code, name: BANK_DISPLAY_NAMES[code] ?? titleCase(key) });
+  }
+  return banks;
+}
+
+const BANK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+let bankCache: { at: number; banks: Bank[] } | null = null;
+
+/** Drop the in-process bank-list cache (used by tests and diagnostics). */
+export function clearBankCache(): void {
+  bankCache = null;
+}
+
+/**
+ * The bank list for the guided account-entry flow: the provider's live list
+ * (cached for 24h), falling back to the static `BANK_CODES` map when the
+ * provider call fails or returns nothing. The cache is only populated on a
+ * successful provider response so a transient outage is not sticky.
+ */
+export async function listBanks(provider?: ProviderAdapter): Promise<Bank[]> {
+  if (bankCache && Date.now() - bankCache.at < BANK_CACHE_TTL_MS) return bankCache.banks;
+  try {
+    const p = provider ?? (await resolveProvider());
+    const banks = await p.listBanks?.();
+    if (banks && banks.length) {
+      bankCache = { at: Date.now(), banks };
+      return banks;
+    }
+  } catch {
+    /* fall through to the static list */
+  }
+  return staticBanks();
 }

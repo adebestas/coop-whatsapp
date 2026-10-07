@@ -271,6 +271,7 @@ function fakeAdapter(overrides: Record<string, unknown> = {}) {
     })),
     cancelMandate: vi.fn(async () => ({ ok: true })),
     debitMandate: vi.fn(async () => ({ ok: true, providerRef: "TRX-1", status: "SUCCESSFUL" })),
+    resolveAccount: vi.fn(async () => ({ ok: true, name: "ADA OBI" })),
     verifyWebhook: () => true,
     parseNotification: () => null,
     ...overrides,
@@ -505,12 +506,32 @@ describe("mandate lifecycle service", () => {
     await handleMessage(m.phone, "mandate 60000");
 
     const session = await prisma.session.findUnique({ where: { phone: m.phone } });
-    expect(session?.state).toBe("awaiting_mandate_pin");
+    // The mandate flow now begins with the guided bank picker (Task 11).
+    expect(session?.state).toBe("awaiting_bank_account");
     const texts = vi
       .mocked(sendText)
       .mock.calls.map((c) => String(c[0].text))
       .join("\n");
     expect(texts).not.toMatch(/tier/i);
+  });
+
+  it("creates a mandate against the account confirmed in the bank-picker flow", async () => {
+    const coop = await createTestCoop("MND14");
+    const m = await createTestMember(coop.id, { phone: "2348000100014" });
+    await enableDirectDebit(coop.id);
+    vi.mocked(resolveProvider).mockResolvedValue(fakeAdapter());
+
+    await handleMessage(m.phone, "mandate 5000");
+    await handleMessage(m.phone, "0123456789"); // account number
+    await handleMessage(m.phone, "access"); // pick a bank
+    await handleMessage(m.phone, "yes"); // confirm the resolved name
+    await handleMessage(m.phone, "1234"); // PIN
+
+    const row = await prisma.mandate.findFirst({ where: { memberId: m.id } });
+    expect(row).not.toBeNull();
+    expect(row?.bankAccountNumber).toBe("0123456789");
+    expect(row?.bankCode).toBe("044");
+    expect(row?.accountName).toBe("ADA OBI");
   });
 });
 

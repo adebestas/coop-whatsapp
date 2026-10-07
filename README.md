@@ -74,7 +74,7 @@ tests/                   # vitest smoke tests
 | `support <issue>` | Open a support ticket with customer service |
 | `vote <election id> <member code>` | Vote in an open election |
 | `freeze` / `unfreeze` | Freeze your account so no money can leave, then lift it yourself |
-| `payees` / `addpayee <name> <account> <bank>` / `delpayee <name\|#>` | Save / list / remove favorite payout accounts (beneficiary memory) |
+| `payees` / `addpayee <name> <account>` / `delpayee <name\|#>` | Save / list / remove favorite payout accounts (beneficiary memory). Adding a payee uses the guided bank picker with account-name confirmation. |
 | `analytics` | Personal savings analytics (balance, totals, monthly rate, withdrawals, loans) |
 | `votediv <yes\|no>` | Vote on an open dividend-rate change ballot |
 | `statement <month\|year>` | Monthly or yearly statement |

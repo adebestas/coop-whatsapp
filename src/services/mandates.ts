@@ -75,6 +75,12 @@ export async function createMandate(
   memberId: string,
   cap: number,
   actor: MandateActor,
+  bank?: {
+    accountNumber: string;
+    bankCode: string;
+    bankName?: string | null;
+    accountName?: string | null;
+  },
 ): Promise<{ ok: boolean; message: string; mandateId?: string; authorizationUrl?: string }> {
   const config = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
   if (!config?.directDebitEnabled) {
@@ -83,7 +89,13 @@ export async function createMandate(
 
   const member = await prisma.member.findUnique({ where: { id: memberId } });
   if (!member) return { ok: false, message: "Member not found." };
-  if (!member.bankAccountNumber || !member.bankCode) {
+  // The account confirmed in the guided flow wins; otherwise fall back to the
+  // member's saved bank account (used by direct/programmatic callers).
+  const accountNumber = bank?.accountNumber ?? member.bankAccountNumber;
+  const bankCode = bank?.bankCode ?? member.bankCode;
+  const bankName = bank?.bankName ?? member.bankName;
+  const accountName = bank?.accountName ?? member.name;
+  if (!accountNumber || !bankCode) {
     return {
       ok: false,
       message: "Please add a bank account first. Reply *withdraw* to save one, then try again.",
@@ -119,9 +131,9 @@ export async function createMandate(
     memberName: member.name,
     memberEmail: member.email ?? `${member.phone}@coop.local`,
     memberPhone: member.phone,
-    accountNumber: member.bankAccountNumber,
-    bankCode: member.bankCode,
-    accountName: member.name,
+    accountNumber,
+    bankCode,
+    accountName,
     amountCap: cap,
     reference: providerReference,
     narration: "Cooperative savings/loan mandate",
@@ -155,10 +167,10 @@ export async function createMandate(
         providerReference,
         status: "pending",
         amountCap: cap,
-        bankAccountNumber: member.bankAccountNumber as string,
-        bankCode: member.bankCode as string,
-        bankName: member.bankName,
-        accountName: member.name,
+        bankAccountNumber: accountNumber,
+        bankCode,
+        bankName,
+        accountName,
         authorizationUrl: result.authorizationUrl ?? null,
       },
     });
@@ -173,7 +185,7 @@ export async function createMandate(
     targetType: "mandate",
     targetId: mandate.id,
     amount: cap,
-    detail: `${provider.name} cap ${formatBalance(cap)}`,
+    detail: `${provider.name} cap ${formatBalance(cap)} • ${bankName ?? bankCode} ****${accountNumber.slice(-4)}`,
   }).catch(() => {});
 
   const linkLine = result.authorizationUrl

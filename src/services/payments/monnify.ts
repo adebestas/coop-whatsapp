@@ -8,6 +8,7 @@ import type {
   PayoutNotification,
   ResolveAccountParams,
   ResolveAccountResult,
+  Bank,
   PayoutParams,
   PayoutResult,
   TransferStatus,
@@ -262,6 +263,22 @@ export const monnifyAdapter: ProviderAdapter = {
       return { ok: true, name: res.responseBody.accountName };
     } catch (err: any) {
       return { ok: false, error: err?.message ?? "resolution failed" };
+    }
+  },
+
+  async listBanks(): Promise<Bank[]> {
+    if (!configured()) return [];
+    try {
+      const res = await api<MonnifyResponse<Array<{ code: string; name: string }>>>(
+        "GET",
+        "/api/v1/banks",
+      );
+      if (!res.requestSuccessful || !Array.isArray(res.responseBody)) return [];
+      return res.responseBody
+        .map((b) => ({ code: String(b.code ?? ""), name: String(b.name ?? "") }))
+        .filter((b) => b.code && b.name);
+    } catch {
+      return [];
     }
   },
 

@@ -104,7 +104,7 @@ export async function canWithdraw(
 export async function requestWithdrawal(
   phone: string,
   amount: number,
-  bank?: { accountNumber: string; bankCode: string; bankName?: string },
+  bank?: { accountNumber: string; bankCode: string; bankName?: string; accountName?: string },
 ): Promise<WithdrawResult> {
   if (!Number.isFinite(amount) || amount <= 0) {
     return { ok: false, message: "Enter a valid amount, e.g. *withdraw 5000*." };
@@ -232,7 +232,14 @@ export async function requestWithdrawal(
 
     await tx.member.update({
       where: { id: member.id },
-      data: { bankAccountNumber: accNo, bankCode, bankName },
+      data: {
+        bankAccountNumber: accNo,
+        bankCode,
+        bankName,
+        // Persist the name confirmed in the guided bank-picker flow so future
+        // payouts can trust the destination (Zero-BVN identity assurance).
+        ...(bank?.accountName ? { bankAccountName: bank.accountName } : {}),
+      },
     });
 
     return {

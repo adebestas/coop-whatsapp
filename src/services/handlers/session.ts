@@ -1000,49 +1000,21 @@ export async function handleAwaitingInput(
       break;
     }
 
-    case "awaiting_withdraw_account": {
-      const account = text.trim().replace(/[^0-9]/g, "");
-      if (!/^\d{10}$/.test(account)) {
-        await sendText({
-          to: phone,
-          text: "Account numbers are 10 digits. Please re-enter, e.g. *0123456789*.",
-        });
-        return;
-      }
-      await prisma.session.upsert({
-        where: { phone },
-        create: {
-          phone,
-          state: "awaiting_withdraw_bank",
-          data: JSON.stringify({ ...data, withdrawAccount: account }),
-        },
-        update: {
-          state: "awaiting_withdraw_bank",
-          data: JSON.stringify({ ...data, withdrawAccount: account }),
-        },
-      });
-      await sendText({
-        to: phone,
-        text: `Which bank? (e.g. *Access*, *GTB*, *Zenith*, *UBA*, *Kuda*)`,
-      });
+    case "awaiting_bank_account": {
+      const { handleBankAccountStep } = await import("./money.js");
+      await handleBankAccountStep(phone, text, data);
       break;
     }
 
-    case "awaiting_withdraw_bank": {
-      const bank = resolveBankCode(text);
-      if (!bank) {
-        await sendText({
-          to: phone,
-          text: "We don't recognise that bank. Try e.g. *Access*, *GTB*, *Zenith*, *Kuda*, or the 5-digit bank code.",
-        });
-        return;
-      }
-      await issueSecretChallenge(
-        phone,
-        "awaiting_withdraw_pin",
-        { ...data, withdrawBankCode: bank.code, withdrawBankName: bank.name },
-        "Enter your 4-digit PIN to confirm the withdrawal.",
-      );
+    case "awaiting_bank_choice": {
+      const { handleBankChoiceStep } = await import("./money.js");
+      await handleBankChoiceStep(phone, text, data);
+      break;
+    }
+
+    case "awaiting_bank_confirm": {
+      const { handleBankConfirmStep } = await import("./money.js");
+      await handleBankConfirmStep(phone, text, data);
       break;
     }
 
@@ -1081,6 +1053,7 @@ export async function handleAwaitingInput(
               accountNumber: data.withdrawAccount,
               bankCode: data.withdrawBankCode,
               bankName: data.withdrawBankName,
+              accountName: data.bankAccountName,
             }
           : undefined;
       const result = await requestWithdrawal(phone, data.withdrawAmount ?? 0, bank);
@@ -1209,11 +1182,24 @@ export async function handleAwaitingInput(
         await issueSecretChallenge(phone, "awaiting_mandate_pin", data, msg);
         return;
       }
-      const result = await createMandate(member.cooperativeId, member.id, data.mandateCap ?? 0, {
-        id: member.id,
-        phone,
-        role: member.role,
-      });
+      const result = await createMandate(
+        member.cooperativeId,
+        member.id,
+        data.mandateCap ?? 0,
+        {
+          id: member.id,
+          phone,
+          role: member.role,
+        },
+        data.bankAccount && data.bankCode
+          ? {
+              accountNumber: data.bankAccount,
+              bankCode: data.bankCode,
+              bankName: data.bankName ?? null,
+              accountName: data.bankAccountName ?? null,
+            }
+          : undefined,
+      );
       await prisma.session.upsert({
         where: { phone },
         create: { phone, state: "idle" },

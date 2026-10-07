@@ -20,6 +20,9 @@ import {
 } from "../savings-products.js";
 import { listMandates } from "../mandates.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
+import { resolveProvider, listBanks, type Bank } from "../payments/index.js";
+import { savePayee } from "../../lib/beneficiaries.js";
+import type { FlowData } from "../conversation.js";
 
 export async function handleBalance(
   phone: string,
@@ -149,22 +152,7 @@ export async function handleWithdraw(phone: string, args: string[]): Promise<voi
     );
     return;
   }
-  await prisma.session.upsert({
-    where: { phone },
-    create: {
-      phone,
-      state: "awaiting_withdraw_account",
-      data: JSON.stringify({ withdrawAmount: amount }),
-    },
-    update: {
-      state: "awaiting_withdraw_account",
-      data: JSON.stringify({ withdrawAmount: amount }),
-    },
-  });
-  await sendText({
-    to: phone,
-    text: "Your savings will go to your bank account. What's your *bank account number*? (10 digits, e.g. *0123456789*)",
-  });
+  await startBankFlow(phone, "withdraw", { withdrawAmount: amount });
 }
 
 export async function handleLoan(phone: string, args: string[]): Promise<void> {
@@ -622,12 +610,8 @@ export async function handleMandate(phone: string, args: string[]): Promise<void
     });
     return;
   }
-  await issueSecretChallenge(
-    phone,
-    "awaiting_mandate_pin",
-    { mandateCap: cap },
-    `Authorize automatic debits of up to *${formatBalance(cap)}* per collection? Enter your 4-digit PIN to confirm.`,
-  );
+  // Guided account entry: account number -> bank list -> name confirm -> PIN.
+  await startBankFlow(phone, "mandate", { mandateCap: cap });
 }
 
 /** List the member's direct-debit mandates. */
@@ -718,4 +702,208 @@ export async function handleCancelMandate(phone: string, args: string[]): Promis
     { mandateId },
     `Cancel mandate *${mandateId}*? No further debits will be collected. Enter your 4-digit PIN to confirm.`,
   );
+}
+
+// ===== Guided bank-account entry (used by the mandate, withdrawal and payee flows) =====
+
+/** Persist a session state + data payload. */
+async function setSession(phone: string, state: string, data: FlowData): Promise<void> {
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state, data: JSON.stringify(data) },
+    update: { state, data: JSON.stringify(data) },
+  });
+}
+
+function bankListText(banks: Bank[]): string {
+  const lines = banks.map((b, i) => `${i + 1}. ${b.name}`);
+  return (
+    "Which bank is this account with? Reply with the *number* or type the *bank name*.\n\n" +
+    lines.join("\n")
+  );
+}
+
+/** Match a reply (list number, raw bank code, or a name substring) against the list. */
+function matchBank(banks: Bank[], input: string): Bank | null {
+  const q = input.trim().toLowerCase();
+  if (!q) return null;
+  if (/^\d+$/.test(q)) {
+    const idx = parseInt(q, 10);
+    if (idx >= 1 && idx <= banks.length) return banks[idx - 1];
+    return banks.find((b) => b.code === q) ?? null;
+  }
+  return banks.find((b) => b.name.toLowerCase().includes(q) || b.code === q) ?? null;
+}
+
+/** Fetch the bank list (cached, static fallback) and ask the member to pick one. */
+async function showBankList(phone: string, data: FlowData): Promise<void> {
+  const provider = await resolveProvider();
+  const banks = await listBanks(provider);
+  await setSession(phone, "awaiting_bank_choice", { ...data, bankChoices: banks });
+  await sendText({ to: phone, text: bankListText(banks) });
+}
+
+/**
+ * Start the guided account-entry flow. When the account number is already known
+ * (e.g. `addpayee <name> <account>`) it jumps straight to the bank list.
+ */
+export async function startBankFlow(
+  phone: string,
+  intent: "mandate" | "withdraw" | "payee",
+  data: FlowData,
+  account?: string,
+): Promise<void> {
+  const base: FlowData = { ...data, bankIntent: intent };
+  if (account) {
+    await showBankList(phone, { ...base, bankAccount: account });
+    return;
+  }
+  await setSession(phone, "awaiting_bank_account", base);
+  await sendText({
+    to: phone,
+    text: "What's your *bank account number*? (10 digits, e.g. *0123456789*)",
+  });
+}
+
+/** Step 1: the member typed their account number; list banks and ask them to pick. */
+export async function handleBankAccountStep(
+  phone: string,
+  text: string,
+  data: FlowData,
+): Promise<void> {
+  const account = text.trim().replace(/[^0-9]/g, "");
+  if (!/^\d{10}$/.test(account)) {
+    await sendText({
+      to: phone,
+      text: "Account numbers are 10 digits. Please re-enter, e.g. *0123456789*.",
+    });
+    return;
+  }
+  await showBankList(phone, { ...data, bankAccount: account });
+}
+
+/** Step 2: the member picked a bank; resolve the account name and ask to confirm. */
+export async function handleBankChoiceStep(
+  phone: string,
+  text: string,
+  data: FlowData,
+): Promise<void> {
+  const banks = data.bankChoices ?? [];
+  const picked = matchBank(banks, text);
+  if (!picked) {
+    await sendText({ to: phone, text: `We didn't catch that.\n\n${bankListText(banks)}` });
+    return;
+  }
+  const account = data.bankAccount ?? "";
+  const provider = await resolveProvider();
+  const resolved = await provider.resolveAccount?.({
+    accountNumber: account,
+    bankCode: picked.code,
+  });
+  if (!resolved?.ok || !resolved.name) {
+    await sendText({
+      to: phone,
+      text:
+        `We couldn't confirm the account name for *${picked.name}*. Please check the bank and try again.\n\n` +
+        bankListText(banks),
+    });
+    return;
+  }
+  await setSession(phone, "awaiting_bank_confirm", {
+    ...data,
+    bankCode: picked.code,
+    bankName: picked.name,
+    bankAccountName: resolved.name,
+  });
+  await sendText({
+    to: phone,
+    text:
+      `Bank: *${picked.name}*\n` +
+      `Account: ****${account.slice(-4)}\n` +
+      `Name on account: *${resolved.name}*\n\n` +
+      `Is this correct? Reply *yes* to continue or *cancel* to stop.`,
+  });
+}
+
+/** Step 3: the member confirmed the resolved name; continue the caller's flow. */
+export async function handleBankConfirmStep(
+  phone: string,
+  text: string,
+  data: FlowData,
+): Promise<void> {
+  const answer = text.trim().toLowerCase();
+  if (answer !== "yes" && answer !== "y") {
+    await setSession(phone, "idle", {});
+    await sendText({ to: phone, text: "Cancelled. Reply *menu* to see options." });
+    return;
+  }
+
+  if (data.bankIntent === "payee") {
+    const member = await getMemberByPhone(phone);
+    if (!member) {
+      await setSession(phone, "idle", {});
+      await sendText({
+        to: phone,
+        text: "You need to join a cooperative first. Reply *join <code>*.",
+      });
+      return;
+    }
+    const result = await savePayee(
+      member.id,
+      data.payeeName ?? "",
+      data.bankAccount ?? "",
+      data.bankCode ?? "",
+      data.bankName ?? null,
+    );
+    await setSession(phone, "idle", {});
+    await sendText({
+      to: phone,
+      text: result.ok
+        ? `✅ Payee *${result.payee.name}* saved (${data.bankName} ****${(data.bankAccount ?? "").slice(-4)} — ${data.bankAccountName}). Reply *payees* to see your list.`
+        : result.message,
+    });
+    return;
+  }
+
+  if (data.bankIntent === "withdraw") {
+    await issueSecretChallenge(
+      phone,
+      "awaiting_withdraw_pin",
+      {
+        ...data,
+        withdrawAccount: data.bankAccount,
+        withdrawBankCode: data.bankCode,
+        withdrawBankName: data.bankName,
+      },
+      `Withdraw ${formatBalance(data.withdrawAmount ?? 0)} to ${data.bankName} ****${(data.bankAccount ?? "").slice(-4)}? Enter your 4-digit PIN to confirm.`,
+    );
+    return;
+  }
+
+  // Default: direct-debit mandate — keep the existing PIN step.
+  await issueSecretChallenge(
+    phone,
+    "awaiting_mandate_pin",
+    data,
+    `Authorize automatic debits of up to *${formatBalance(data.mandateCap ?? 0)}* per collection? Enter your 4-digit PIN to confirm.`,
+  );
+}
+
+/** Save a favorite payee through the guided bank flow: account -> bank -> confirm. */
+export async function handleAddPayee(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const name = args[0];
+  const account = (args[1] ?? "").replace(/[^0-9]/g, "");
+  if (!name || !/^\d{10}$/.test(account)) {
+    await sendText({
+      to: phone,
+      text: "Usage: *addpayee <name> <account>*, e.g. *addpayee mama-ngozi 0123456789*. We'll confirm the account name.",
+    });
+    return;
+  }
+  await startBankFlow(phone, "payee", { payeeName: name }, account);
 }

@@ -13,7 +13,7 @@ import { getReserveInfo } from "./dividends.js";
 import { formatBalance } from "./cooperative.js";
 import { validateDeviceSession } from "../lib/security-hardening.js";
 import { isFrozen, freezeMessage, unfreezeMessage } from "../lib/freeze.js";
-import { savePayee, listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js";
+import { listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js";
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
 import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js";
 import { requestPhoneChange } from "./phone-change.js";
@@ -91,6 +91,7 @@ import {
   handleMandates,
   handleMandateStatus,
   handleCancelMandate,
+  handleAddPayee,
 } from "./handlers/money.js";
 import {
   handleValidateClaim,
@@ -156,11 +157,12 @@ export type BotState =
   | "awaiting_guarantor_1"
   | "awaiting_guarantor_2"
   | "awaiting_withdraw_amount"
-  | "awaiting_withdraw_account"
-  | "awaiting_withdraw_bank"
   | "awaiting_withdraw_pin"
   | "awaiting_repay_pin"
   | "awaiting_buyshares_pin"
+  | "awaiting_bank_account"
+  | "awaiting_bank_choice"
+  | "awaiting_bank_confirm"
   | "awaiting_mandate_pin"
   | "awaiting_cancelmandate_pin"
   | "awaiting_death_cert"
@@ -207,6 +209,14 @@ export const FlowDataSchema = z.object({
   withdrawAccount: z.string().optional(),
   withdrawBankCode: z.string().optional(),
   withdrawBankName: z.string().optional(),
+  // Guided bank-account entry (mandate / withdrawal / payee).
+  bankIntent: z.string().optional(),
+  bankAccount: z.string().optional(),
+  bankCode: z.string().optional(),
+  bankName: z.string().optional(),
+  bankAccountName: z.string().optional(),
+  payeeName: z.string().optional(),
+  bankChoices: z.array(z.object({ code: z.string(), name: z.string() })).optional(),
   deathClaimId: z.string().optional(),
   aiCommand: z.string().optional(),
   aiArgs: z.array(z.string()).optional(),
@@ -658,23 +668,7 @@ async function handleMessageInner(
         });
         break;
       }
-      const name = args[0];
-      const acct = args[1];
-      const bank = args[2];
-      if (!name || !acct || !bank) {
-        await sendText({
-          to: phone,
-          text: "Usage: *addpayee <name> <account> <bank>*, e.g. *addpayee mama-ngozi 0123456789 gtb*.",
-        });
-        break;
-      }
-      const result = await savePayee(member.id, name, acct, bank);
-      await sendText({
-        to: phone,
-        text: result.ok
-          ? `✅ Payee *${result.payee.name}* saved. Reply *payees* to see your list.`
-          : result.message,
-      });
+      await handleAddPayee(phone, args);
       break;
     }
 
