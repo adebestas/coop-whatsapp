@@ -120,6 +120,11 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
     const msg = "Payment provider has no account resolver — can't verify the bank account.";
     await opts.onFailure?.("failed", "provider has no resolver");
     await notify(member, msg);
+    await alertSupers(
+      member.cooperativeId,
+      `🛑 Payout *held* for ${member.name} — ${formatBalance(opts.amount)} NOT sent: the payment provider has no account resolver, so the destination account can't be verified.`,
+      AlertSeverity.CRITICAL,
+    ).catch(() => {});
     return { ok: false, status: "failed", message: msg };
   }
 
@@ -140,12 +145,22 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
     const msg = `Not paid out: the account name (*${confirm.name}*) does not match your registered name (*${member.name}*). Admin must verify before paying.`;
     await opts.onFailure?.("name_mismatch", `account name is "${confirm.name}"`);
     await notify(member, msg);
+    await alertSupers(
+      member.cooperativeId,
+      `🛑 Payout *held* for ${member.name} — ${formatBalance(opts.amount)} NOT sent: name mismatch. The bank account resolves to *${confirm.name}*, not the registered *${member.name}*. Verify the bank details before retrying.`,
+      AlertSeverity.CRITICAL,
+    ).catch(() => {});
     return { ok: false, status: "name_mismatch", message: msg };
   }
 
   const msg = `Not paid out: could not verify the account (${confirm.error ?? "unknown error"}). Check the bank details.`;
   await opts.onFailure?.("failed", confirm.error ?? "resolution failed");
   await notify(member, msg);
+  await alertSupers(
+    member.cooperativeId,
+    `🛑 Payout *held* for ${member.name} — ${formatBalance(opts.amount)} NOT sent: the destination account could not be resolved (${confirm.error ?? "unknown error"}).`,
+    AlertSeverity.CRITICAL,
+  ).catch(() => {});
   return { ok: false, status: "failed", message: msg };
 }
 
@@ -223,7 +238,7 @@ async function payOut(
           status: "successful",
           provider: provider.name,
           providerRef,
-          note: opts.note,
+          note: verifiedName ? `${opts.note} · confirmed: ${verifiedName}` : opts.note,
           memberId: member.id,
           cooperativeId: member.cooperativeId,
         },

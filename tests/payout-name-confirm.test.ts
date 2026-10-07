@@ -151,6 +151,7 @@ describe("sendToBank confirmation (withdrawal/refund/dividend shared path)", () 
   it("holds the payout and alerts on a name mismatch", async () => {
     const coop = await makeCoop("PNC1");
     const member = await makeMember(PHONE, coop.id, { name: "Ada Obi" });
+    await makeMember("2348079999999", coop.id, { role: "superadmin" });
     paymentState.resolveName = "SADE BALOGUN";
 
     const result = await sendToBank({
@@ -165,6 +166,9 @@ describe("sendToBank confirmation (withdrawal/refund/dividend shared path)", () 
     expect(result.status).toBe("name_mismatch");
     expect(await prisma.payout.count()).toBe(0);
     expect(allTexts()).toMatch(/does not match/i);
+    // A super admin is alerted that money was held (not just the member).
+    expect(allTexts()).toMatch(/held/i);
+    expect(allTexts()).toContain("Ada Obi");
   });
 
   it("holds the payout (fail-closed) when the account cannot be resolved", async () => {
@@ -202,6 +206,8 @@ describe("sendToBank confirmation (withdrawal/refund/dividend shared path)", () 
     const payout = await prisma.payout.findFirst({ where: { memberId: member.id } });
     expect(payout).not.toBeNull();
     expect(payout!.note).toContain("Dividend");
+    // The provider-confirmed name is persisted on the payout.
+    expect(payout!.note).toContain("confirmed: ADA OBI");
   });
 });
 

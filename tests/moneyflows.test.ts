@@ -72,6 +72,8 @@ beforeEach(async () => {
   paymentState.resolveName = "ADA OBI";
   paymentState.resolveFails = false;
   paymentState.payoutFails = false;
+  paymentState.payoutPending = false;
+  paymentState.transferStatus = "unknown";
   for (const m of [
     "coopPost",
     "deductionItem",
