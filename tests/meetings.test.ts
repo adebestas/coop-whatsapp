@@ -14,6 +14,7 @@ import {
   quorumMet,
   startMeeting,
 } from "../src/services/meetings.js";
+import { exportMeetingMinutes } from "../src/services/exports.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { sendText } from "../src/lib/messaging.js";
 
@@ -204,6 +205,63 @@ describe("meeting service", () => {
     expect(q.met).toBe(true);
   });
 
+  it("rejects a motion when quorum is not met, with a clear no-quorum note", async () => {
+    const coop = await createTestCoop("MTG10");
+    const admin = await createTestMember(coop.id, SUPER);
+    const a = await createTestMember(coop.id, { phone: "2348010000070", name: "Ada" });
+    await createTestMember(coop.id, { phone: "2348010000071", name: "Bola" });
+    await createTestMember(coop.id, { phone: "2348010000072", name: "Chidi" });
+    const actor = { phone: admin.phone, id: admin.id, role: "superadmin" };
+
+    const started = await startMeeting(coop.id, "agm", "No-quorum AGM", 50, actor);
+    const meetingId = started.meetingId!;
+    await openMeeting(coop.id, meetingId, actor);
+
+    // Only one of five active members attends — far below the 50% quorum.
+    await attendMeeting(coop.id, meetingId, a.id);
+    const q = await quorumMet(coop.id, meetingId);
+    expect(q.met).toBe(false);
+    expect(q.eligible).toBe(4);
+
+    const motion = await addMotion(coop.id, meetingId, "Unquake motion", "Desc", "general", actor);
+    const motionId = motion.motionId!;
+    await castMotionVote(coop.id, motionId, a.id, "yes");
+
+    const closed = await closeMotion(coop.id, motionId, actor);
+    expect(closed.ok).toBe(true);
+    expect(closed.passed).toBe(false);
+    expect(closed.status).toBe("rejected");
+    expect(closed.quorumMet).toBe(false);
+    expect(closed.message.toLowerCase()).toContain("no quorum");
+    expect((await prisma.motion.findUnique({ where: { id: motionId } }))!.status).toBe("rejected");
+  });
+
+  it("passes a motion on a yes-majority once quorum is met", async () => {
+    const coop = await createTestCoop("MTG11");
+    const admin = await createTestMember(coop.id, SUPER);
+    const a = await createTestMember(coop.id, { phone: "2348010000080", name: "Ada" });
+    const b = await createTestMember(coop.id, { phone: "2348010000081", name: "Bola" });
+    await createTestMember(coop.id, { phone: "2348010000082", name: "Chidi" });
+    const actor = { phone: admin.phone, id: admin.id, role: "superadmin" };
+
+    const started = await startMeeting(coop.id, "agm", "Quorate AGM", 50, actor);
+    const meetingId = started.meetingId!;
+    await openMeeting(coop.id, meetingId, actor);
+    await attendMeeting(coop.id, meetingId, a.id);
+    await attendMeeting(coop.id, meetingId, b.id);
+
+    const motion = await addMotion(coop.id, meetingId, "Quorate motion", "Desc", "bylaw", actor);
+    const motionId = motion.motionId!;
+    await castMotionVote(coop.id, motionId, a.id, "yes");
+    await castMotionVote(coop.id, motionId, b.id, "yes");
+
+    const closed = await closeMotion(coop.id, motionId, actor);
+    expect(closed.ok).toBe(true);
+    expect(closed.passed).toBe(true);
+    expect(closed.quorumMet).toBe(true);
+    expect(closed.message.toLowerCase()).toContain("passed");
+  });
+
   it("lists meetings and motions for members", async () => {
     const coop = await createTestCoop("MTG06");
     const admin = await createTestMember(coop.id, SUPER);
@@ -227,6 +285,73 @@ describe("meeting service", () => {
     expect(actions).toEqual(
       expect.arrayContaining(["meeting.schedule", "meeting.open", "motion.add"]),
     );
+  });
+});
+
+describe("meeting minutes", () => {
+  it("records attendees, motions, tallies and resolutions", async () => {
+    const coop = await createTestCoop("MTG12");
+    const admin = await createTestMember(coop.id, SUPER);
+    const a = await createTestMember(coop.id, { phone: "2348010000090", name: "Ada Obi" });
+    const b = await createTestMember(coop.id, { phone: "2348010000091", name: "Bola Ade" });
+    const actor = { phone: admin.phone, id: admin.id, role: "superadmin" };
+
+    const started = await startMeeting(coop.id, "agm", "Minutes AGM", 25, actor);
+    const meetingId = started.meetingId!;
+    await openMeeting(coop.id, meetingId, actor);
+    await attendMeeting(coop.id, meetingId, a.id);
+    await attendMeeting(coop.id, meetingId, b.id);
+
+    const motion = await addMotion(
+      coop.id,
+      meetingId,
+      "Approve accounts",
+      "Adopt the 2025 accounts",
+      "general",
+      actor,
+    );
+    await castMotionVote(coop.id, motion.motionId!, a.id, "yes");
+    await castMotionVote(coop.id, motion.motionId!, b.id, "yes");
+    const closed = await closeMotion(coop.id, motion.motionId!, actor);
+    expect(closed.passed).toBe(true);
+    await closeMeeting(coop.id, meetingId, actor);
+
+    const mins = await meetingMinutes(coop.id, meetingId);
+    expect(mins.ok).toBe(true);
+    expect(mins.message).toContain("Attendance");
+    expect(mins.message).toContain("Ada Obi");
+    expect(mins.message).toContain("Bola Ade");
+    expect(mins.message).toContain("Approve accounts");
+    expect(mins.message).toContain("2 yes");
+    expect(mins.message).toContain("Resolutions");
+    expect(mins.message).toContain("carried");
+  });
+
+  it("exports the minutes to downloadable files", async () => {
+    const coop = await createTestCoop("MTG13");
+    const admin = await createTestMember(coop.id, SUPER);
+    const a = await createTestMember(coop.id, { phone: "2348010000092", name: "Ada Obi" });
+    const actor = { phone: admin.phone, id: admin.id, role: "superadmin" };
+
+    const started = await startMeeting(coop.id, "agm", "Export AGM", 25, actor);
+    const meetingId = started.meetingId!;
+    await openMeeting(coop.id, meetingId, actor);
+    await attendMeeting(coop.id, meetingId, a.id);
+    await addMotion(coop.id, meetingId, "Exported motion", "Desc", "general", actor);
+    await closeMeeting(coop.id, meetingId, actor);
+
+    const res = await exportMeetingMinutes(
+      { id: admin.id, name: admin.name, email: null, cooperativeId: coop.id },
+      meetingId,
+      "http://localhost:3000",
+    );
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("/api/export/");
+    expect(res.files?.length).toBeGreaterThan(0);
+    const { stat } = await import("node:fs/promises");
+    for (const f of res.files ?? []) {
+      expect((await stat(f)).size).toBeGreaterThan(100);
+    }
   });
 });
 

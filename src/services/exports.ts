@@ -9,6 +9,7 @@ import { prisma } from "../lib/prisma.js";
 import { computePnl } from "./ledger.js";
 import { uploadToS3 } from "../lib/s3.js";
 import { audit } from "./audit.js";
+import { quorumMet, resolveMeeting } from "./meetings.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
 
@@ -109,7 +110,128 @@ export async function runExport(
   };
 }
 
+/**
+ * Export a meeting's minutes (attendance, motions, tallies, resolutions) to
+ * Excel + PDF, reusing the shared export pipeline, and return download links.
+ * Mirrors `runExport` but is scoped to a single meeting.
+ */
+export async function exportMeetingMinutes(
+  requester: { id: string; name: string; email: string | null; cooperativeId: string },
+  meetingId: string,
+  appBaseUrl: string,
+): Promise<ExportResult> {
+  const meeting = await resolveMeeting(requester.cooperativeId, meetingId);
+  if (!meeting) return { ok: false, message: "Meeting not found. Check the id and try again." };
+
+  await mkdir(EXPORT_DIR, { recursive: true });
+  const token = randomBytes(16).toString("hex");
+  const coop = await prisma.cooperative.findUnique({ where: { id: requester.cooperativeId } });
+  const sheet = await minutesData(meeting);
+
+  const base = `meetingminutes-${token.slice(0, 8)}`;
+  const xlsxName = `${base}.xlsx`;
+  const pdfName = `${base}.pdf`;
+
+  await writeXlsx(join(EXPORT_DIR, xlsxName), sheet);
+  await writePdf(
+    join(EXPORT_DIR, pdfName),
+    `${coop?.name ?? "Cooperative"} — Minutes: ${meeting.title}`,
+    sheet,
+  );
+
+  const s3Keys: string[] = [];
+  for (const fileName of [xlsxName, pdfName]) {
+    const s3Key = `exports/${requester.cooperativeId}/${fileName}`;
+    if (await uploadToS3(join(EXPORT_DIR, fileName), s3Key)) s3Keys.push(s3Key);
+  }
+
+  await audit({
+    cooperativeId: requester.cooperativeId,
+    actorId: requester.id,
+    actorPhone: "export",
+    actorRole: "admin",
+    action: "meeting.minutes_export",
+    targetType: "meeting",
+    targetId: meeting.id,
+    detail: `minutes exported for "${meeting.title}"`,
+  });
+
+  const links = [
+    `📊 Excel: ${appBaseUrl}/api/export/${xlsxName}`,
+    `📄 PDF: ${appBaseUrl}/api/export/${pdfName}`,
+  ];
+  const storage = s3Keys.length === 2 ? "S3" : s3Keys.length === 1 ? "S3 (partial)" : "local";
+  return {
+    ok: true,
+    message: `📜 *Minutes export* ready (stored on ${storage}):\n${links.join("\n")}`,
+    files: [join(EXPORT_DIR, xlsxName), join(EXPORT_DIR, pdfName)],
+  };
+}
+
 // ---------- data builders ----------
+
+async function minutesData(meeting: {
+  id: string;
+  cooperativeId: string;
+  title: string;
+  type: string;
+  status: string;
+  quorumPercent: number;
+  createdAt: Date;
+}): Promise<{ name: string; rows: string[][] }> {
+  const [attendance, motions, quorum] = await Promise.all([
+    prisma.meetingAttendance.findMany({
+      where: { meetingId: meeting.id, present: true },
+      include: {
+        member: { select: { name: true, code: true } },
+        proxyForMember: { select: { name: true } },
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.motion.findMany({
+      where: { meetingId: meeting.id },
+      include: { votes: { select: { choice: true } } },
+      orderBy: { createdAt: "asc" },
+    }),
+    quorumMet(meeting.cooperativeId, meeting.id),
+  ]);
+
+  const carried = motions.filter((m) => m.status === "passed");
+
+  const rows: string[][] = [
+    ["Minutes", meeting.title],
+    ["Type", meeting.type.toUpperCase()],
+    ["Status", meeting.status],
+    ["Called", meeting.createdAt.toISOString().slice(0, 10)],
+    [
+      "Quorum",
+      `${quorum.present}/${quorum.eligible} present — ${quorum.met ? "met" : "NOT met"} (required ${quorum.required}, ${meeting.quorumPercent}%)`,
+    ],
+    [],
+    ["Attendance"],
+    ["Name", "Code", "Basis"],
+    ...attendance.map((row) => [
+      row.member.name,
+      row.member.code,
+      row.proxyForMember ? `proxy of ${row.proxyForMember.name}` : "in person",
+    ]),
+    [],
+    ["Motions"],
+    ["Title", "Kind", "Status", "Yes", "No", "Abstain"],
+    ...motions.map((m) => [
+      m.title,
+      m.kind,
+      m.status,
+      String(m.votes.filter((v) => v.choice === "yes").length),
+      String(m.votes.filter((v) => v.choice === "no").length),
+      String(m.votes.filter((v) => v.choice === "abstain").length),
+    ]),
+    [],
+    ["Resolutions (carried)"],
+    ...carried.map((m) => [m.title]),
+  ];
+  return { name: "Minutes", rows };
+}
 
 async function membersData(cooperativeId: string): Promise<{ name: string; rows: string[][] }> {
   const members = await prisma.member.findMany({

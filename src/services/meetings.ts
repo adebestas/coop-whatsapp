@@ -81,7 +81,7 @@ function isValidVoteChoice(choice: string): choice is VoteChoice {
  * Resolve a meeting by full id or a trailing id fragment (commands accept the
  * short 6-char suffix shown in listings), scoped to the cooperative.
  */
-async function resolveMeeting(coopId: string, ref: string) {
+export async function resolveMeeting(coopId: string, ref: string) {
   const clean = (ref ?? "").trim();
   if (!clean) return null;
   return prisma.meeting.findFirst({
@@ -552,7 +552,9 @@ export async function closeMotion(
       message: `✅ Motion *${motion.title}* has *passed* (${tally}).`,
     };
   }
-  const reason = quorum.met ? "majority not reached" : "quorum not met";
+  const reason = quorum.met
+    ? "majority not reached"
+    : `no quorum (${quorum.present}/${quorum.eligible} present, ${quorum.required} required)`;
   return {
     ok: true,
     motionId: motion.id,
@@ -708,6 +710,9 @@ export async function meetingMinutes(
     return `*${m.title}* (${m.kind}) — ${m.status.toUpperCase()}\n   ${yes} yes · ${no} no · ${abstain} abstain`;
   });
 
+  const carried = motions.filter((m) => m.status === "passed");
+  const resolutionLines = carried.map((m) => `• ${m.title} — *carried*`);
+
   const lines = [
     `*📜 Minutes — ${meeting.title}*`,
     `Type: ${meeting.type.toUpperCase()} · Status: ${meeting.status}`,
@@ -720,6 +725,9 @@ export async function meetingMinutes(
     "",
     `*Motions (${motions.length}):*`,
     motionLines.length > 0 ? motionLines.join("\n\n") : "• none tabled",
+    "",
+    `*Resolutions (${carried.length}) — carried:*`,
+    resolutionLines.length > 0 ? resolutionLines.join("\n") : "• none carried",
   ];
 
   return { ok: true, message: lines.join("\n") };

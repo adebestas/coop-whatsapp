@@ -460,6 +460,35 @@ elections). Members add candidates (`candidate <id> <code>`) and vote
 restricted to unit members. `closevote <id>` tallies the result; the winner of
 a unit election is automatically installed as that unit's admin.
 
+## General meetings (AGM/SGM)
+
+Cooperatives can run **Annual General Meetings** (`agm`) and **Special General
+Meetings** (`sgm`) entirely through chat.
+
+- **Schedule** — an admin calls `startmeeting <agm|sgm> <title> [quorum%]`. The
+  quorum defaults to the cooperative's `agmQuorumPercent` (25% unless
+  configured).
+- **Open & attend** — `openmeeting <id>` moves the meeting to *open*, then
+  members mark themselves present with `attend <id>`. Attendance is
+  per-meeting and idempotent.
+- **Proxies** — a present member may carry another's vote with
+  `proxy <id> <member code>`. The represented member's attendance row records
+  the proxy holder, and **both count toward quorum**.
+- **Quorum** — quorum is met when attendance *including proxies* reaches
+  `quorumPercent`% of **active** members (pending/suspended members are not
+  counted).
+- **Motions** — admins table motions with
+  `addmotion <id> <title> | <description> [general|bylaw|dividend|election]`.
+  Present members vote `motionvote <id> yes|no|abstain` (one vote each;
+  non-attendees cannot vote).
+- **Close & tally** — `closemotion <id>` tallies the votes. A motion **passes
+  only when quorum is met and yes exceeds no**; otherwise it is *rejected* with
+  a clear no-quorum or no-majority note. `closemeeting <id>` closes the floor.
+- **Minutes & export** — `meetingminutes <id>` prints the minutes (type,
+  quorum, attendance, motions, tallies and carried resolutions) and generates a
+  downloadable **Excel + PDF** export via the shared export pipeline
+  (`/api/export/<file>`).
+
 ## Payment provider failover
 
 Top-ups and payouts run through **Monnify** (primary) with **Paystack** as the

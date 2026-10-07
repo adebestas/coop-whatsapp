@@ -57,7 +57,7 @@ import {
 } from "./payanyone.js";
 import { startBuyPoll, addPollOption, closeBuyPoll, listBuyPolls } from "./buypoll.js";
 import { payrollOverview, runPayroll, setSalary } from "./payroll.js";
-import { runExport, type ExportKind } from "./exports.js";
+import { runExport, exportMeetingMinutes, type ExportKind } from "./exports.js";
 import { checkDailyPayoutLimit, checkVelocity } from "./fraud.js";
 import { runBackup } from "./backup.js";
 import { runReconciliation } from "./reconcile.js";
@@ -2974,6 +2974,15 @@ export async function handleAdminCommand(
         }
         const minutesRes = await meetingMinutes(coopId, minutesId);
         await sendText({ to: phone, text: minutesRes.message });
+        if (minutesRes.ok) {
+          const baseUrl = process.env.APP_URL ?? `http://localhost:${process.env.PORT ?? "3000"}`;
+          const exportRes = await exportMeetingMinutes(
+            { id: admin.id, name: admin.name, email: admin.email ?? null, cooperativeId: coopId },
+            minutesId,
+            baseUrl,
+          );
+          if (exportRes.ok) await sendText({ to: phone, text: exportRes.message });
+        }
         return true;
       }
 
