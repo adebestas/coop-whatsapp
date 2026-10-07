@@ -238,7 +238,12 @@ export async function cleanupDatabase(): Promise<void> {
 
   await prisma.$executeRawUnsafe(`PRAGMA foreign_keys = OFF`);
   try {
-    for (const table of tables) {
+    // Delete children before parents. sqlite_master lists tables in creation
+    // order (parents first), so reverse it. This is FK-safe even when the
+    // `foreign_keys = OFF` pragma lands on a different pooled connection than
+    // the DELETEs (Prisma uses a connection pool, so the pragma is not
+    // guaranteed to apply to every connection).
+    for (const table of [...tables].reverse()) {
       await prisma.$executeRawUnsafe(`DELETE FROM "${table.name}"`);
     }
   } finally {
