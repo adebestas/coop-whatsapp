@@ -10,6 +10,7 @@ import { paystackAdapter } from "../src/services/payments/paystack.js";
 import { resolveProvider } from "../src/services/payments/index.js";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import { handleMessage } from "../src/services/conversation.js";
+import { handleAdminCommand } from "../src/services/admin.js";
 import { sendText } from "../src/lib/messaging.js";
 import {
   createMandate,
@@ -510,5 +511,107 @@ describe("mandate lifecycle service", () => {
       .mock.calls.map((c) => String(c[0].text))
       .join("\n");
     expect(texts).not.toMatch(/tier/i);
+  });
+});
+
+// ===== Task 8: admin view + pause commands =====
+
+describe("mandate admin commands", () => {
+  beforeEach(async () => {
+    await cleanupDatabase();
+  });
+
+  it("lists the cooperative's mandates for an admin", async () => {
+    const coop = await createTestCoop("MNADM1");
+    const admin = await createTestMember(coop.id, { phone: "2348000300001", role: "superadmin" });
+    const m = await createTestMember(coop.id, {
+      phone: "2348000300002",
+      name: "Ada Obi",
+    });
+    const mandate = await seedMandate(coop.id, m.id);
+
+    vi.clearAllMocks();
+    const handled = await handleAdminCommand(admin.phone, "mandates", []);
+    expect(handled).toBe(true);
+
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => String(c[0].text))
+      .join("\n");
+    expect(texts).toMatch(/Ada Obi/);
+    expect(texts).toMatch(mandate.id.slice(-6));
+  });
+
+  it("refuses mandate administration to a plain member", async () => {
+    const coop = await createTestCoop("MNADM2");
+    const m = await createTestMember(coop.id, { phone: "2348000300011" });
+    await seedMandate(coop.id, m.id);
+
+    const handled = await handleAdminCommand(m.phone, "mandates", []);
+    expect(handled).toBe(false);
+  });
+
+  it("pauses the whole mandate and resumes it", async () => {
+    const coop = await createTestCoop("MNADM3");
+    const admin = await createTestMember(coop.id, { phone: "2348000300021", role: "superadmin" });
+    const m = await createTestMember(coop.id, { phone: "2348000300022" });
+    const mandate = await seedMandate(coop.id, m.id);
+
+    await handleAdminCommand(admin.phone, "pausemandate", [mandate.id]);
+    expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe("paused");
+
+    await handleAdminCommand(admin.phone, "resumemandate", [mandate.id]);
+    expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe(
+      "active",
+    );
+  });
+
+  it("pauses and resumes a single purpose", async () => {
+    const coop = await createTestCoop("MNADM4");
+    const admin = await createTestMember(coop.id, { phone: "2348000300031", role: "superadmin" });
+    const m = await createTestMember(coop.id, { phone: "2348000300032" });
+    const mandate = await seedMandate(coop.id, m.id);
+
+    await handleAdminCommand(admin.phone, "pausemandate", [mandate.id, "savings"]);
+    let row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.pausedPurposes.split(",")).toContain("savings");
+    expect(row?.status).toBe("active");
+
+    await handleAdminCommand(admin.phone, "resumemandate", [mandate.id, "savings"]);
+    row = await prisma.mandate.findUnique({ where: { id: mandate.id } });
+    expect(row?.pausedPurposes.split(",")).not.toContain("savings");
+  });
+
+  it("skips a pending debit", async () => {
+    const coop = await createTestCoop("MNADM5");
+    const admin = await createTestMember(coop.id, { phone: "2348000300041", role: "superadmin" });
+    const m = await createTestMember(coop.id, { phone: "2348000300042" });
+    const mandate = await seedMandate(coop.id, m.id);
+    const debit = await prisma.mandateDebit.create({
+      data: {
+        mandateId: mandate.id,
+        cooperativeId: coop.id,
+        memberId: m.id,
+        purpose: "savings",
+        amount: 50_000,
+        status: "pending",
+        providerRef: "DD-ADMINSKIP-1",
+      },
+    });
+
+    await handleAdminCommand(admin.phone, "skipdebit", [debit.id]);
+    expect((await prisma.mandateDebit.findUnique({ where: { id: debit.id } }))?.status).toBe(
+      "skipped",
+    );
+  });
+
+  it("accepts a mandate id suffix", async () => {
+    const coop = await createTestCoop("MNADM6");
+    const admin = await createTestMember(coop.id, { phone: "2348000300051", role: "superadmin" });
+    const m = await createTestMember(coop.id, { phone: "2348000300052" });
+    const mandate = await seedMandate(coop.id, m.id);
+
+    await handleAdminCommand(admin.phone, "pausemandate", [mandate.id.slice(-6)]);
+    expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe("paused");
   });
 });

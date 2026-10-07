@@ -47,6 +47,7 @@ import { revokeMemberSessions, unrevokeMemberSessions } from "./revocation.js";
 import { approvePhoneChange, rejectPhoneChange } from "./phone-change.js";
 import { requestManualCredit, approveManualCredit, rejectManualCredit } from "./manualcredit.js";
 import { startDeathClaim, setClaimBank, approveClaim, rejectClaim } from "./deathclaims.js";
+import { listCoopMandates, pauseMandate, resumeMandate, skipDebit } from "./mandates.js";
 import { audit, recentAudit } from "./audit.js";
 import { computePnl, getMonthlySummary, recordLedger } from "./ledger.js";
 import {
@@ -2941,6 +2942,97 @@ export async function handleAdminCommand(
           to: phone,
           text: `*Open Grievances*\n\n${gBody}\n\nResolve with *resolve <id> <response>*`,
         });
+        return true;
+      }
+
+      case "mandates": {
+        const listed = await listCoopMandates(coopId);
+        const rows = listed.mandates ?? [];
+        if (rows.length === 0) {
+          await sendText({ to: phone, text: "No direct-debit mandates yet. ✅" });
+          return true;
+        }
+        const owners = await prisma.member.findMany({
+          where: { id: { in: [...new Set(rows.map((r) => r.memberId))] } },
+          select: { id: true, name: true },
+        });
+        const ownerName = new Map(owners.map((o) => [o.id, o.name]));
+        const body = rows
+          .map((r) => {
+            const paused = r.pausedPurposes
+              .split(",")
+              .map((p) => p.trim())
+              .filter(Boolean);
+            const state =
+              r.status === "active" && paused.length > 0
+                ? `active (paused: ${paused.join(", ")})`
+                : r.status;
+            const ref = r.id.slice(-6);
+            return (
+              `• *${ref}* — ${ownerName.get(r.memberId) ?? "member"} — *${state}* — cap ${formatBalance(r.amountCap)}\n` +
+              `   Pause: *pausemandate ${ref}* · Resume: *resumemandate ${ref}*`
+            );
+          })
+          .join("\n");
+        await sendText({
+          to: phone,
+          text: `*Direct-debit mandates (${rows.length})*\n\n${body}`,
+        });
+        return true;
+      }
+
+      case "pausemandate":
+      case "resumemandate": {
+        const ref = args[0];
+        if (!ref) {
+          await sendText({
+            to: phone,
+            text: `Usage: *${cmd} <mandate id> [savings|loan|group]*.`,
+          });
+          return true;
+        }
+        const target = await prisma.mandate.findFirst({
+          where: {
+            cooperativeId: coopId,
+            OR: [{ id: ref }, { id: { startsWith: ref } }, { id: { endsWith: ref } }],
+          },
+        });
+        if (!target) {
+          await sendText({ to: phone, text: "Mandate not found." });
+          return true;
+        }
+        const purpose = args[1]?.trim().toLowerCase() || null;
+        const mandateActor = { id: admin.id, phone, role: admin.role };
+        const result =
+          cmd === "pausemandate"
+            ? await pauseMandate(coopId, target.id, purpose, mandateActor)
+            : await resumeMandate(coopId, target.id, purpose, mandateActor);
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "skipdebit": {
+        const ref = args[0];
+        if (!ref) {
+          await sendText({ to: phone, text: "Usage: *skipdebit <debit id>*." });
+          return true;
+        }
+        const target = await prisma.mandateDebit.findFirst({
+          where: {
+            cooperativeId: coopId,
+            OR: [{ id: ref }, { id: { startsWith: ref } }, { id: { endsWith: ref } }],
+          },
+        });
+        if (!target) {
+          await sendText({ to: phone, text: "Debit not found." });
+          return true;
+        }
+        const result = await skipDebit(coopId, target.id, {
+          id: admin.id,
+          phone,
+          role: admin.role,
+        });
+        await sendText({ to: phone, text: result.message });
         return true;
       }
 

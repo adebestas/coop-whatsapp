@@ -203,6 +203,9 @@ export function buildAdminMenu(): string {
     `• *claimbank* — set claim bank\n` +
     `• *tickets* — list support tickets\n` +
     `• *grievances* — list grievances\n` +
+    `• *mandates* — list members' direct-debit mandates\n` +
+    `• *pausemandate <id> [purpose]* / *resumemandate <id> [purpose]* — pause/resume debits\n` +
+    `• *skipdebit <id>* — skip one pending direct debit\n` +
     `• *resolve <id> <response>* — resolve ticket/grievance\n` +
     `• *startvote unit|exec ...* — start an election\n` +
     `• *candidate* — add election candidate\n` +

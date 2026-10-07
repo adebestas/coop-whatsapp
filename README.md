@@ -54,6 +54,9 @@ tests/                   # vitest smoke tests
 | `save <amount>` | Get your personal funding account, then transfer that amount — your wallet is credited when the transfer confirms (e.g. `save 2000`) |
 | `withdraw <amount>` | Withdraw up to 45% of savings to your bank account |
 | `plan <amount> <weekly\|monthly>` | Set a recurring contribution plan |
+| `mandate <cap>` | Authorize automatic bank direct debits up to a cap (returns a bank consent link) |
+| `mandates` / `mandatestatus <id>` | View your direct-debit mandates |
+| `cancelmandate <id>` | Cancel a direct-debit mandate |
 | `fund` | Get your personal virtual account number for top-ups |
 | `loan <amount> <months>` | Apply for a loan (e.g. `loan 50000 3`) |
 | `repay` | Pay the monthly installment on your active loan |
@@ -149,6 +152,9 @@ committee.
 | `rejectwithdraw <id>` | admin + super | Reject a withdrawal request |
 | `overridewithdrawal <phone>` | admin + super | Let a member withdraw before the 6-month window |
 | `pendingwithdraw` | admin + super | List pending withdrawal requests |
+| `mandates` | admin + super | List the cooperative's direct-debit mandates |
+| `pausemandate <id> [purpose]` / `resumemandate <id> [purpose]` | admin + super | Pause/resume a whole mandate, or a single purpose (`savings`/`loan`/`group`) |
+| `skipdebit <id>` | admin + super | Skip one pending direct debit so it is never retried |
 | `deathclaim <member code> <family phone>` | admin + super | Open a death claim (then send the certificate) |
 | `claimbank <claim id> <account> <bank>` | admin + super | Set the family's payout account |
 | `approveclaim <id>` | super only | Pay the validated claim to the family |
@@ -315,6 +321,44 @@ units are an organizational layer for communication and visibility.
   to pay). `plan off` cancels.
 - Loan interest is **tiered and flat** — see `interest`. It applies to loans
   only, never to savings.
+
+## Direct debit mandates
+
+Members can authorize a **NIBSS direct-debit mandate** on their saved bank
+account, so the cooperative can pull money automatically for recurring savings,
+loan repayments and group (VSLA/ROSCA) contributions — instead of the
+reminder-and-reply flow.
+
+Direct debit is **off by default** and enabled per cooperative through
+`CooperativeConfig.directDebitEnabled` (super admin). An optional per-debit
+ceiling, `directDebitMaxCap` (kobo, `0` = none), caps every debit on top of the
+member's own mandate cap.
+
+- **Member commands** (create/cancel require the transaction PIN):
+  - `mandate <cap>` — start a mandate; the bot returns a provider-hosted consent
+    link and the mandate stays `pending` until the member authorizes it at their
+    bank and the provider webhook flips it to `active`.
+  - `mandates` / `mandatestatus <id>` — view your mandates.
+  - `cancelmandate <id>` — cancel a mandate (also cancelled at the provider).
+  - One flexible mandate per member: a single `amountCap` per debit, each debit
+    tagged with a purpose (`savings` | `loan` | `group`).
+- **Admin commands** (admin or super admin):
+  - `mandates` — list the cooperative's mandates.
+  - `pausemandate <id>` / `resumemandate <id>` — pause/resume the **whole**
+    mandate (status → `paused`).
+  - `pausemandate <id> <savings|loan|group>` / `resumemandate <id> <purpose>` —
+    pause/resume a **single purpose** (added to / removed from `pausedPurposes`).
+  - `skipdebit <id>` — mark one **pending** debit `skipped` so it is never
+    retried.
+- **Retry policy:** a failed debit is retried **once per day (never more)** until
+  it succeeds or the mandate is cancelled. The scheduler skips a `paused`
+  mandate, any purpose listed in `pausedPurposes`, and never retries a `skipped`
+  debit.
+- **No pre-debit notice** — the member is notified **after** each debit (success
+  or failure).
+- **Provider fallback:** mandates run through the same payment adapter as every
+  other movement — **Monnify** primary, **Paystack** fallback — behind the
+  existing circuit-breaker failover (`resolveProvider`).
 
 ## Dividends
 
