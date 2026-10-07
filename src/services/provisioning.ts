@@ -1,6 +1,7 @@
 import { prisma, withTx } from "../lib/prisma.js";
 import { setCoopContext } from "../lib/tenant-context.js";
-import { postJournal } from "./journal.js";
+import { postJournal, getBankAccountBalance } from "./journal.js";
+import { computePnl } from "./ledger.js";
 import { audit } from "./audit.js";
 import { roundMoney } from "./money.js";
 
@@ -19,6 +20,7 @@ export interface ParResult {
   buckets: Record<ParBucket, number>;
   total: number;
   parRatio: number;
+  portfolio: number;
 }
 
 export interface ProvisionEntryDraft {
@@ -110,7 +112,7 @@ export async function computePar(coopId: string, now = new Date()): Promise<ParR
   }
   const total = PAR_BUCKETS.reduce((sum, b) => sum + buckets[b], 0);
   const parRatio = portfolio > 0 ? total / portfolio : 0;
-  return { buckets, total, parRatio };
+  return { buckets, total, parRatio, portfolio };
 }
 
 /**
@@ -217,5 +219,139 @@ export async function runProvision(
         : `✅ No past-due loans for *${period}* — provision is zero.`,
     runId,
     total,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PEARLS — WOCCU's six key financial-health ratios.
+// ---------------------------------------------------------------------------
+
+export interface PearlsResult {
+  /** P — Protection: is the membership protected against loan losses? */
+  protection: {
+    allowanceToLoans: number;
+    netCapital: number;
+  };
+  /** E — Effective structure: is the balance sheet deployed productively? */
+  effectiveStructure: {
+    loansToAssets: number;
+    savingsToAssets: number;
+  };
+  /** A — Asset quality: how much of the portfolio is at risk? */
+  assetQuality: {
+    parRatio: number;
+    provisionCoverage: number;
+  };
+  /** R — Rates of return: how well do assets and savings earn/consume? */
+  ratesOfReturn: {
+    interestIncomeToAssets: number;
+    costOfFunds: number;
+  };
+  /** L — Liquidity: can the coop meet member withdrawals? */
+  liquidity: {
+    liquidAssetsToSavings: number;
+  };
+  /** S — Signs of growth: is the membership and its savings base expanding? */
+  signsOfGrowth: {
+    memberGrowth: number;
+    savingsGrowth: number;
+  };
+  /** Raw kobo/member figures behind the ratios (shown on the dashboard). */
+  totals: {
+    members: number;
+    savings: number;
+    loans: number;
+    allowance: number;
+    bank: number;
+    assets: number;
+    pastDue: number;
+  };
+}
+
+/** Growth is measured year-on-year: this window separates new from prior. */
+const GROWTH_WINDOW_MS = 365 * 86_400_000;
+
+/** Safe division — a ratio with a zero (or negative) denominator is 0. */
+function ratio(numerator: number, denominator: number): number {
+  return denominator > 0 ? numerator / denominator : 0;
+}
+
+/**
+ * Compute the six WOCCU PEARLS groups for a cooperative. Every ratio is a
+ * plain number (fractions, not percentages) and a zero-but-valid cooperative
+ * (no loans, no members, no journal) returns all zeros without throwing.
+ *
+ * Sources: the double-entry journal (bank float), the loan book (portfolio and
+ * PAR), the ledger (interest income/cost of funds), contributions (savings),
+ * and the membership roster (growth).
+ */
+export async function computePearls(coopId: string, now = new Date()): Promise<PearlsResult> {
+  const cutoff = new Date(now.getTime() - GROWTH_WINDOW_MS);
+
+  const [coop, par, bank, pnl, members, priorMembers, savingsAgg, priorSavingsAgg] =
+    await Promise.all([
+      prisma.cooperative.findUnique({
+        where: { id: coopId },
+        select: { loanLossProvisionBalance: true },
+      }),
+      computePar(coopId, now),
+      getBankAccountBalance(coopId),
+      computePnl(coopId),
+      prisma.member.count({ where: { cooperativeId: coopId } }),
+      prisma.member.count({ where: { cooperativeId: coopId, createdAt: { lt: cutoff } } }),
+      prisma.contribution.aggregate({
+        where: { cooperativeId: coopId, status: "confirmed" },
+        _sum: { amount: true },
+      }),
+      prisma.contribution.aggregate({
+        where: { cooperativeId: coopId, status: "confirmed", createdAt: { lt: cutoff } },
+        _sum: { amount: true },
+      }),
+    ]);
+
+  const allowance = roundMoney(coop?.loanLossProvisionBalance ?? 0);
+  const loans = roundMoney(par.portfolio);
+  const pastDue = roundMoney(par.total);
+  const savings = roundMoney(savingsAgg._sum.amount ?? 0);
+  const priorSavings = roundMoney(priorSavingsAgg._sum.amount ?? 0);
+  const bankBalance = roundMoney(bank);
+  const assets = roundMoney(bankBalance + loans);
+
+  const interestIncome = roundMoney(pnl.incomeByCategory.interest ?? 0);
+  const interestExpense = roundMoney(pnl.expenseByCategory.interest ?? 0);
+
+  return {
+    protection: {
+      allowanceToLoans: ratio(allowance, loans),
+      netCapital: ratio(assets - savings, assets),
+    },
+    effectiveStructure: {
+      loansToAssets: ratio(loans, assets),
+      savingsToAssets: ratio(savings, assets),
+    },
+    assetQuality: {
+      parRatio: par.parRatio,
+      provisionCoverage: ratio(allowance, pastDue),
+    },
+    ratesOfReturn: {
+      interestIncomeToAssets: ratio(interestIncome, assets),
+      costOfFunds: ratio(interestExpense, savings),
+    },
+    liquidity: {
+      liquidAssetsToSavings: ratio(bankBalance, savings),
+    },
+    signsOfGrowth: {
+      memberGrowth: priorMembers > 0 ? (members - priorMembers) / priorMembers : 0,
+      savingsGrowth: priorSavings > 0 ? (savings - priorSavings) / priorSavings : 0,
+    },
+    totals: {
+      members,
+      savings,
+      loans,
+      allowance,
+      bank: bankBalance,
+      assets,
+      pastDue,
+    },
   };
 }

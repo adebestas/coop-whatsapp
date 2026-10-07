@@ -261,6 +261,42 @@ small premium instead of buying third-party insurance:
 - If the outstanding balance exceeds the fund, the excess is absorbed as a
   cooperative expense; the fund never goes negative.
 
+## Loan-loss provisioning & PEARLS
+
+Past-due loans are aged into WOCCU PAR buckets and provisioned against a
+loan-loss reserve, and the cooperative's financial health is summarised with
+the six WOCCU **PEARLS** ratio groups.
+
+**PAR aging & provisioning.** Outstanding loans are bucketed by how long the
+next installment is past due — `1-30`, `31-90`, `91-180`, `180+` days. The
+expected loss is the outstanding balance × the bucket rate (defaults `1 / 5 /
+20 / 50%`, configurable per cooperative via `provisionRates`). `runProvision`
+snapshots the per-loan expected loss into a `ProvisionRun` (one per cooperative
+per month), posts a balanced journal (`expense:loan_loss_provision` →
+`assets:loan_loss_provision`), and increments the cooperative's
+`loanLossProvisionBalance`. Re-running the same month is refused.
+
+- Admin: `par` shows the ageing buckets, `provisionrates` shows the rates, and
+  `provision` (super admin) books the month's provision.
+
+**PEARLS ratios.** `computePearls(coopId)` derives six groups of named ratios
+from the double-entry journal, the loan book, the ledger, contributions and the
+membership roster. Every ratio is a fraction, and an inactive cooperative
+returns zeros without throwing.
+
+| Group | Ratios |
+| --- | --- |
+| **P** — Protection | `allowanceToLoans`, `netCapital` |
+| **E** — Effective structure | `loansToAssets`, `savingsToAssets` |
+| **A** — Asset quality | `parRatio`, `provisionCoverage` |
+| **R** — Rates of return | `interestIncomeToAssets`, `costOfFunds` |
+| **L** — Liquidity | `liquidAssetsToSavings` |
+| **S** — Signs of growth | `memberGrowth`, `savingsGrowth` (year-on-year) |
+
+- Admin: `pearls` prints a formatted PEARLS summary.
+- Dashboard: the **PEARLS** tab renders the six groups as ratio cards.
+- API: `GET /api/admin/pearls` (admin bearer token) returns the same figures.
+
 ## Workplaces (units)
 
 Members can be grouped by workplace. Each workplace has its own code and an

@@ -5,6 +5,7 @@ import { verifyPin } from "../lib/security.js";
 import { checkRateLimit } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 import { approveLoan } from "../services/loans.js";
+import { computePearls } from "../services/provisioning.js";
 import { audit } from "../services/audit.js";
 import { notifyMember } from "../lib/messaging.js";
 import {
@@ -285,6 +286,13 @@ export async function adminApiRoutes(app: FastifyInstance) {
       walletBalance: walletAgg._sum.balance ?? 0,
       payoutCount: payoutAgg,
     };
+  }));
+
+  // WOCCU PEARLS financial-health ratios for the dashboard panel.
+  app.get("/api/admin/pearls", withTenant(async (req) => {
+    const coopId = req.adminCoopId!;
+    const pearls = await computePearls(coopId);
+    return { ok: true, ...pearls };
   }));
 
   app.get("/api/admin/members", withTenant(async (req) => {

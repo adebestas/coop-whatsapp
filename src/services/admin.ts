@@ -63,7 +63,7 @@ import { runBackup } from "./backup.js";
 import { runReconciliation } from "./reconcile.js";
 import { runWalletReconciliation } from "./reconciliation.js";
 import { getReserveReport } from "./reconciliation.js";
-import { computePar, provisionRates, runProvision } from "./provisioning.js";
+import { computePar, computePearls, provisionRates, runProvision } from "./provisioning.js";
 import { resolveProvider } from "./payments/index.js";
 import {
   assertMoneyAuthorized,
@@ -1458,6 +1458,42 @@ export async function handleAdminCommand(
           "_Dividends are paid from this profit: *paydividend <rate%>*_",
         ];
         await sendLongText({ to: phone, text: body.join("\n") });
+        return true;
+      }
+
+      case "pearls": {
+        // WOCCU PEARLS financial-health ratios — a read-only board report.
+        const pearls = await computePearls(coopId);
+        const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+        const summary = [
+          "*💎 PEARLS health check*",
+          "",
+          "*P — Protection*",
+          `• Allowance / loans: *${pct(pearls.protection.allowanceToLoans)}*`,
+          `• Net capital: *${pct(pearls.protection.netCapital)}*`,
+          "",
+          "*E — Effective structure*",
+          `• Loans / assets: *${pct(pearls.effectiveStructure.loansToAssets)}*`,
+          `• Savings / assets: *${pct(pearls.effectiveStructure.savingsToAssets)}*`,
+          "",
+          "*A — Asset quality*",
+          `• PAR ratio: *${pct(pearls.assetQuality.parRatio)}*`,
+          `• Provision coverage: *${pct(pearls.assetQuality.provisionCoverage)}*`,
+          "",
+          "*R — Rates of return*",
+          `• Interest income / assets: *${pct(pearls.ratesOfReturn.interestIncomeToAssets)}*`,
+          `• Cost of funds: *${pct(pearls.ratesOfReturn.costOfFunds)}*`,
+          "",
+          "*L — Liquidity*",
+          `• Liquid assets / savings: *${pct(pearls.liquidity.liquidAssetsToSavings)}*`,
+          "",
+          "*S — Signs of growth*",
+          `• Member growth (YoY): *${pct(pearls.signsOfGrowth.memberGrowth)}*`,
+          `• Savings growth (YoY): *${pct(pearls.signsOfGrowth.savingsGrowth)}*`,
+          "",
+          `_Book: ${pearls.totals.members} members · savings ${formatBalance(pearls.totals.savings)} · loans ${formatBalance(pearls.totals.loans)}_`,
+        ];
+        await sendLongText({ to: phone, text: summary.join("\n") });
         return true;
       }
 

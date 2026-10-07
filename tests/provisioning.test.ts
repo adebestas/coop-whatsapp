@@ -3,16 +3,23 @@ import { prisma, cleanupDatabase } from "./setup.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import {
   computePar,
+  computePearls,
   computeProvision,
   provisionRates,
   runProvision,
 } from "../src/services/provisioning.js";
+import { postJournal } from "../src/services/journal.js";
 
 async function makeCoop(code: string) {
   return prisma.cooperative.create({ data: { name: `Provision Coop ${code}`, code } });
 }
 
-async function makeMember(coopId: string, name: string, role: "member" | "admin" | "superadmin" = "member") {
+async function makeMember(
+  coopId: string,
+  name: string,
+  role: "member" | "admin" | "superadmin" = "member",
+  createdAt?: Date,
+) {
   let code = generateMemberCode();
   while (await prisma.member.findUnique({ where: { code } })) code = generateMemberCode();
   return prisma.member.create({
@@ -25,7 +32,36 @@ async function makeMember(coopId: string, name: string, role: "member" | "admin"
       status: "active",
       pin: hashPin("1234"),
       wallet: { create: {} },
+      ...(createdAt ? { createdAt } : {}),
     },
+  });
+}
+
+/** A confirmed savings contribution of `amount` kobo, booked `ageDays` ago. */
+async function makeContribution(coopId: string, memberId: string, amount: number, ageDays = 0) {
+  const createdAt = new Date(Date.now() - ageDays * 86_400_000);
+  return prisma.contribution.create({
+    data: {
+      amount,
+      type: "savings",
+      status: "confirmed",
+      reference: `ref_${Math.random().toString(36).slice(2)}`,
+      memberId,
+      cooperativeId: coopId,
+      createdAt,
+    },
+  });
+}
+
+/** A ledger entry that computePnl() will pick up (no journal side effects). */
+async function makeLedgerEntry(
+  coopId: string,
+  type: "income" | "expense",
+  category: string,
+  amount: number,
+) {
+  return prisma.ledgerEntry.create({
+    data: { cooperativeId: coopId, type, category, amount },
   });
 }
 
@@ -189,5 +225,85 @@ describe("runProvision", () => {
     expect(result.runId).toBeUndefined();
     const run = await prisma.provisionRun.findFirst({ where: { cooperativeId: coop.id } });
     expect(run).toBeNull();
+  });
+});
+
+describe("computePearls", () => {
+  it("returns the six WOCCU PEARLS groups with numeric ratios from the books", async () => {
+    const coop = await makeCoop("PEARL1");
+    const memberOld = await makeMember(
+      coop.id,
+      "Ada",
+      "member",
+      new Date(Date.now() - 400 * 86_400_000),
+    );
+    await makeMember(coop.id, "Bola");
+
+    // Loan portfolio 500000 kobo: 200000 past due (provisions), 300000 current.
+    await makeOverdueLoan(coop.id, memberOld.id, 200000, 45);
+    await makeOverdueLoan(coop.id, memberOld.id, 300000, -30);
+
+    // Accumulated loan-loss allowance.
+    await prisma.cooperative.update({
+      where: { id: coop.id },
+      data: { loanLossProvisionBalance: 50000 },
+    });
+
+    // Bank float 500000 kobo, tracked through the double-entry journal.
+    await postJournal({
+      cooperativeId: coop.id,
+      description: "opening capital",
+      postings: [
+        { account: "assets:bank", direction: "DEBIT", amount: 500000 },
+        { account: "equity:share_capital", direction: "CREDIT", amount: 500000 },
+      ],
+    });
+
+    // Income/expense hit the P&L (ledger only — no bank movement).
+    await makeLedgerEntry(coop.id, "income", "interest", 25000);
+    await makeLedgerEntry(coop.id, "expense", "interest", 4000);
+
+    // Savings 400000 kobo: 100000 booked 400 days ago, 300000 now.
+    await makeContribution(coop.id, memberOld.id, 100000, 400);
+    await makeContribution(coop.id, memberOld.id, 300000, 0);
+
+    const pearls = await computePearls(coop.id);
+
+    expect(pearls.protection.allowanceToLoans).toBeCloseTo(0.1, 6);
+    expect(pearls.protection.netCapital).toBeCloseTo(0.6, 6);
+    expect(pearls.effectiveStructure.loansToAssets).toBeCloseTo(0.5, 6);
+    expect(pearls.effectiveStructure.savingsToAssets).toBeCloseTo(0.4, 6);
+    expect(pearls.assetQuality.parRatio).toBeCloseTo(0.4, 6);
+    expect(pearls.assetQuality.provisionCoverage).toBeCloseTo(0.25, 6);
+    expect(pearls.ratesOfReturn.interestIncomeToAssets).toBeCloseTo(0.025, 6);
+    expect(pearls.ratesOfReturn.costOfFunds).toBeCloseTo(0.01, 6);
+    expect(pearls.liquidity.liquidAssetsToSavings).toBeCloseTo(1.25, 6);
+    expect(pearls.signsOfGrowth.memberGrowth).toBeCloseTo(1, 6);
+    expect(pearls.signsOfGrowth.savingsGrowth).toBeCloseTo(3, 6);
+
+    expect(pearls.totals.members).toBe(2);
+    expect(pearls.totals.savings).toBe(400000);
+    expect(pearls.totals.loans).toBe(500000);
+    expect(pearls.totals.allowance).toBe(50000);
+    expect(pearls.totals.assets).toBe(1000000);
+  });
+
+  it("returns zeros for a cooperative with no loans or activity without throwing", async () => {
+    const coop = await makeCoop("PEARL2");
+    const pearls = await computePearls(coop.id);
+
+    expect(pearls.protection.allowanceToLoans).toBe(0);
+    expect(pearls.protection.netCapital).toBe(0);
+    expect(pearls.effectiveStructure.loansToAssets).toBe(0);
+    expect(pearls.effectiveStructure.savingsToAssets).toBe(0);
+    expect(pearls.assetQuality.parRatio).toBe(0);
+    expect(pearls.assetQuality.provisionCoverage).toBe(0);
+    expect(pearls.ratesOfReturn.interestIncomeToAssets).toBe(0);
+    expect(pearls.ratesOfReturn.costOfFunds).toBe(0);
+    expect(pearls.liquidity.liquidAssetsToSavings).toBe(0);
+    expect(pearls.signsOfGrowth.memberGrowth).toBe(0);
+    expect(pearls.signsOfGrowth.savingsGrowth).toBe(0);
+    expect(pearls.totals.members).toBe(0);
+    expect(pearls.totals.assets).toBe(0);
   });
 });
