@@ -10,6 +10,7 @@ import { formatBalance } from "../lib/money.js";
 import { postJournal } from "./journal.js";
 import { notifyMember } from "../lib/messaging.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
+import { log } from "../lib/logger.js";
 import { resolveProvider, markProviderUp, markProviderDown } from "./payments/index.js";
 import { repayLoan } from "./loans.js";
 
@@ -95,6 +96,19 @@ export async function createMandate(
     return {
       ok: false,
       message: `Your cooperative caps direct debit at *${formatBalance(config.directDebitMaxCap)}* per debit.`,
+    };
+  }
+
+  // One flexible mandate per member: never let a second mandate double-charge
+  // the same obligation.
+  const existing = await prisma.mandate.findFirst({
+    where: { cooperativeId: coopId, memberId, status: { in: ["pending", "active"] } },
+  });
+  if (existing) {
+    return {
+      ok: false,
+      message:
+        "You already have a direct-debit mandate. Reply *mandates* to see it, or cancel it before starting another.",
     };
   }
 
@@ -458,6 +472,11 @@ async function applyPurpose(
         debit.cooperativeId,
       );
       await notifyMember(await loadNotifiable(member.id), result.message).catch(() => {});
+      // Surface a failed repayment to the caller so it can alert super admins —
+      // the bank pull already succeeded, so silence here would strand the money.
+      if (!result.ok) {
+        throw new Error(`loan repayment failed: ${result.message}`);
+      }
       return;
     }
     case "group":
@@ -538,7 +557,15 @@ export async function settleDebit(
         );
         await tx.wallet.update({
           where: { id: member.wallet!.id },
-          data: { balance: { increment: debit.amount }, totalSaved: { increment: debit.amount } },
+          data: {
+            balance: { increment: debit.amount },
+            // Only a savings debit is savings. Loan/group money is credited to
+            // the wallet so the purpose service can debit it, but it must not
+            // inflate `totalSaved`.
+            ...(debit.purpose === "savings"
+              ? { totalSaved: { increment: debit.amount } }
+              : {}),
+          },
         });
         await tx.mandateDebit.update({
           where: { id: debit.id },
@@ -549,7 +576,23 @@ export async function settleDebit(
           data: { lastDebitAt: new Date() },
         });
       });
-      await applyPurpose(debit, member);
+      // The debit is already `successful` and the wallet credited; a failure to
+      // apply the purpose must be surfaced (alert + log), never swallowed.
+      try {
+        await applyPurpose(debit, member);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error("[mandates] applyPurpose failed after settlement", {
+          reference,
+          purpose: debit.purpose,
+          err: msg,
+        });
+        await alertSupers(
+          debit.cooperativeId,
+          `Direct-debit ${reference} was collected and the wallet credited, but applying the *${debit.purpose}* purpose failed: ${msg}`,
+          AlertSeverity.CRITICAL,
+        ).catch(() => {});
+      }
 
       await audit({
         cooperativeId: debit.cooperativeId,

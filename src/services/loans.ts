@@ -751,6 +751,30 @@ async function finalizeLoanApproval(
 class RepayBalanceChangedError extends Error {}
 
 /**
+ * The full amount `repayLoan` will debit for `loan` at `nowMs`: the installment
+ * plus any late fine (`lateFinePercent`% of the installment per full month
+ * overdue, minimum one month). Exported so the mandate scheduler can create a
+ * debit for EXACTLY what repayment will charge — a partial debit would settle the
+ * bank pull but leave `repayLoan` short, stranding the money and wedging the loan.
+ */
+export function computeRepaymentDue(
+  loan: { monthlyPayment: number | null; balance: number; dueDate: Date | null },
+  nowMs: number,
+  lateFinePercent: number,
+): { amount: number; fine: number; totalDue: number } {
+  const amount = loan.monthlyPayment ?? loan.balance;
+  let fine = 0;
+  if (loan.dueDate && loan.dueDate.getTime() < nowMs) {
+    const monthsLate = Math.max(
+      1,
+      Math.floor((nowMs - loan.dueDate.getTime()) / (30 * 24 * 60 * 60 * 1000)),
+    );
+    fine = Math.round(amount * (lateFinePercent / 100) * monthsLate);
+  }
+  return { amount, fine, totalDue: amount + fine };
+}
+
+/**
  * Member repays their loan monthly installment. Debited from wallet.
  */
 export async function repayLoan(
@@ -784,18 +808,14 @@ export async function repayLoan(
   const amount = loan.monthlyPayment ?? loan.balance;
 
   // Late fine: lateFinePercent% of the installment per month overdue.
-  let fine = 0;
   const now = Date.now();
+  let lateFinePercent = 0;
   if (loan.dueDate && loan.dueDate.getTime() < now) {
-    const coopConfig = await getCoopConfig(member.cooperativeId);
-    const fineRate = coopConfig.lateFinePercent;
-    const monthsLate = Math.max(
-      1,
-      Math.floor((now - loan.dueDate.getTime()) / (30 * 24 * 60 * 60 * 1000)),
-    );
-    fine = Math.round(amount * (fineRate / 100) * monthsLate);
+    lateFinePercent = (await getCoopConfig(member.cooperativeId)).lateFinePercent;
   }
-  const totalDue = amount + fine;
+  // Shared with the mandate scheduler so a direct debit always covers exactly
+  // what is charged here (installment + fine).
+  const { fine, totalDue } = computeRepaymentDue(loan, now, lateFinePercent);
 
   if (member.wallet.balance < totalDue) {
     return {

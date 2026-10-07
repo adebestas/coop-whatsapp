@@ -9,6 +9,7 @@ import { getRedis, claimOnce } from "../lib/cache.js";
 import { forEachCoop, withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
 import { log } from "../lib/logger.js";
 import { maskId } from "../lib/security.js";
+import { computeRepaymentDue } from "./loans.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -130,6 +131,10 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
         member: {
           select: {
             id: true,
+            phone: true,
+            optedOut: true,
+            preferredChannel: true,
+            altChannelId: true,
             autoSaveEnabled: true,
             autoSaveAmount: true,
             autoSaveInterval: true,
@@ -201,9 +206,22 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
             },
           });
           for (const loan of loans) {
-            const installment = loan.monthlyPayment ?? loan.balance;
-            const amount = Math.min(installment, loan.balance, mandate.amountCap);
-            if (amount <= 0 || !loan.dueDate) continue;
+            if (!loan.dueDate) continue;
+            // The debit must cover EXACTLY what repayLoan will charge
+            // (installment + any late fine). A smaller, capped debit would settle
+            // the bank pull but leave repayment short — stranding the money and
+            // never reducing the loan.
+            const { totalDue } = computeRepaymentDue(loan, now.getTime(), config.lateFinePercent);
+            if (totalDue <= 0) continue;
+            if (totalDue > mandate.amountCap) {
+              // Never create a partial debit: tell the member to repay directly
+              // or raise their cap instead.
+              await notifyMember(
+                member,
+                `⚠️ Your loan installment of *${formatBalance(totalDue)}* is due, but it is above your direct-debit cap of *${formatBalance(mandate.amountCap)}*. Reply *repay* to pay it now, or raise your mandate cap.`,
+              ).catch(() => {});
+              continue;
+            }
             // Keyed on the loan's due timestamp: while the due date is unchanged
             // the reference repeats, so overlapping ticks skip instead of
             // double-charging. Settlement (repayLoan) advances `dueDate`.
@@ -214,16 +232,16 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
               memberId: member.id,
               purpose: "loan",
               targetId: loan.id,
-              amount,
+              amount: totalDue,
               providerRef,
             });
             if (!debitId) continue; // already created by an overlapping tick
             created++;
             await dispatchMandateDebit(
               mandate,
-              amount,
+              totalDue,
               providerRef,
-              `Loan repayment — ${formatBalance(amount)}`,
+              `Loan repayment — ${formatBalance(totalDue)}`,
               debitId,
               now,
             );

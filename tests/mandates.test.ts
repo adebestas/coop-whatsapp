@@ -371,6 +371,20 @@ describe("mandate lifecycle service", () => {
     expect(await prisma.mandate.count()).toBe(0);
   });
 
+  it("refuses a second mandate when the member already has an active one", async () => {
+    const coop = await createTestCoop("MND13");
+    const m = await createTestMember(coop.id, { phone: "2348000100013" });
+    await enableDirectDebit(coop.id);
+    await setBank(m.id);
+    await seedMandate(coop.id, m.id); // status: active
+    vi.mocked(resolveProvider).mockResolvedValue(fakeAdapter());
+
+    const res = await createMandate(coop.id, m.id, 100_000, actor(m));
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/already/i);
+    expect(await prisma.mandate.count()).toBe(1);
+  });
+
   it("cancels a mandate and calls the provider cancel", async () => {
     const coop = await createTestCoop("MND5");
     const m = await createTestMember(coop.id, { phone: "2348000100005" });

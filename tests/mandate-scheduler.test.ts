@@ -176,7 +176,7 @@ describe("mandate scheduler debits", () => {
     expect(vi.mocked(adapter.debitMandate)).toHaveBeenCalledTimes(1);
   });
 
-  it("creates a loan debit for an active loan whose installment is due", async () => {
+  it("creates a loan debit for the full overdue charge (installment + late fine)", async () => {
     const coop = await createTestCoop("MSCH10");
     const m = await createTestMember(coop.id, { phone: "2348000300011" });
     await enableDirectDebit(coop.id);
@@ -184,8 +184,8 @@ describe("mandate scheduler debits", () => {
     const loan = await prisma.loan.create({
       data: {
         amount: 500_000,
-        balance: 120_000,
-        monthlyPayment: 500_000,
+        balance: 250_000,
+        monthlyPayment: 100_000,
         tenureMonths: 1,
         status: "disbursed",
         dueDate: new Date(Date.now() - 1000),
@@ -204,19 +204,19 @@ describe("mandate scheduler debits", () => {
     expect(debit).toBeTruthy();
     expect(debit?.status).toBe("pending");
     expect(debit?.targetId).toBe(loan.id);
-    // amount = min(installment 500k, balance 120k, cap 200k)
-    expect(debit?.amount).toBe(120_000);
+    // Full charge = installment 100_000 + 5% late fine (one month overdue).
+    expect(debit?.amount).toBe(105_000);
     expect(n).toBe(1);
 
     const call = vi.mocked(adapter.debitMandate).mock.calls[0][0] as {
       amount: number;
       narration?: string;
     };
-    expect(call.amount).toBe(120_000);
+    expect(call.amount).toBe(105_000);
     expect(call.narration).toMatch(/loan/i);
   });
 
-  it("caps a loan debit at the mandate amountCap", async () => {
+  it("skips an overdue loan whose full charge exceeds the mandate cap and notifies the member", async () => {
     const coop = await createTestCoop("MSCH11");
     const m = await createTestMember(coop.id, { phone: "2348000300012" });
     await enableDirectDebit(coop.id);
@@ -235,13 +235,18 @@ describe("mandate scheduler debits", () => {
     });
     const adapter = fakeAdapter();
     vi.mocked(resolveProvider).mockResolvedValue(adapter);
+    vi.mocked(notifyMember).mockClear();
 
-    await runMandateDebits(new Date());
+    const n = await runMandateDebits(new Date());
 
-    const debit = await prisma.mandateDebit.findFirst({
-      where: { mandateId: mandate.id, purpose: "loan" },
-    });
-    expect(debit?.amount).toBe(100_000);
+    // Never create a partial debit: the full charge (315_000) exceeds the cap.
+    expect(await prisma.mandateDebit.count({ where: { mandateId: mandate.id } })).toBe(0);
+    expect(vi.mocked(adapter.debitMandate)).not.toHaveBeenCalled();
+    expect(n).toBe(0);
+    const told = vi
+      .mocked(notifyMember)
+      .mock.calls.some((c) => /cap|installment/i.test(String(c[1])));
+    expect(told).toBe(true);
   });
 
   it("creates only one loan debit when the same due obligation is processed twice", async () => {

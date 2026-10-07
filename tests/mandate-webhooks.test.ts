@@ -157,7 +157,7 @@ describe("mandate webhooks", () => {
     expect(journal?.description).toMatch(/savings/i);
   });
 
-  it("settles a loan debit by repaying the target loan and reducing its balance", async () => {
+  it("settles an overdue loan debit by repaying the target loan without inflating totalSaved", async () => {
     const coop = await createTestCoop("MWH9");
     const m = await createTestMember(coop.id, { phone: "2348000200010" });
     const mandate = await seedMandate(coop.id, m.id);
@@ -168,7 +168,8 @@ describe("mandate webhooks", () => {
         monthlyPayment: 50_000,
         tenureMonths: 1,
         status: "disbursed",
-        dueDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
+        // Overdue, so repayLoan charges installment + a 5% late fine = 52_500.
+        dueDate: new Date(Date.now() - 1000),
         memberId: m.id,
         cooperativeId: coop.id,
       },
@@ -176,7 +177,7 @@ describe("mandate webhooks", () => {
     const debit = await seedDebit(coop.id, m.id, mandate.id, {
       purpose: "loan",
       targetId: loan.id,
-      amount: 50_000,
+      amount: 52_500,
       providerRef: "DD-LOAN-1",
     });
 
@@ -197,6 +198,13 @@ describe("mandate webhooks", () => {
     expect((await prisma.mandateDebit.findUnique({ where: { id: debit.id } }))?.status).toBe(
       "successful",
     );
+
+    // Loan money is not savings: `totalSaved` must stay untouched, and the
+    // wallet nets out (credited the debit, debited the repayment incl. fine).
+    const wallet = await prisma.wallet.findUnique({ where: { memberId: m.id } });
+    expect(wallet?.totalSaved).toBe(0);
+    expect(wallet?.balance).toBe(0);
+
     // The member is told the repayment happened.
     const notified = vi
       .mocked(notifyMember)
