@@ -80,6 +80,8 @@ subscription       Subscription?
   savingsAccounts    SavingsAccount[]
   mandates           Mandate[]
   refunds            RefundRequest[]
+  regulatorProfiles  RegulatorProfile[]
+  regulatorReports   RegulatorReport[]
 
   @@index([status])
   @@index([code])
@@ -1180,6 +1182,7 @@ model CooperativeConfig {
   agmQuorumPercent         Int      @default(25)
   directDebitEnabled       Boolean  @default(false)
   directDebitMaxCap        Int      @default(0) // kobo; 0 = no extra coop cap
+  regulatorReportingEnabled Boolean @default(false)
   ombudsmanSlaDays         Int      @default(7) // days the ombudsman has to decide a case
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
@@ -1794,4 +1797,41 @@ model OmbudsmanCaseEvent {
   createdAt DateTime @default(now())
 
   @@index([caseId, createdAt])
+}
+
+// The regulator a cooperative files returns with (state Ministry, CBN, NFIU, or
+// a custom label) plus the filing due dates for the pack.
+model RegulatorProfile {
+  id              String   @id @default(cuid())
+  cooperativeId   String
+  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  label           String
+  type            String // ministry | cbn | nfiu | custom
+  contactEmail    String?
+  monthlyDueDay   Int      @default(10)
+  quarterlyDueDay Int      @default(15)
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+
+  @@index([cooperativeId, active])
+}
+
+// A generated regulator report pack for a period (idempotent per period/type).
+model RegulatorReport {
+  id            String    @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  period        String // YYYY-MM
+  periodType    String // monthly | quarterly
+  packType      String // statutory | nfiu | both
+  status        String    @default("generated") // generated | filed
+  generatedAt   DateTime  @default(now())
+  generatedById String?
+  files         String? // JSON { xlsx, pdf, csv }
+  dueAt         DateTime?
+  filedAt       DateTime?
+  notes         String?
+
+  @@unique([cooperativeId, period, periodType, packType])
+  @@index([cooperativeId, status])
 }

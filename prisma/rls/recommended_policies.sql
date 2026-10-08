@@ -40,6 +40,7 @@ BEGIN
     'SavingsProduct','SavingsAccount',
     'Mandate','MandateDebit',
     'RefundRequest',
+    'RegulatorProfile','RegulatorReport',
     'Meeting','Motion',
     'Unit','Vote','WithdrawalRequest',
     -- Child tables reached through a tenant parent.
