@@ -2,6 +2,7 @@ import { prisma, withTx } from "../lib/prisma.js";
 import { setCoopContext } from "../lib/tenant-context.js";
 import { audit } from "./audit.js";
 import { sendText } from "../lib/messaging.js";
+import { Prisma } from "@prisma/client";
 
 const DEFAULT_SLA_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -118,14 +119,6 @@ export async function escalateCase(
       if (!grievance) return { error: "not_found" as const };
     }
 
-    if (sourceId) {
-      const duplicate = await tx.ombudsmanCase.findFirst({
-        where: { cooperativeId: coopId, sourceType, sourceId },
-        select: { id: true },
-      });
-      if (duplicate) return { error: "duplicate" as const };
-    }
-
     const config = await tx.cooperativeConfig.findUnique({
       where: { cooperativeId: coopId },
       select: { ombudsmanSlaDays: true },
@@ -133,6 +126,9 @@ export async function escalateCase(
     const slaDays = config?.ombudsmanSlaDays ?? DEFAULT_SLA_DAYS;
     const slaDueAt = new Date(Date.now() + slaDays * DAY_MS);
 
+    // Deduplication is enforced by the partial unique index
+    // OmbudsmanCase_cooperativeId_sourceType_sourceId_key, not a check-then-act
+    // read — so two concurrent escalations cannot both succeed.
     const c = await tx.ombudsmanCase.create({
       data: {
         cooperativeId: coopId,
@@ -157,6 +153,11 @@ export async function escalateCase(
       },
     });
     return { caseId: c.id };
+  }).catch((err: unknown) => {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return { error: "duplicate" as const };
+    }
+    throw err;
   });
 
   if ("error" in outcome) {
@@ -209,24 +210,50 @@ export async function listCases(
   const cases = rows.map(toSummary);
   return {
     ok: true,
-    message: cases.length ? `${cases.length} case(s).` : "No open cases.",
+    message: cases.length
+      ? `${cases.length} ${status ? `${status} ` : ""}case(s).`
+      : status
+        ? `No ${status} cases.`
+        : "No cases yet.",
     cases,
   };
 }
 
-/** Platform-level: read one case and its full timeline. */
+/**
+ * Platform-level: read one case and its full timeline. An exact id is resolved
+ * with `findUnique`; a partial prefix/suffix must be at least 6 characters and
+ * resolve to exactly one case, otherwise an ambiguity error is returned rather
+ * than an arbitrary case's (PII-bearing) timeline.
+ */
 export async function getCase(
   caseId: string,
 ): Promise<{ ok: boolean; message: string; case?: CaseDetail }> {
   const id = caseId?.trim();
   if (!id) return { ok: false, message: "Which case? Give the case id." };
-  const c = await prisma.ombudsmanCase.findFirst({
-    where: {
-      OR: [{ id }, { id: { startsWith: id } }, { id: { endsWith: id } }],
-    },
-    include: { events: { orderBy: { createdAt: "asc" } } },
-  });
-  if (!c) return { ok: false, message: "Case not found." };
+
+  const include = { events: { orderBy: { createdAt: "asc" as const } } };
+  let c = await prisma.ombudsmanCase.findUnique({ where: { id }, include });
+  if (!c) {
+    if (id.length < 6) {
+      return {
+        ok: false,
+        message: "That id is too short. Give at least 6 characters of the case id.",
+      };
+    }
+    const matches = await prisma.ombudsmanCase.findMany({
+      where: { OR: [{ id: { startsWith: id } }, { id: { endsWith: id } }] },
+      include,
+      take: 2,
+    });
+    if (matches.length === 0) return { ok: false, message: "Case not found." };
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        message: "More than one case matches that id. Give more characters of the case id.",
+      };
+    }
+    c = matches[0];
+  }
   return {
     ok: true,
     message: `Case #${c.id.slice(-6)} (${c.status}).`,

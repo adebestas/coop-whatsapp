@@ -79,6 +79,39 @@ describe("ombudsman escalation", () => {
     expect(await prisma.ombudsmanCase.count({ where: { sourceId: g.id } })).toBe(1);
   });
 
+  it("enforces one case per source at the database level (partial unique index)", async () => {
+    const coop = await createTestCoop("OMB6");
+    const member = await createTestMember(coop.id, { phone: "2348000040051" });
+    const g = await createGrievance(coop.id, member.id);
+    const base = {
+      cooperativeId: coop.id,
+      memberId: member.id,
+      sourceType: "grievance",
+      sourceId: g.id,
+      category: "other",
+      summary: "first",
+      escalatedBy: "member",
+    };
+    await prisma.ombudsmanCase.create({ data: base });
+
+    await expect(
+      prisma.ombudsmanCase.create({ data: { ...base, summary: "second" } }),
+    ).rejects.toMatchObject({ code: "P2002" });
+
+    // Sourceless disputes are not constrained by the partial index.
+    const dispute = {
+      cooperativeId: coop.id,
+      memberId: member.id,
+      sourceType: "dispute",
+      sourceId: null,
+      category: "other",
+      summary: "a",
+      escalatedBy: "member",
+    };
+    await prisma.ombudsmanCase.create({ data: dispute });
+    await expect(prisma.ombudsmanCase.create({ data: { ...dispute, summary: "b" } })).resolves.toBeTruthy();
+  });
+
   it("notifies active ombudsmen and ignores inactive ones", async () => {
     const coop = await createTestCoop("OMB3");
     const member = await createTestMember(coop.id, { phone: "2348000040021" });
@@ -126,6 +159,36 @@ describe("ombudsman escalation", () => {
     expect(detail.case?.id).toBe(res.caseId);
     expect(detail.case?.events.length).toBeGreaterThanOrEqual(1);
     expect(detail.case?.events[0].action).toBe("escalated");
+  });
+
+  it("refuses an ambiguous case id instead of returning an arbitrary timeline", async () => {
+    const coop = await createTestCoop("OMB7");
+    const member = await createTestMember(coop.id, { phone: "2348000040061" });
+    const common = {
+      cooperativeId: coop.id,
+      memberId: member.id,
+      sourceType: "dispute",
+      sourceId: null,
+      category: "other",
+      escalatedBy: "member",
+    };
+    await prisma.ombudsmanCase.create({
+      data: { ...common, id: "abcdef0000000000000001", summary: "one" },
+    });
+    await prisma.ombudsmanCase.create({
+      data: { ...common, id: "abcdef0000000000000002", summary: "two" },
+    });
+
+    const exact = await getCase("abcdef0000000000000001");
+    expect(exact.ok).toBe(true);
+    expect(exact.case?.id).toBe("abcdef0000000000000001");
+
+    const ambiguous = await getCase("abcdef");
+    expect(ambiguous.ok).toBe(false);
+    expect(ambiguous.message).toMatch(/more than one|more characters/i);
+
+    const tooShort = await getCase("abc");
+    expect(tooShort.ok).toBe(false);
   });
 
   it("recognises only an active ombudsman phone", async () => {

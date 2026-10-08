@@ -1776,6 +1776,9 @@ model OmbudsmanCase {
   @@index([cooperativeId, status])
   @@index([memberId])
   @@index([status, slaDueAt])
+  // One case per source when a source id is present. NULLs are distinct in
+  // unique indexes (Postgres/SQLite), so sourceless disputes are unconstrained.
+  @@unique([cooperativeId, sourceType, sourceId])
 }
 
 // The case timeline.
