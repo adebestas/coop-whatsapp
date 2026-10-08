@@ -3,6 +3,8 @@ import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./set
 import { recordReferral, qualifyReferral } from "../src/services/referrals.js";
 import { handleAwaitingInput } from "../src/services/handlers/session.js";
 import { handleJoinStart } from "../src/services/handlers/join.js";
+import { handlePaymentNotification } from "../src/services/payments/topup.js";
+import { requestManualCredit, approveManualCredit } from "../src/services/manualcredit.js";
 import type { BotState } from "../src/services/conversation.js";
 
 beforeEach(async () => {
@@ -213,5 +215,66 @@ describe("referral registration step", () => {
     // Straight to consent — the referral step is never shown.
     expect(session?.state).toBe("awaiting_consent");
     expect(dataOf(session?.data).referrerCode).toBe(referrer.code.toUpperCase());
+  });
+});
+
+describe("referral qualification on real money-in paths", () => {
+  it("qualifies a pending referral on a provider top-up credit (production path)", async () => {
+    const coop = await createTestCoop("REFQ1");
+    const referrer = await createTestMember(coop.id, { phone: "2348033330001" });
+    const referred = await createTestMember(coop.id, { phone: "2348033330002" });
+    await recordReferral(coop.id, referrer.code, referred.id);
+    await prisma.member.update({
+      where: { id: referred.id },
+      data: { virtualAccountNumber: "9000000301" },
+    });
+
+    // Provider webhook credits the wallet — the real production money-in path.
+    await handlePaymentNotification({
+      transactionId: "TX-REFQ-1",
+      reference: "MEM-refq-1",
+      accountNumber: "9000000301",
+      amount: 500000,
+      currency: "NGN",
+      status: "successful",
+      provider: "monnify",
+      raw: {},
+    });
+
+    const referral = await prisma.referral.findUnique({
+      where: { referredMemberId: referred.id },
+    });
+    expect(referral?.status).toBe("qualified");
+    expect(referral?.qualifiedAt).toBeInstanceOf(Date);
+  });
+
+  it("does not qualify on an admin manual credit (not a real money-in path)", async () => {
+    const coop = await createTestCoop("REFQ2");
+    const initiator = await createTestMember(coop.id, {
+      phone: "2348033330011",
+      role: "superadmin",
+    });
+    const approver = await createTestMember(coop.id, {
+      phone: "2348033330012",
+      role: "superadmin",
+    });
+    const referrer = await createTestMember(coop.id, { phone: "2348033330013" });
+    const referred = await createTestMember(coop.id, { phone: "2348033330014" });
+    await recordReferral(coop.id, referrer.code, referred.id);
+
+    const requested = await requestManualCredit(initiator.phone, referred.code, 100, "goodwill");
+    expect(requested.ok).toBe(true);
+    const approved = await approveManualCredit(
+      approver.phone,
+      requested.creditId!.slice(-6),
+      "1234",
+    );
+    expect(approved.ok).toBe(true);
+
+    const referral = await prisma.referral.findUnique({
+      where: { referredMemberId: referred.id },
+    });
+    expect(referral?.status).toBe("pending");
+    expect(referral?.qualifiedAt).toBeNull();
   });
 });

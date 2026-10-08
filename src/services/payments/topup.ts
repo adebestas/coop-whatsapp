@@ -7,6 +7,7 @@ import { postJournal } from "../journal.js";
 import { roundMoney } from "../money.js";
 import { formatBalance } from "../cooperative.js";
 import { flagTransaction } from "../aml.js";
+import { qualifyReferral } from "../referrals.js";
 import { resolveCoopByVirtualAccount, withCoopContext, forEachCoop } from "../../lib/tenant-context.js";
 import { maskId } from "../../lib/security.js";
 
@@ -138,7 +139,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
   if (amount <= 0) return;
   const reference = `${n.provider}-${n.transactionId}`;
 
-  await withTx(async (tx) => {
+  const credited = await withTx(async (tx) => {
     // Idempotency gate FIRST: duplicate delivery throws P2002 here, which
     // rolls back everything � the wallet is never credited twice.
     try {
@@ -163,7 +164,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
     } catch (err: any) {
       if (err?.code === "P2002") {
         console.log(`[topup] duplicate credit blocked: ${reference}`);
-        return; // treat like a no-op success
+        return false; // treat like a no-op success
       }
       throw err;
     }
@@ -187,7 +188,17 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
         totalSaved: { increment: amount },
       },
     });
+    return true;
   });
+
+  // A successful real money-in contribution is a "first qualifying contribution":
+  // qualify any pending referral for this member. Idempotent, and never on the
+  // duplicate-delivery path above. A referral bug must never break crediting.
+  if (credited) {
+    await qualifyReferral(member.cooperativeId, member.id).catch((err) => {
+      console.warn("[topup] referral qualification failed:", err);
+    });
+  }
 
   // AML/CFT: flag + auto-file STR for large/suspicious deposits (money-in).
   try {

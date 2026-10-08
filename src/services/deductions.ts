@@ -2,6 +2,7 @@ import { prisma, withTx } from "../lib/prisma.js";
 import { notifyMember, sendText } from "../lib/messaging.js";
 import { formatBalance, getMemberByPhone } from "./cooperative.js";
 import { audit } from "./audit.js";
+import { qualifyReferral } from "./referrals.js";
 import { notifySuperAdmins } from "./withdrawals.js";
 
 /** "YYYY-MM" for a date, in UTC. */
@@ -514,6 +515,9 @@ export async function approveBatch(
     optedOut: boolean;
   };
   const notifications: Array<{ member: NotifyTarget; text: string }> = [];
+  // Members credited via a savings deduction — their first such credit can
+  // qualify a pending referral. Qualified AFTER the transaction commits (see below).
+  const savingsCredited: Array<{ id: string; cooperativeId: string }> = [];
   let savedCount = 0;
   let repaidCount = 0;
   let totalSaved = 0;
@@ -564,6 +568,7 @@ export async function approveBatch(
           member,
           text: `💰 ${formatBalance(item.amount)} salary deduction received and credited to your savings.`,
         });
+        savingsCredited.push({ id: member.id, cooperativeId: member.cooperativeId });
         savedCount += 1;
         totalSaved += item.amount;
       } else if (item.loanId) {
@@ -623,6 +628,14 @@ export async function approveBatch(
   // Notifications are side effects — send only after the transaction commits.
   for (const n of notifications) {
     await notifyMember(n.member, n.text).catch(() => {});
+  }
+
+  // A credited savings deduction is a real money-in contribution: qualify any
+  // pending referral for the member. Idempotent; a failure must not break the batch.
+  for (const m of savingsCredited) {
+    await qualifyReferral(m.cooperativeId, m.id).catch((err) => {
+      console.warn("[deductions] referral qualification failed:", err);
+    });
   }
 
   const partial = budget < pendingTotal;
