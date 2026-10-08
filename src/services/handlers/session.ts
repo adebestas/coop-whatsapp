@@ -243,7 +243,9 @@ export function buildOmbudsmanMenu(): string {
     `• *cases investigating* — cases under investigation\n` +
     `• *case <id>* — full case timeline\n` +
     `• *investigate <id> <note>* — open an investigation (notifies the cooperative)\n` +
-    `• *decide <id> <decision>* — issue a binding decision (notifies member + cooperative)`
+    `• *decide <id> <decision>* — issue a binding decision (notifies member + cooperative)\n` +
+    `• *remedy <id> unfreeze* — lift a member's freeze\n` +
+    `• *remedy <id> refund <amount> [reason]* — pay the member a refund`
   );
 }
 

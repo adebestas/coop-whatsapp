@@ -18,6 +18,17 @@ export interface RefundResult {
   refundId?: string;
 }
 
+export interface ApproveRefundOptions {
+  /**
+   * Set ONLY by the platform-ombudsman remedy path (`applyRemedy` in
+   * `ombudsman.ts`), after it has verified an active `Ombudsman` phone. The
+   * independent ombudsman is empowered to approve a remedy refund directly, so
+   * the super-admin maker-checker requirement is bypassed for this call. Never
+   * set from a chat/admin handler.
+   */
+  ombudsmanApproved?: boolean;
+}
+
 /** Resolve a refund by full id or a trailing id suffix, scoped to one coop. */
 async function resolveRefund(coopId: string, idOrSuffix: string) {
   if (!idOrSuffix) return null;
@@ -110,8 +121,9 @@ export async function approveRefund(
   coopId: string,
   refundId: string,
   actor: RefundActor,
+  options: ApproveRefundOptions = {},
 ): Promise<RefundResult> {
-  if (actor.role !== "superadmin") {
+  if (!options.ombudsmanApproved && actor.role !== "superadmin") {
     return { ok: false, message: "Only *super admins* can approve refunds." };
   }
   const refund = await resolveRefund(coopId, refundId);

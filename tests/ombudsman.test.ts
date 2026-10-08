@@ -7,11 +7,13 @@ import {
   isOmbudsman,
   investigateCase,
   decideCase,
+  applyRemedy,
 } from "../src/services/ombudsman.js";
 import { runOmbudsmanEscalations } from "../src/services/scheduler.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
 import { handleMessage } from "../src/services/conversation.js";
+import { resolveProvider } from "../src/services/payments/index.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -485,5 +487,172 @@ describe("ombudsman decisions", () => {
     expect(texts).toMatch(/decided/);
     expect(texts).toMatch(/closed/);
     expect(texts).not.toMatch(/Ombudsman cases \(/);
+  });
+});
+
+describe("ombudsman remedies", () => {
+  const payoutSpy = vi.fn();
+
+  beforeEach(() => {
+    payoutSpy.mockReset();
+    payoutSpy.mockResolvedValue({ ok: true, providerRef: "trx-1" });
+    vi.mocked(resolveProvider).mockImplementation(
+      () =>
+        ({
+          name: "monnify",
+          createVirtualAccount: vi.fn(async () => ({ accountNumber: "1234567890" })),
+          payout: payoutSpy,
+          resolveAccount: vi.fn(async () => ({ ok: true, name: "ADA OBI" })),
+          getTransferStatus: vi.fn(async () => ({ status: "successful" })),
+          verifyWebhook: () => true,
+          parseNotification: () => null,
+        }) as unknown as ReturnType<typeof resolveProvider>,
+    );
+  });
+
+  /** A dispute case (no source) with a seeded ombudsman, ready to remediate. */
+  async function seedRemedyCase(opts: { bank?: boolean; frozen?: boolean } = {}) {
+    const coop = await createTestCoop("OMB20");
+    const member = await createTestMember(coop.id, { phone: "2348000060001", name: "ADA OBI" });
+    if (opts.bank) {
+      await prisma.member.update({
+        where: { id: member.id },
+        data: { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
+      });
+    }
+    if (opts.frozen) {
+      await prisma.member.update({
+        where: { id: member.id },
+        data: { frozenAt: new Date(), supervisoryFrozenAt: new Date() },
+      });
+    }
+    const ombudsman = await prisma.ombudsman.create({
+      data: { name: "Ada Ombuds", phone: "2348000069999", active: true },
+    });
+    const escalated = await escalateCase(
+      coop.id,
+      member.id,
+      { sourceType: "dispute", sourceId: null, category: "other", summary: "Needs a remedy" },
+      { id: member.id, phone: member.phone },
+    );
+    return {
+      coop,
+      member,
+      ombudsman,
+      caseId: escalated.caseId!,
+      actor: { id: ombudsman.id, phone: ombudsman.phone },
+    };
+  }
+
+  it("unfreeze clears the member's freeze fields, records the remedy and audits", async () => {
+    const { member, caseId, actor } = await seedRemedyCase({ frozen: true });
+
+    const res = await applyRemedy(caseId, "unfreeze", {}, actor);
+    expect(res.ok).toBe(true);
+
+    const m = await prisma.member.findUnique({ where: { id: member.id } });
+    expect(m!.frozenAt).toBeNull();
+    expect(m!.supervisoryFrozenAt).toBeNull();
+
+    const c = await prisma.ombudsmanCase.findUnique({
+      where: { id: caseId },
+      include: { events: true },
+    });
+    expect(c!.remedy).toBeTruthy();
+    const remedy = JSON.parse(c!.remedy!);
+    expect(remedy.action).toBe("unfreeze");
+    expect(remedy.appliedAt).toBeTruthy();
+    const ev = c!.events.find((e) => e.action === "remedy_applied");
+    expect(ev).toBeTruthy();
+    expect(ev!.actorRole).toBe("ombudsman");
+    expect(ev!.actorId).toBe(actor.id);
+
+    const audited = await prisma.auditLog.findFirst({
+      where: { action: "ombudsman.remedy_applied", targetId: caseId },
+    });
+    expect(audited).toBeTruthy();
+  });
+
+  it("refund creates a refund via the refund flow and pays the member's bank", async () => {
+    const { member, caseId, actor } = await seedRemedyCase({ bank: true });
+
+    const res = await applyRemedy(
+      caseId,
+      "refund",
+      { amount: 500000, reason: "Ombudsman ordered a refund" },
+      actor,
+    );
+    expect(res.ok).toBe(true);
+
+    const refund = await prisma.refundRequest.findFirst({ where: { memberId: member.id } });
+    expect(refund).toBeTruthy();
+    expect(refund!.status).toBe("paid");
+    expect(refund!.amount).toBe(500000);
+    expect(refund!.approvedById).toBe(actor.id);
+    expect(refund!.reason).toMatch(/ombudsman ordered/i);
+    expect(await prisma.payout.count()).toBe(1);
+    expect(payoutSpy).toHaveBeenCalledTimes(1);
+    expect(payoutSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        amount: 500000,
+        bankAccountNumber: "0123456789",
+        bankCode: "058",
+      }),
+    );
+
+    const c = await prisma.ombudsmanCase.findUnique({
+      where: { id: caseId },
+      include: { events: true },
+    });
+    expect(JSON.parse(c!.remedy!).action).toBe("refund");
+    expect(c!.events.some((e) => e.action === "remedy_applied")).toBe(true);
+
+    const audited = await prisma.auditLog.findFirst({
+      where: { action: "ombudsman.remedy_applied", targetId: caseId },
+    });
+    expect(audited).toBeTruthy();
+  });
+
+  it("refuses a remedy from a non-ombudsman", async () => {
+    const { member, caseId } = await seedRemedyCase({ frozen: true });
+
+    const res = await applyRemedy(caseId, "unfreeze", {}, { id: member.id, phone: member.phone });
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/ombudsman/i);
+
+    const m = await prisma.member.findUnique({ where: { id: member.id } });
+    expect(m!.frozenAt).not.toBeNull();
+    expect(
+      await prisma.ombudsmanCaseEvent.count({ where: { caseId, action: "remedy_applied" } }),
+    ).toBe(0);
+  });
+
+  it("refuses a second remedy once one has been applied", async () => {
+    const { caseId, actor } = await seedRemedyCase({ frozen: true });
+
+    const first = await applyRemedy(caseId, "unfreeze", {}, actor);
+    expect(first.ok).toBe(true);
+
+    const second = await applyRemedy(caseId, "unfreeze", {}, actor);
+    expect(second.ok).toBe(false);
+    expect(second.message).toMatch(/already/i);
+  });
+
+  it("routes the unfreeze remedy command through chat", async () => {
+    const { member, caseId, ombudsman } = await seedRemedyCase({ frozen: true });
+
+    await handleMessage(ombudsman.phone, `remedy ${caseId} unfreeze`);
+    const m = await prisma.member.findUnique({ where: { id: member.id } });
+    expect(m!.frozenAt).toBeNull();
+    expect(m!.supervisoryFrozenAt).toBeNull();
+  });
+
+  it("routes a refund remedy command through chat", async () => {
+    const { member, caseId, ombudsman } = await seedRemedyCase({ bank: true });
+
+    await handleMessage(ombudsman.phone, `remedy ${caseId} refund 5000 ordered by the ombudsman`);
+    const refund = await prisma.refundRequest.findFirst({ where: { memberId: member.id } });
+    expect(refund?.status).toBe("paid");
+    expect(refund?.amount).toBe(500000);
   });
 });

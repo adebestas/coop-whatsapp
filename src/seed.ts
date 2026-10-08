@@ -1,6 +1,9 @@
 /**
  * Seed a cooperative and an admin member.
  * Usage: npx tsx src/seed.ts --name "Oyo Farmers Coop" --code OYOF1 --state Oyo --admin-name "Ade Ade" --admin-phone 2348012345678 --admin-pin 1234
+ *
+ * Create a platform-level ombudsman (npm run seed:ombudsman -- --name <name> --phone <phone>):
+ * Usage: npx tsx src/seed.ts --ombudsman --name "Ada Ombuds" --phone 2348012345678
  */
 import { prisma } from "./lib/prisma.js";
 import { hashPin } from "./lib/security.js";
@@ -11,7 +14,31 @@ function arg(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
+/** Create (or reactivate) a platform-level ombudsman by phone. */
+async function seedOmbudsman() {
+  const name = arg("name");
+  const phone = arg("phone")?.replace(/[^0-9]/g, "");
+  if (!name || !phone) {
+    console.error("Usage: npx tsx src/seed.ts --ombudsman --name <name> --phone <phone>");
+    process.exit(1);
+  }
+  const ombudsman = await prisma.ombudsman.upsert({
+    where: { phone },
+    create: { name, phone, active: true },
+    update: { name, active: true },
+  });
+  console.log(
+    `Ombudsman ready: ${ombudsman.name} (${ombudsman.phone}, ${ombudsman.active ? "active" : "inactive"}).`,
+  );
+  await prisma.$disconnect();
+}
+
 async function main() {
+  if (process.argv.includes("--ombudsman")) {
+    await seedOmbudsman();
+    return;
+  }
+
   const name = arg("name");
   const coopCode = arg("code");
   const state = arg("state");

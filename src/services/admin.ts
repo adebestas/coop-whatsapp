@@ -88,6 +88,7 @@ import {
   getCase,
   investigateCase,
   decideCase,
+  applyRemedy,
   getActiveOmbudsman,
   type CaseDetail,
 } from "./ombudsman.js";
@@ -321,7 +322,7 @@ async function handleCommitteeCommand(
 }
 
 /** Commands an active platform ombudsman can use from chat (not coop members). */
-const OMBUDSMAN_COMMANDS = new Set(["cases", "case", "investigate", "decide"]);
+const OMBUDSMAN_COMMANDS = new Set(["cases", "case", "investigate", "decide", "remedy"]);
 /** Valid `OmbudsmanCase.status` values (no Prisma enum — plain strings). */
 const CASE_STATUSES = new Set(["open", "investigating", "decided", "closed"]);
 
@@ -400,6 +401,37 @@ export async function handleOmbudsmanCommand(
       return true;
     }
     const res = await investigateCase(caseRef, note, actor);
+    await sendText({ to: phone, text: res.message });
+    return true;
+  }
+
+  if (cmd === "remedy") {
+    const caseRef = args[0];
+    const action = args[1]?.trim().toLowerCase();
+    if (!caseRef || (action !== "unfreeze" && action !== "refund")) {
+      await sendText({
+        to: phone,
+        text:
+          "Usage: *remedy <case id> unfreeze* or *remedy <case id> refund <amount naira> [reason]*.",
+      });
+      return true;
+    }
+    if (action === "unfreeze") {
+      const res = await applyRemedy(caseRef, "unfreeze", {}, actor);
+      await sendText({ to: phone, text: res.message });
+      return true;
+    }
+    const amountRaw = args[2];
+    const amount = amountRaw ? toKobo(Number(amountRaw.replace(/[^0-9.]/g, ""))) : undefined;
+    if (amount === undefined || !Number.isFinite(amount)) {
+      await sendText({
+        to: phone,
+        text: "Usage: *remedy <case id> refund <amount naira> [reason]* — e.g. *remedy 1a2b3c refund 5000 double debit*.",
+      });
+      return true;
+    }
+    const reason = args.slice(3).join(" ").trim();
+    const res = await applyRemedy(caseRef, "refund", { amount, reason }, actor);
     await sendText({ to: phone, text: res.message });
     return true;
   }

@@ -380,6 +380,43 @@ pays out from the cooperative's bank/settlement account — never the member's
 wallet. Every step (recommend / approve / reject / paid / failed) is audited with
 a human-readable description.
 
+## Member ombudsman
+
+Members have an **independent escalation tier above cooperative admins**: a
+**platform-level ombudsman** (not tied to any cooperative) who can investigate a
+grievance or dispute, issue a **binding decision**, and apply a remedy.
+
+- **Escalate.** A member replies `escalate <grievance id> [reason]` to escalate a
+  grievance to the ombudsman (one case per source). A grievance left unresolved
+  past `CooperativeConfig.ombudsmanSlaDays` (default **7**) is auto-escalated by
+  the scheduler.
+- **Ombudsman console** (gated to an active `Ombudsman` phone):
+  - `cases [status]` — cases across every cooperative (`open` / `investigating` /
+    `decided` / `closed`).
+  - `case <id>` — the full case timeline.
+  - `investigate <id> <note>` — open an investigation (notifies the cooperative's
+    admins).
+  - `decide <id> <decision>` — record a binding decision (notifies the member +
+    the cooperative).
+  - `remedy <id> unfreeze` — lift a member's self-freeze **and** any Supervisory
+    Committee freeze.
+  - `remedy <id> refund <amount> [reason]` — pay the member a refund through the
+    existing refund flow, with the ombudsman acting as the approver (the
+    admin-recommend step is bypassed). One remedy per case.
+- Every case action is audited and recorded on the case timeline.
+- `Ombudsman` / `OmbudsmanCase` / `OmbudsmanCaseEvent` are **platform-level**
+  tables (not cooperative-RLS-scoped); cross-tenant access is gated in code by the
+  ombudsman role plus an explicit `withCoopContext` per coop-scoped write.
+
+**Create an ombudsman:**
+
+```bash
+npm run seed:ombudsman -- --name "Ada Ombuds" --phone 2348012345678
+```
+
+or directly:
+`npx tsx src/seed.ts --ombudsman --name "Ada Ombuds" --phone 2348012345678`.
+
 ## Dividends
 
 Profit comes from the **ledger**: loan interest, fines and admin charges in;

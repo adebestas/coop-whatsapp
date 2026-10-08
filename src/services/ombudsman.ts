@@ -2,6 +2,8 @@ import { prisma, withTx } from "../lib/prisma.js";
 import { setCoopContext } from "../lib/tenant-context.js";
 import { audit } from "./audit.js";
 import { sendText, notifyMember } from "../lib/messaging.js";
+import { recommendRefund, approveRefund } from "./refunds.js";
+import { formatBalance } from "../lib/money.js";
 import { Prisma } from "@prisma/client";
 
 const DEFAULT_SLA_DAYS = 7;
@@ -471,4 +473,136 @@ export async function decideCase(
   );
 
   return { ok: true, message: `✅ Decision recorded for case #${c.id.slice(-6)}.` };
+}
+
+export type RemedyAction = "unfreeze" | "refund";
+
+/**
+ * Ombudsman-only: apply a binding remedy to a case. `unfreeze` lifts both the
+ * member's self-freeze and any Supervisory Committee freeze (inside
+ * `withCoopContext`); `refund` pays the member through the existing
+ * maker-checker refund flow with the ombudsman acting as the approver (the
+ * admin-recommend step is bypassed). Records the `remedy` JSON + a
+ * `remedy_applied` event, audits the action, and notifies the member. One remedy
+ * per case.
+ */
+export async function applyRemedy(
+  caseId: string,
+  action: RemedyAction,
+  params: { amount?: number; reason?: string },
+  actor: { id: string; phone: string },
+): Promise<{ ok: boolean; message: string }> {
+  if (!(await isOmbudsman(actor.phone))) {
+    return { ok: false, message: "Only the independent ombudsman can act on a case." };
+  }
+  if (action !== "unfreeze" && action !== "refund") {
+    return {
+      ok: false,
+      message:
+        "Unknown remedy. Use *remedy <id> unfreeze* or *remedy <id> refund <amount> [reason]*.",
+    };
+  }
+  const lookup = await lookupCase(caseId);
+  if (!lookup.ok) return { ok: false, message: lookup.message };
+  const c = lookup.case;
+  if (c.remedy) {
+    return { ok: false, message: "This case already has a remedy applied." };
+  }
+
+  const member = await prisma.member.findUnique({
+    where: { id: c.memberId },
+    select: {
+      name: true,
+      phone: true,
+      altChannelId: true,
+      preferredChannel: true,
+      optedOut: true,
+    },
+  });
+  if (!member) return { ok: false, message: "The member on this case no longer exists." };
+
+  let detail: string;
+  let amount: number | undefined;
+
+  if (action === "unfreeze") {
+    detail = `Wallet unfrozen by ombudsman remedy (case #${c.id.slice(-6)})`;
+  } else {
+    const refundAmount = params.amount;
+    if (!Number.isInteger(refundAmount) || (refundAmount ?? 0) <= 0) {
+      return {
+        ok: false,
+        message: "Give the refund amount in naira, e.g. *remedy <id> refund 5000*.",
+      };
+    }
+    amount = refundAmount as number;
+    const reason = (
+      params.reason?.trim() || `Ombudsman remedy (case #${c.id.slice(-6)})`
+    ).slice(0, 200);
+
+    // The ombudsman bypasses the admin-recommend step and acts as the approver:
+    // create the request, then approve it through the shared payout path.
+    const recommended = await recommendRefund(c.cooperativeId, c.memberId, amount, reason, {
+      id: actor.id,
+      phone: actor.phone,
+      role: "ombudsman",
+    });
+    if (!recommended.ok || !recommended.refundId) {
+      return { ok: false, message: recommended.message };
+    }
+    const paid = await approveRefund(
+      c.cooperativeId,
+      recommended.refundId,
+      { id: actor.id, phone: actor.phone, role: "ombudsman" },
+      { ombudsmanApproved: true },
+    );
+    if (!paid.ok) {
+      return { ok: false, message: paid.message };
+    }
+    detail =
+      `Refund of ${formatBalance(amount)} ordered for ${member.name} — ${reason} ` +
+      `(refund #${recommended.refundId.slice(-6)})`;
+  }
+
+  const remedy = JSON.stringify({ action, detail, appliedAt: new Date().toISOString() });
+  await withTx(async (tx) => {
+    await setCoopContext(tx as never, c.cooperativeId);
+    if (action === "unfreeze") {
+      await tx.member.update({
+        where: { id: c.memberId },
+        data: { frozenAt: null, supervisoryFrozenAt: null },
+      });
+    }
+    await tx.ombudsmanCase.update({ where: { id: c.id }, data: { remedy } });
+    await tx.ombudsmanCaseEvent.create({
+      data: {
+        caseId: c.id,
+        actorId: actor.id,
+        actorRole: "ombudsman",
+        action: "remedy_applied",
+        detail,
+      },
+    });
+  });
+
+  await audit({
+    cooperativeId: c.cooperativeId,
+    actorPhone: actor.phone,
+    actorId: actor.id,
+    actorRole: "ombudsman",
+    action: "ombudsman.remedy_applied",
+    targetType: "ombudsman_case",
+    targetId: c.id,
+    ...(amount ? { amount } : {}),
+    detail,
+  }).catch(() => {});
+
+  await notifyMember(
+    member,
+    `⚖️ *Ombudsman remedy applied* on case #${c.id.slice(-6)}\n\n${detail}`,
+  ).catch(() => {});
+
+  return {
+    ok: true,
+    message: `✅ Remedy applied to case #${c.id.slice(-6)}: ${action}.\n\n${detail}`,
+  };
 }
