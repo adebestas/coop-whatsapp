@@ -89,6 +89,14 @@ vi.mock("../src/services/payments/index.js", async (importOriginal) => {
   };
 });
 
+// Wrap `sendToBank` in a passthrough spy so tests can inject a throw AFTER a
+// real payout (to exercise the refund-remedy "money may have moved" guard).
+// Registered before the app import, so per-file mocks of this module are inert.
+vi.mock("../src/services/disbursements.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/services/disbursements.js")>();
+  return { ...actual, sendToBank: vi.fn(actual.sendToBank) };
+});
+
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
 import { beforeAll, beforeEach } from "vitest";

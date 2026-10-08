@@ -1,5 +1,5 @@
 import { prisma, withTx } from "../lib/prisma.js";
-import { setCoopContext } from "../lib/tenant-context.js";
+import { setCoopContext, withCoopContext } from "../lib/tenant-context.js";
 import { audit } from "./audit.js";
 import { sendText, notifyMember } from "../lib/messaging.js";
 import { recommendRefund, approveRefundAsOmbudsman } from "./refunds.js";
@@ -91,9 +91,18 @@ async function notifyOmbudsmen(text: string): Promise<void> {
 
 /** Notify the admins of a cooperative (member admins + the coop admin phone). Never throws. */
 async function notifyCoop(cooperativeId: string, text: string): Promise<void> {
-  const admins = await prisma.member.findMany({
-    where: { cooperativeId, role: { in: ["admin", "superadmin"] }, status: "active" },
-    select: { phone: true, altChannelId: true, preferredChannel: true, optedOut: true },
+  // Member/Cooperative are cooperative-RLS-scoped: read them inside the coop's
+  // context or they return nothing under Stage-2 RLS.
+  const { admins, coop } = await withCoopContext(cooperativeId, async () => {
+    const admins = await prisma.member.findMany({
+      where: { cooperativeId, role: { in: ["admin", "superadmin"] }, status: "active" },
+      select: { phone: true, altChannelId: true, preferredChannel: true, optedOut: true },
+    });
+    const coop = await prisma.cooperative.findUnique({
+      where: { id: cooperativeId },
+      select: { adminPhone: true },
+    });
+    return { admins, coop };
   });
   const seen = new Set<string>();
   await Promise.all(
@@ -102,10 +111,6 @@ async function notifyCoop(cooperativeId: string, text: string): Promise<void> {
       return notifyMember(a, text);
     }),
   ).catch(() => {});
-  const coop = await prisma.cooperative.findUnique({
-    where: { id: cooperativeId },
-    select: { adminPhone: true },
-  });
   if (coop?.adminPhone && !seen.has(coop.adminPhone)) {
     await sendText({ to: coop.adminPhone, text }).catch(() => {});
   }
@@ -180,9 +185,20 @@ export async function escalateCase(
     const slaDays = config?.ombudsmanSlaDays ?? DEFAULT_SLA_DAYS;
     const slaDueAt = new Date(Date.now() + slaDays * DAY_MS);
 
-    // Deduplication is enforced by the partial unique index
-    // OmbudsmanCase_cooperativeId_sourceType_sourceId_key, not a check-then-act
-    // read — so two concurrent escalations cannot both succeed.
+    // Pre-check for an existing case for this source INSIDE the transaction.
+    // `escalateCase` runs inside `handleMessage`'s outer `withCoopContext`
+    // transaction, so letting a duplicate INSERT hit the unique index would
+    // abort that shared Postgres transaction (an aborted statement poisons it)
+    // and the friendly "already escalated" reply would never be delivered. The
+    // unique index stays as a race backstop.
+    if (sourceId) {
+      const existing = await tx.ombudsmanCase.findFirst({
+        where: { cooperativeId: coopId, sourceType, sourceId },
+        select: { id: true },
+      });
+      if (existing) return { error: "duplicate" as const };
+    }
+
     const c = await tx.ombudsmanCase.create({
       data: {
         cooperativeId: coopId,
@@ -457,10 +473,12 @@ export async function decideCase(
     detail: `Decision on case #${c.id.slice(-6)}: ${detail}`,
   }).catch(() => {});
 
-  const member = await prisma.member.findUnique({
-    where: { id: c.memberId },
-    select: { phone: true, altChannelId: true, preferredChannel: true, optedOut: true },
-  });
+  const member = await withCoopContext(c.cooperativeId, () =>
+    prisma.member.findUnique({
+      where: { id: c.memberId },
+      select: { phone: true, altChannelId: true, preferredChannel: true, optedOut: true },
+    }),
+  );
   if (member) {
     await notifyMember(
       member,
@@ -482,6 +500,45 @@ async function resetRemedyClaim(caseId: string, claim: string): Promise<void> {
   await prisma.ombudsmanCase.updateMany({
     where: { id: caseId, remedy: claim },
     data: { remedy: null },
+  });
+}
+
+/**
+ * True when a refund linked to a case may already have moved money: it is
+ * `paid`/`approved`, or it failed with an "unsure:" provider outcome. Read inside
+ * the coop's context so it resolves under Stage-2 RLS.
+ */
+async function linkedRefundMayHavePaid(cooperativeId: string, refundId: string): Promise<boolean> {
+  const refund = await withCoopContext(cooperativeId, () =>
+    prisma.refundRequest.findUnique({
+      where: { id: refundId },
+      select: { status: true, payoutRef: true },
+    }),
+  );
+  if (!refund) return false;
+  return (
+    refund.status === "paid" ||
+    refund.status === "approved" ||
+    (refund.payoutRef ?? "").startsWith("unsure:")
+  );
+}
+
+/** Persist an "unconfirmed" remedy marker so the case is never re-paid automatically. */
+async function markRemedyUnconfirmed(
+  caseId: string,
+  action: RemedyAction,
+  refundId: string,
+): Promise<void> {
+  await prisma.ombudsmanCase.update({
+    where: { id: caseId },
+    data: {
+      remedy: JSON.stringify({
+        action,
+        status: "unconfirmed",
+        refundId,
+        appliedAt: new Date().toISOString(),
+      }),
+    },
   });
 }
 
@@ -532,11 +589,14 @@ async function recordRemedy(
  *
  * The case is **atomically claimed** (`remedy: null` -> a `status: "applying"`
  * marker) before any money moves or state changes, so two concurrent calls
- * cannot both proceed — exactly one pays. The claim is reset to null on a clean
- * failure (no money moved) so the remedy can be retried, but is deliberately
- * LEFT in place when a payout outcome is unconfirmed, so it is never re-paid
- * automatically. Records the final `remedy` JSON + a `remedy_applied` event,
- * audits the action, and notifies the member.
+ * cannot both proceed — exactly one pays. Once a refund exists, its id is
+ * written into the marker BEFORE paying, so if the payout step later throws we
+ * can still find the linked refund and tell whether money may have moved. The
+ * claim is reset to null on a clean failure (no money moved) so the remedy can
+ * be retried, but is deliberately LEFT in place when a payout is unconfirmed or
+ * may have been accepted, so it is never re-paid automatically. Records the
+ * final `remedy` JSON + a `remedy_applied` event, audits the action, and
+ * notifies the member.
  */
 export async function applyRemedy(
   caseId: string,
@@ -558,19 +618,34 @@ export async function applyRemedy(
   if (!lookup.ok) return { ok: false, message: lookup.message };
   const c = lookup.case;
   if (c.remedy) {
+    let prior: { status?: string } = {};
+    try {
+      prior = JSON.parse(c.remedy) as { status?: string };
+    } catch {
+      // A malformed marker is treated as an applied remedy.
+    }
+    if (prior.status === "unconfirmed") {
+      return {
+        ok: false,
+        message:
+          "This case's refund payout is unconfirmed — an admin must reconcile with the provider before any retry.",
+      };
+    }
     return { ok: false, message: "This case already has a remedy applied." };
   }
 
-  const member = await prisma.member.findUnique({
-    where: { id: c.memberId },
-    select: {
-      name: true,
-      phone: true,
-      altChannelId: true,
-      preferredChannel: true,
-      optedOut: true,
-    },
-  });
+  const member = await withCoopContext(c.cooperativeId, () =>
+    prisma.member.findUnique({
+      where: { id: c.memberId },
+      select: {
+        name: true,
+        phone: true,
+        altChannelId: true,
+        preferredChannel: true,
+        optedOut: true,
+      },
+    }),
+  );
   if (!member) return { ok: false, message: "The member on this case no longer exists." };
 
   let amount: number | undefined;
@@ -601,6 +676,11 @@ export async function applyRemedy(
     return { ok: false, message: "This case already has a remedy applied or one is in progress." };
   }
 
+  // The marker currently in the DB; it grows to carry the refund id once a
+  // refund exists, so a throw after money moved can still be traced.
+  let activeClaim = claim;
+  let refundId: string | undefined;
+
   let detail: string;
   try {
     if (action === "unfreeze") {
@@ -615,33 +695,41 @@ export async function applyRemedy(
         role: "ombudsman",
       });
       if (!recommended.ok || !recommended.refundId) {
-        await resetRemedyClaim(c.id, claim);
+        await resetRemedyClaim(c.id, activeClaim);
         return { ok: false, message: recommended.message };
       }
-      const paid = await approveRefundAsOmbudsman(c.cooperativeId, recommended.refundId, {
+      refundId = recommended.refundId;
+      // Persist the refund id into the claim BEFORE paying: if the payout step
+      // later throws, we can still find the linked refund and tell whether money
+      // may have moved (a brand-new retry would otherwise double-pay).
+      activeClaim = JSON.stringify({
+        action,
+        status: "applying",
+        refundId,
+        appliedAt: new Date().toISOString(),
+      });
+      await prisma.ombudsmanCase.updateMany({
+        where: { id: c.id, remedy: claim },
+        data: { remedy: activeClaim },
+      });
+
+      const paid = await approveRefundAsOmbudsman(c.cooperativeId, refundId, {
         id: actor.id,
         phone: actor.phone,
       });
       if (!paid.ok) {
-        const refund = await prisma.refundRequest.findUnique({
-          where: { id: recommended.refundId },
-          select: { status: true, payoutRef: true },
-        });
+        const refund = await withCoopContext(c.cooperativeId, () =>
+          prisma.refundRequest.findUnique({
+            where: { id: refundId },
+            select: { status: true, payoutRef: true },
+          }),
+        );
         const unsure =
           refund?.status === "failed" && (refund.payoutRef ?? "").startsWith("unsure:");
         if (unsure) {
           // The transfer may already have been sent — keep the claim so this case
           // is never re-paid automatically; a human must reconcile.
-          await prisma.ombudsmanCase.update({
-            where: { id: c.id },
-            data: {
-              remedy: JSON.stringify({
-                action,
-                status: "unconfirmed",
-                appliedAt: new Date().toISOString(),
-              }),
-            },
-          });
+          await markRemedyUnconfirmed(c.id, action, refundId);
           return { ok: false, message: paid.message };
         }
         // No money moved: cancel the orphan request and reset the claim so the
@@ -649,21 +737,33 @@ export async function applyRemedy(
         await withTx(async (tx) => {
           await setCoopContext(tx as never, c.cooperativeId);
           await tx.refundRequest.updateMany({
-            where: { id: recommended.refundId, status: { in: ["pending", "failed"] } },
+            where: { id: refundId, status: { in: ["pending", "failed"] } },
             data: { status: "rejected", reason: `${reason} (ombudsman remedy failed)` },
           });
         });
-        await resetRemedyClaim(c.id, claim);
+        await resetRemedyClaim(c.id, activeClaim);
         return { ok: false, message: paid.message };
       }
       detail =
         `Refund of ${formatBalance(amount!)} ordered for ${member.name} — ${reason} ` +
-        `(refund #${recommended.refundId.slice(-6)})`;
+        `(refund #${refundId.slice(-6)})`;
       await recordRemedy(c, action, detail, actor.id);
     }
   } catch (err) {
-    // Unexpected failure before completion — release the claim for a retry.
-    await resetRemedyClaim(c.id, claim);
+    // A throw here may have happened AFTER the payout was accepted (e.g. a DB
+    // error writing the Payout row or the final refund update). If a refund
+    // linked to this case is paid/approved/unsure, money may have moved: keep the
+    // claim and mark it unconfirmed so a retry can NEVER re-pay. Only a clean
+    // failure (no such linked refund) releases the claim for a retry.
+    if (refundId && (await linkedRefundMayHavePaid(c.cooperativeId, refundId))) {
+      await markRemedyUnconfirmed(c.id, action, refundId);
+      return {
+        ok: false,
+        message:
+          "⚠️ The refund payout could not be confirmed. Do NOT retry until an admin reconciles with the provider.",
+      };
+    }
+    await resetRemedyClaim(c.id, activeClaim);
     throw err;
   }
 

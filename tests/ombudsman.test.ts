@@ -14,6 +14,7 @@ import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { resolveProvider } from "../src/services/payments/index.js";
+import { sendToBank } from "../src/services/disbursements.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -89,7 +90,7 @@ describe("ombudsman escalation", () => {
     expect(await prisma.ombudsmanCase.count({ where: { sourceId: g.id } })).toBe(1);
   });
 
-  it("enforces one case per source at the database level (partial unique index)", async () => {
+  it("enforces one case per source at the database level (unique index)", async () => {
     const coop = await createTestCoop("OMB6");
     const member = await createTestMember(coop.id, { phone: "2348000040051" });
     const g = await createGrievance(coop.id, member.id);
@@ -108,7 +109,7 @@ describe("ombudsman escalation", () => {
       prisma.ombudsmanCase.create({ data: { ...base, summary: "second" } }),
     ).rejects.toMatchObject({ code: "P2002" });
 
-    // Sourceless disputes are not constrained by the partial index.
+    // Sourceless disputes are not constrained (NULLs are distinct in a unique index).
     const dispute = {
       cooperativeId: coop.id,
       memberId: member.id,
@@ -319,6 +320,42 @@ describe("member escalate command", () => {
       .mock.calls.map((c) => c[0].text)
       .join("\n");
     expect(texts).toMatch(/ombudsman/i);
+  });
+
+  it("escalates a dispute through the chat command with its category", async () => {
+    const coop = await createTestCoop("OMB12");
+    const member = await createTestMember(coop.id, { phone: "2348000040101" });
+
+    await handleMessage(member.phone, `escalate dispute freeze LOAN-123 wrongly frozen`);
+
+    const c = await prisma.ombudsmanCase.findFirst({ where: { memberId: member.id } });
+    expect(c).toBeTruthy();
+    expect(c!.sourceType).toBe("dispute");
+    expect(c!.category).toBe("freeze");
+    expect(c!.sourceId!.toLowerCase()).toBe("loan-123");
+    expect(c!.summary).toMatch(/wrongly frozen/);
+
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(texts).toMatch(/ombudsman/i);
+  });
+
+  it("replies 'already escalated' when the same source is escalated twice via chat", async () => {
+    const coop = await createTestCoop("OMB13");
+    const member = await createTestMember(coop.id, { phone: "2348000040111" });
+    const g = await createGrievance(coop.id, member.id);
+
+    await handleMessage(member.phone, `escalate ${g.id} first try`);
+    await handleMessage(member.phone, `escalate ${g.id} second try`);
+
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(texts).toMatch(/already been escalated/i);
+    expect(await prisma.ombudsmanCase.count({ where: { sourceId: g.id } })).toBe(1);
   });
 });
 
@@ -707,5 +744,46 @@ describe("ombudsman remedies", () => {
     expect(await prisma.refundRequest.count({ where: { status: "paid" } })).toBe(1);
     expect(await prisma.payout.count()).toBe(1);
     expect(payoutSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-pay when the payout throws after the money may have moved", async () => {
+    const { member, caseId, actor } = await seedRemedyCase({ bank: true });
+
+    // Simulate a throw AFTER the provider accepted the transfer: run the real
+    // sendToBank (which calls the provider and writes the Payout row), then throw
+    // from the bookkeeping step.
+    const realSendToBank = vi.mocked(sendToBank).getMockImplementation()!;
+    vi.mocked(sendToBank).mockImplementationOnce(async (opts) => {
+      await realSendToBank(opts);
+      throw new Error("simulated DB failure after payout");
+    });
+
+    const first = await applyRemedy(
+      caseId,
+      "refund",
+      { amount: 500000, reason: "throw path" },
+      actor,
+    );
+    expect(first.ok).toBe(false);
+    expect(payoutSpy).toHaveBeenCalledTimes(1);
+    expect(await prisma.payout.count()).toBe(1);
+
+    // The claim must be LEFT in place (the linked refund is not a clean decline),
+    // so a retry cannot create a new refund and pay a second time.
+    const afterThrow = await prisma.ombudsmanCase.findUnique({ where: { id: caseId } });
+    expect(afterThrow!.remedy).toBeTruthy();
+    expect(JSON.parse(afterThrow!.remedy!).status).toBe("unconfirmed");
+
+    const retry = await applyRemedy(
+      caseId,
+      "refund",
+      { amount: 500000, reason: "throw path" },
+      actor,
+    );
+    expect(retry.ok).toBe(false);
+    expect(payoutSpy).toHaveBeenCalledTimes(1);
+    expect(await prisma.payout.count()).toBe(1);
+    expect(await prisma.refundRequest.count()).toBe(1);
+    expect(member.id).toBeTruthy();
   });
 });

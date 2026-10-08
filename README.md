@@ -387,9 +387,10 @@ Members have an **independent escalation tier above cooperative admins**: a
 grievance or dispute, issue a **binding decision**, and apply a remedy.
 
 - **Escalate.** A member replies `escalate <grievance id> [reason]` to escalate a
-  grievance to the ombudsman (one case per source). A grievance left unresolved
-  past `CooperativeConfig.ombudsmanSlaDays` (default **7**) is auto-escalated by
-  the scheduler.
+  grievance, or `escalate dispute <loan_rejection|dividend|freeze|suspension|other>
+  <reference> [reason]` to escalate a dispute directly (one case per source). A
+  grievance left unresolved past `CooperativeConfig.ombudsmanSlaDays` (default
+  **7**) is auto-escalated by the scheduler.
 - **Ombudsman console** (gated to an active `Ombudsman` phone):
   - `cases [status]` — cases across every cooperative (`open` / `investigating` /
     `decided` / `closed`).

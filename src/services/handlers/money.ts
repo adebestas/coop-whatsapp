@@ -19,7 +19,7 @@ import {
   openJuniorAccount,
 } from "../savings-products.js";
 import { listMandates } from "../mandates.js";
-import { escalateCase } from "../ombudsman.js";
+import { escalateCase, type EscalateInput } from "../ombudsman.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 import { resolveProvider, listBanks, type Bank } from "../payments/index.js";
 import { savePayee } from "../../lib/beneficiaries.js";
@@ -903,9 +903,21 @@ export async function handleBankConfirmStep(
   );
 }
 
+/** Valid dispute forms (no Prisma enum — plain strings). */
+const DISPUTE_CATEGORIES = new Set([
+  "loan_rejection",
+  "dividend",
+  "freeze",
+  "suspension",
+  "other",
+]);
+
 /**
- * Escalate a cooperative matter (a grievance) to the independent, platform-level
- * ombudsman. `escalate <grievance id> [reason]`.
+ * Escalate a cooperative matter to the independent, platform-level ombudsman.
+ * Two forms:
+ *   *escalate <grievance id> [reason]* — escalate an existing grievance.
+ *   *escalate dispute <loan_rejection|dividend|freeze|suspension|other> <reference> [reason]*
+ *     — escalate a dispute directly (no stored grievance required).
  */
 export async function handleEscalate(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
@@ -913,28 +925,53 @@ export async function handleEscalate(phone: string, args: string[]): Promise<voi
     await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
     return;
   }
-  const sourceId = args[0];
-  if (!sourceId) {
-    await sendText({
-      to: phone,
-      text:
-        "Usage: *escalate <grievance id> [reason]* — escalate an unresolved grievance to the independent ombudsman.\n" +
-        "Reply *grievances* to find your grievance id.",
-    });
-    return;
-  }
-  const reason = args.slice(1).join(" ").trim();
-  const result = await escalateCase(
-    member.cooperativeId,
-    member.id,
-    {
+
+  const first = (args[0] ?? "").trim().toLowerCase();
+  let input: EscalateInput;
+
+  if (first === "dispute") {
+    const category = (args[1] ?? "").trim().toLowerCase();
+    const ref = (args[2] ?? "").trim();
+    if (!DISPUTE_CATEGORIES.has(category) || !ref) {
+      await sendText({
+        to: phone,
+        text:
+          "Usage: *escalate dispute <loan_rejection|dividend|freeze|suspension|other> <reference> [reason]*.\n" +
+          "E.g. *escalate dispute freeze LOAN-123 wrongly frozen*.",
+      });
+      return;
+    }
+    const reason = args.slice(3).join(" ").trim();
+    input = {
+      sourceType: "dispute",
+      sourceId: ref,
+      category,
+      summary: reason || `Member dispute (${category})`,
+    };
+  } else {
+    const sourceId = args[0];
+    if (!sourceId) {
+      await sendText({
+        to: phone,
+        text:
+          "Usage: *escalate <grievance id> [reason]* — escalate an unresolved grievance to the independent ombudsman.\n" +
+          "Reply *grievances* to find your grievance id.",
+      });
+      return;
+    }
+    const reason = args.slice(1).join(" ").trim();
+    input = {
       sourceType: "grievance",
       sourceId,
       category: "other",
       summary: reason || "Member escalation of an unresolved grievance",
-    },
-    { id: member.id, phone },
-  );
+    };
+  }
+
+  const result = await escalateCase(member.cooperativeId, member.id, input, {
+    id: member.id,
+    phone,
+  });
   await sendText({ to: phone, text: result.message });
 }
 
