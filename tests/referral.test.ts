@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import {
   recordReferral,
@@ -14,6 +14,7 @@ import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { requestManualCredit, approveManualCredit } from "../src/services/manualcredit.js";
 import { sendToBank } from "../src/services/disbursements.js";
 import { runReferralPayouts } from "../src/services/scheduler.js";
+import { clearVtuBillerCache } from "../src/services/payments/vtu.js";
 import { txStorage } from "../src/lib/prisma.js";
 import { enqueueAfterCommit, withDeferredSends } from "../src/lib/deferred.js";
 import type { BotState } from "../src/services/conversation.js";
@@ -997,5 +998,96 @@ describe("referral board controls", () => {
     });
     expect(cfg.referralEnabled).toBe(true);
     expect(textsSent()).toContain("Board Committee");
+  });
+});
+
+describe("referral airtime reward via the Flutterwave adapter", () => {
+  const FLW = "https://api.flutterwave.com/v3";
+  const json = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+
+  beforeEach(() => {
+    process.env.VTU_PROVIDER = "flutterwave";
+    process.env.FLUTTERWAVE_SECRET_KEY = "FLWSECK_TEST-abc";
+    clearVtuBillerCache();
+  });
+
+  afterEach(() => {
+    delete process.env.VTU_PROVIDER;
+    delete process.env.FLUTTERWAVE_SECRET_KEY;
+    vi.unstubAllGlobals();
+  });
+
+  it("pays an airtime reward end-to-end when the adapter resolves", async () => {
+    const paymentCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/top-bill-categories")) {
+          return json({ status: "success", data: [{ code: "AIRTIME", country_code: "NG" }] });
+        }
+        if (url.includes("/bills/AIRTIME/billers")) {
+          return json({
+            status: "success",
+            data: [{ biller_code: "BIL100", name: "MTN", short_name: "MTN" }],
+          });
+        }
+        if (url.endsWith("/items")) {
+          return json({
+            status: "success",
+            data: [{ item_code: "AT100", is_airtime: true, category_name: "Airtime" }],
+          });
+        }
+        paymentCalls.push({ url, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+        return json({
+          status: "success",
+          message: "Bill payment successful",
+          data: { tx_ref: "CF-FLYAPI-REFERRAL", reference: "247891569224" },
+        });
+      }),
+    );
+
+    const coop = await createCoop("REFAIR");
+    // An MTN number set as the referrer's own phone (no contactPhone) — the exact
+    // number the airtime branch would recharge.
+    const referrer = await createTestMember(coop.id, {
+      phone: "08031234567",
+      name: "Ada Obi",
+    });
+    const referred = await createTestMember(coop.id, { phone: "2348044440011" });
+    await recordReferral(coop.id, referrer.code, referred.id);
+    const referral = await prisma.referral.findUniqueOrThrow({
+      where: { referredMemberId: referred.id },
+    });
+    await prisma.referral.update({
+      where: { id: referral.id },
+      data: {
+        status: "qualified",
+        qualifiedAt: new Date(),
+        rewardType: "airtime",
+        rewardAmount: 50000,
+      },
+    });
+
+    const res = await payReferralReward(coop.id, referral.id);
+    expect(res.ok).toBe(true);
+
+    // Money moved: the referral is `rewarded` and audited.
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referral.id } });
+    expect(after.status).toBe("rewarded");
+    expect(after.rewardedAt).toBeInstanceOf(Date);
+    const audited = await prisma.auditLog.findFirst({
+      where: { action: "referral.rewarded", targetId: referral.id },
+    });
+    expect(audited).toBeTruthy();
+
+    // ₦500 (50,000 kobo) was bought as whole naira via the MTN airtime biller.
+    expect(paymentCalls).toHaveLength(1);
+    expect(paymentCalls[0].url).toBe(`${FLW}/billers/BIL100/items/AT100/payment`);
+    expect(paymentCalls[0].body).toMatchObject({
+      country: "NG",
+      customer_id: "08031234567",
+      amount: 500,
+    });
   });
 });
