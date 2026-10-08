@@ -100,7 +100,7 @@ import {
   type PackType,
   type PeriodType,
 } from "./regulator-reporting.js";
-import { setReferralConfig, setReferralEnabled, referralReport, payReferralReward } from "./referrals.js";
+import { setReferralConfig, setReferralEnabled, referralReport, notifyReferralReward } from "./referrals.js";
 import { enqueueAfterCommit } from "../lib/deferred.js";
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
@@ -1443,13 +1443,14 @@ export async function handleAdminCommand(
 
       case "referralpay":
       case "referralretry": {
-        // Retry a single `qualified` referral reward (e.g. a gated airtime reward
-        // or a bank payout that failed). Idempotent; only pays when `qualified`.
+        // Re-send the referral reward CONFIRMATION prompt (a nudge). Rewards are
+        // member-confirmed now, so this never pays: the referrer must reply
+        // *confirmreward* and enter their PIN. Keep the program's enablement gate.
         const refArg = args[0]?.trim();
         if (!refArg) {
           await sendText({
             to: phone,
-            text: "Usage: *referralpay <referral id>* — retry a qualified referral reward (from *referralreport*).",
+            text: "Usage: *referralpay <referral id>* — re-send a qualified referral reward prompt (from *referralreport*).",
           });
           return true;
         }
@@ -1474,24 +1475,23 @@ export async function handleAdminCommand(
           await sendText({ to: phone, text: `No referral found for *${refArg}*.` });
           return true;
         }
-        // The chat handler runs under `withCoopContext` (an ambient tx), and
-        // `payReferralReward` must commit its claim BEFORE the provider call —
-        // so defer the payout past the chat transaction. `enqueueAfterCommit`
-        // returns false with no ambient scope (direct call), so fall back to an
-        // immediate await there. The reconciliation job is the safety net.
+        // The chat handler runs under `withCoopContext` (an ambient tx); the
+        // prompt send must not run inside it, so defer past the chat
+        // transaction. `enqueueAfterCommit` returns false with no ambient scope
+        // (direct call), so fall back to an immediate await there.
         const triggered = enqueueAfterCommit(async () => {
-          await payReferralReward(coopId, match.id).catch((err) => {
-            console.error("[referral] admin referralpay failed", err);
+          await notifyReferralReward(coopId, match.id).catch((err) => {
+            console.error("[referral] admin referralpay prompt failed", err);
           });
         });
         if (!triggered) {
-          const payRes = await payReferralReward(coopId, match.id);
-          await sendText({ to: phone, text: payRes.message });
+          const res = await notifyReferralReward(coopId, match.id);
+          await sendText({ to: phone, text: res.message });
           return true;
         }
         await sendText({
           to: phone,
-          text: "Referral reward payment triggered — it will complete shortly; check *referralreport*.",
+          text: "Referral reward confirmation prompt re-sent — the member must reply *confirmreward* and enter their PIN to receive it.",
         });
         return true;
       }

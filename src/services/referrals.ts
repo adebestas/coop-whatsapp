@@ -3,8 +3,9 @@ import { setCoopContext } from "../lib/tenant-context.js";
 import { audit } from "./audit.js";
 import { postJournal } from "./journal.js";
 import { sendToBank } from "./disbursements.js";
-import { resolveVtuProvider } from "./payments/vtu.js";
+import { resolveVtuProvider, networkForPhone } from "./payments/vtu.js";
 import { enqueueAfterCommit } from "../lib/deferred.js";
+import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "../lib/money.js";
 import { log } from "../lib/logger.js";
 
@@ -126,9 +127,11 @@ export async function recordReferral(
 /**
  * Qualify a referral on the referred member's first qualifying contribution.
  * Snapshots the coop's reward type + amount at this moment, flips the row to
- * `qualified`, and pays the reward (wallet/bank/airtime) via
- * `payReferralReward`. Idempotent: a second call is a no-op and leaves the
- * snapshot untouched.
+ * `qualified`, and asks the referrer to confirm the reward — it does NOT pay.
+ * A confirmation prompt (with the reward details) is sent via
+ * `notifyReferralReward`; the reward is disbursed only after the member replies
+ * *confirmreward* and enters their PIN. Idempotent: a second call is a no-op and
+ * leaves the snapshot untouched.
  */
 export async function qualifyReferral(
   coopId: string,
@@ -224,19 +227,20 @@ export async function qualifyReferral(
       detail: `${outcome.rewardType} reward of ${formatBalance(outcome.rewardAmount ?? 0)} for referrer ${outcome.referrerId}`,
     }).catch(() => {});
 
-    // Single reward trigger: the referral we just moved pending → qualified is
-    // paid. Inside a deferred-send scope (the top-up money-in path) the payment
-    // is queued to run AFTER the credit transaction commits, so the provider
-    // payout never executes with a DB transaction open. Outside any scope (the
-    // deductions path) it runs immediately. Either way it is fail-safe: a
-    // reward error is logged and audited, never propagated into the money-in
-    // flow.
+    // Confirmation prompt: NO reward is auto-paid. The referrer is asked to
+    // confirm the pending reward (and later enter their PIN). Inside a
+    // deferred-send scope (the top-up money-in path) the prompt is queued to run
+    // AFTER the credit transaction commits, so it never executes with a DB
+    // transaction open. Outside any scope (the deductions path) it runs
+    // immediately. Either way it is fail-safe: a prompt error is logged and
+    // audited, never propagated into the money-in flow.
     if (outcome.referralId) {
-      const pay = () => payReferralReward(coopId, outcome.referralId!);
-      if (!enqueueAfterCommit(pay)) {
-        await pay().catch((err) => {
-          console.warn("[referral] reward payment failed:", err);
+      const prompt = () =>
+        notifyReferralReward(coopId, outcome.referralId!).catch((err) => {
+          console.warn("[referral] reward prompt failed:", err);
         });
+      if (!enqueueAfterCommit(prompt)) {
+        await prompt();
       }
     }
   }
@@ -254,6 +258,161 @@ export async function qualifyReferral(
   }
 
   return { ok: outcome.ok, message: outcome.message, referralId: outcome.referralId };
+}
+
+/** Load the member's most recent `qualified` referral (their pending reward). */
+export async function latestQualifiedReferral(
+  coopId: string,
+  referrerId: string,
+): Promise<{ id: string } | null> {
+  return withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    return tx.referral.findFirst({
+      where: { cooperativeId: coopId, referrerId, status: "qualified" },
+      orderBy: [{ qualifiedAt: "desc" }, { createdAt: "desc" }],
+      select: { id: true },
+    });
+  });
+}
+
+type ReferrerPrompt = {
+  id: string;
+  name: string;
+  phone: string;
+  contactPhone: string | null;
+  bankAccountNumber: string | null;
+  bankCode: string | null;
+  bankName: string | null;
+  altChannelId: string | null;
+  preferredChannel: string | null;
+  optedOut: boolean;
+} | null;
+
+/** Mask a bank account number for display: first four digits, then `****`. */
+function maskAccountNumber(account: string): string {
+  const digits = account.replace(/\D/g, "");
+  return digits.length > 4 ? `${digits.slice(0, 4)}****` : digits;
+}
+
+/** The referrer's real recharge phone (contactPhone first, never a `tg:` id). */
+function airtimePhoneOf(referrer: ReferrerPrompt): string {
+  if (!referrer) return "";
+  return (
+    referrer.contactPhone?.trim() ||
+    (referrer.phone && !referrer.phone.startsWith("tg:") ? referrer.phone : "")
+  );
+}
+
+/** Build the human-readable reward details line shown in the confirm prompt. */
+function rewardDetailsText(rewardType: string, amount: number, referrer: ReferrerPrompt): string {
+  const amt = formatBalance(amount);
+  if (rewardType === "bank") {
+    if (referrer?.bankAccountNumber) {
+      const bank = referrer.bankName ? ` (${referrer.bankName})` : "";
+      return `${amt} to your bank account ${maskAccountNumber(referrer.bankAccountNumber)}${bank}`;
+    }
+    return `${amt} to your bank account`;
+  }
+  if (rewardType === "airtime") {
+    const phone = airtimePhoneOf(referrer);
+    if (!phone) return `${amt} airtime`;
+    const network = networkForPhone(phone);
+    return network ? `${amt} airtime to ${phone} (${network})` : `${amt} airtime to ${phone}`;
+  }
+  return `${amt} to your wallet`;
+}
+
+/**
+ * Send the referrer a confirmation prompt for a `qualified` referral — the
+ * details of the pending reward plus how to claim it (*confirmreward* /
+ * *cancelreward*). Never pays: disbursement happens only after the member
+ * confirms and enters their PIN. Safe to call with no ambient transaction (the
+ * reads self-contextualize); the send is deferred inside a deferred-send scope.
+ * Audits `referral.reward.prompted`.
+ *
+ * Returns `{ ok: false }` (and sends nothing) when the referral is missing or no
+ * longer `qualified`.
+ */
+export async function notifyReferralReward(
+  coopId: string,
+  referralId: string,
+): Promise<{ ok: boolean; message: string }> {
+  const prep = await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    const referral = await tx.referral.findUnique({ where: { id: referralId } });
+    if (!referral || referral.cooperativeId !== coopId) {
+      return { kind: "not_found" as const };
+    }
+    if (referral.status !== "qualified") {
+      return { kind: "not_qualified" as const, status: referral.status };
+    }
+    const referrer = await tx.member.findUnique({
+      where: { id: referral.referrerId },
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        contactPhone: true,
+        bankAccountNumber: true,
+        bankCode: true,
+        bankName: true,
+        altChannelId: true,
+        preferredChannel: true,
+        optedOut: true,
+      },
+    });
+    return { kind: "proceed" as const, referral, referrer };
+  });
+
+  if (prep.kind === "not_found") return { ok: false, message: "Referral not found." };
+  if (prep.kind === "not_qualified") {
+    return { ok: false, message: `Referral is ${prep.status}; there is no reward to confirm.` };
+  }
+
+  const { referral, referrer } = prep;
+  const amount = referral.rewardAmount ?? 0;
+  const rewardType = referral.rewardType ?? DEFAULT_REWARD_TYPE;
+  const details = rewardDetailsText(rewardType, amount, referrer);
+
+  // A short note when the reward cannot currently be paid, so the member is not
+  // promised something the confirm PIN step will then refuse.
+  const notes: string[] = [];
+  if (rewardType === "bank" && !referrer?.bankAccountNumber) {
+    notes.push("Add a bank account to receive it.");
+  }
+  if (rewardType === "airtime") {
+    const phone = airtimePhoneOf(referrer);
+    if (!phone) notes.push("Add a phone number to receive it.");
+    else if (!resolveVtuProvider())
+      notes.push("Airtime payouts are enabled once a provider is configured.");
+  }
+
+  const text =
+    `🎁 Your referral reward is ready: ${details}.\n\n` +
+    `Reply *confirmreward* to receive it, or *cancelreward* to skip.` +
+    (notes.length ? `\n\n_${notes.join(" ")}_` : "");
+
+  if (referrer) {
+    await notifyMember(referrer, text).catch((err) =>
+      log.error("[referral] failed to send reward prompt", {
+        referralId,
+        err: String(err),
+      }),
+    );
+  }
+
+  await audit({
+    cooperativeId: coopId,
+    actorPhone: "",
+    actorId: referral.referrerId,
+    action: "referral.reward.prompted",
+    targetType: "referral",
+    targetId: referralId,
+    amount,
+    detail: `Prompted ${formatBalance(amount)} ${rewardType} referral reward for confirmation`,
+  }).catch(() => {});
+
+  return { ok: true, message: "Referral reward confirmation prompt sent." };
 }
 
 /** Thrown when a reward cannot be paid yet (e.g. airtime with no VTU provider). */
@@ -404,7 +563,7 @@ export async function payReferralReward(
       const provider = resolveVtuProvider();
       if (!provider) {
         throw new RewardGatedError(
-          "Airtime reward not enabled yet — the payout reconciliation job will retry it once a VTU provider is configured (or run *referralpay* manually).",
+          "Airtime reward not enabled yet — it stays ready and is re-offered once a VTU provider is configured.",
         );
       }
       if (!referrer) throw new Error("referrer no longer exists");

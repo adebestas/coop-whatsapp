@@ -7,20 +7,21 @@ import {
   myReferrals,
   setReferralConfig,
   referralReport,
+  notifyReferralReward,
 } from "../src/services/referrals.js";
 import { handleAwaitingInput } from "../src/services/handlers/session.js";
 import { handleJoinStart } from "../src/services/handlers/join.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { requestManualCredit, approveManualCredit } from "../src/services/manualcredit.js";
 import { sendToBank } from "../src/services/disbursements.js";
-import { runReferralPayouts } from "../src/services/scheduler.js";
+import { runReferralRewardPrompts } from "../src/services/scheduler.js";
 import { clearVtuBillerCache } from "../src/services/payments/vtu.js";
 import { txStorage } from "../src/lib/prisma.js";
 import { enqueueAfterCommit, withDeferredSends } from "../src/lib/deferred.js";
 import type { BotState } from "../src/services/conversation.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { createCommittee, appointMember } from "../src/services/committees.js";
-import { sendText } from "../src/lib/messaging.js";
+import { sendText, notifyMember } from "../src/lib/messaging.js";
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -37,12 +38,12 @@ function dataOf(json: string | null | undefined): Record<string, unknown> {
   return json ? (JSON.parse(json) as Record<string, unknown>) : {};
 }
 
-/** Concatenate every text sent via the mocked messaging transport. */
+/** Concatenate every text sent via the mocked transport (direct + notifyMember). */
 function textsSent(): string {
-  return vi
-    .mocked(sendText)
-    .mock.calls.map((c) => c[0].text)
-    .join("\n");
+  return [
+    ...vi.mocked(sendText).mock.calls.map((c) => String(c[0].text)),
+    ...vi.mocked(notifyMember).mock.calls.map((c) => String(c[1])),
+  ].join("\n");
 }
 
 /**
@@ -167,9 +168,9 @@ describe("referrals", () => {
     const after = await prisma.referral.findUnique({
       where: { referredMemberId: referred.id },
     });
-    // Default reward is a wallet credit — the first qualify now pays it, so the
-    // referral reaches `rewarded`; the snapshot timestamp is untouched.
-    expect(after?.status).toBe("rewarded");
+    // Qualification no longer pays: it leaves the referral `qualified` and
+    // prompts the referrer to confirm. The snapshot timestamp is untouched.
+    expect(after?.status).toBe("qualified");
     expect(after?.qualifiedAt?.getTime()).toBe(first?.qualifiedAt?.getTime());
   });
 });
@@ -351,57 +352,34 @@ describe("referral reward payment", () => {
     expect(after.rewardedAt).toBeNull();
   });
 
-  it("runReferralPayouts pays a retried `qualified` referral and is idempotent", async () => {
-    const { coop, referrer, referralId } = await setupReward("REFJOB", {
+  it("runReferralRewardPrompts re-prompts a `qualified` referral, is deduped per day, and does not pay", async () => {
+    const { referrer, referralId } = await setupReward("REFJOB", {
       rewardType: "bank",
       rewardAmount: 44000,
       bank: true,
     });
 
-    // A first, definite failure leaves the reward `qualified`...
-    vi.mocked(sendToBank).mockImplementationOnce(async () => ({
-      ok: false,
-      status: "failed",
-      message: "nope",
-    }));
-    await payReferralReward(coop.id, referralId);
+    const now = new Date("2026-10-08T12:00:00Z");
+    const first = await runReferralRewardPrompts(now);
+    expect(first).toBe(1);
+
+    // A re-prompt NEVER pays: the referral stays `qualified` and no money moves.
     expect(
       (await prisma.referral.findUniqueOrThrow({ where: { id: referralId } })).status,
     ).toBe("qualified");
-
-    // ...and the reconciliation job retries the whole qualified queue and pays it
-    // via the real payout path (which writes the Payout row). The payout MUST run
-    // with NO ambient transaction: the `qualified → rewarded` claim has committed
-    // first, so a later rollback/timeout cannot double-pay.
-    const realSendToBank = vi.mocked(sendToBank).getMockImplementation()!;
-    let txAtPayout: boolean | null = null;
-    vi.mocked(sendToBank).mockImplementationOnce(async (opts) => {
-      txAtPayout = txStorage.getStore() !== undefined;
-      return realSendToBank(opts);
-    });
-    const paid = await runReferralPayouts();
-    expect(paid).toBe(1);
-    expect(txAtPayout).toBe(false);
-
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(after.status).toBe("rewarded");
-    expect(after.rewardedAt).toBeInstanceOf(Date);
-    const payout = await prisma.payout.findFirst({
-      where: { idempotencyKey: `REFERRAL-${referralId}` },
-    });
-    expect(payout).toBeTruthy();
-    // A bank payout must NOT also credit the wallet.
-    const wallet = await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } });
-    expect(wallet.balance).toBe(0);
-
-    // A second sweep finds nothing left `qualified` — a strict no-op.
-    expect(await runReferralPayouts()).toBe(0);
-    expect(await prisma.payout.count({ where: { idempotencyKey: `REFERRAL-${referralId}` } })).toBe(
-      1,
+    expect(
+      await prisma.payout.count({ where: { idempotencyKey: `REFERRAL-${referralId}` } }),
+    ).toBe(0);
+    expect((await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance).toBe(
+      0,
     );
+    expect(textsSent()).toContain("confirmreward");
+
+    // The same day's second sweep is deduped (claimOnce) — a strict no-op.
+    expect(await runReferralRewardPrompts(now)).toBe(0);
   });
 
-  it("admin `referralpay` pays a qualified referral and respects the disabled gate", async () => {
+  it("admin `referralpay` re-sends the confirmation prompt and does not pay", async () => {
     const { coop, referralId } = await setupReward("REFADM", {
       rewardType: "bank",
       rewardAmount: 46000,
@@ -410,17 +388,17 @@ describe("referral reward payment", () => {
     const admin = await createTestMember(coop.id, { phone: "2348090000400", role: "admin" });
 
     await handleMessage(admin.phone, `referralpay ${referralId}`);
-    // The payout is deferred past the chat transaction, so the reply is the
-    // "triggered" acknowledgement — but the deferred work has flushed by the time
-    // `handleMessage` resolves, so the referral is already `rewarded`.
-    expect(textsSent().toLowerCase()).toContain("triggered");
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(after.status).toBe("rewarded");
-    expect(
-      await prisma.payout.findFirst({ where: { idempotencyKey: `REFERRAL-${referralId}` } }),
-    ).toBeTruthy();
 
-    // The Board can pause the program — a retry must then be refused, not paid.
+    // It is a NUDGE only — the referral is NOT paid; the referrer gets the prompt.
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
+    expect(after.status).toBe("qualified");
+    expect(after.rewardedAt).toBeNull();
+    expect(
+      await prisma.payout.count({ where: { idempotencyKey: `REFERRAL-${referralId}` } }),
+    ).toBe(0);
+    expect(textsSent()).toContain("confirmreward");
+
+    // The Board can pause the program — a nudge must then be refused.
     const second = await setupReward("REFADM2", {
       rewardType: "bank",
       rewardAmount: 47000,
@@ -459,7 +437,7 @@ describe("referral reward deferral (after-commit)", () => {
     expect(enqueueAfterCommit(async () => {})).toBe(false);
   });
 
-  it("runs the referral payout only after the top-up credit transaction commits", async () => {
+  it("prompts the referrer only after the top-up credit transaction commits", async () => {
     const coop = await createCoop("REFORD");
     const referrer = await createTestMember(coop.id, {
       phone: "2348055550001",
@@ -491,37 +469,49 @@ describe("referral reward deferral (after-commit)", () => {
       data: { virtualAccountNumber: "9000000555" },
     });
 
-    // Assert TWO things at payout time: no DB transaction is open (the provider
-    // call is not running inside `withCoopContext`'s tx), and the money-in
-    // credit is already committed so the deferred reward ran after commit.
+    // Capture the state at PROMPT time: the referral prompt must run with no DB
+    // transaction open (deferred past `withCoopContext`'s tx), and only after the
+    // money-in credit has committed.
     const reference = "monnify-TX-REFORD-1";
-    let txOpenAtPayout: boolean | null = null;
-    let contributionCommittedAtPayout = false;
-    vi.mocked(sendToBank).mockImplementationOnce(async () => {
-      txOpenAtPayout = txStorage.getStore() !== undefined;
-      contributionCommittedAtPayout =
-        (await prisma.contribution.findFirst({ where: { reference } })) !== null;
-      return { ok: true, status: "successful", message: "paid" };
+    let txOpenAtPrompt: boolean | null = null;
+    let contributionCommittedAtPrompt = false;
+    const realNotifyMember = vi.mocked(notifyMember).getMockImplementation()!;
+    vi.mocked(notifyMember).mockImplementation(async (member, text) => {
+      if (String(text).includes("confirmreward")) {
+        txOpenAtPrompt = txStorage.getStore() !== undefined;
+        contributionCommittedAtPrompt =
+          (await prisma.contribution.findFirst({ where: { reference } })) !== null;
+      }
+      return realNotifyMember(member as never, text);
     });
 
-    await handlePaymentNotification({
-      transactionId: "TX-REFORD-1",
-      reference: "MEM-reford-1",
-      accountNumber: "9000000555",
-      amount: 500000,
-      currency: "NGN",
-      status: "successful",
-      provider: "monnify",
-      raw: {},
-    });
+    try {
+      await handlePaymentNotification({
+        transactionId: "TX-REFORD-1",
+        reference: "MEM-reford-1",
+        accountNumber: "9000000555",
+        amount: 500000,
+        currency: "NGN",
+        status: "successful",
+        provider: "monnify",
+        raw: {},
+      });
 
-    expect(txOpenAtPayout).toBe(false);
-    expect(contributionCommittedAtPayout).toBe(true);
+      expect(txOpenAtPrompt).toBe(false);
+      expect(contributionCommittedAtPrompt).toBe(true);
+      expect(textsSent()).toContain("confirmreward");
 
-    const referral = await prisma.referral.findUnique({
-      where: { referredMemberId: referred.id },
-    });
-    expect(referral?.status).toBe("rewarded");
+      const referral = await prisma.referral.findUnique({
+        where: { referredMemberId: referred.id },
+      });
+      // Confirmation is required — the reward is NOT auto-paid.
+      expect(referral?.status).toBe("qualified");
+      expect(
+        (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
+      ).toBe(0);
+    } finally {
+      vi.mocked(notifyMember).mockImplementation(realNotifyMember);
+    }
   });
 });
 
@@ -635,12 +625,13 @@ describe("referral qualification on real money-in paths", () => {
     const referral = await prisma.referral.findUnique({
       where: { referredMemberId: referred.id },
     });
-    // The qualification trigger also pays the reward: default is a wallet
-    // credit of ₦500 (50,000 kobo) to the referrer.
-    expect(referral?.status).toBe("rewarded");
+    // Qualification prompts the referrer but pays nothing: the reward is only
+    // disbursed after the member confirms with *confirmreward* + their PIN.
+    expect(referral?.status).toBe("qualified");
     expect(referral?.qualifiedAt).toBeInstanceOf(Date);
     const referrerWallet = await prisma.wallet.findUnique({ where: { memberId: referrer.id } });
-    expect(referrerWallet?.balance).toBe(50000);
+    expect(referrerWallet?.balance).toBe(0);
+    expect(textsSent()).toContain("confirmreward");
   });
 
   it("does not qualify on a duplicate top-up delivery", async () => {
@@ -711,6 +702,186 @@ describe("referral qualification on real money-in paths", () => {
     });
     expect(referral?.status).toBe("pending");
     expect(referral?.qualifiedAt).toBeNull();
+  });
+});
+
+describe("referral reward confirmation", () => {
+  let seq = 0;
+
+  /** Seed a `qualified` referral for a referrer, with the given reward snapshot. */
+  async function qualifiedReward(
+    code: string,
+    opts: { rewardType: string; rewardAmount: number; phone?: string; bank?: boolean },
+  ) {
+    seq++;
+    const coop = await createCoop(code);
+    const referrer = await createTestMember(coop.id, {
+      phone: opts.phone ?? `2348044449${String(seq).padStart(3, "0")}`,
+      name: "Ada Obi",
+    });
+    const referred = await createTestMember(coop.id, {
+      phone: `2348044459${String(seq).padStart(3, "0")}`,
+    });
+    await recordReferral(coop.id, referrer.code, referred.id);
+    const referral = await prisma.referral.findUniqueOrThrow({
+      where: { referredMemberId: referred.id },
+    });
+    await prisma.referral.update({
+      where: { id: referral.id },
+      data: {
+        status: "qualified",
+        qualifiedAt: new Date(),
+        rewardType: opts.rewardType,
+        rewardAmount: opts.rewardAmount,
+      },
+    });
+    if (opts.bank) {
+      await prisma.member.update({
+        where: { id: referrer.id },
+        data: { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
+      });
+    }
+    return { coop, referrer, referralId: referral.id };
+  }
+
+  it("qualifyReferral prompts the referrer and does not pay", async () => {
+    const coop = await createCoop("REFCNF1");
+    const referrer = await createTestMember(coop.id, { phone: "2348077010001" });
+    const referred = await createTestMember(coop.id, { phone: "2348077010002" });
+    await prisma.cooperativeConfig.update({
+      where: { cooperativeId: coop.id },
+      data: { referralRewardType: "wallet", referralRewardAmount: 50000 },
+    });
+    await recordReferral(coop.id, referrer.code, referred.id);
+
+    const res = await qualifyReferral(coop.id, referred.id);
+    expect(res.ok).toBe(true);
+
+    const referral = await prisma.referral.findUniqueOrThrow({
+      where: { referredMemberId: referred.id },
+    });
+    expect(referral.status).toBe("qualified");
+    expect(referral.rewardedAt).toBeNull();
+    expect(
+      (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
+    ).toBe(0);
+
+    const text = textsSent();
+    expect(text).toContain("referral reward is ready");
+    expect(text).toContain("₦500.00");
+    expect(text).toContain("wallet");
+    expect(text).toContain("confirmreward");
+    expect(text).toContain("cancelreward");
+  });
+
+  it("bank prompt shows the masked account and bank name", async () => {
+    const { coop, referralId } = await qualifiedReward("REFCNF2", {
+      rewardType: "bank",
+      rewardAmount: 30000,
+      bank: true,
+    });
+    const res = await notifyReferralReward(coop.id, referralId);
+    expect(res.ok).toBe(true);
+
+    const text = textsSent();
+    expect(text).toContain("₦300.00");
+    expect(text).toContain("0123****");
+    expect(text).toContain("GTBank");
+    expect(text).toContain("confirmreward");
+
+    const prompted = await prisma.auditLog.findFirst({
+      where: { action: "referral.reward.prompted", targetId: referralId },
+    });
+    expect(prompted).toBeTruthy();
+  });
+
+  it("airtime prompt shows the phone, amount and network", async () => {
+    const { coop, referralId } = await qualifiedReward("REFCNF3", {
+      rewardType: "airtime",
+      rewardAmount: 20000,
+      phone: "08031234567",
+    });
+    const res = await notifyReferralReward(coop.id, referralId);
+    expect(res.ok).toBe(true);
+
+    const text = textsSent();
+    expect(text).toContain("₦200.00");
+    expect(text).toContain("08031234567");
+    expect(text).toContain("MTN");
+  });
+
+  it("confirmreward arms the PIN challenge; the correct PIN pays the reward", async () => {
+    const { referrer, referralId } = await qualifiedReward("REFCNF4", {
+      rewardType: "wallet",
+      rewardAmount: 25000,
+    });
+
+    await handleMessage(referrer.phone, "confirmreward");
+    const session = await prisma.session.findUnique({ where: { phone: referrer.phone } });
+    expect(session?.state).toBe("awaiting_referral_reward_pin");
+    expect(dataOf(session?.data).referralId).toBe(referralId);
+
+    await handleMessage(referrer.phone, "1234");
+
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
+    expect(after.status).toBe("rewarded");
+    expect(after.rewardedAt).toBeInstanceOf(Date);
+    expect(
+      (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
+    ).toBe(25000);
+
+    const confirmed = await prisma.auditLog.findFirst({
+      where: { action: "referral.reward.confirmed", targetId: referralId },
+    });
+    expect(confirmed).toBeTruthy();
+    const disbursed = await prisma.auditLog.findFirst({
+      where: { action: "referral.rewarded", targetId: referralId },
+    });
+    expect(disbursed).toBeTruthy();
+  });
+
+  it("a wrong PIN re-challenges and moves no money", async () => {
+    const { referrer, referralId } = await qualifiedReward("REFCNF5", {
+      rewardType: "wallet",
+      rewardAmount: 25000,
+    });
+
+    await handleMessage(referrer.phone, "confirmreward");
+    await handleMessage(referrer.phone, "9999");
+
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
+    expect(after.status).toBe("qualified");
+    expect(
+      (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
+    ).toBe(0);
+    const session = await prisma.session.findUnique({ where: { phone: referrer.phone } });
+    expect(session?.state).toBe("awaiting_referral_reward_pin");
+  });
+
+  it("cancelreward leaves the referral qualified and pays nothing", async () => {
+    const { referrer, referralId } = await qualifiedReward("REFCNF6", {
+      rewardType: "wallet",
+      rewardAmount: 25000,
+    });
+
+    await handleMessage(referrer.phone, "cancelreward");
+
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
+    expect(after.status).toBe("qualified");
+    expect(
+      (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
+    ).toBe(0);
+  });
+
+  it("confirmreward with no qualified reward replies without arming a PIN", async () => {
+    const coop = await createCoop("REFCNF7");
+    const member = await createTestMember(coop.id, { phone: "2348077020001" });
+
+    await handleMessage(member.phone, "confirmreward");
+
+    const session = await prisma.session.findUnique({ where: { phone: member.phone } });
+    expect(session?.state).toBe("idle");
+    expect(textsSent().toLowerCase()).toContain("no referral reward");
   });
 });
 

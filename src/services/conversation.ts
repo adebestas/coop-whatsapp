@@ -67,6 +67,8 @@ import {
   parseNaira,
   handleMyRefCode,
   handleReferrals,
+  handleConfirmReward,
+  handleCancelReward,
 } from "./handlers/session.js";
 import { handleJoinStart, handleOnboardStart } from "./handlers/join.js";
 import {
@@ -166,6 +168,7 @@ export type BotState =
   | "awaiting_withdraw_pin"
   | "awaiting_repay_pin"
   | "awaiting_buyshares_pin"
+  | "awaiting_referral_reward_pin"
   | "awaiting_bank_account"
   | "awaiting_bank_choice"
   | "awaiting_bank_confirm"
@@ -213,6 +216,7 @@ export const FlowDataSchema = z.object({
   shareCount: z.number().positive().optional(),
   mandateCap: z.number().positive().optional(),
   mandateId: z.string().optional(),
+  referralId: z.string().optional(),
   withdrawAccount: z.string().optional(),
   withdrawBankCode: z.string().optional(),
   withdrawBankName: z.string().optional(),
@@ -249,6 +253,7 @@ export const SECRET_STATES: BotState[] = [
   "awaiting_withdraw_pin",
   "awaiting_repay_pin",
   "awaiting_buyshares_pin",
+  "awaiting_referral_reward_pin",
   "awaiting_mandate_pin",
   "awaiting_cancelmandate_pin",
   "awaiting_delete_account_pin",
@@ -741,6 +746,14 @@ async function handleMessageInner(
 
     case "referrals":
       await handleReferrals(phone);
+      break;
+
+    case "confirmreward":
+      await handleConfirmReward(phone);
+      break;
+
+    case "cancelreward":
+      await handleCancelReward(phone);
       break;
 
     case "phone":

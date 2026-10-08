@@ -591,16 +591,23 @@ neither recorded nor paid.
   it blank) to join without one — no referral is recorded. Unknown and self-referral
   codes are rejected; the join itself always succeeds.
 - **Reward types** — `wallet` (credits the referrer's wallet), `bank` (payout to
-  their saved account), or `airtime` (a **gated** VTU recharge). A reward that
-  cannot be paid yet — gated airtime with no VTU provider configured, or a bank
-  payout that was definitely rejected — stays `qualified` and is **retried by the
-  background payout reconciliation job** (and on demand with `referralpay <id>`),
-  so it is paid once the provider is available; it is never silently lost. The
-  default reward is **₦500**.
+  their saved account), or `airtime` (a **gated** VTU recharge). The default reward
+  is **₦500**.
+- **Member-confirmed payout** — a reward is **never paid automatically**. When a
+  referral qualifies the referrer gets a prompt with the reward details (wallet:
+  amount; bank: amount + masked account + bank; airtime: amount + phone + network):
+  *"Reply confirmreward to receive it, or cancelreward to skip."* `confirmreward`
+  then asks for the member's **PIN**, and the reward is disbursed only on a correct
+  PIN. `cancelreward` (or ignoring the prompt) leaves the referral `qualified`; the
+  scheduler re-offers it later, at most **once per referral per day**. A reward that
+  cannot be paid yet (gated airtime with no VTU provider, or a bank payout that was
+  definitely rejected) simply stays `qualified` until it can be — it is never
+  silently lost.
 - **Configuration** — `referralconfig [on|off] [wallet|bank|airtime] [amount] [maxRewards]`
   (admin/super admin) updates the program; `referralreport` summarises the whole
   cooperative (counts by status, rewards paid, and any qualified-but-unpaid rewards);
-  `referralpay <id>` retries a single qualified reward. Every config change is audited.
+  `referralpay <id>` **re-sends the confirmation prompt** to the member (a nudge —
+  it never force-pays). Every config change is audited.
 - **Board pause/activate** — the governance **Board committee** can pause or resume
   the program at any time with `referralpause` / `referralresume` (active Board
   members or the super admin), which toggles `referralEnabled`.

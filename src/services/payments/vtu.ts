@@ -5,9 +5,9 @@
  * `VTU_PROVIDER` (the provider key) names a factory in `PROVIDER_FACTORIES` below
  * AND that factory finds its own secret configured. The referral flow treats null
  * as "airtime reward not enabled yet" and leaves the referral `qualified`, so the
- * reward is retried by the scheduler's payout reconciliation job (or an admin's
- * `referralpay`) once a provider is wired in — no change to the referral flow
- * itself, only a config/implementation addition here.
+ * reward stays available and is re-offered (by the scheduler's re-prompt job or an
+ * admin's `referralpay` nudge) once a provider is wired in — no change to the
+ * referral flow itself, only a config/implementation addition here.
  *
  * Implemented providers:
  *  - `flutterwave` — Flutterwave Bills API (https://developer.flutterwave.com/docs/bill-payment).
