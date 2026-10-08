@@ -100,7 +100,7 @@ import {
   type PackType,
   type PeriodType,
 } from "./regulator-reporting.js";
-import { setReferralConfig, referralReport } from "./referrals.js";
+import { setReferralConfig, setReferralEnabled, referralReport } from "./referrals.js";
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
 
@@ -308,11 +308,7 @@ async function handleCommitteeCommand(
       return true;
     }
     const resume = cmd === "referralresume";
-    await prisma.cooperativeConfig.upsert({
-      where: { cooperativeId: coopId },
-      create: { cooperativeId: coopId, referralEnabled: resume },
-      update: { referralEnabled: resume },
-    });
+    const toggle = await setReferralEnabled(coopId, resume);
     await audit({
       cooperativeId: coopId,
       actorPhone: phone,
@@ -323,12 +319,7 @@ async function handleCommitteeCommand(
       targetId: coopId,
       detail: `${resume ? "Resumed" : "Paused"} the referral program`,
     });
-    await sendText({
-      to: phone,
-      text: resume
-        ? "✅ Referral program *activated*. New referrals will be recorded and paid."
-        : "⏸️ Referral program *paused*. No new referrals will be recorded or paid.",
-    });
+    await sendText({ to: phone, text: toggle.message });
     return true;
   }
 
@@ -1422,7 +1413,23 @@ export async function handleAdminCommand(
           }
           input.maxRewards = Number(rest.shift());
         }
-        const cfgRes = await setReferralConfig(coopId, input, { id: admin.id, phone });
+        const hasInput =
+          input.enabled !== undefined ||
+          input.rewardType !== undefined ||
+          input.rewardAmount !== undefined ||
+          input.maxRewards !== undefined;
+        if (!hasInput || rest.length > 0) {
+          await sendText({
+            to: phone,
+            text: "Usage: *referralconfig [on|off] [wallet|bank|airtime] [amount] [maxRewards]*.",
+          });
+          return true;
+        }
+        const cfgRes = await setReferralConfig(coopId, input, {
+          id: admin.id,
+          phone,
+          role: roleLabel(ctx),
+        });
         await sendText({ to: phone, text: cfgRes.message });
         return true;
       }

@@ -599,7 +599,7 @@ export async function setReferralConfig(
     rewardAmount?: number;
     maxRewards?: number;
   },
-  actor: { id: string; phone: string },
+  actor: { id: string; phone: string; role?: string },
 ): Promise<{ ok: boolean; message: string }> {
   const type = input.rewardType?.trim().toLowerCase();
   if (type && !REWARD_TYPES.has(type)) {
@@ -646,7 +646,7 @@ export async function setReferralConfig(
     cooperativeId: coopId,
     actorPhone: actor.phone,
     actorId: actor.id,
-    actorRole: "admin",
+    actorRole: actor.role ?? "admin",
     action: "referral.config",
     targetType: "cooperativeConfig",
     targetId: coopId,
@@ -654,6 +654,34 @@ export async function setReferralConfig(
   }).catch(() => {});
 
   return { ok: true, message: `✅ Referral program updated — ${summary}.` };
+}
+
+/**
+ * Toggle only the referral program on/off — used by the Board committee's
+ * `referralpause` / `referralresume` commands. Coop-scoped write via `withTx` +
+ * `setCoopContext` (the same RLS-safe path `setReferralConfig` uses), so it keeps
+ * working once RLS is forced. Auditing is left to the caller so the board actor
+ * role is preserved.
+ */
+export async function setReferralEnabled(
+  coopId: string,
+  enabled: boolean,
+): Promise<{ ok: boolean; message: string }> {
+  await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    await tx.cooperativeConfig.upsert({
+      where: { cooperativeId: coopId },
+      create: { cooperativeId: coopId, referralEnabled: enabled },
+      update: { referralEnabled: enabled },
+    });
+  });
+
+  return {
+    ok: true,
+    message: enabled
+      ? "✅ Referral program *activated*. New referrals will be recorded and paid."
+      : "⏸️ Referral program *paused*. No new referrals will be recorded or paid.",
+  };
 }
 
 /**

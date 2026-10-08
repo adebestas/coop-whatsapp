@@ -16,6 +16,9 @@ import { sendToBank } from "../src/services/disbursements.js";
 import { txStorage } from "../src/lib/prisma.js";
 import { enqueueAfterCommit, withDeferredSends } from "../src/lib/deferred.js";
 import type { BotState } from "../src/services/conversation.js";
+import { handleMessage } from "../src/services/conversation.js";
+import { createCommittee, appointMember } from "../src/services/committees.js";
+import { sendText } from "../src/lib/messaging.js";
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -30,6 +33,14 @@ async function sessionOf(phone: string) {
 
 function dataOf(json: string | null | undefined): Record<string, unknown> {
   return json ? (JSON.parse(json) as Record<string, unknown>) : {};
+}
+
+/** Concatenate every text sent via the mocked messaging transport. */
+function textsSent(): string {
+  return vi
+    .mocked(sendText)
+    .mock.calls.map((c) => c[0].text)
+    .join("\n");
 }
 
 /**
@@ -630,6 +641,23 @@ describe("referral commands", () => {
     expect(res.ok).toBe(false);
   });
 
+  it("setReferralConfig records the caller's true role in the audit", async () => {
+    const coop = await createTestCoop("REFSET3");
+    const superAdmin = await createTestMember(coop.id, {
+      phone: "2348066660051",
+      role: "superadmin",
+    });
+
+    await setReferralConfig(
+      coop.id,
+      { enabled: true },
+      { id: superAdmin.id, phone: superAdmin.phone, role: "superadmin" },
+    );
+
+    const audited = await prisma.auditLog.findFirst({ where: { action: "referral.config" } });
+    expect(audited?.actorRole).toBe("superadmin");
+  });
+
   it("referralReport summarises the coop's referrals", async () => {
     const coop = await createCoop("REPR1");
     const referrer = await createTestMember(coop.id, { phone: "2348066660041" });
@@ -712,5 +740,109 @@ describe("referral per-referrer cap", () => {
       where: { referredMemberId: second.id },
     });
     expect(row.status).toBe("rejected");
+  });
+});
+
+describe("referral config command parsing", () => {
+  it("parses on/off, reward type, amount (naira→kobo) and maxRewards", async () => {
+    const coop = await createTestCoop("REFCFG");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348090000300",
+      role: "admin",
+    });
+
+    await handleMessage(admin.phone, "referralconfig on bank 750 2");
+    const cfg = await prisma.cooperativeConfig.findUniqueOrThrow({
+      where: { cooperativeId: coop.id },
+    });
+    expect(cfg.referralEnabled).toBe(true);
+    expect(cfg.referralRewardType).toBe("bank");
+    expect(cfg.referralRewardAmount).toBe(75000);
+    expect(cfg.referralMaxRewards).toBe(2);
+
+    await handleMessage(admin.phone, "referralconfig off");
+    const off = await prisma.cooperativeConfig.findUniqueOrThrow({
+      where: { cooperativeId: coop.id },
+    });
+    expect(off.referralEnabled).toBe(false);
+    // Untouched fields survive a partial update.
+    expect(off.referralRewardType).toBe("bank");
+    expect(off.referralRewardAmount).toBe(75000);
+  });
+
+  it("bare referralconfig replies with usage and does not write", async () => {
+    const coop = await createTestCoop("REFCFG2");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348090000310",
+      role: "admin",
+    });
+
+    await handleMessage(admin.phone, "referralconfig");
+
+    expect(
+      await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coop.id } }),
+    ).toBeNull();
+    expect(textsSent()).toContain("Usage: *referralconfig");
+  });
+});
+
+describe("referral board controls", () => {
+  /** A coop with an active, fully seated Board committee. */
+  async function seatedBoard(coopId: string) {
+    const superAdmin = await createTestMember(coopId, {
+      phone: "2348090000001",
+      role: "superadmin",
+    });
+    const actor = { phone: superAdmin.phone, id: superAdmin.id, role: "superadmin" as const };
+    const chair = await createTestMember(coopId, { phone: "2348090000101", name: "Board Chair" });
+    const b = await createTestMember(coopId, { phone: "2348090000102" });
+    const c = await createTestMember(coopId, { phone: "2348090000103" });
+    await createCommittee(coopId, "board", "Board", 3, actor);
+    await appointMember(coopId, "board", chair.code, "chair", actor);
+    await appointMember(coopId, "board", b.code, "member", actor);
+    await appointMember(coopId, "board", c.code, "member", actor);
+    return { chair };
+  }
+
+  it("lets an active Board member pause and resume the program", async () => {
+    const coop = await createCoop("REFB1");
+    const { chair } = await seatedBoard(coop.id);
+
+    await handleMessage(chair.phone, "referralpause");
+    let cfg = await prisma.cooperativeConfig.findUniqueOrThrow({
+      where: { cooperativeId: coop.id },
+    });
+    expect(cfg.referralEnabled).toBe(false);
+
+    await handleMessage(chair.phone, "referralresume");
+    cfg = await prisma.cooperativeConfig.findUniqueOrThrow({
+      where: { cooperativeId: coop.id },
+    });
+    expect(cfg.referralEnabled).toBe(true);
+
+    const actions = (
+      await prisma.auditLog.findMany({
+        where: { cooperativeId: coop.id },
+        select: { action: true, actorRole: true },
+      })
+    ).filter((e) => e.action.startsWith("referral."));
+    expect(actions.map((e) => e.action)).toEqual(
+      expect.arrayContaining(["referral.paused", "referral.resumed"]),
+    );
+    expect(actions.every((e) => e.actorRole === "committee")).toBe(true);
+  });
+
+  it("rejects a non-Board member from pausing the program", async () => {
+    const coop = await createCoop("REFB2");
+    await seatedBoard(coop.id);
+    const outsider = await createTestMember(coop.id, { phone: "2348090000200" });
+
+    await handleMessage(outsider.phone, "referralpause");
+
+    const cfg = await prisma.cooperativeConfig.findUniqueOrThrow({
+      where: { cooperativeId: coop.id },
+    });
+    expect(cfg.referralEnabled).toBe(true);
+    expect(textsSent()).toContain("Board Committee");
   });
 });
