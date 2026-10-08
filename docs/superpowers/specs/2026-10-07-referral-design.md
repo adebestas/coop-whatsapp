@@ -23,6 +23,11 @@ account**, or as **airtime recharge**.
    provider is configured (the user will enable a VTU provider).
 5. **Anti-abuse:** one reward per referred member, self-referral blocked, per-referrer
    cap, reward only on first contribution.
+6. **Pause/activate:** the **Board committee** (governance) can pause/activate the
+   referral program, in addition to the admin/superadmin config command.
+7. **Optional at registration:** the referral code is **optional** — a member can join
+   with or without one (`join <coop code>` or `join <coop code> ref <code>`); no
+   referral is recorded when omitted.
 
 ## Non-goals
 
