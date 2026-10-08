@@ -40,6 +40,7 @@ BEGIN
     'SavingsProduct','SavingsAccount',
     'Mandate','MandateDebit',
     'RefundRequest',
+    'Referral',
     'RegulatorProfile','RegulatorReport',
     'Meeting','Motion',
     'Unit','Vote','WithdrawalRequest',

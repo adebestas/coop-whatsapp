@@ -79,6 +79,7 @@ subscription       Subscription?
   savingsAccounts    SavingsAccount[]
   mandates           Mandate[]
   refunds            RefundRequest[]
+  referrals          Referral[]
   regulatorProfiles  RegulatorProfile[]
   regulatorReports   RegulatorReport[]
 
@@ -276,6 +277,8 @@ model Member {
   savingsDeposits         SavingsDeposit[]
   mandates                Mandate[]           @relation("MemberMandates")
   refunds                 RefundRequest[]     @relation("MemberRefunds")
+  referralsMade           Referral[]          @relation("Referrer")
+  referralReceived        Referral?           @relation("ReferredMember")
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -1183,6 +1186,10 @@ model CooperativeConfig {
   directDebitMaxCap        Int      @default(0) // kobo; 0 = no extra coop cap
   regulatorReportingEnabled Boolean @default(false)
   ombudsmanSlaDays         Int      @default(7) // days the ombudsman has to decide a case
+  referralEnabled          Boolean  @default(false)
+  referralRewardType       String   @default("wallet") // wallet | bank | airtime
+  referralRewardAmount     Int      @default(50000) // kobo = ₦500
+  referralMaxRewards       Int      @default(0) // cap per referrer; 0 = unlimited
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
@@ -1744,6 +1751,28 @@ model RefundRequest {
 
   @@index([cooperativeId, status])
   @@index([cooperativeId, memberId])
+}
+
+// A member-get-member referral. One row per referred member (unique), created at
+// join and qualified on the referred member's first contribution.
+model Referral {
+  id               String    @id @default(cuid())
+  cooperativeId    String
+  cooperative      Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  referrerId       String
+  referrer         Member    @relation("Referrer", fields: [referrerId], references: [id], onDelete: Cascade)
+  referredMemberId String    @unique
+  referredMember   Member    @relation("ReferredMember", fields: [referredMemberId], references: [id], onDelete: Cascade)
+  code             String // the referrer's code used
+  status           String    @default("pending") // pending | qualified | rewarded | rejected
+  qualifiedAt      DateTime?
+  rewardType       String? // wallet | bank | airtime (snapshot at qualification)
+  rewardAmount     Int? // kobo (snapshot at qualification)
+  rewardedAt       DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([cooperativeId, referrerId])
+  @@index([cooperativeId, status])
 }
 
 // Platform-level independent ombudsman (not tied to a cooperative).
