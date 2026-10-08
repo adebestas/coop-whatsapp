@@ -100,6 +100,7 @@ import {
   type PackType,
   type PeriodType,
 } from "./regulator-reporting.js";
+import { setReferralConfig, referralReport } from "./referrals.js";
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
 
@@ -126,6 +127,20 @@ const MONEY_OUT_COMMANDS = new Set([
 async function guardFailed(phone: string, message?: string): Promise<boolean> {
   await sendText({ to: phone, text: message ?? "⛔ Not allowed." });
   return true;
+}
+
+/**
+ * Parse an admin-typed naira amount into integer kobo, or null if malformed.
+ * Mirrors `parseNaira` (handlers/session.ts) without the OCR digit fix-ups; kept
+ * local so the admin service does not import a handler module (that would form
+ * an import cycle through conversation.ts).
+ */
+function parseAdminNaira(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const cleaned = raw.replace(/[,₦\s]/g, "");
+  if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) && n > 0 ? toKobo(n) : null;
 }
 
 interface AdminContext {
@@ -171,6 +186,8 @@ const COMMITTEE_COMMANDS = new Set([
   "committeequeue",
   "supervisoryfreeze",
   "supervisoryunfreeze",
+  "referralpause",
+  "referralresume",
 ]);
 
 /**
@@ -276,6 +293,42 @@ async function handleCommitteeCommand(
       })
       .join("\n");
     await sendText({ to: phone, text: `*Committee queue*\n\n${body}` });
+    return true;
+  }
+
+  // referralpause / referralresume — governance control reserved for the Board
+  // committee. Reuses the exact active-seat check the supervisory commands use.
+  if (cmd === "referralpause" || cmd === "referralresume") {
+    const allowed = isSuper || (await isCommitteeMember(coopId, "board", member.id));
+    if (!allowed) {
+      await sendText({
+        to: phone,
+        text: "Only *Board Committee* members (or the super admin) can pause or activate the referral program.",
+      });
+      return true;
+    }
+    const resume = cmd === "referralresume";
+    await prisma.cooperativeConfig.upsert({
+      where: { cooperativeId: coopId },
+      create: { cooperativeId: coopId, referralEnabled: resume },
+      update: { referralEnabled: resume },
+    });
+    await audit({
+      cooperativeId: coopId,
+      actorPhone: phone,
+      actorId: member.id,
+      actorRole: isSuper ? "superadmin" : "committee",
+      action: resume ? "referral.resumed" : "referral.paused",
+      targetType: "cooperativeConfig",
+      targetId: coopId,
+      detail: `${resume ? "Resumed" : "Paused"} the referral program`,
+    });
+    await sendText({
+      to: phone,
+      text: resume
+        ? "✅ Referral program *activated*. New referrals will be recorded and paid."
+        : "⏸️ Referral program *paused*. No new referrals will be recorded or paid.",
+    });
     return true;
   }
 
@@ -1322,6 +1375,61 @@ export async function handleAdminCommand(
             `*📋 Regulator packs (${res.reports.length})*\n\n${lines.join("\n")}\n\n` +
             `Mark one filed: *regreport filed <id>*.`,
         });
+        return true;
+      }
+
+      case "referralconfig": {
+        // referralconfig [on|off] [wallet|bank|airtime] [amount] [maxRewards]
+        const input: {
+          enabled?: boolean;
+          rewardType?: string;
+          rewardAmount?: number;
+          maxRewards?: number;
+        } = {};
+        const rest = [...args];
+        const head = rest[0]?.toLowerCase();
+        if (head === "on" || head === "enable" || head === "enabled") {
+          input.enabled = true;
+          rest.shift();
+        } else if (head === "off" || head === "disable" || head === "disabled") {
+          input.enabled = false;
+          rest.shift();
+        }
+        const typeTok = rest[0]?.toLowerCase();
+        if (typeTok && ["wallet", "bank", "airtime"].includes(typeTok)) {
+          input.rewardType = typeTok;
+          rest.shift();
+        }
+        if (rest[0] !== undefined) {
+          const amount = parseAdminNaira(rest[0]);
+          if (amount === null) {
+            await sendText({
+              to: phone,
+              text: "Usage: *referralconfig [on|off] [wallet|bank|airtime] [amount] [maxRewards]*.",
+            });
+            return true;
+          }
+          input.rewardAmount = amount;
+          rest.shift();
+        }
+        if (rest[0] !== undefined) {
+          if (!/^\d+$/.test(rest[0])) {
+            await sendText({
+              to: phone,
+              text: "Max rewards must be a whole number (0 = unlimited).",
+            });
+            return true;
+          }
+          input.maxRewards = Number(rest.shift());
+        }
+        const cfgRes = await setReferralConfig(coopId, input, { id: admin.id, phone });
+        await sendText({ to: phone, text: cfgRes.message });
+        return true;
+      }
+
+      case "referralreport": {
+        const res = await referralReport(coopId);
+        await sendText({ to: phone, text: res.message });
         return true;
       }
 

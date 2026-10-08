@@ -1,6 +1,13 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
-import { recordReferral, qualifyReferral, payReferralReward } from "../src/services/referrals.js";
+import {
+  recordReferral,
+  qualifyReferral,
+  payReferralReward,
+  myReferrals,
+  setReferralConfig,
+  referralReport,
+} from "../src/services/referrals.js";
 import { handleAwaitingInput } from "../src/services/handlers/session.js";
 import { handleJoinStart } from "../src/services/handlers/join.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
@@ -23,6 +30,21 @@ async function sessionOf(phone: string) {
 
 function dataOf(json: string | null | undefined): Record<string, unknown> {
   return json ? (JSON.parse(json) as Record<string, unknown>) : {};
+}
+
+/**
+ * A coop with the referral program enabled. Referrals are opt-in
+ * (`referralEnabled` defaults to false), so tests that exercise recording /
+ * qualification must turn the program on first.
+ */
+async function createCoop(code: string) {
+  const coop = await createTestCoop(code);
+  await prisma.cooperativeConfig.upsert({
+    where: { cooperativeId: coop.id },
+    create: { cooperativeId: coop.id, referralEnabled: true },
+    update: { referralEnabled: true },
+  });
+  return coop;
 }
 
 /** Walk the onboarding from wherever it is up to member creation (awaiting_optin). */
@@ -48,7 +70,7 @@ async function finishRegistration(phone: string): Promise<void> {
 
 describe("referrals", () => {
   it("records a pending referral for a valid referrer code", async () => {
-    const coop = await createTestCoop("REF1");
+    const coop = await createCoop("REF1");
     const referrer = await createTestMember(coop.id, { phone: "2348011110001" });
     const referred = await createTestMember(coop.id, { phone: "2348011110002" });
 
@@ -66,7 +88,7 @@ describe("referrals", () => {
   });
 
   it("rejects a self-referral", async () => {
-    const coop = await createTestCoop("REF2");
+    const coop = await createCoop("REF2");
     const m = await createTestMember(coop.id, { phone: "2348011110011" });
 
     const res = await recordReferral(coop.id, m.code, m.id);
@@ -75,7 +97,7 @@ describe("referrals", () => {
   });
 
   it("rejects an unknown referrer code", async () => {
-    const coop = await createTestCoop("REF3");
+    const coop = await createCoop("REF3");
     const referred = await createTestMember(coop.id, { phone: "2348011110021" });
 
     const res = await recordReferral(coop.id, "ZZZZZZ", referred.id);
@@ -84,7 +106,7 @@ describe("referrals", () => {
   });
 
   it("qualifies on the first contribution and snapshots the reward from config", async () => {
-    const coop = await createTestCoop("REF4");
+    const coop = await createCoop("REF4");
     const referrer = await createTestMember(coop.id, { phone: "2348011110031" });
     const referred = await createTestMember(coop.id, { phone: "2348011110032" });
     await prisma.cooperativeConfig.upsert({
@@ -117,7 +139,7 @@ describe("referrals", () => {
   });
 
   it("is idempotent — a second qualify is a no-op", async () => {
-    const coop = await createTestCoop("REF5");
+    const coop = await createCoop("REF5");
     const referrer = await createTestMember(coop.id, { phone: "2348011110041" });
     const referred = await createTestMember(coop.id, { phone: "2348011110042" });
     await recordReferral(coop.id, referrer.code, referred.id);
@@ -150,7 +172,7 @@ describe("referral reward payment", () => {
       bank?: boolean;
     },
   ) {
-    const coop = await createTestCoop(code);
+    const coop = await createCoop(code);
     const referrer = await createTestMember(coop.id, {
       phone: "2348044440000",
       name: opts.referrerName ?? "Ada Obi",
@@ -313,7 +335,7 @@ describe("referral reward deferral (after-commit)", () => {
   });
 
   it("runs the referral payout only after the top-up credit transaction commits", async () => {
-    const coop = await createTestCoop("REFORD");
+    const coop = await createCoop("REFORD");
     const referrer = await createTestMember(coop.id, {
       phone: "2348055550001",
       name: "Ada Obi",
@@ -380,7 +402,7 @@ describe("referral reward deferral (after-commit)", () => {
 
 describe("referral registration step", () => {
   it("captures the code in the flow and records the referral at member creation", async () => {
-    const coop = await createTestCoop("REFR1");
+    const coop = await createCoop("REFR1");
     const referrer = await createTestMember(coop.id, { phone: "2348022220001" });
     const phone = "2348022220002";
 
@@ -419,7 +441,7 @@ describe("referral registration step", () => {
   });
 
   it("skip records no referral", async () => {
-    const coop = await createTestCoop("REFR2");
+    const coop = await createCoop("REFR2");
     await createTestMember(coop.id, { phone: "2348022220011" });
     const phone = "2348022220012";
 
@@ -445,7 +467,7 @@ describe("referral registration step", () => {
   });
 
   it("the `join ... ref CODE` shortcut skips the referral step", async () => {
-    const coop = await createTestCoop("REFR3");
+    const coop = await createCoop("REFR3");
     const referrer = await createTestMember(coop.id, { phone: "2348022220021" });
     const phone = "2348022220022";
 
@@ -464,7 +486,7 @@ describe("referral registration step", () => {
 
 describe("referral qualification on real money-in paths", () => {
   it("qualifies a pending referral on a provider top-up credit (production path)", async () => {
-    const coop = await createTestCoop("REFQ1");
+    const coop = await createCoop("REFQ1");
     const referrer = await createTestMember(coop.id, { phone: "2348033330001" });
     const referred = await createTestMember(coop.id, { phone: "2348033330002" });
     await recordReferral(coop.id, referrer.code, referred.id);
@@ -497,7 +519,7 @@ describe("referral qualification on real money-in paths", () => {
   });
 
   it("does not qualify on an admin manual credit (not a real money-in path)", async () => {
-    const coop = await createTestCoop("REFQ2");
+    const coop = await createCoop("REFQ2");
     const initiator = await createTestMember(coop.id, {
       phone: "2348033330011",
       role: "superadmin",
@@ -524,5 +546,171 @@ describe("referral qualification on real money-in paths", () => {
     });
     expect(referral?.status).toBe("pending");
     expect(referral?.qualifiedAt).toBeNull();
+  });
+});
+
+describe("referral commands", () => {
+  it("myReferrals lists the member's referrals and earnings", async () => {
+    const coop = await createCoop("REFMY");
+    const referrer = await createTestMember(coop.id, {
+      phone: "2348066660001",
+      name: "Ada Obi",
+    });
+    const referred = await createTestMember(coop.id, {
+      phone: "2348066660002",
+      name: "Bola Adeyemi",
+    });
+    await recordReferral(coop.id, referrer.code, referred.id);
+    const referral = await prisma.referral.findUniqueOrThrow({
+      where: { referredMemberId: referred.id },
+    });
+    await prisma.referral.update({
+      where: { id: referral.id },
+      data: {
+        status: "rewarded",
+        rewardType: "wallet",
+        rewardAmount: 50000,
+        rewardedAt: new Date(),
+      },
+    });
+
+    const res = await myReferrals(coop.id, referrer.id);
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("Bola Adeyemi");
+    expect(res.message).toContain("₦500.00");
+  });
+
+  it("myReferrals is empty-safe for a member with no referrals", async () => {
+    const coop = await createCoop("REFMY2");
+    const member = await createTestMember(coop.id, { phone: "2348066660011" });
+
+    const res = await myReferrals(coop.id, member.id);
+    expect(res.ok).toBe(true);
+    expect(res.message.toLowerCase()).toContain("haven't referred");
+  });
+
+  it("setReferralConfig upserts the coop config and audits the change", async () => {
+    const coop = await createTestCoop("REFSET");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348066660021",
+      role: "admin",
+    });
+
+    const res = await setReferralConfig(
+      coop.id,
+      { enabled: true, rewardType: "airtime", rewardAmount: 20000, maxRewards: 3 },
+      { id: admin.id, phone: admin.phone },
+    );
+    expect(res.ok).toBe(true);
+
+    const cfg = await prisma.cooperativeConfig.findUniqueOrThrow({
+      where: { cooperativeId: coop.id },
+    });
+    expect(cfg.referralEnabled).toBe(true);
+    expect(cfg.referralRewardType).toBe("airtime");
+    expect(cfg.referralRewardAmount).toBe(20000);
+    expect(cfg.referralMaxRewards).toBe(3);
+
+    const audited = await prisma.auditLog.findFirst({ where: { action: "referral.config" } });
+    expect(audited).toBeTruthy();
+  });
+
+  it("setReferralConfig rejects an unknown reward type", async () => {
+    const coop = await createTestCoop("REFSET2");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348066660031",
+      role: "admin",
+    });
+
+    const res = await setReferralConfig(
+      coop.id,
+      { rewardType: "crypto" },
+      { id: admin.id, phone: admin.phone },
+    );
+    expect(res.ok).toBe(false);
+  });
+
+  it("referralReport summarises the coop's referrals", async () => {
+    const coop = await createCoop("REPR1");
+    const referrer = await createTestMember(coop.id, { phone: "2348066660041" });
+    const referred = await createTestMember(coop.id, { phone: "2348066660042" });
+    await recordReferral(coop.id, referrer.code, referred.id);
+    const referral = await prisma.referral.findUniqueOrThrow({
+      where: { referredMemberId: referred.id },
+    });
+    await prisma.referral.update({
+      where: { id: referral.id },
+      data: {
+        status: "rewarded",
+        rewardType: "wallet",
+        rewardAmount: 50000,
+        rewardedAt: new Date(),
+      },
+    });
+
+    const res = await referralReport(coop.id);
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("Referred");
+    expect(res.message).toContain("₦500.00");
+  });
+});
+
+describe("referral enablement gate", () => {
+  it("does not record a referral when the program is disabled", async () => {
+    const coop = await createTestCoop("REFG1");
+    const referrer = await createTestMember(coop.id, { phone: "2348077770001" });
+    const referred = await createTestMember(coop.id, { phone: "2348077770002" });
+
+    const res = await recordReferral(coop.id, referrer.code, referred.id);
+    expect(res.ok).toBe(false);
+    expect(res.message.toLowerCase()).toContain("not enabled");
+    expect(await prisma.referral.count()).toBe(0);
+  });
+
+  it("does not qualify a pending referral when the program is paused", async () => {
+    const coop = await createCoop("REFG2");
+    const referrer = await createTestMember(coop.id, { phone: "2348077770011" });
+    const referred = await createTestMember(coop.id, { phone: "2348077770012" });
+    await recordReferral(coop.id, referrer.code, referred.id);
+
+    await prisma.cooperativeConfig.update({
+      where: { cooperativeId: coop.id },
+      data: { referralEnabled: false },
+    });
+
+    const res = await qualifyReferral(coop.id, referred.id);
+    expect(res.ok).toBe(false);
+
+    const referral = await prisma.referral.findUniqueOrThrow({
+      where: { referredMemberId: referred.id },
+    });
+    expect(referral.status).toBe("pending");
+    expect(referral.qualifiedAt).toBeNull();
+  });
+});
+
+describe("referral per-referrer cap", () => {
+  it("does not qualify beyond the configured reward cap", async () => {
+    const coop = await createCoop("REFCAP");
+    await prisma.cooperativeConfig.update({
+      where: { cooperativeId: coop.id },
+      data: { referralMaxRewards: 1 },
+    });
+    const referrer = await createTestMember(coop.id, { phone: "2348088880001" });
+    const first = await createTestMember(coop.id, { phone: "2348088880002" });
+    const second = await createTestMember(coop.id, { phone: "2348088880003" });
+    await recordReferral(coop.id, referrer.code, first.id);
+    await recordReferral(coop.id, referrer.code, second.id);
+
+    const firstRes = await qualifyReferral(coop.id, first.id);
+    expect(firstRes.ok).toBe(true);
+
+    const secondRes = await qualifyReferral(coop.id, second.id);
+    expect(secondRes.ok).toBe(false);
+
+    const row = await prisma.referral.findUniqueOrThrow({
+      where: { referredMemberId: second.id },
+    });
+    expect(row.status).toBe("rejected");
   });
 });

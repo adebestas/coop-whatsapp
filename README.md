@@ -573,6 +573,42 @@ Statutory packs contain the balance sheet, profit & loss, PAR aging, PEARLS
 ratios, and membership/savings/loans summaries. NFIU packs contain STR/SAR counts
 by status and the large-transaction (≥ ₦5M) list. All admin-only.
 
+## Referrals
+
+Members grow the cooperative: a member shares their **referral code** (their
+existing member `code`), a new member joins with it, and once the referred member
+makes their **first qualifying contribution** the referrer earns a reward.
+
+The program is **opt-in per cooperative** (`referralEnabled`, off by default) and
+is configured by an admin or the Board. When it is off or paused, referrals are
+neither recorded nor paid.
+
+- **Sharing a code** — `myrefcode` shows the member's own code plus a ready-to-share
+  invite; `referrals` lists who they referred and what they have earned.
+- **Joining** — the referral code is **optional** at registration. A joiner can
+  reply `join <coop code> ref <referrer code>` as a shortcut, or simply enter the
+  code when the bot asks *"were you referred by a member?"*. Reply `skip` (or leave
+  it blank) to join without one — no referral is recorded. Unknown and self-referral
+  codes are rejected; the join itself always succeeds.
+- **Reward types** — `wallet` (credits the referrer's wallet), `bank` (payout to
+  their saved account), or `airtime` (a **gated** VTU recharge that starts paying
+  once a VTU provider is configured; until then the referral stays `qualified` and
+  can be seen in `referralreport`). The default reward is **₦500**.
+- **Configuration** — `referralconfig [on|off] [wallet|bank|airtime] [amount] [maxRewards]`
+  (admin/super admin) updates the program; `referralreport` summarises the whole
+  cooperative (counts by status, rewards paid, and any qualified-but-unpaid rewards).
+  Every config change is audited.
+- **Board pause/activate** — the governance **Board committee** can pause or resume
+  the program at any time with `referralpause` / `referralresume` (active Board
+  members or the super admin), which toggles `referralEnabled`.
+
+**Anti-abuse.** One reward per referred member (a member can only ever be referred
+once), self-referral is blocked, a reward is only paid on the referred member's
+first qualifying contribution (real money-in — a provider top-up or a savings
+salary-deduction; loan late-fines and admin manual credits do not qualify), and a
+per-referrer cap (`referralMaxRewards`; `0` = unlimited) stops reward farming.
+Every recorded, qualified, rejected and paid referral is audited.
+
 ## Guarantor default deductions
 
 When a loan is **2+ months overdue**, each confirmed guarantor gets a

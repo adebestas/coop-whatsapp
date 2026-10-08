@@ -29,6 +29,7 @@ import { createCooperative, generateMemberFileNumber } from "../cooperative.js";
 import { confirmDividendDistribution } from "../dividends.js";
 import { hashPin, verifyPin } from "../../lib/security.js";
 import { createMandate, cancelMandate } from "../mandates.js";
+import { myReferrals } from "../referrals.js";
 
 /** A half-finished flow expires after this long. */
 /** OTP codes expire after this long. */
@@ -158,6 +159,7 @@ export function buildFullMenu(
     `• *analytics* — savings analytics\n` +
     `• *ledger* — cooperative ledger (transparency)\n` +
     `• *code* — your member code\n` +
+    `• *myrefcode* / *referrals* — share your referral code & track rewards\n` +
     `• *phone <number>* — add/update your phone\n` +
     `• *changephone <number>* — move your account to a new number (OTP + admin approval)\n` +
     `• *mydata* / *deleteaccount* — your data (NDPR)\n\n` +
@@ -230,14 +232,44 @@ export function buildAdminMenu(): string {
     `• *regulatorconfig <label> [type] [email] [monthlyDue] [quarterlyDue]* — set the regulator to file with\n` +
     `• *regreport <YYYY-MM> <statutory\\|nfiu\\|both> [monthly\\|quarterly]* — generate a regulator pack\n` +
     `• *regreportstatus* — view generated/filed regulator packs\n` +
-    `• *regreport filed <id>* — mark a regulator pack filed\n\n` +
+    `• *regreport filed <id>* — mark a regulator pack filed\n` +
+    `• *referralconfig [on\\|off] [wallet\\|bank\\|airtime] [amount] [maxRewards]* — configure referrals\n` +
+    `• *referralreport* — referral summary for the coop\n\n` +
     `*Committees (super admin):* *addcommittee <credit\\|supervisory\\|board> <name> [size]*, *appoint <type> <member code> [chair]*, *removecommittee <type> <member code>*, *committees*\n` +
-    `*Committees (members):* *cvote <loan id> approve\\|reject*, *committeequeue*, *supervisoryfreeze <member code> [reason]*, *supervisoryunfreeze <member code>*\n\n` +
+    `*Committees (members):* *cvote <loan id> approve\\|reject*, *committeequeue*, *supervisoryfreeze <member code> [reason]*, *supervisoryunfreeze <member code>*, *referralpause* / *referralresume* (Board)\n\n` +
     `*Meetings:* *startmeeting <agm\\|sgm> <title> [quorum%]*, *openmeeting <id>*, *closemeeting <id>*, *addmotion <meeting id> <title> \\| <description> [kind]*, *closemotion <id>*, *meetingminutes <id>*\n\n` +
     `*Savings groups:* *newgroup <rosca\\|vsla> <name> <code> <amount> <cycleLength>*, *closegroupcycle <group id>*, *groups*, *grouploans <group id>*\n\n` +
     `*Savings products:* *newproduct <fixed\\|goal\\|seasonal\\|junior> <name> [rate] [termMonths]*, *products*\n\n` +
     `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *confirmname <code>*, *paydividend <rate%>*, *paysharedividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
+}
+
+/** Show the member's own referral code plus a ready-to-share invite. */
+export async function handleMyRefCode(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  await sendText({
+    to: phone,
+    text:
+      `🎟️ *Your referral code is ${member.code}*\n\n` +
+      `Share it with friends. They can join with *join ${member.cooperative?.code ?? "<coop code>"} ref ${member.code}*, ` +
+      `or simply enter your code when the bot asks who referred them.\n\n` +
+      `You earn a reward once they make their first contribution.`,
+  });
+}
+
+/** Show the member's referrals and rewards earned. */
+export async function handleReferrals(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const res = await myReferrals(member.cooperativeId, member.id);
+  await sendText({ to: phone, text: res.message });
 }
 
 export function buildOmbudsmanMenu(): string {

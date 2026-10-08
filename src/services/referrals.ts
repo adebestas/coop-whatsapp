@@ -30,6 +30,7 @@ interface RecordOutcome extends ReferralResult {
 
 interface QualifyOutcome extends QualifyResult {
   qualified: boolean;
+  rejected?: boolean;
   referrerId?: string;
   rewardType?: string;
   rewardAmount?: number;
@@ -53,6 +54,19 @@ export async function recordReferral(
   try {
     outcome = await withTx(async (tx) => {
       await setCoopContext(tx as never, coopId);
+      // The program is opt-in per cooperative. When it is off (or paused by the
+      // Board) the join still succeeds — we simply do not record a referral.
+      const gate = await tx.cooperativeConfig.findUnique({
+        where: { cooperativeId: coopId },
+        select: { referralEnabled: true },
+      });
+      if (gate?.referralEnabled !== true) {
+        return {
+          ok: false,
+          created: false,
+          message: "Referrals are not enabled for this cooperative.",
+        };
+      }
       const referrer = await tx.member.findFirst({
         where: {
           cooperativeId: coopId,
@@ -129,8 +143,43 @@ export async function qualifyReferral(
     }
 
     const config = await tx.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
+    if (config?.referralEnabled !== true) {
+      return {
+        ok: false,
+        qualified: false,
+        referralId: referral.id,
+        message: "Referrals are not enabled for this cooperative.",
+      };
+    }
     const rewardType = config?.referralRewardType ?? DEFAULT_REWARD_TYPE;
     const rewardAmount = config?.referralRewardAmount ?? DEFAULT_REWARD_AMOUNT;
+
+    // Per-referrer cap: count the rewards this referrer has already earned. At
+    // the cap the referral is rejected (not left pending) so it is not retried
+    // on every later contribution.
+    const maxRewards = config?.referralMaxRewards ?? 0;
+    if (maxRewards > 0) {
+      const earned = await tx.referral.count({
+        where: {
+          cooperativeId: coopId,
+          referrerId: referral.referrerId,
+          status: { in: ["qualified", "rewarded"] },
+        },
+      });
+      if (earned >= maxRewards) {
+        const claimed = await tx.referral.updateMany({
+          where: { id: referral.id, status: "pending" },
+          data: { status: "rejected" },
+        });
+        return {
+          ok: false,
+          qualified: false,
+          rejected: claimed.count > 0,
+          referralId: referral.id,
+          message: `Referral not qualified — the referrer has reached their reward cap (${maxRewards}).`,
+        };
+      }
+    }
 
     const claimed = await tx.referral.updateMany({
       where: { id: referral.id, status: "pending" },
@@ -183,6 +232,18 @@ export async function qualifyReferral(
         });
       }
     }
+  }
+
+  if (outcome.rejected && outcome.referralId) {
+    await audit({
+      cooperativeId: coopId,
+      actorPhone: "",
+      actorId: referredMemberId,
+      action: "referral.rejected",
+      targetType: "referral",
+      targetId: outcome.referralId,
+      detail: "Referral rejected — the referrer has reached their reward cap",
+    }).catch(() => {});
   }
 
   return { ok: outcome.ok, message: outcome.message, referralId: outcome.referralId };
@@ -456,4 +517,182 @@ async function revertToQualified(coopId: string, referralId: string): Promise<vo
   } catch {
     // best-effort revert — a later reconcile/retry can still repair the row
   }
+}
+
+/** Valid `referralRewardType` values (no Prisma enum — plain strings). */
+const REWARD_TYPES = new Set(["wallet", "bank", "airtime"]);
+
+function statusLabel(status: string): string {
+  switch (status) {
+    case "qualified":
+      return "✅ qualified (reward pending)";
+    case "rewarded":
+      return "💸 reward paid";
+    case "rejected":
+      return "⛔ rejected";
+    default:
+      return "⏳ pending";
+  }
+}
+
+/**
+ * The member's own referral programme view: everyone they referred, the status
+ * of each, and how much they have earned. RLS-safe (`withTx` + `setCoopContext`).
+ */
+export async function myReferrals(
+  coopId: string,
+  memberId: string,
+): Promise<{ ok: boolean; message: string }> {
+  const rows = await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    return tx.referral.findMany({
+      where: { cooperativeId: coopId, referrerId: memberId },
+      orderBy: { createdAt: "desc" },
+      include: { referredMember: { select: { name: true } } },
+    });
+  });
+
+  if (rows.length === 0) {
+    return {
+      ok: true,
+      message:
+        "You haven't referred anyone yet. Share your referral code — reply *myrefcode* to get it.",
+    };
+  }
+
+  const qualified = rows.filter((r) => r.status === "qualified" || r.status === "rewarded").length;
+  const rewarded = rows.filter((r) => r.status === "rewarded").length;
+  const earned = rows
+    .filter((r) => r.status === "rewarded")
+    .reduce((sum, r) => sum + (r.rewardAmount ?? 0), 0);
+
+  const lines = rows
+    .map((r) => {
+      const amount =
+        r.status === "rewarded" && r.rewardAmount ? ` (${formatBalance(r.rewardAmount)})` : "";
+      return `• ${r.referredMember?.name ?? "A member"} — ${statusLabel(r.status)}${amount}`;
+    })
+    .join("\n");
+
+  return {
+    ok: true,
+    message:
+      `📣 *Your referrals*\n\n` +
+      `Referred: *${rows.length}* · Qualified: *${qualified}* · Rewards paid: *${rewarded}*\n` +
+      `Earned: *${formatBalance(earned)}*\n\n` +
+      `${lines}\n\n` +
+      `Share your code — reply *myrefcode*.`,
+  };
+}
+
+/**
+ * Create or update a cooperative's referral configuration and audit the change.
+ * The program is opt-in: `enabled` must be set to `true` for referrals to be
+ * recorded or rewards to be paid. Coop-scoped write via `withTx` +
+ * `setCoopContext`, audited as `referral.config`.
+ */
+export async function setReferralConfig(
+  coopId: string,
+  input: {
+    enabled?: boolean;
+    rewardType?: string;
+    rewardAmount?: number;
+    maxRewards?: number;
+  },
+  actor: { id: string; phone: string },
+): Promise<{ ok: boolean; message: string }> {
+  const type = input.rewardType?.trim().toLowerCase();
+  if (type && !REWARD_TYPES.has(type)) {
+    return {
+      ok: false,
+      message: `Unknown reward type *${input.rewardType}*. Use *wallet*, *bank* or *airtime*.`,
+    };
+  }
+  if (
+    input.rewardAmount !== undefined &&
+    (!Number.isInteger(input.rewardAmount) || input.rewardAmount <= 0)
+  ) {
+    return { ok: false, message: "Reward amount must be a positive amount (kobo)." };
+  }
+  if (
+    input.maxRewards !== undefined &&
+    (!Number.isInteger(input.maxRewards) || input.maxRewards < 0)
+  ) {
+    return { ok: false, message: "Max rewards must be 0 (unlimited) or a positive whole number." };
+  }
+
+  const data = {
+    ...(input.enabled !== undefined ? { referralEnabled: input.enabled } : {}),
+    ...(type ? { referralRewardType: type } : {}),
+    ...(input.rewardAmount !== undefined ? { referralRewardAmount: input.rewardAmount } : {}),
+    ...(input.maxRewards !== undefined ? { referralMaxRewards: input.maxRewards } : {}),
+  };
+
+  const config = await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    return tx.cooperativeConfig.upsert({
+      where: { cooperativeId: coopId },
+      create: { cooperativeId: coopId, ...data },
+      update: data,
+    });
+  });
+
+  const cap = config.referralMaxRewards === 0 ? "unlimited" : String(config.referralMaxRewards);
+  const summary =
+    `${config.referralEnabled ? "active" : "paused"} · ` +
+    `${formatBalance(config.referralRewardAmount)} ${config.referralRewardType} · cap ${cap}`;
+
+  await audit({
+    cooperativeId: coopId,
+    actorPhone: actor.phone,
+    actorId: actor.id,
+    actorRole: "admin",
+    action: "referral.config",
+    targetType: "cooperativeConfig",
+    targetId: coopId,
+    detail: `Referral config updated — ${summary}`,
+  }).catch(() => {});
+
+  return { ok: true, message: `✅ Referral program updated — ${summary}.` };
+}
+
+/**
+ * A cooperative-wide referral summary for admins: the current configuration and
+ * a breakdown of every referral by status, including the count of `qualified`
+ * (earned but unpaid) referrals — the gated-airtime queue an admin must watch.
+ * Coop-scoped read via `withTx` + `setCoopContext`.
+ */
+export async function referralReport(coopId: string): Promise<{ ok: boolean; message: string }> {
+  const { config, rows } = await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    const config = await tx.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
+    const rows = await tx.referral.findMany({
+      where: { cooperativeId: coopId },
+      select: { status: true, rewardAmount: true },
+    });
+    return { config, rows };
+  });
+
+  const count = (status: string) => rows.filter((r) => r.status === status).length;
+  const paid = rows
+    .filter((r) => r.status === "rewarded")
+    .reduce((sum, r) => sum + (r.rewardAmount ?? 0), 0);
+  const amount = config?.referralRewardAmount ?? DEFAULT_REWARD_AMOUNT;
+  const rewardType = config?.referralRewardType ?? DEFAULT_REWARD_TYPE;
+  const cap = config?.referralMaxRewards ?? 0;
+
+  return {
+    ok: true,
+    message:
+      `📊 *Referral report*\n\n` +
+      `Status: *${config?.referralEnabled ? "active" : "paused"}*\n` +
+      `Reward: *${formatBalance(amount)} ${rewardType}*\n` +
+      `Per-referrer cap: *${cap === 0 ? "unlimited" : cap}*\n\n` +
+      `Referred: *${rows.length}*\n` +
+      `• Pending: *${count("pending")}*\n` +
+      `• Qualified (unpaid): *${count("qualified")}*\n` +
+      `• Rewarded: *${count("rewarded")}*\n` +
+      `• Rejected: *${count("rejected")}*\n\n` +
+      `Rewards paid: *${formatBalance(paid)}*`,
+  };
 }

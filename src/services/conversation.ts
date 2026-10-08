@@ -65,6 +65,8 @@ import {
   buildOmbudsmanMenu,
   handleAwaitingInput,
   parseNaira,
+  handleMyRefCode,
+  handleReferrals,
 } from "./handlers/session.js";
 import { handleJoinStart, handleOnboardStart } from "./handlers/join.js";
 import {
@@ -731,6 +733,14 @@ async function handleMessageInner(
 
     case "code":
       await handleCode(phone);
+      break;
+
+    case "myrefcode":
+      await handleMyRefCode(phone);
+      break;
+
+    case "referrals":
+      await handleReferrals(phone);
       break;
 
     case "phone":
