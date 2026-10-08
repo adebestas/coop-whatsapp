@@ -113,6 +113,24 @@ async function makePayout(
   });
 }
 
+async function makeDisbursedLoan(
+  coopId: string,
+  memberId: string,
+  amount: number,
+  disbursedAt: Date,
+) {
+  return prisma.loan.create({
+    data: {
+      amount,
+      balance: amount,
+      status: "disbursed",
+      disbursedAt,
+      memberId,
+      cooperativeId: coopId,
+    },
+  });
+}
+
 function sheet(pack: { name: string; rows: string[][] }[], re: RegExp) {
   return pack.find((s) => re.test(s.name));
 }
@@ -246,6 +264,28 @@ describe("nfiuPack", () => {
     expect(largeText).toContain(formatBalance(900_000_000));
     expect(largeText).toContain(member.code);
     expect(largeText).not.toContain(formatBalance(400_000_000));
+  });
+
+  it("includes large money-in contributions and loan disbursements with a direction column", async () => {
+    const coop = await createTestCoop("REG9");
+    const member = await createTestMember(coop.id, { phone: "2348000010009" });
+
+    await makeWithdrawal(coop.id, member.id, 500_000_000, "paid", new Date("2026-03-05T10:00:00Z"));
+    await makeDisbursedLoan(coop.id, member.id, 700_000_000, new Date("2026-03-10T10:00:00Z"));
+    await makeContrib(coop.id, member.id, 800_000_000, new Date("2026-03-15T10:00:00Z"));
+
+    const pack = await nfiuPack(coop.id, "2026-03");
+    const largeSheet = sheet(pack, /large|transaction/i)!;
+
+    expect(largeSheet.rows[0]).toContain("Direction");
+    // Header + the three in-period large transactions (out, out, in).
+    expect(largeSheet.rows.length).toBe(4);
+    const text = largeSheet.rows.flat().join(" ");
+    expect(text).toContain(formatBalance(500_000_000));
+    expect(text).toContain(formatBalance(700_000_000));
+    expect(text).toContain(formatBalance(800_000_000));
+    expect(largeSheet.rows.some((r) => r.includes("in"))).toBe(true);
+    expect(largeSheet.rows.some((r) => r.includes("out"))).toBe(true);
   });
 
   it("returns an empty large-transaction list when there are none", async () => {

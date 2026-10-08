@@ -189,14 +189,16 @@ export async function statutoryPack(coopId: string, period: string): Promise<Rep
 
 /**
  * Build the NFIU AML summaries pack for a cooperative and period, READ-ONLY:
- * STR/SAR counts grouped by status, and the large-transaction (≥ ₦5M) money-out
- * list (paid withdrawals + successful payouts) drawn from the AML service.
+ * STR/SAR counts grouped by status, and the large-transaction (≥ ₦5M) list —
+ * all directions, matching the direction-agnostic AML large-transaction rule
+ * (paid withdrawals + successful payouts + disbursed loans out; confirmed
+ * contributions in).
  */
 export async function nfiuPack(coopId: string, period: string): Promise<ReportSheet[]> {
   const { start, end } = periodRange(period);
   const inPeriod = { createdAt: { gte: start, lte: end } };
 
-  const [strs, withdrawals, payouts] = await Promise.all([
+  const [strs, withdrawals, payouts, loans, deposits] = await Promise.all([
     prisma.sTR.findMany({
       where: { cooperativeId: coopId, ...inPeriod },
       select: { status: true, amount: true },
@@ -214,6 +216,23 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
       where: {
         cooperativeId: coopId,
         status: "successful",
+        amount: { gte: LARGE_TX_THRESHOLD },
+        ...inPeriod,
+      },
+      include: { member: { select: { name: true, code: true } } },
+    }),
+    prisma.loan.findMany({
+      where: {
+        cooperativeId: coopId,
+        amount: { gte: LARGE_TX_THRESHOLD },
+        disbursedAt: { gte: start, lte: end },
+      },
+      include: { member: { select: { name: true, code: true } } },
+    }),
+    prisma.contribution.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "confirmed",
         amount: { gte: LARGE_TX_THRESHOLD },
         ...inPeriod,
       },
@@ -241,10 +260,11 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
   ]);
   const strSheet: ReportSheet = { name: "STR-SAR Summary", rows: strRows };
 
-  // Large-transaction list (≥ ₦5M), money-out only, oldest first.
+  // Large-transaction list (≥ ₦5M), all directions, oldest first.
   const large = [
     ...withdrawals.map((w) => ({
       date: w.createdAt,
+      direction: "out",
       type: "withdrawal",
       member: w.member.name,
       code: w.member.code,
@@ -252,18 +272,36 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
     })),
     ...payouts.map((p) => ({
       date: p.createdAt,
+      direction: "out",
       type: "payout",
       member: p.member.name,
       code: p.member.code,
       amount: p.amount,
     })),
+    ...loans.map((l) => ({
+      date: l.disbursedAt ?? l.createdAt,
+      direction: "out",
+      type: "loan disbursement",
+      member: l.member.name,
+      code: l.member.code,
+      amount: l.amount,
+    })),
+    ...deposits.map((c) => ({
+      date: c.createdAt,
+      direction: "in",
+      type: "contribution",
+      member: c.member.name,
+      code: c.member.code,
+      amount: c.amount,
+    })),
   ].sort((a, b) => a.date.getTime() - b.date.getTime());
   const largeSheet: ReportSheet = {
     name: "Large Transactions",
     rows: [
-      ["Date", "Type", "Member", "Code", "Amount"],
+      ["Date", "Direction", "Type", "Member", "Code", "Amount"],
       ...large.map((tx) => [
         tx.date.toISOString().slice(0, 10),
+        tx.direction,
         tx.type,
         tx.member,
         tx.code,
