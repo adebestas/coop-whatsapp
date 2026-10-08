@@ -128,6 +128,7 @@ describe("coop whatsapp bot", () => {
 
     await handleMessage(PHONE, "join TEST01");
     await handleMessage(PHONE, "Ada Obi");
+    await handleMessage(PHONE, "skip"); // referral step
     await handleMessage(PHONE, "YES");
     await handleMessage(PHONE, "skip");
     await handleMessage(PHONE, "skip");
@@ -158,6 +159,7 @@ describe("coop whatsapp bot", () => {
 
     await handleMessage(PHONE, "join TEST06");
     await handleMessage(PHONE, "Ada Obi");
+    await handleMessage(PHONE, "skip"); // referral step
     await handleMessage(PHONE, "YES");
     await handleMessage(PHONE, "ada@example.com");
     await handleMessage(PHONE, "15/08");
@@ -249,6 +251,7 @@ describe("coop whatsapp bot", () => {
 
     await handleMessage(TG, "join TEST05");
     await handleMessage(TG, "Bola Musa");
+    await handleMessage(TG, "skip"); // referral step
     await handleMessage(TG, "YES");
     await handleMessage(TG, "08012345678");
     await handleMessage(TG, "skip");

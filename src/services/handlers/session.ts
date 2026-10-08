@@ -315,6 +315,26 @@ async function teardownTelegramKiosk(phone: string, data: FlowData): Promise<voi
   }
 }
 
+/** Store `data` and send the NDPR privacy notice, awaiting a YES/NO. */
+async function askConsent(phone: string, data: FlowData): Promise<void> {
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_consent", data: JSON.stringify(data) },
+    update: { state: "awaiting_consent", data: JSON.stringify(data) },
+  });
+  await sendText({
+    to: phone,
+    text:
+      `*Privacy Notice (NDPR)*\n\n` +
+      `By continuing, you consent to the collection and processing of your personal data ` +
+      `(name, phone, bank details) for cooperative banking purposes only. Your data is stored ` +
+      `securely and never shared with third parties without your consent.\n\n` +
+      `For data protection inquiries, contact our Data Protection Officer (DPO): ` +
+      `dpo@cooperative-app.ng\n\n` +
+      `Reply *YES* to consent or *NO* to cancel.`,
+  });
+}
+
 export async function handleAwaitingInput(
   phone: string,
   state: BotState,
@@ -377,22 +397,41 @@ export async function handleAwaitingInput(
         });
         return;
       }
+      // The `join ... ref CODE` shortcut pre-fills referrerCode, so skip the
+      // referral step; otherwise ask for it here (runs on WhatsApp and Telegram).
+      if (data.referrerCode) {
+        await askConsent(phone, { ...data, name });
+        break;
+      }
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_consent", data: JSON.stringify({ ...data, name }) },
-        update: { state: "awaiting_consent", data: JSON.stringify({ ...data, name }) },
+        create: { phone, state: "awaiting_referral", data: JSON.stringify({ ...data, name }) },
+        update: { state: "awaiting_referral", data: JSON.stringify({ ...data, name }) },
       });
       await sendText({
         to: phone,
         text:
-          `*Privacy Notice (NDPR)*\n\n` +
-          `By continuing, you consent to the collection and processing of your personal data ` +
-          `(name, phone, bank details) for cooperative banking purposes only. Your data is stored ` +
-          `securely and never shared with third parties without your consent.\n\n` +
-          `For data protection inquiries, contact our Data Protection Officer (DPO): ` +
-          `dpo@cooperative-app.ng\n\n` +
-          `Reply *YES* to consent or *NO* to cancel.`,
+          `One quick thing — were you referred by a member? ` +
+          `Enter their member code (e.g. *ABC123-DEFG*), or reply *skip*.`,
       });
+      break;
+    }
+
+    case "awaiting_referral": {
+      const answer = text.trim();
+      const skipped =
+        answer === "" || ["skip", "none", "no", "0", "-"].includes(answer.toLowerCase());
+      const nextData: FlowData = { ...data };
+      if (skipped) {
+        // No referral — clear anything that may have been pre-filled.
+        delete nextData.referrerCode;
+      } else {
+        // Store the code as-is (uppercased). Unknown codes are NOT blocked here:
+        // the join always proceeds and recordReferral rejects unknown codes
+        // gracefully when the member is created.
+        nextData.referrerCode = answer.toUpperCase();
+      }
+      await askConsent(phone, nextData);
       break;
     }
 

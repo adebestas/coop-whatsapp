@@ -1,6 +1,9 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import { recordReferral, qualifyReferral } from "../src/services/referrals.js";
+import { handleAwaitingInput } from "../src/services/handlers/session.js";
+import { handleJoinStart } from "../src/services/handlers/join.js";
+import type { BotState } from "../src/services/conversation.js";
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -8,6 +11,35 @@ beforeEach(async () => {
 });
 
 afterAll(cleanupDatabase);
+
+async function sessionOf(phone: string) {
+  return prisma.session.findUnique({ where: { phone } });
+}
+
+function dataOf(json: string | null | undefined): Record<string, unknown> {
+  return json ? (JSON.parse(json) as Record<string, unknown>) : {};
+}
+
+/** Walk the onboarding from wherever it is up to member creation (awaiting_optin). */
+async function finishRegistration(phone: string): Promise<void> {
+  const answers: Record<string, string> = {
+    awaiting_consent: "YES",
+    awaiting_email: "skip",
+    awaiting_birthday: "skip",
+    awaiting_nok_name: "Chidi Okafor",
+    awaiting_nok_phone: "08030000000",
+    awaiting_pin: "1234",
+    awaiting_pin_confirm: "1234",
+  };
+  let session = await sessionOf(phone);
+  let guard = 0;
+  while (session && session.state !== "awaiting_optin" && guard++ < 20) {
+    const answer = answers[session.state];
+    if (answer === undefined) break;
+    await handleAwaitingInput(phone, session.state as BotState, answer, session.data ?? "{}");
+    session = await sessionOf(phone);
+  }
+}
 
 describe("referrals", () => {
   it("records a pending referral for a valid referrer code", async () => {
@@ -97,5 +129,89 @@ describe("referrals", () => {
     });
     expect(after?.status).toBe("qualified");
     expect(after?.qualifiedAt?.getTime()).toBe(first?.qualifiedAt?.getTime());
+  });
+});
+
+describe("referral registration step", () => {
+  it("captures the code in the flow and records the referral at member creation", async () => {
+    const coop = await createTestCoop("REFR1");
+    const referrer = await createTestMember(coop.id, { phone: "2348022220001" });
+    const phone = "2348022220002";
+
+    await prisma.session.create({
+      data: { phone, state: "awaiting_name", data: JSON.stringify({ joinCode: coop.code }) },
+    });
+
+    await handleAwaitingInput(phone, "awaiting_name", "Ada Obi", JSON.stringify({ joinCode: coop.code }));
+    let session = await sessionOf(phone);
+    expect(session?.state).toBe("awaiting_referral");
+    expect(dataOf(session?.data).name).toBe("Ada Obi");
+
+    // A lowercase code is stored uppercased.
+    await handleAwaitingInput(
+      phone,
+      "awaiting_referral",
+      referrer.code.toLowerCase(),
+      session?.data ?? "{}",
+    );
+    session = await sessionOf(phone);
+    expect(session?.state).toBe("awaiting_consent");
+    expect(dataOf(session?.data).referrerCode).toBe(referrer.code.toUpperCase());
+
+    await finishRegistration(phone);
+
+    const member = await prisma.member.findUnique({
+      where: { cooperativeId_phone: { cooperativeId: coop.id, phone } },
+    });
+    expect(member).toBeTruthy();
+    const referral = await prisma.referral.findUnique({
+      where: { referredMemberId: member!.id },
+    });
+    expect(referral).toBeTruthy();
+    expect(referral?.referrerId).toBe(referrer.id);
+    expect(referral?.status).toBe("pending");
+  });
+
+  it("skip records no referral", async () => {
+    const coop = await createTestCoop("REFR2");
+    await createTestMember(coop.id, { phone: "2348022220011" });
+    const phone = "2348022220012";
+
+    await prisma.session.create({
+      data: { phone, state: "awaiting_name", data: JSON.stringify({ joinCode: coop.code }) },
+    });
+    await handleAwaitingInput(phone, "awaiting_name", "Bola Adeyemi", JSON.stringify({ joinCode: coop.code }));
+    let session = await sessionOf(phone);
+    expect(session?.state).toBe("awaiting_referral");
+
+    await handleAwaitingInput(phone, "awaiting_referral", "skip", session?.data ?? "{}");
+    session = await sessionOf(phone);
+    expect(session?.state).toBe("awaiting_consent");
+    expect(dataOf(session?.data).referrerCode).toBeUndefined();
+
+    await finishRegistration(phone);
+
+    const member = await prisma.member.findUnique({
+      where: { cooperativeId_phone: { cooperativeId: coop.id, phone } },
+    });
+    expect(member).toBeTruthy();
+    expect(await prisma.referral.count()).toBe(0);
+  });
+
+  it("the `join ... ref CODE` shortcut skips the referral step", async () => {
+    const coop = await createTestCoop("REFR3");
+    const referrer = await createTestMember(coop.id, { phone: "2348022220021" });
+    const phone = "2348022220022";
+
+    await handleJoinStart(phone, [coop.code, "ref", referrer.code.toLowerCase()]);
+    let session = await sessionOf(phone);
+    expect(session?.state).toBe("awaiting_name");
+    expect(dataOf(session?.data).referrerCode).toBe(referrer.code.toUpperCase());
+
+    await handleAwaitingInput(phone, "awaiting_name", "Chika Eze", session?.data ?? "{}");
+    session = await sessionOf(phone);
+    // Straight to consent — the referral step is never shown.
+    expect(session?.state).toBe("awaiting_consent");
+    expect(dataOf(session?.data).referrerCode).toBe(referrer.code.toUpperCase());
   });
 });

@@ -101,6 +101,7 @@ describe("channel linking", () => {
 
     await handleMessage("tg:555", "join TESTR1");
     await handleMessage("tg:555", "Ada Obi");
+    await handleMessage("tg:555", "skip"); // referral step
     await handleMessage("tg:555", "YES"); // NDPR consent
     await handleMessage("tg:555", "08087654321"); // real phone → OTP sent to WhatsApp
 

@@ -122,6 +122,7 @@ describe("secure PIN challenges", () => {
     await makeCoop("TESTSP1", "Test Coop");
     await handleMessage(PHONE, "join TESTSP1");
     await handleMessage(PHONE, "Ada Obi");
+    await handleMessage(PHONE, "skip"); // referral step
     await handleMessage(PHONE, "YES"); // NDPR consent
     await handleMessage(PHONE, "skip");
     await handleMessage(PHONE, "skip");

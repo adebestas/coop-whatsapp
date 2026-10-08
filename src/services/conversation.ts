@@ -141,6 +141,7 @@ export type BotState =
   | "idle"
   | "awaiting_name"
   | "awaiting_coop_code"
+  | "awaiting_referral"
   | "awaiting_phone"
   | "awaiting_otp"
   | "awaiting_changephone_otp"
