@@ -16,6 +16,7 @@ import {
   generateReport,
   type PeriodType,
   type PackType,
+  type GenerateReportDeps,
 } from "./regulator-reporting.js";
 
 /**
@@ -1093,35 +1094,45 @@ async function remindRegulatorFilings(coopId: string, now: Date): Promise<number
  * packs created. One coop's failure is logged and skipped so it cannot abort
  * the remaining coops.
  */
-export async function runRegulatorReports(now = new Date()): Promise<number> {
+export async function runRegulatorReports(
+  now = new Date(),
+  deps?: GenerateReportDeps,
+): Promise<number> {
   let created = 0;
-  await forEachCoop(async (coopId) => {
+  // Deliberately NOT forEachCoop: `generateReport` builds ExcelJS/PDFKit files
+  // and uploads to S3, which must not run inside a per-coop transaction. Each
+  // DB-touching step opens its own short RLS-scoped context instead.
+  const coopIds = await listCooperativeIds();
+  for (const coopId of coopIds) {
     try {
-      const config = await prisma.cooperativeConfig.findUnique({
-        where: { cooperativeId: coopId },
-        select: { regulatorReportingEnabled: true },
-      });
-      if (!config?.regulatorReportingEnabled) return;
+      const have = await withCoopContext(coopId, async () => {
+        const config = await prisma.cooperativeConfig.findUnique({
+          where: { cooperativeId: coopId },
+          select: { regulatorReportingEnabled: true },
+        });
+        if (!config?.regulatorReportingEnabled) return null;
 
-      // A pack is due only where a regulator is configured.
-      const profile = await prisma.regulatorProfile.findFirst({
-        where: { cooperativeId: coopId, active: true },
-        select: { id: true },
+        // A pack is due only where a regulator is configured.
+        const profile = await prisma.regulatorProfile.findFirst({
+          where: { cooperativeId: coopId, active: true },
+          select: { id: true },
+        });
+        if (!profile) return null;
+
+        // Pre-fetch existing packs so generation cannot collide with the unique
+        // `(coop, period, periodType, packType)` key.
+        const existing = await prisma.regulatorReport.findMany({
+          where: { cooperativeId: coopId, packType: SCHEDULED_REGULATOR_PACK },
+          select: { period: true, periodType: true },
+        });
+        return new Set(existing.map((r) => `${r.periodType}:${r.period}`));
       });
-      if (!profile) return;
+      if (!have) continue;
 
       const targets: { periodType: PeriodType; period: string }[] = [
         { periodType: "monthly", period: lastClosedMonthlyPeriod(now) },
         { periodType: "quarterly", period: lastClosedQuarterlyPeriod(now) },
       ];
-
-      // Pre-fetch existing packs and exclude them, so no generation can collide
-      // with the unique `(coop, period, periodType, packType)` key.
-      const existing = await prisma.regulatorReport.findMany({
-        where: { cooperativeId: coopId, packType: SCHEDULED_REGULATOR_PACK },
-        select: { period: true, periodType: true },
-      });
-      const have = new Set(existing.map((r) => `${r.periodType}:${r.period}`));
 
       for (const target of targets) {
         if (have.has(`${target.periodType}:${target.period}`)) continue;
@@ -1130,16 +1141,18 @@ export async function runRegulatorReports(now = new Date()): Promise<number> {
           target.period,
           target.periodType,
           SCHEDULED_REGULATOR_PACK,
+          undefined,
+          deps,
         );
         if (res.ok) created++;
       }
 
-      await remindRegulatorFilings(coopId, now);
+      await withCoopContext(coopId, () => remindRegulatorFilings(coopId, now));
     } catch (err) {
       // One cooperative's failure must not abort the rest.
       log.error("[scheduler] regulator report job failed", { coopId, err: String(err) });
     }
-  });
+  }
   return created;
 }
 

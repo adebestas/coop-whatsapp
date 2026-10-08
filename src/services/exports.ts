@@ -528,7 +528,7 @@ export async function buildReportFiles(
   return { xlsx, pdf, csv };
 }
 
-async function emailFiles(
+export async function emailFiles(
   to: string,
   subject: string,
   body: string,

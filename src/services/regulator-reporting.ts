@@ -1,14 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { prisma, withTx } from "../lib/prisma.js";
-import { setCoopContext } from "../lib/tenant-context.js";
+import { setCoopContext, withCoopContext } from "../lib/tenant-context.js";
 import { computePnl } from "./ledger.js";
 import { computePar, computePearls } from "./provisioning.js";
 import { audit } from "./audit.js";
 import { formatBalance } from "../lib/money.js";
 import { LARGE_TX_THRESHOLD } from "./aml.js";
-import { EXPORT_DIR, buildReportFiles, type ReportSheet } from "./exports.js";
+import { EXPORT_DIR, buildReportFiles, emailFiles, type ReportSheet } from "./exports.js";
+import { uploadToS3 } from "../lib/s3.js";
 
 export type PeriodType = "monthly" | "quarterly";
 export type PackType = "statutory" | "nfiu" | "both";
@@ -23,6 +24,18 @@ export interface GenerateReportResult {
   message: string;
   reportId?: string;
   files?: { xlsx: string; pdf: string; csv: string };
+  links?: { xlsx: string; pdf: string };
+}
+
+/**
+ * Optional I/O seams for `generateReport`, so tests can observe the file-build,
+ * object-storage and email steps without needing live S3/SMTP. Production callers
+ * omit them and get the real implementations.
+ */
+export interface GenerateReportDeps {
+  buildFiles?: typeof buildReportFiles;
+  upload?: (filePath: string, key: string) => Promise<boolean>;
+  sendEmail?: typeof emailFiles;
 }
 
 const DEFAULT_DUE: RegulatorDueProfile = { monthlyDueDay: 10, quarterlyDueDay: 15 };
@@ -78,10 +91,13 @@ function pct(fraction: number): string {
 export async function statutoryPack(coopId: string, period: string): Promise<ReportSheet[]> {
   const { start, end } = periodRange(period);
 
-  const [pnl, par, pearls, memberCount, savings, loanBook] = await Promise.all([
+  const [pnl, par, pearls, memberCount, savings, loanBook, savingsAccounts] = await Promise.all([
     computePnl(coopId, start, end),
-    computePar(coopId),
-    computePearls(coopId),
+    // Period-scope the statutory figures: PAR is measured as of the period end,
+    // not generation time (and PEARLS' growth window likewise). Loan balances
+    // remain current-state — there is no historical loan snapshot.
+    computePar(coopId, end),
+    computePearls(coopId, end),
     prisma.member.count({ where: { cooperativeId: coopId } }),
     prisma.contribution.aggregate({
       where: { cooperativeId: coopId, status: "confirmed" },
@@ -93,23 +109,40 @@ export async function statutoryPack(coopId: string, period: string): Promise<Rep
       _sum: { balance: true },
       _count: { _all: true },
     }),
+    // Savings products hold member money outside `Contribution`; include their
+    // balances so the savings and balance-sheet liabilities are complete.
+    prisma.savingsAccount.aggregate({
+      where: { cooperativeId: coopId },
+      _sum: { balance: true },
+    }),
   ]);
 
   const savingsTotal = savings._sum.amount ?? 0;
   const savingsCount = savings._count._all;
+  const savingsAccountsTotal = savingsAccounts._sum.balance ?? 0;
+  const totalLiabilities = savingsTotal + savingsAccountsTotal;
   const loanTotal = loanBook._sum.balance ?? 0;
   const loanCount = loanBook._count._all;
 
+  // Net assets (loans are a contra-asset after the loan-loss reserve) reconcile
+  // with liabilities + net capital. This is a PEARLS-derived summary, not a GAAP
+  // balance sheet: share capital, wallet liabilities and other equity are not
+  // represented, and loan balances are current-state (no historical snapshot).
+  const netAssets = pearls.totals.assets - pearls.totals.allowance;
   const balanceSheet: ReportSheet = {
     name: "Balance Sheet",
     rows: [
       ["Item", "Amount"],
-      ["Total assets", formatBalance(pearls.totals.assets)],
-      ["  Bank & cash", formatBalance(pearls.totals.bank)],
-      ["  Loan portfolio", formatBalance(pearls.totals.loans)],
-      ["Member savings (liability)", formatBalance(pearls.totals.savings)],
-      ["Loan-loss reserve", formatBalance(pearls.totals.allowance)],
-      ["Net capital", formatBalance(pearls.totals.assets - pearls.totals.savings)],
+      ["Bank & cash", formatBalance(pearls.totals.bank)],
+      ["Gross loan portfolio", formatBalance(pearls.totals.loans)],
+      ["Less: loan-loss reserve", formatBalance(-pearls.totals.allowance)],
+      ["Net loans", formatBalance(pearls.totals.loans - pearls.totals.allowance)],
+      ["Total assets (net)", formatBalance(netAssets)],
+      ["Member savings (liability)", formatBalance(savingsTotal)],
+      ["Savings accounts (liability)", formatBalance(savingsAccountsTotal)],
+      ["Total liabilities", formatBalance(totalLiabilities)],
+      ["Net capital", formatBalance(netAssets - totalLiabilities)],
+      ["Note", "PEARLS-derived summary — not a GAAP balance sheet; loan balances are current-state"],
     ],
   };
 
@@ -169,7 +202,9 @@ export async function statutoryPack(coopId: string, period: string): Promise<Rep
     name: "Savings",
     rows: [
       ["Metric", "Value"],
-      ["Confirmed savings", formatBalance(savingsTotal)],
+      ["Confirmed savings (contributions)", formatBalance(savingsTotal)],
+      ["Savings product balances", formatBalance(savingsAccountsTotal)],
+      ["Total member savings", formatBalance(totalLiabilities)],
       ["Confirmed contributions", String(savingsCount)],
     ],
   };
@@ -196,11 +231,15 @@ export async function statutoryPack(coopId: string, period: string): Promise<Rep
  */
 export async function nfiuPack(coopId: string, period: string): Promise<ReportSheet[]> {
   const { start, end } = periodRange(period);
-  const inPeriod = { createdAt: { gte: start, lte: end } };
-
+  // Transactions are attributed to the period in which the money actually moved
+  // (the completion timestamp), not when the request/record was created:
+  // withdrawals by `finalizedAt`, contributions by `paidAt`. Payouts have no
+  // dedicated completion column, so `updatedAt` (the last status transition) is
+  // used. Records lacking a completion timestamp fall back to `createdAt` so
+  // legacy rows are not dropped.
   const [strs, withdrawals, payouts, loans, deposits] = await Promise.all([
     prisma.sTR.findMany({
-      where: { cooperativeId: coopId, ...inPeriod },
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
       select: { status: true, amount: true },
     }),
     prisma.withdrawalRequest.findMany({
@@ -208,7 +247,10 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
         cooperativeId: coopId,
         status: "paid",
         amount: { gte: LARGE_TX_THRESHOLD },
-        ...inPeriod,
+        OR: [
+          { finalizedAt: { gte: start, lte: end } },
+          { finalizedAt: null, createdAt: { gte: start, lte: end } },
+        ],
       },
       include: { member: { select: { name: true, code: true } } },
     }),
@@ -217,7 +259,7 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
         cooperativeId: coopId,
         status: "successful",
         amount: { gte: LARGE_TX_THRESHOLD },
-        ...inPeriod,
+        updatedAt: { gte: start, lte: end },
       },
       include: { member: { select: { name: true, code: true } } },
     }),
@@ -234,7 +276,10 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
         cooperativeId: coopId,
         status: "confirmed",
         amount: { gte: LARGE_TX_THRESHOLD },
-        ...inPeriod,
+        OR: [
+          { paidAt: { gte: start, lte: end } },
+          { paidAt: null, createdAt: { gte: start, lte: end } },
+        ],
       },
       include: { member: { select: { name: true, code: true } } },
     }),
@@ -263,7 +308,7 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
   // Large-transaction list (≥ ₦5M), all directions, oldest first.
   const large = [
     ...withdrawals.map((w) => ({
-      date: w.createdAt,
+      date: w.finalizedAt ?? w.createdAt,
       direction: "out",
       type: "withdrawal",
       member: w.member.name,
@@ -271,7 +316,7 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
       amount: w.amount,
     })),
     ...payouts.map((p) => ({
-      date: p.createdAt,
+      date: p.updatedAt,
       direction: "out",
       type: "payout",
       member: p.member.name,
@@ -287,7 +332,7 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
       amount: l.amount,
     })),
     ...deposits.map((c) => ({
-      date: c.createdAt,
+      date: c.paidAt ?? c.createdAt,
       direction: "in",
       type: "contribution",
       member: c.member.name,
@@ -313,24 +358,29 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
   return [strSheet, largeSheet];
 }
 
-/** The due-day profile for a coop, falling back to the schema defaults. */
-async function dueProfile(coopId: string): Promise<RegulatorDueProfile> {
+/** The due-day profile (and contact email) for a coop, with schema defaults. */
+async function dueProfile(
+  coopId: string,
+): Promise<RegulatorDueProfile & { contactEmail: string | null }> {
   const profile = await prisma.regulatorProfile.findFirst({
     where: { cooperativeId: coopId, active: true },
     orderBy: { createdAt: "desc" },
-    select: { monthlyDueDay: true, quarterlyDueDay: true },
+    select: { monthlyDueDay: true, quarterlyDueDay: true, contactEmail: true },
   });
   return {
     monthlyDueDay: profile?.monthlyDueDay ?? DEFAULT_DUE.monthlyDueDay,
     quarterlyDueDay: profile?.quarterlyDueDay ?? DEFAULT_DUE.quarterlyDueDay,
+    contactEmail: profile?.contactEmail ?? null,
   };
 }
 
 /**
- * Generate a regulator report pack for a coop and period: write xlsx + pdf +
- * csv, then upsert the `RegulatorReport` (idempotent per period/type/pack) and
- * audit the generation. `statutory` returns the financial-returns sheets;
- * `nfiu` the AML summaries; `both` combines them.
+ * Generate a regulator report pack for a coop and period. DB reads run in a
+ * short read transaction; the file build + object-storage upload + email then
+ * run OUTSIDE any transaction (heavy ExcelJS/PDFKit work must never hold a
+ * connection open), and only the upsert is committed. Idempotent per
+ * period/type/pack; a regeneration preserves an already-filed pack. `statutory`
+ * returns the financial-returns sheets; `nfiu` the AML summaries; `both` both.
  */
 export async function generateReport(
   coopId: string,
@@ -338,6 +388,7 @@ export async function generateReport(
   periodType: PeriodType,
   packType: PackType,
   actorId?: string,
+  deps: GenerateReportDeps = {},
 ): Promise<GenerateReportResult> {
   if (packType !== "statutory" && packType !== "nfiu" && packType !== "both") {
     return {
@@ -346,32 +397,75 @@ export async function generateReport(
     };
   }
 
-  const [coop, profile] = await Promise.all([
-    prisma.cooperative.findUnique({ where: { id: coopId }, select: { name: true } }),
-    dueProfile(coopId),
-  ]);
+  const buildFiles = deps.buildFiles ?? buildReportFiles;
+  const upload = deps.upload ?? uploadToS3;
+  const sendEmail = deps.sendEmail ?? emailFiles;
 
-  const sheets: ReportSheet[] = [];
-  if (packType === "statutory" || packType === "both") {
-    sheets.push(...(await statutoryPack(coopId, period)));
-  }
-  if (packType === "nfiu" || packType === "both") {
-    sheets.push(...(await nfiuPack(coopId, period)));
-  }
+  // Phase 1 — read-only data gathering, scoped to the coop's RLS context. The
+  // transaction closes before any file I/O begins.
+  const { coop, profile, sheets } = await withCoopContext(coopId, async () => {
+    const [coop, profile] = await Promise.all([
+      prisma.cooperative.findUnique({ where: { id: coopId }, select: { name: true } }),
+      dueProfile(coopId),
+    ]);
+    const sheets: ReportSheet[] = [];
+    if (packType === "statutory" || packType === "both") {
+      sheets.push(...(await statutoryPack(coopId, period)));
+    }
+    if (packType === "nfiu" || packType === "both") {
+      sheets.push(...(await nfiuPack(coopId, period)));
+    }
+    return { coop, profile, sheets };
+  });
+
   const dueAt = periodDueAt(period, periodType, profile);
 
+  // Phase 2 — build the artifacts and deliver them. All of this (ExcelJS +
+  // PDFKit, S3 upload, SMTP) happens with no transaction open.
   await mkdir(EXPORT_DIR, { recursive: true });
   const token = randomBytes(8).toString("hex");
-  const base = join(EXPORT_DIR, `regulator-${coopId}-${period}-${periodType}-${packType}-${token}`);
-  const files = await buildReportFiles(
+  // `<coopId>-regulator-<hex>` is coop-scoped and passes the `/api/export`
+  // route's filename allow-list (it leads with the cooperative id).
+  const base = join(EXPORT_DIR, `${coopId}-regulator-${token}`);
+  const files = await buildFiles(
     base,
     `${coop?.name ?? "Cooperative"} — Regulator ${packType} report ${period}`,
     sheets,
   );
 
+  const s3Keys: string[] = [];
+  for (const filePath of [files.xlsx, files.pdf, files.csv]) {
+    const key = `exports/${coopId}/${basename(filePath)}`;
+    if (await upload(filePath, key)) s3Keys.push(key);
+  }
+  const storage =
+    s3Keys.length === 3 ? "S3" : s3Keys.length > 0 ? "S3 (partial)" : "local";
+
+  const baseUrl =
+    process.env.APP_URL ?? `http://localhost:${process.env.PORT ?? "3000"}`;
+  const links = {
+    xlsx: `${baseUrl}/api/export/${basename(files.xlsx)}`,
+    pdf: `${baseUrl}/api/export/${basename(files.pdf)}`,
+  };
+
+  let emailNote = "";
+  if (profile.contactEmail && process.env.SMTP_HOST) {
+    const sent = await sendEmail(
+      profile.contactEmail,
+      `[${coop?.name ?? "Coop"}] ${packType} regulator report ${period}`,
+      `Attached is the ${packType} regulator pack for ${period}.\n\n${links.xlsx}\n${links.pdf}`,
+      [files.xlsx, files.pdf],
+    );
+    emailNote = sent
+      ? `\n\n📧 Emailed to ${profile.contactEmail}.`
+      : `\n\n⚠️ Email delivery failed — use the download links.`;
+  }
+
+  // Phase 3 — persist. Never reset `status`/`filedAt`: regenerating a pack that
+  // a coop has already filed must not silently un-file it.
   const report = await withTx(async (tx) => {
     await setCoopContext(tx as never, coopId);
-    return tx.regulatorReport.upsert({
+    const saved = await tx.regulatorReport.upsert({
       where: {
         cooperativeId_period_periodType_packType: {
           cooperativeId: coopId,
@@ -391,35 +485,34 @@ export async function generateReport(
         dueAt,
       },
       update: {
-        status: "generated",
         generatedAt: new Date(),
         generatedById: actorId ?? null,
         files: JSON.stringify(files),
         dueAt,
-        filedAt: null,
       },
     });
-  });
-
-  await audit({
-    cooperativeId: coopId,
-    actorPhone: "regulator",
-    actorId: actorId ?? null,
-    actorRole: "system",
-    action: "regulator.report_generate",
-    targetType: "regulatorReport",
-    targetId: report.id,
-    detail: `${packType} ${periodType} regulator pack for ${period} generated`,
+    await audit({
+      cooperativeId: coopId,
+      actorPhone: "regulator",
+      actorId: actorId ?? null,
+      actorRole: "system",
+      action: "regulator.report_generate",
+      targetType: "regulatorReport",
+      targetId: saved.id,
+      detail: `${packType} ${periodType} regulator pack for ${period} generated`,
+    });
+    return saved;
   });
 
   return {
     ok: true,
     message:
-      `✅ *${packType}* regulator pack for *${period}* is ready.\n\n` +
-      `📊 Excel: ${files.xlsx}\n📄 PDF: ${files.pdf}\n🧾 CSV: ${files.csv}\n` +
-      `🗓️ Filing due: ${dueAt.toISOString().slice(0, 10)}`,
+      `✅ *${packType}* regulator pack for *${period}* is ready (stored on ${storage}).\n\n` +
+      `📊 Excel: ${links.xlsx}\n📄 PDF: ${links.pdf}\n` +
+      `🗓️ Filing due: ${dueAt.toISOString().slice(0, 10)}${emailNote}`,
     reportId: report.id,
     files,
+    links,
   };
 }
 
