@@ -235,6 +235,18 @@ export function buildAdminMenu(): string {
   );
 }
 
+export function buildOmbudsmanMenu(): string {
+  return (
+    `⚖️ *Ombudsman Console*\n\n` +
+    `You serve as an independent platform ombudsman across every cooperative.\n\n` +
+    `• *cases* — open cases across all cooperatives\n` +
+    `• *cases investigating* — cases under investigation\n` +
+    `• *case <id>* — full case timeline\n` +
+    `• *investigate <id> <note>* — open an investigation (notifies the cooperative)\n` +
+    `• *decide <id> <decision>* — issue a binding decision (notifies member + cooperative)`
+  );
+}
+
 export async function deliverOtp(contactPhone: string, code: string): Promise<boolean> {
   const existing = await prisma.member.findFirst({
     where: { contactPhone, phone: { not: { startsWith: "tg:" } } },

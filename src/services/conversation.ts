@@ -3,7 +3,8 @@ import { resolveCoopsByPhone, resolveCoopByCode, withCoopContext } from "../lib/
 import { sendText, platformOf } from "../lib/messaging.js";
 import { MESSAGE_CONSENT_PROMPT } from "../lib/consent.js";
 import { getMemberByPhone, invalidateMemberCache } from "./cooperative.js";
-import { handleAdminCommand } from "./admin.js";
+import { handleAdminCommand, handleOmbudsmanCommand } from "./admin.js";
+import { isOmbudsman } from "./ombudsman.js";
 import { checkMoneyRateLimit, checkAIRateLimit } from "./fraud.js";
 import { aiEnabled, suggestCommand } from "../lib/ai.js";
 import { handleAIQuery, isNaturalLanguageQuery } from "../lib/ai-query.js";
@@ -61,6 +62,7 @@ import {
   buildMenu,
   buildFullMenu,
   buildAdminMenu,
+  buildOmbudsmanMenu,
   handleAwaitingInput,
   parseNaira,
 } from "./handlers/session.js";
@@ -481,6 +483,10 @@ async function handleMessageInner(
 
   const { cmd, args } = parseCommand(text);
 
+  // Platform-level ombudsman commands run before the member/admin routers:
+  // ombudsmen are not cooperative members, so they have no member row.
+  if (await handleOmbudsmanCommand(phone, cmd, args)) return;
+
   const handled = await handleAdminCommand(phone, cmd, args);
   if (handled) return;
 
@@ -489,10 +495,18 @@ async function handleMessageInner(
     case "hello":
     case "hey":
     case "menu":
+      if (await isOmbudsman(phone)) {
+        await sendText({ to: phone, text: buildOmbudsmanMenu() });
+        break;
+      }
       await sendText({ to: phone, text: buildMenu(member) });
       break;
 
     case "help":
+      if (await isOmbudsman(phone)) {
+        await sendText({ to: phone, text: buildOmbudsmanMenu() });
+        break;
+      }
       await sendText({ to: phone, text: buildFullMenu(member) });
       break;
 

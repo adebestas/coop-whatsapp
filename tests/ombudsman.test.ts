@@ -1,8 +1,15 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
-import { escalateCase, listCases, getCase, isOmbudsman } from "../src/services/ombudsman.js";
+import {
+  escalateCase,
+  listCases,
+  getCase,
+  isOmbudsman,
+  investigateCase,
+  decideCase,
+} from "../src/services/ombudsman.js";
 import { runOmbudsmanEscalations } from "../src/services/scheduler.js";
-import { sendText } from "../src/lib/messaging.js";
+import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
 import { handleMessage } from "../src/services/conversation.js";
 
@@ -310,5 +317,122 @@ describe("member escalate command", () => {
       .mock.calls.map((c) => c[0].text)
       .join("\n");
     expect(texts).toMatch(/ombudsman/i);
+  });
+});
+
+describe("ombudsman decisions", () => {
+  async function seedEscalatedCase() {
+    const coop = await createTestCoop("OMB11");
+    const member = await createTestMember(coop.id, { phone: "2348000050001" });
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000050002",
+      role: "admin",
+      name: "Coop Admin",
+    });
+    const ombudsman = await prisma.ombudsman.create({
+      data: { name: "Ada Ombuds", phone: "2348000059999", active: true },
+    });
+    const g = await createGrievance(coop.id, member.id);
+    const escalated = await escalateCase(
+      coop.id,
+      member.id,
+      { sourceType: "grievance", sourceId: g.id, category: "other", summary: "Needs review" },
+      { id: member.id, phone: member.phone },
+    );
+    return { coop, member, admin, ombudsman, caseId: escalated.caseId! };
+  }
+
+  it("investigateCase moves the case to investigating and notifies the coop admins", async () => {
+    const { caseId, ombudsman, admin } = await seedEscalatedCase();
+    vi.mocked(sendText).mockClear();
+
+    const res = await investigateCase(caseId, "Requesting the loan file", {
+      id: ombudsman.id,
+      phone: ombudsman.phone,
+    });
+    expect(res.ok).toBe(true);
+
+    const c = await prisma.ombudsmanCase.findUnique({
+      where: { id: caseId },
+      include: { events: true },
+    });
+    expect(c!.status).toBe("investigating");
+    const ev = c!.events.find((e) => e.action === "investigating");
+    expect(ev).toBeTruthy();
+    expect(ev!.actorRole).toBe("ombudsman");
+    expect(ev!.actorId).toBe(ombudsman.id);
+    expect(ev!.detail).toMatch(/loan file/i);
+
+    const recipients = [
+      ...vi.mocked(sendText).mock.calls.map((call) => call[0].to),
+      ...vi.mocked(notifyMember).mock.calls.map((call) => call[0].phone),
+    ];
+    expect(recipients).toContain(admin.phone);
+  });
+
+  it("decideCase records a binding decision and notifies the member and coop", async () => {
+    const { caseId, ombudsman, member, admin } = await seedEscalatedCase();
+    vi.mocked(sendText).mockClear();
+
+    const before = Date.now();
+    const res = await decideCase(caseId, "Refund the disputed amount", {
+      id: ombudsman.id,
+      phone: ombudsman.phone,
+    });
+    expect(res.ok).toBe(true);
+
+    const c = await prisma.ombudsmanCase.findUnique({
+      where: { id: caseId },
+      include: { events: true },
+    });
+    expect(c!.status).toBe("decided");
+    expect(c!.decision).toBe("Refund the disputed amount");
+    expect(c!.decisionById).toBe(ombudsman.id);
+    expect(c!.decidedAt).toBeInstanceOf(Date);
+    expect(c!.decidedAt!.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    expect(c!.events.some((e) => e.action === "decided" && e.actorRole === "ombudsman")).toBe(
+      true,
+    );
+
+    const recipients = [
+      ...vi.mocked(sendText).mock.calls.map((call) => call[0].to),
+      ...vi.mocked(notifyMember).mock.calls.map((call) => call[0].phone),
+    ];
+    expect(recipients).toContain(member.phone);
+    expect(recipients).toContain(admin.phone);
+  });
+
+  it("refuses case actions from a non-ombudsman", async () => {
+    const { caseId, member } = await seedEscalatedCase();
+
+    const res = await investigateCase(caseId, "sneaky", { id: member.id, phone: member.phone });
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/ombudsman/i);
+
+    const c = await prisma.ombudsmanCase.findUnique({ where: { id: caseId } });
+    expect(c!.status).toBe("open");
+    expect(
+      await prisma.ombudsmanCaseEvent.count({ where: { caseId, action: "investigating" } }),
+    ).toBe(0);
+  });
+
+  it("routes the ombudsman commands through chat", async () => {
+    const { caseId, ombudsman } = await seedEscalatedCase();
+
+    await handleMessage(ombudsman.phone, "cases");
+    const listTexts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(listTexts).toMatch(/case/i);
+
+    await handleMessage(ombudsman.phone, `investigate ${caseId} need the file`);
+    const investigating = await prisma.ombudsmanCase.findUnique({ where: { id: caseId } });
+    expect(investigating!.status).toBe("investigating");
+
+    await handleMessage(ombudsman.phone, `decide ${caseId} refund`);
+    const decided = await prisma.ombudsmanCase.findUnique({ where: { id: caseId } });
+    expect(decided!.status).toBe("decided");
+    expect(decided!.decision).toBe("refund");
   });
 });

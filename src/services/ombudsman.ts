@@ -1,7 +1,7 @@
 import { prisma, withTx } from "../lib/prisma.js";
 import { setCoopContext } from "../lib/tenant-context.js";
 import { audit } from "./audit.js";
-import { sendText } from "../lib/messaging.js";
+import { sendText, notifyMember } from "../lib/messaging.js";
 import { Prisma } from "@prisma/client";
 
 const DEFAULT_SLA_DAYS = 7;
@@ -85,6 +85,58 @@ function toSummary(c: {
 async function notifyOmbudsmen(text: string): Promise<void> {
   const ombudsmen = await prisma.ombudsman.findMany({ where: { active: true } });
   await Promise.all(ombudsmen.map((o) => sendText({ to: o.phone, text }))).catch(() => {});
+}
+
+/** Notify the admins of a cooperative (member admins + the coop admin phone). Never throws. */
+async function notifyCoop(cooperativeId: string, text: string): Promise<void> {
+  const admins = await prisma.member.findMany({
+    where: { cooperativeId, role: { in: ["admin", "superadmin"] }, status: "active" },
+    select: { phone: true, altChannelId: true, preferredChannel: true, optedOut: true },
+  });
+  const seen = new Set<string>();
+  await Promise.all(
+    admins.map((a) => {
+      seen.add(a.phone);
+      return notifyMember(a, text);
+    }),
+  ).catch(() => {});
+  const coop = await prisma.cooperative.findUnique({
+    where: { id: cooperativeId },
+    select: { adminPhone: true },
+  });
+  if (coop?.adminPhone && !seen.has(coop.adminPhone)) {
+    await sendText({ to: coop.adminPhone, text }).catch(() => {});
+  }
+}
+
+/**
+ * Resolve a case by exact id, or by a unique prefix/suffix of at least 6
+ * characters. Ambiguous or short refs are refused rather than guessing, so an
+ * ombudsman never acts on the wrong (PII-bearing) case.
+ */
+async function lookupCase(ref: string) {
+  const id = ref?.trim();
+  if (!id) return { ok: false as const, message: "Which case? Give the case id." };
+  const exact = await prisma.ombudsmanCase.findUnique({ where: { id } });
+  if (exact) return { ok: true as const, case: exact };
+  if (id.length < 6) {
+    return {
+      ok: false as const,
+      message: "That id is too short. Give at least 6 characters of the case id.",
+    };
+  }
+  const matches = await prisma.ombudsmanCase.findMany({
+    where: { OR: [{ id: { startsWith: id } }, { id: { endsWith: id } }] },
+    take: 2,
+  });
+  if (matches.length === 0) return { ok: false as const, message: "Case not found." };
+  if (matches.length > 1) {
+    return {
+      ok: false as const,
+      message: "More than one case matches that id. Give more characters of the case id.",
+    };
+  }
+  return { ok: true as const, case: matches[0] };
 }
 
 /**
@@ -278,10 +330,138 @@ export async function getCase(
 
 /** True only for a phone belonging to an active platform ombudsman. */
 export async function isOmbudsman(phone: string): Promise<boolean> {
-  if (!phone) return false;
-  const found = await prisma.ombudsman.findFirst({
+  return (await getActiveOmbudsman(phone)) !== null;
+}
+
+/** Load the active platform ombudsman for a phone, if any. */
+export async function getActiveOmbudsman(
+  phone: string,
+): Promise<{ id: string; name: string } | null> {
+  if (!phone) return null;
+  return prisma.ombudsman.findFirst({
     where: { phone, active: true },
-    select: { id: true },
+    select: { id: true, name: true },
   });
-  return found !== null;
+}
+
+/**
+ * Ombudsman-only: open an investigation on a case, record the `investigating`
+ * event, notify the cooperative's admins, and audit the action.
+ */
+export async function investigateCase(
+  caseId: string,
+  note: string,
+  actor: { id: string; phone: string },
+): Promise<{ ok: boolean; message: string }> {
+  if (!(await isOmbudsman(actor.phone))) {
+    return { ok: false, message: "Only the independent ombudsman can act on a case." };
+  }
+  const detail = note?.trim() ?? "";
+  if (!detail) {
+    return { ok: false, message: "Add a short note describing what you're investigating." };
+  }
+  const lookup = await lookupCase(caseId);
+  if (!lookup.ok) return { ok: false, message: lookup.message };
+  const c = lookup.case;
+  if (c.status === "decided" || c.status === "closed") {
+    return { ok: false, message: "This case has already been decided." };
+  }
+
+  await prisma.ombudsmanCase.update({
+    where: { id: c.id },
+    data: { status: "investigating" },
+  });
+  await prisma.ombudsmanCaseEvent.create({
+    data: {
+      caseId: c.id,
+      actorId: actor.id,
+      actorRole: "ombudsman",
+      action: "investigating",
+      detail,
+    },
+  });
+
+  await audit({
+    cooperativeId: c.cooperativeId,
+    actorPhone: actor.phone,
+    actorId: actor.id,
+    actorRole: "ombudsman",
+    action: "ombudsman.case_investigating",
+    targetType: "ombudsman_case",
+    targetId: c.id,
+    detail: `Investigating case #${c.id.slice(-6)}: ${detail}`,
+  }).catch(() => {});
+
+  await notifyCoop(
+    c.cooperativeId,
+    `⚖️ *Ombudsman investigation opened* — case #${c.id.slice(-6)}\n\n` +
+      `The independent ombudsman is investigating this matter and needs your input:\n${detail}`,
+  );
+
+  return { ok: true, message: `✅ Case #${c.id.slice(-6)} is now under investigation.` };
+}
+
+/**
+ * Ombudsman-only: record a binding decision on a case (status `decided`,
+ * decision, decisionById, decidedAt), add the `decided` event, notify both the
+ * member and the cooperative, and audit the action.
+ */
+export async function decideCase(
+  caseId: string,
+  decision: string,
+  actor: { id: string; phone: string },
+): Promise<{ ok: boolean; message: string }> {
+  if (!(await isOmbudsman(actor.phone))) {
+    return { ok: false, message: "Only the independent ombudsman can act on a case." };
+  }
+  const detail = decision?.trim() ?? "";
+  if (!detail) {
+    return { ok: false, message: "Give the decision you're issuing." };
+  }
+  const lookup = await lookupCase(caseId);
+  if (!lookup.ok) return { ok: false, message: lookup.message };
+  const c = lookup.case;
+
+  const decidedAt = new Date();
+  await prisma.ombudsmanCase.update({
+    where: { id: c.id },
+    data: { status: "decided", decision: detail, decisionById: actor.id, decidedAt },
+  });
+  await prisma.ombudsmanCaseEvent.create({
+    data: {
+      caseId: c.id,
+      actorId: actor.id,
+      actorRole: "ombudsman",
+      action: "decided",
+      detail,
+    },
+  });
+
+  await audit({
+    cooperativeId: c.cooperativeId,
+    actorPhone: actor.phone,
+    actorId: actor.id,
+    actorRole: "ombudsman",
+    action: "ombudsman.case_decided",
+    targetType: "ombudsman_case",
+    targetId: c.id,
+    detail: `Decision on case #${c.id.slice(-6)}: ${detail}`,
+  }).catch(() => {});
+
+  const member = await prisma.member.findUnique({
+    where: { id: c.memberId },
+    select: { phone: true, altChannelId: true, preferredChannel: true, optedOut: true },
+  });
+  if (member) {
+    await notifyMember(
+      member,
+      `⚖️ *Ombudsman decision on your case* #${c.id.slice(-6)}\n\n${detail}`,
+    ).catch(() => {});
+  }
+  await notifyCoop(
+    c.cooperativeId,
+    `⚖️ *Ombudsman decision* — case #${c.id.slice(-6)}\n\n${detail}\n\n_This decision is binding._`,
+  );
+
+  return { ok: true, message: `✅ Decision recorded for case #${c.id.slice(-6)}.` };
 }
