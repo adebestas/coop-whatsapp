@@ -18,6 +18,7 @@ import {
   type PackType,
   type GenerateReportDeps,
 } from "./regulator-reporting.js";
+import { payReferralReward } from "./referrals.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -1156,9 +1157,65 @@ export async function runRegulatorReports(
   return created;
 }
 
+// ---- Referral reward reconciliation ----
+
+/**
+ * Pay every `qualified` referral reward that is still unpaid.
+ *
+ * A reward normally pays itself at qualification (`qualifyReferral`), but a
+ * DEFINITE failure (a bank payout rejection, or a gated airtime reward with no
+ * VTU provider) reverts the row to `qualified` — and nothing else ever retries
+ * it. This sweep is that retry: for each coop with referrals enabled it calls
+ * `payReferralReward` (idempotent; moves `qualified → rewarded`) on every
+ * `qualified` row. One referral's failure is logged and never stops the sweep.
+ * Returns the number of rewards actually paid.
+ */
+export async function runReferralPayouts(now = new Date()): Promise<number> {
+  let paid = 0;
+  await forEachCoop(async (coopId) => {
+    const config = await prisma.cooperativeConfig.findUnique({
+      where: { cooperativeId: coopId },
+      select: { referralEnabled: true },
+    });
+    if (config?.referralEnabled !== true) return;
+
+    const qualified = await prisma.referral.findMany({
+      where: { cooperativeId: coopId, status: "qualified" },
+      select: { id: true },
+    });
+
+    for (const referral of qualified) {
+      try {
+        const res = await payReferralReward(coopId, referral.id);
+        if (res.ok) {
+          paid++;
+        } else {
+          // Expected for a gated airtime reward (no VTU provider yet) — it stays
+          // `qualified` and is retried on the next sweep.
+          log.warn("[scheduler] referral payout not completed", {
+            coopId,
+            referralId: referral.id,
+            at: now.toISOString(),
+            message: res.message,
+          });
+        }
+      } catch (err) {
+        log.error("[scheduler] referral payout failed", {
+          coopId,
+          referralId: referral.id,
+          at: now.toISOString(),
+          err: String(err),
+        });
+      }
+    }
+  });
+  return paid;
+}
+
 /** One scheduler tick: reminders, statements, birthdays, anniversaries,
  *  guarantor defaults, status posts, VA cleanup, retention, STR escalation,
- *  ombudsman SLA escalation, proactive alerts, backup verification. */
+ *  ombudsman SLA escalation, regulator packs, referral reward reconciliation,
+ *  proactive alerts, backup verification. */
 export async function runSchedulerTick(): Promise<void> {
   const { checkAnniversaries } = await import("./anniversary.js");
   const { scanGuarantorDefaults, executeDueDeductions } = await import("./guarantordeduction.js");
@@ -1219,6 +1276,9 @@ export async function runSchedulerTick(): Promise<void> {
   );
   await runRegulatorReports().catch((err) =>
     log.error("[scheduler] regulator reports failed", { err: String(err) }),
+  );
+  await runReferralPayouts().catch((err) =>
+    log.error("[scheduler] referral payouts failed", { err: String(err) }),
   );
   await runProactiveAlerts().catch((err) =>
     log.error("[scheduler] proactive alerts failed", { err: String(err) }),

@@ -5,8 +5,9 @@
  * BOTH `VTU_PROVIDER` (the provider key) and `VTU_API_KEY` are set AND a matching
  * factory exists in `PROVIDER_FACTORIES` below. The referral flow treats null as
  * "airtime reward not enabled yet" and leaves the referral `qualified`, so the
- * reward is paid automatically once a provider is wired in — no change to the
- * referral flow itself, only a config/implementation addition here.
+ * reward is retried by the scheduler's payout reconciliation job (or an admin's
+ * `referralpay`) once a provider is wired in — no change to the referral flow
+ * itself, only a config/implementation addition here.
  *
  * No live provider is bundled: this file is the seam, not an integration.
  */
@@ -15,7 +16,8 @@ export interface VtuProvider {
   name: string;
   recharge(params: {
     phone: string;
-    amount: number;
+    /** Amount to recharge, in KOBO (e.g. 50000 = ₦500). */
+    amountKobo: number;
     reference: string;
   }): Promise<{ ok: boolean; providerRef?: string; error?: string }>;
 }

@@ -13,6 +13,7 @@ import { handleJoinStart } from "../src/services/handlers/join.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { requestManualCredit, approveManualCredit } from "../src/services/manualcredit.js";
 import { sendToBank } from "../src/services/disbursements.js";
+import { runReferralPayouts } from "../src/services/scheduler.js";
 import { txStorage } from "../src/lib/prisma.js";
 import { enqueueAfterCommit, withDeferredSends } from "../src/lib/deferred.js";
 import type { BotState } from "../src/services/conversation.js";
@@ -325,6 +326,102 @@ describe("referral reward payment", () => {
     });
     expect(warned).toBeTruthy();
   });
+
+  it("reverts a DEFINITE bank failure back to qualified (retryable)", async () => {
+    const { coop, referralId } = await setupReward("REFDF", {
+      rewardType: "bank",
+      rewardAmount: 41000,
+      bank: true,
+    });
+
+    vi.mocked(sendToBank).mockImplementationOnce(async () => ({
+      ok: false,
+      status: "failed",
+      message: "provider rejected the transfer",
+    }));
+
+    const res = await payReferralReward(coop.id, referralId);
+    expect(res.ok).toBe(false);
+
+    // A definite failure moves NO money, so the referral must not be stranded
+    // as `rewarded` — it reverts to `qualified` for a later retry.
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
+    expect(after.status).toBe("qualified");
+    expect(after.rewardedAt).toBeNull();
+  });
+
+  it("runReferralPayouts pays a retried `qualified` referral and is idempotent", async () => {
+    const { coop, referrer, referralId } = await setupReward("REFJOB", {
+      rewardType: "bank",
+      rewardAmount: 44000,
+      bank: true,
+    });
+
+    // A first, definite failure leaves the reward `qualified`...
+    vi.mocked(sendToBank).mockImplementationOnce(async () => ({
+      ok: false,
+      status: "failed",
+      message: "nope",
+    }));
+    await payReferralReward(coop.id, referralId);
+    expect(
+      (await prisma.referral.findUniqueOrThrow({ where: { id: referralId } })).status,
+    ).toBe("qualified");
+
+    // ...and the reconciliation job retries the whole qualified queue and pays it
+    // via the real payout path (which writes the Payout row).
+    const paid = await runReferralPayouts();
+    expect(paid).toBe(1);
+
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
+    expect(after.status).toBe("rewarded");
+    expect(after.rewardedAt).toBeInstanceOf(Date);
+    const payout = await prisma.payout.findFirst({
+      where: { idempotencyKey: `REFERRAL-${referralId}` },
+    });
+    expect(payout).toBeTruthy();
+    // A bank payout must NOT also credit the wallet.
+    const wallet = await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } });
+    expect(wallet.balance).toBe(0);
+
+    // A second sweep finds nothing left `qualified` — a strict no-op.
+    expect(await runReferralPayouts()).toBe(0);
+    expect(await prisma.payout.count({ where: { idempotencyKey: `REFERRAL-${referralId}` } })).toBe(
+      1,
+    );
+  });
+
+  it("admin `referralpay` pays a qualified referral and respects the disabled gate", async () => {
+    const { coop, referralId } = await setupReward("REFADM", {
+      rewardType: "bank",
+      rewardAmount: 46000,
+      bank: true,
+    });
+    const admin = await createTestMember(coop.id, { phone: "2348090000400", role: "admin" });
+
+    await handleMessage(admin.phone, `referralpay ${referralId}`);
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
+    expect(after.status).toBe("rewarded");
+
+    // The Board can pause the program — a retry must then be refused, not paid.
+    const second = await setupReward("REFADM2", {
+      rewardType: "bank",
+      rewardAmount: 47000,
+      bank: true,
+    });
+    await prisma.cooperativeConfig.update({
+      where: { cooperativeId: second.coop.id },
+      data: { referralEnabled: false },
+    });
+    const admin2 = await createTestMember(second.coop.id, {
+      phone: "2348090000401",
+      role: "admin",
+    });
+    await handleMessage(admin2.phone, `referralpay ${second.referralId}`);
+    const untouched = await prisma.referral.findUniqueOrThrow({ where: { id: second.referralId } });
+    expect(untouched.status).toBe("qualified");
+    expect(textsSent().toLowerCase()).toContain("not enabled");
+  });
 });
 
 describe("referral reward deferral (after-commit)", () => {
@@ -527,6 +624,46 @@ describe("referral qualification on real money-in paths", () => {
     expect(referral?.qualifiedAt).toBeInstanceOf(Date);
     const referrerWallet = await prisma.wallet.findUnique({ where: { memberId: referrer.id } });
     expect(referrerWallet?.balance).toBe(50000);
+  });
+
+  it("does not qualify on a duplicate top-up delivery", async () => {
+    const coop = await createCoop("REFDUP");
+    const referrer = await createTestMember(coop.id, { phone: "2348033330021" });
+    const referred = await createTestMember(coop.id, { phone: "2348033330022" });
+    await recordReferral(coop.id, referrer.code, referred.id);
+    await prisma.member.update({
+      where: { id: referred.id },
+      data: { virtualAccountNumber: "9000000321" },
+    });
+
+    // Pre-seed the journal entry for this provider transaction, so the delivery
+    // below is a DUPLICATE. The top-up path treats it as a no-op (never credits)
+    // and must therefore never qualify or pay the referral.
+    await prisma.journalEntry.create({
+      data: {
+        cooperativeId: coop.id,
+        txRef: "TOPUP-monnify-TX-REFDUP-1",
+        description: "earlier delivery of the same transfer",
+      },
+    });
+
+    await handlePaymentNotification({
+      transactionId: "TX-REFDUP-1",
+      reference: "MEM-refdup-1",
+      accountNumber: "9000000321",
+      amount: 500000,
+      currency: "NGN",
+      status: "successful",
+      provider: "monnify",
+      raw: {},
+    });
+
+    const referral = await prisma.referral.findUnique({
+      where: { referredMemberId: referred.id },
+    });
+    expect(referral?.status).toBe("pending");
+    expect(referral?.qualifiedAt).toBeNull();
+    expect(await prisma.contribution.count({ where: { reference: "monnify-TX-REFDUP-1" } })).toBe(0);
   });
 
   it("does not qualify on an admin manual credit (not a real money-in path)", async () => {

@@ -234,7 +234,8 @@ export function buildAdminMenu(): string {
     `• *regreportstatus* — view generated/filed regulator packs\n` +
     `• *regreport filed <id>* — mark a regulator pack filed\n` +
     `• *referralconfig [on\\|off] [wallet\\|bank\\|airtime] [amount] [maxRewards]* — configure referrals\n` +
-    `• *referralreport* — referral summary for the coop\n\n` +
+    `• *referralreport* — referral summary for the coop\n` +
+    `• *referralpay <id>* — retry a qualified referral reward\n\n` +
     `*Committees (super admin):* *addcommittee <credit\\|supervisory\\|board> <name> [size]*, *appoint <type> <member code> [chair]*, *removecommittee <type> <member code>*, *committees*\n` +
     `*Committees (members):* *cvote <loan id> approve\\|reject*, *committeequeue*, *supervisoryfreeze <member code> [reason]*, *supervisoryunfreeze <member code>*, *referralpause* / *referralresume* (Board)\n\n` +
     `*Meetings:* *startmeeting <agm\\|sgm> <title> [quorum%]*, *openmeeting <id>*, *closemeeting <id>*, *addmotion <meeting id> <title> \\| <description> [kind]*, *closemotion <id>*, *meetingminutes <id>*\n\n` +

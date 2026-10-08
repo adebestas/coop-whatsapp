@@ -6,6 +6,7 @@ import { sendToBank } from "./disbursements.js";
 import { resolveVtuProvider } from "./payments/vtu.js";
 import { enqueueAfterCommit } from "../lib/deferred.js";
 import { formatBalance } from "../lib/money.js";
+import { log } from "../lib/logger.js";
 
 const DEFAULT_REWARD_TYPE = "wallet";
 const DEFAULT_REWARD_AMOUNT = 50000;
@@ -95,10 +96,16 @@ export async function recordReferral(
       });
       return { ok: true, created: true, referrerName: referrer.name, referralId: referral.id };
     });
-  } catch {
-    // A unique-constraint race on `referredMemberId` — another request recorded
-    // the referral first. Treat it as a benign duplicate.
-    return { ok: false, message: "A referral is already recorded for this member." };
+  } catch (err) {
+    if ((err as { code?: string })?.code === "P2002") {
+      // A unique-constraint race on `referredMemberId` — another request recorded
+      // the referral first. Treat it as a benign duplicate.
+      return { ok: false, message: "A referral is already recorded for this member." };
+    }
+    // Any other failure is a REAL fault (DB/connection), not a duplicate. The
+    // join still succeeds (the caller swallows), but never report it as one.
+    log.error("[referral] failed to record referral", { coopId, err: String(err) });
+    return { ok: false, message: "Referral could not be recorded right now." };
   }
 
   if (outcome.created) {
@@ -397,14 +404,26 @@ export async function payReferralReward(
       const provider = resolveVtuProvider();
       if (!provider) {
         throw new RewardGatedError(
-          "Airtime reward not enabled yet — it will be paid automatically once a VTU provider is configured.",
+          "Airtime reward not enabled yet — the payout reconciliation job will retry it once a VTU provider is configured (or run *referralpay* manually).",
         );
       }
       if (!referrer) throw new Error("referrer no longer exists");
-      const phone = referrer.contactPhone ?? referrer.phone;
+      // Airtime needs a REAL phone. `contactPhone` first; otherwise the member's
+      // own number only when it is a WhatsApp number (Telegram members carry a
+      // `tg:<chatId>` pseudo-phone, which no VTU API can recharge).
+      const phone =
+        referrer.contactPhone?.trim() ||
+        (referrer.phone && !referrer.phone.startsWith("tg:") ? referrer.phone : "");
+      if (!phone) {
+        throw new RewardGatedError(
+          "Airtime reward skipped — the referrer has no real phone number on file. Add one, or pay by *wallet*/*bank*.",
+        );
+      }
       const result = await provider.recharge({
         phone,
-        amount,
+        // `amount` is Kobo, matching the reward snapshot (`rewardAmount`).
+        // The (future) VTU/Flutterwave adapter converts kobo → naira at the seam.
+        amountKobo: amount,
         reference: `REFERRAL-${referralId}`,
       });
       if (!result.ok) throw new Error(result.error ?? "airtime recharge failed");

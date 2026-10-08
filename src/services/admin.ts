@@ -100,7 +100,7 @@ import {
   type PackType,
   type PeriodType,
 } from "./regulator-reporting.js";
-import { setReferralConfig, setReferralEnabled, referralReport } from "./referrals.js";
+import { setReferralConfig, setReferralEnabled, referralReport, payReferralReward } from "./referrals.js";
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
 
@@ -1437,6 +1437,44 @@ export async function handleAdminCommand(
       case "referralreport": {
         const res = await referralReport(coopId);
         await sendText({ to: phone, text: res.message });
+        return true;
+      }
+
+      case "referralpay":
+      case "referralretry": {
+        // Retry a single `qualified` referral reward (e.g. a gated airtime reward
+        // or a bank payout that failed). Idempotent; only pays when `qualified`.
+        const refArg = args[0]?.trim();
+        if (!refArg) {
+          await sendText({
+            to: phone,
+            text: "Usage: *referralpay <referral id>* — retry a qualified referral reward (from *referralreport*).",
+          });
+          return true;
+        }
+        const refConfig = await prisma.cooperativeConfig.findUnique({
+          where: { cooperativeId: coopId },
+          select: { referralEnabled: true },
+        });
+        if (refConfig?.referralEnabled !== true) {
+          await sendText({
+            to: phone,
+            text: "Referrals are not enabled for this cooperative — turn them on with *referralconfig on* first.",
+          });
+          return true;
+        }
+        // Accept the full id or the short suffix shown in `referralreport`.
+        const refs = await prisma.referral.findMany({
+          where: { cooperativeId: coopId },
+          select: { id: true },
+        });
+        const match = refs.find((r) => r.id === refArg || r.id.endsWith(refArg));
+        if (!match) {
+          await sendText({ to: phone, text: `No referral found for *${refArg}*.` });
+          return true;
+        }
+        const payRes = await payReferralReward(coopId, match.id);
+        await sendText({ to: phone, text: payRes.message });
         return true;
       }
 

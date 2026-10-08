@@ -50,7 +50,9 @@ export async function handleJoinStart(phone: string, args: string[]): Promise<vo
   await prisma.session.upsert({
     where: { phone },
     create: { phone, state: "awaiting_coop_code" },
-    update: { state: "awaiting_coop_code" },
+    // Reset any prior flow's data (e.g. a stale joinCode/referrerCode) so a
+    // previous attempt cannot leak into this fresh "ask again" session.
+    update: { state: "awaiting_coop_code", data: "{}" },
   });
   await sendText({
     to: phone,

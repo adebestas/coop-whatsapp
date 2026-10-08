@@ -591,13 +591,16 @@ neither recorded nor paid.
   it blank) to join without one — no referral is recorded. Unknown and self-referral
   codes are rejected; the join itself always succeeds.
 - **Reward types** — `wallet` (credits the referrer's wallet), `bank` (payout to
-  their saved account), or `airtime` (a **gated** VTU recharge that starts paying
-  once a VTU provider is configured; until then the referral stays `qualified` and
-  can be seen in `referralreport`). The default reward is **₦500**.
+  their saved account), or `airtime` (a **gated** VTU recharge). A reward that
+  cannot be paid yet — gated airtime with no VTU provider configured, or a bank
+  payout that was definitely rejected — stays `qualified` and is **retried by the
+  background payout reconciliation job** (and on demand with `referralpay <id>`),
+  so it is paid once the provider is available; it is never silently lost. The
+  default reward is **₦500**.
 - **Configuration** — `referralconfig [on|off] [wallet|bank|airtime] [amount] [maxRewards]`
   (admin/super admin) updates the program; `referralreport` summarises the whole
-  cooperative (counts by status, rewards paid, and any qualified-but-unpaid rewards).
-  Every config change is audited.
+  cooperative (counts by status, rewards paid, and any qualified-but-unpaid rewards);
+  `referralpay <id>` retries a single qualified reward. Every config change is audited.
 - **Board pause/activate** — the governance **Board committee** can pause or resume
   the program at any time with `referralpause` / `referralresume` (active Board
   members or the super admin), which toggles `referralEnabled`.
