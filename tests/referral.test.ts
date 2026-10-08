@@ -5,6 +5,9 @@ import { handleAwaitingInput } from "../src/services/handlers/session.js";
 import { handleJoinStart } from "../src/services/handlers/join.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { requestManualCredit, approveManualCredit } from "../src/services/manualcredit.js";
+import { sendToBank } from "../src/services/disbursements.js";
+import { txStorage } from "../src/lib/prisma.js";
+import { enqueueAfterCommit, withDeferredSends } from "../src/lib/deferred.js";
 import type { BotState } from "../src/services/conversation.js";
 
 beforeEach(async () => {
@@ -261,6 +264,117 @@ describe("referral reward payment", () => {
     const wallet = await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } });
     expect(wallet.balance).toBe(7000);
     expect(await prisma.journalEntry.count({ where: { txRef: `REFERRAL-${referralId}` } })).toBe(1);
+  });
+
+  it("keeps the referral rewarded (no retry) when the bank payout is 'unsure'", async () => {
+    const { coop, referralId } = await setupReward("REFUN", {
+      rewardType: "bank",
+      rewardAmount: 33000,
+      bank: true,
+    });
+
+    vi.mocked(sendToBank).mockImplementationOnce(async () => ({
+      ok: false,
+      status: "unsure",
+      message: "awaiting provider authorization",
+    }));
+
+    const res = await payReferralReward(coop.id, referralId);
+
+    // An unsure payout must NOT revert to `qualified` (a retry could double-pay).
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
+    expect(after.status).toBe("rewarded");
+    expect(after.rewardedAt).toBeInstanceOf(Date);
+    expect(res.message.toLowerCase()).toContain("unconfirmed");
+
+    const warned = await prisma.auditLog.findFirst({
+      where: { action: "referral.reward.unconfirmed" },
+    });
+    expect(warned).toBeTruthy();
+  });
+});
+
+describe("referral reward deferral (after-commit)", () => {
+  it("enqueueAfterCommit runs the callback only after the deferred scope resolves", async () => {
+    const order: string[] = [];
+    await withDeferredSends(async () => {
+      order.push("scope-start");
+      const scheduled = enqueueAfterCommit(async () => {
+        order.push("after-commit");
+      });
+      expect(scheduled).toBe(true);
+      order.push("scope-end");
+    });
+    expect(order).toEqual(["scope-start", "scope-end", "after-commit"]);
+  });
+
+  it("enqueueAfterCommit returns false with no ambient scope", async () => {
+    expect(enqueueAfterCommit(async () => {})).toBe(false);
+  });
+
+  it("runs the referral payout only after the top-up credit transaction commits", async () => {
+    const coop = await createTestCoop("REFORD");
+    const referrer = await createTestMember(coop.id, {
+      phone: "2348055550001",
+      name: "Ada Obi",
+    });
+    const referred = await createTestMember(coop.id, { phone: "2348055550002" });
+    await prisma.cooperativeConfig.upsert({
+      where: { cooperativeId: coop.id },
+      create: {
+        cooperativeId: coop.id,
+        referralEnabled: true,
+        referralRewardType: "bank",
+        referralRewardAmount: 40000,
+      },
+      update: {
+        cooperativeId: coop.id,
+        referralEnabled: true,
+        referralRewardType: "bank",
+        referralRewardAmount: 40000,
+      },
+    });
+    await prisma.member.update({
+      where: { id: referrer.id },
+      data: { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
+    });
+    await recordReferral(coop.id, referrer.code, referred.id);
+    await prisma.member.update({
+      where: { id: referred.id },
+      data: { virtualAccountNumber: "9000000555" },
+    });
+
+    // Assert TWO things at payout time: no DB transaction is open (the provider
+    // call is not running inside `withCoopContext`'s tx), and the money-in
+    // credit is already committed so the deferred reward ran after commit.
+    const reference = "monnify-TX-REFORD-1";
+    let txOpenAtPayout: boolean | null = null;
+    let contributionCommittedAtPayout = false;
+    vi.mocked(sendToBank).mockImplementationOnce(async () => {
+      txOpenAtPayout = txStorage.getStore() !== undefined;
+      contributionCommittedAtPayout =
+        (await prisma.contribution.findFirst({ where: { reference } })) !== null;
+      return { ok: true, status: "successful", message: "paid" };
+    });
+
+    await handlePaymentNotification({
+      transactionId: "TX-REFORD-1",
+      reference: "MEM-reford-1",
+      accountNumber: "9000000555",
+      amount: 500000,
+      currency: "NGN",
+      status: "successful",
+      provider: "monnify",
+      raw: {},
+    });
+
+    expect(txOpenAtPayout).toBe(false);
+    expect(contributionCommittedAtPayout).toBe(true);
+
+    const referral = await prisma.referral.findUnique({
+      where: { referredMemberId: referred.id },
+    });
+    expect(referral?.status).toBe("rewarded");
   });
 });
 

@@ -16,6 +16,19 @@ export function enqueueDeferredSend(send: DeferredSend): boolean {
 }
 
 /**
+ * Enqueue `fn` to run AFTER the current deferred-send scope's transaction has
+ * committed. It uses the SAME queue as `enqueueDeferredSend`, so
+ * `withDeferredSends` flushes it once the scope's `fn` (and its transaction)
+ * has resolved — never inside the transaction.
+ *
+ * Returns false when there is no ambient scope, so the caller can run `fn`
+ * immediately (e.g. the deductions path, which qualifies outside any tx).
+ */
+export function enqueueAfterCommit(fn: DeferredSend): boolean {
+  return enqueueDeferredSend(fn);
+}
+
+/**
  * Run `fn` with outbound sends deferred.
  *
  * Any sendText() call inside `fn` is queued and flushed after `fn` resolves.
