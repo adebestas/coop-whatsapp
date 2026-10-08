@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import { escalateCase, listCases, getCase, isOmbudsman } from "../src/services/ombudsman.js";
+import { runOmbudsmanEscalations } from "../src/services/scheduler.js";
 import { sendText } from "../src/lib/messaging.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
 import { handleMessage } from "../src/services/conversation.js";
@@ -202,6 +203,60 @@ describe("ombudsman escalation", () => {
     expect(await isOmbudsman("2348000047777")).toBe(true);
     expect(await isOmbudsman("2348000046666")).toBe(false);
     expect(await isOmbudsman("2348000000000")).toBe(false);
+  });
+});
+
+describe("auto-SLA escalation", () => {
+  it("auto-escalates a grievance open past the SLA exactly once", async () => {
+    const coop = await createTestCoop("OMB8");
+    const member = await createTestMember(coop.id, { phone: "2348000040071" });
+    await prisma.cooperativeConfig.create({
+      data: { cooperativeId: coop.id, ombudsmanSlaDays: 7 },
+    });
+    const g = await prisma.grievance.create({
+      data: {
+        cooperativeId: coop.id,
+        memberId: member.id,
+        message: "Ignored for weeks",
+        createdAt: new Date(Date.now() - 10 * DAY_MS),
+      },
+    });
+
+    const count = await runOmbudsmanEscalations(new Date());
+    expect(count).toBe(1);
+
+    const c = await prisma.ombudsmanCase.findFirst({ where: { sourceId: g.id } });
+    expect(c).toBeTruthy();
+    expect(c!.escalatedBy).toBe("auto");
+    expect(c!.status).toBe("open");
+    expect(c!.sourceType).toBe("grievance");
+    expect(c!.memberId).toBe(member.id);
+    expect(await prisma.ombudsmanCaseEvent.count({ where: { caseId: c!.id } })).toBe(1);
+
+    // Second tick is idempotent — the unique source index blocks a duplicate.
+    const again = await runOmbudsmanEscalations(new Date());
+    expect(again).toBe(0);
+    expect(await prisma.ombudsmanCase.count({ where: { sourceId: g.id } })).toBe(1);
+  });
+
+  it("does not escalate a grievance within the SLA", async () => {
+    const coop = await createTestCoop("OMB9");
+    const member = await createTestMember(coop.id, { phone: "2348000040081" });
+    await prisma.cooperativeConfig.create({
+      data: { cooperativeId: coop.id, ombudsmanSlaDays: 7 },
+    });
+    const g = await prisma.grievance.create({
+      data: {
+        cooperativeId: coop.id,
+        memberId: member.id,
+        message: "Still fresh",
+        createdAt: new Date(Date.now() - 2 * DAY_MS),
+      },
+    });
+
+    const count = await runOmbudsmanEscalations(new Date());
+    expect(count).toBe(0);
+    expect(await prisma.ombudsmanCase.count({ where: { sourceId: g.id } })).toBe(0);
   });
 });
 
