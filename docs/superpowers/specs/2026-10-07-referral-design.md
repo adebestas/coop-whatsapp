@@ -65,19 +65,31 @@ Indexes: `@@index([cooperativeId, referrerId])`, `@@index([cooperativeId, status
 
 **RLS:** `Referral` carries `cooperativeId` → Stage-1 direct policy + FORCE-list entry.
 
-### Join capture
+### Join capture (registration flow)
 
-The new member enters the referrer's code during join: `join <coop code> ref
-<referrer code>` (and a step in the onboarding flow). Records a `pending` `Referral`.
-Self-referral and unknown codes are rejected (the join still succeeds; the referral
-is just not recorded).
+The referral code is captured as an optional **step in the member registration
+flow**: after the member enters their name, the bot asks *"Were you referred by a
+member? Enter their code, or reply skip."* (`awaiting_referral`). The code is stored
+on the session and read when the member is created at the end of registration, where
+`recordReferral` creates a `pending` `Referral`. The step runs on both WhatsApp and
+Telegram.
+
+The `join <coop code> ref <referrer code>` argument remains as a shortcut: when it is
+supplied the code is pre-filled and the registration step is skipped. Self-referral
+and unknown codes are rejected — registration still succeeds; the referral is just
+not recorded.
 
 ### Qualification
 
-When the referred member makes their **first qualifying contribution**, the
-`Referral` flips to `qualified` (snapshotting `rewardType` + `rewardAmount` from the
-coop config at that moment) and the reward is paid. Idempotent (one reward per
-referred member).
+When the referred member makes their **first qualifying contribution** — the first
+confirmed savings contribution from a **real money-in path** (a provider top-up via
+the payment webhook, or an employer salary-deduction savings credit) — the `Referral`
+flips to `qualified` (snapshotting `rewardType` + `rewardAmount` from the coop config
+at that moment) and the reward is paid. Idempotent (one reward per referred member).
+
+Loan late-fine contributions and admin manual credits do **not** qualify (a penalty
+is not a contribution; a manual credit is not the member's own saving). The
+test-only `createContribution` helper is not a production trigger.
 
 ### Reward payment
 
