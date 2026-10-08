@@ -11,6 +11,12 @@ import { forEachCoop, withCoopContext, listCooperativeIds } from "../lib/tenant-
 import { log } from "../lib/logger.js";
 import { maskId } from "../lib/security.js";
 import { computeRepaymentDue } from "./loans.js";
+import {
+  reportPeriod,
+  generateReport,
+  type PeriodType,
+  type PackType,
+} from "./regulator-reporting.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -1001,6 +1007,142 @@ export async function runOmbudsmanEscalations(now = new Date()): Promise<number>
   return created;
 }
 
+// ---- Regulator reporting packs (statutory + NFIU) ----
+
+/** The scheduled pack combines statutory returns and NFIU AML summaries. */
+const SCHEDULED_REGULATOR_PACK: PackType = "both";
+/** Remind admins this long before an unfiled pack's filing due date. */
+const REGULATOR_REMINDER_WINDOW_MS = 7 * DAY_MS;
+
+/** The last fully-closed monthly reporting period (`YYYY-MM`) at `now`. */
+function lastClosedMonthlyPeriod(now: Date): string {
+  // The last day of the previous calendar month → its `YYYY-MM`.
+  return reportPeriod(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0)), "monthly");
+}
+
+/** The last fully-closed quarterly reporting period (`YYYY-MM`, quarter-end month). */
+function lastClosedQuarterlyPeriod(now: Date): string {
+  const year = now.getUTCFullYear();
+  const quarterEndMonth = Math.ceil((now.getUTCMonth() + 1) / 3) * 3; // 3, 6, 9 or 12
+  let month = quarterEndMonth - 3; // previous quarter-end, 1-based (0 → previous December)
+  let y = year;
+  if (month <= 0) {
+    month += 12;
+    y -= 1;
+  }
+  return `${y}-${String(month).padStart(2, "0")}`;
+}
+
+/**
+ * Notify a coop's active admins (at most once per report per day) about any
+ * `generated` (unfiled) pack whose filing due date is within the reminder
+ * window or already past. Audits each reminder. Returns the number sent.
+ */
+async function remindRegulatorFilings(coopId: string, now: Date): Promise<number> {
+  const cutoff = new Date(now.getTime() + REGULATOR_REMINDER_WINDOW_MS);
+  const due = await prisma.regulatorReport.findMany({
+    where: { cooperativeId: coopId, status: "generated", dueAt: { not: null, lte: cutoff } },
+    orderBy: { dueAt: "asc" },
+  });
+  if (due.length === 0) return 0;
+
+  const admins = await prisma.member.findMany({
+    where: { cooperativeId: coopId, role: { in: ["admin", "superadmin"] }, status: "active" },
+  });
+  if (admins.length === 0) return 0;
+
+  const day = now.toISOString().slice(0, 10);
+  let reminded = 0;
+  for (const report of due) {
+    // Dedupe per report per day (Redis-backed, in-memory fallback for one instance).
+    if (!(await claimOnce("regulator-reminder", `${report.id}:${day}`, 2 * 24 * 3600))) continue;
+
+    const overdue = (report.dueAt?.getTime() ?? 0) < now.getTime();
+    const dueLabel = (report.dueAt ?? now).toISOString().slice(0, 10);
+    const text =
+      `📋 *Regulator filing ${overdue ? "overdue" : "due soon"}*\n\n` +
+      `Your *${report.periodType}* regulator pack for *${report.period}* ` +
+      `${overdue ? "was due on" : "is due on"} *${dueLabel}*.\n\n` +
+      `Reply *regreportstatus* to review the pack and mark it filed once submitted.`;
+
+    await Promise.all(admins.map((a) => notifyMember(a, text).catch(() => {})));
+    await audit({
+      cooperativeId: coopId,
+      actorPhone: "system",
+      actorId: null,
+      actorRole: "system",
+      action: "regulator.filing_reminder",
+      targetType: "regulatorReport",
+      targetId: report.id,
+      detail: `${report.periodType} ${report.packType} pack for ${report.period} ${
+        overdue ? "overdue" : "due"
+      } ${dueLabel}`,
+    }).catch(() => {});
+    reminded++;
+  }
+  return reminded;
+}
+
+/**
+ * Auto-generate the regulator packs for every coop with reporting enabled: the
+ * monthly pack for the last closed month and the quarterly pack for the last
+ * closed quarter, then remind admins of any filing due soon or overdue.
+ * Idempotent — an existing pack for a period/type is skipped (pre-filtered so
+ * the shared per-coop transaction never aborts on the unique key). Audits
+ * generations via `generateReport`, audits reminders, and returns the number of
+ * packs created. One coop's failure is logged and skipped so it cannot abort
+ * the remaining coops.
+ */
+export async function runRegulatorReports(now = new Date()): Promise<number> {
+  let created = 0;
+  await forEachCoop(async (coopId) => {
+    try {
+      const config = await prisma.cooperativeConfig.findUnique({
+        where: { cooperativeId: coopId },
+        select: { regulatorReportingEnabled: true },
+      });
+      if (!config?.regulatorReportingEnabled) return;
+
+      // A pack is due only where a regulator is configured.
+      const profile = await prisma.regulatorProfile.findFirst({
+        where: { cooperativeId: coopId, active: true },
+        select: { id: true },
+      });
+      if (!profile) return;
+
+      const targets: { periodType: PeriodType; period: string }[] = [
+        { periodType: "monthly", period: lastClosedMonthlyPeriod(now) },
+        { periodType: "quarterly", period: lastClosedQuarterlyPeriod(now) },
+      ];
+
+      // Pre-fetch existing packs and exclude them, so no generation can collide
+      // with the unique `(coop, period, periodType, packType)` key.
+      const existing = await prisma.regulatorReport.findMany({
+        where: { cooperativeId: coopId, packType: SCHEDULED_REGULATOR_PACK },
+        select: { period: true, periodType: true },
+      });
+      const have = new Set(existing.map((r) => `${r.periodType}:${r.period}`));
+
+      for (const target of targets) {
+        if (have.has(`${target.periodType}:${target.period}`)) continue;
+        const res = await generateReport(
+          coopId,
+          target.period,
+          target.periodType,
+          SCHEDULED_REGULATOR_PACK,
+        );
+        if (res.ok) created++;
+      }
+
+      await remindRegulatorFilings(coopId, now);
+    } catch (err) {
+      // One cooperative's failure must not abort the rest.
+      log.error("[scheduler] regulator report job failed", { coopId, err: String(err) });
+    }
+  });
+  return created;
+}
+
 /** One scheduler tick: reminders, statements, birthdays, anniversaries,
  *  guarantor defaults, status posts, VA cleanup, retention, STR escalation,
  *  ombudsman SLA escalation, proactive alerts, backup verification. */
@@ -1061,6 +1203,9 @@ export async function runSchedulerTick(): Promise<void> {
   );
   await runOmbudsmanEscalations().catch((err) =>
     log.error("[scheduler] ombudsman SLA escalation failed", { err: String(err) }),
+  );
+  await runRegulatorReports().catch((err) =>
+    log.error("[scheduler] regulator reports failed", { err: String(err) }),
   );
   await runProactiveAlerts().catch((err) =>
     log.error("[scheduler] proactive alerts failed", { err: String(err) }),

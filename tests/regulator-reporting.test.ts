@@ -10,6 +10,8 @@ import {
   generateReport,
   type PackType,
 } from "../src/services/regulator-reporting.js";
+import { runRegulatorReports } from "../src/services/scheduler.js";
+import { notifyMember } from "../src/lib/messaging.js";
 
 async function makeContrib(
   coopId: string,
@@ -425,5 +427,133 @@ describe("generateReport", () => {
       },
     });
     expect(report).not.toBeNull();
+  });
+});
+
+describe("runRegulatorReports", () => {
+  async function enableReporting(
+    coopId: string,
+    overrides: { monthlyDueDay?: number; quarterlyDueDay?: number } = {},
+  ) {
+    await prisma.cooperativeConfig.create({
+      data: { cooperativeId: coopId, regulatorReportingEnabled: true },
+    });
+    await prisma.regulatorProfile.create({
+      data: {
+        cooperativeId: coopId,
+        label: "Lagos State Ministry of Cooperatives",
+        type: "ministry",
+        ...overrides,
+      },
+    });
+  }
+
+  it("generates the last closed monthly pack after month-end, idempotently", async () => {
+    const coop = await createTestCoop("REG10");
+    await enableReporting(coop.id);
+
+    const created = await runRegulatorReports(new Date("2026-04-05T12:00:00Z"));
+    expect(created).toBeGreaterThanOrEqual(1);
+
+    const monthly = await prisma.regulatorReport.findUnique({
+      where: {
+        cooperativeId_period_periodType_packType: {
+          cooperativeId: coop.id,
+          period: "2026-03",
+          periodType: "monthly",
+          packType: "both",
+        },
+      },
+    });
+    expect(monthly).not.toBeNull();
+    expect(monthly!.status).toBe("generated");
+    expect(monthly!.generatedById).toBeNull(); // scheduled, not an admin
+
+    const total = await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } });
+
+    // A second tick creates nothing new.
+    const again = await runRegulatorReports(new Date("2026-04-06T12:00:00Z"));
+    expect(again).toBe(0);
+    expect(await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } })).toBe(total);
+  });
+
+  it("generates the last closed quarterly pack after quarter-end", async () => {
+    const coop = await createTestCoop("REG11");
+    await enableReporting(coop.id);
+
+    await runRegulatorReports(new Date("2026-04-05T12:00:00Z"));
+
+    const quarterly = await prisma.regulatorReport.findUnique({
+      where: {
+        cooperativeId_period_periodType_packType: {
+          cooperativeId: coop.id,
+          period: "2026-03",
+          periodType: "quarterly",
+          packType: "both",
+        },
+      },
+    });
+    expect(quarterly).not.toBeNull();
+  });
+
+  it("does not generate a quarterly pack while its quarter is still open", async () => {
+    const coop = await createTestCoop("REG13");
+    await enableReporting(coop.id);
+
+    // 2026-03-15: Q1 (Jan-Mar) has not closed, so the last closed quarter is Q4 2025.
+    await runRegulatorReports(new Date("2026-03-15T12:00:00Z"));
+
+    expect(
+      await prisma.regulatorReport.count({
+        where: { cooperativeId: coop.id, period: "2026-03", periodType: "quarterly" },
+      }),
+    ).toBe(0);
+    expect(
+      await prisma.regulatorReport.count({
+        where: { cooperativeId: coop.id, period: "2025-12", periodType: "quarterly" },
+      }),
+    ).toBe(1);
+  });
+
+  it("reminds admins (not members) of an overdue unfiled pack", async () => {
+    const coop = await createTestCoop("REG12");
+    await enableReporting(coop.id);
+    const admin = await createTestMember(coop.id, { phone: "2348000010021", role: "superadmin" });
+    const member = await createTestMember(coop.id, { phone: "2348000010022" });
+
+    // An overdue, still-unfiled pack.
+    await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026-02",
+        periodType: "monthly",
+        packType: "both",
+        status: "generated",
+        dueAt: new Date("2026-03-10T00:00:00Z"),
+      },
+    });
+
+    await runRegulatorReports(new Date("2026-04-05T12:00:00Z"));
+
+    const calls = vi.mocked(notifyMember).mock.calls;
+    const adminTexts = calls
+      .filter(([m]) => m.phone === admin.phone)
+      .map(([, text]) => text)
+      .join("\n");
+    expect(adminTexts).toMatch(/regulator|filing|due/i);
+
+    const memberTexts = calls.filter(([m]) => m.phone === member.phone);
+    expect(memberTexts).toHaveLength(0);
+  });
+
+  it("does not generate packs when reporting is disabled", async () => {
+    const coop = await createTestCoop("REG14");
+    await prisma.regulatorProfile.create({
+      data: { cooperativeId: coop.id, label: "Ministry", type: "ministry" },
+    });
+
+    const created = await runRegulatorReports(new Date("2026-04-05T12:00:00Z"));
+    expect(created).toBe(0);
+    expect(await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } })).toBe(0);
   });
 });
