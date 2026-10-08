@@ -6,7 +6,12 @@ import {
   myReferrals,
   setReferralConfig,
   referralReport,
+  getReferralBonus,
+  withdrawReferralBonus,
+  listReferralWithdrawals,
 } from "../src/services/referrals.js";
+import { paymentState } from "./payment-state.js";
+import { clearVtuBillerCache } from "../src/services/payments/vtu.js";
 import { handleAwaitingInput } from "../src/services/handlers/session.js";
 import { handleJoinStart } from "../src/services/handlers/join.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
@@ -682,5 +687,308 @@ describe("referral board controls", () => {
     });
     expect(cfg.referralEnabled).toBe(true);
     expect(textsSent()).toContain("Board Committee");
+  });
+});
+
+describe("referral bonus withdrawal", () => {
+  async function bonusMember(
+    coopId: string,
+    phone: string,
+    bonus: number,
+    extra: { name?: string; bank?: boolean } = {},
+  ) {
+    const member = await createTestMember(coopId, { phone, name: extra.name });
+    await prisma.member.update({
+      where: { id: member.id },
+      data: {
+        referralBonusBalance: bonus,
+        ...(extra.bank
+          ? { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" }
+          : {}),
+      },
+    });
+    return member;
+  }
+
+  it("shows the member's referral bonus balance", async () => {
+    const coop = await createCoop("RBBAL");
+    const member = await bonusMember(coop.id, "2348091000090", 12345);
+
+    const res = await getReferralBonus(coop.id, member.id);
+    expect(res.ok).toBe(true);
+    expect(res.balance).toBe(12345);
+    expect(res.message).toContain("₦123.45");
+  });
+
+  it("withdraws to wallet: debits the bonus, credits the wallet, records a paid withdrawal and audits", async () => {
+    const coop = await createCoop("RBW1");
+    const member = await bonusMember(coop.id, "2348091000001", 50000, { name: "Ada Obi" });
+
+    const res = await withdrawReferralBonus(
+      coop.id,
+      member.id,
+      { amount: 30000, destination: "wallet" },
+      { id: member.id, phone: member.phone },
+    );
+    expect(res.ok).toBe(true);
+    expect(res.withdrawalId).toBeTruthy();
+
+    const after = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+    expect(after.referralBonusBalance).toBe(20000);
+
+    const wallet = await prisma.wallet.findUniqueOrThrow({ where: { memberId: member.id } });
+    expect(wallet.balance).toBe(30000);
+
+    const wd = await prisma.referralWithdrawal.findUniqueOrThrow({
+      where: { id: res.withdrawalId! },
+    });
+    expect(wd.status).toBe("paid");
+    expect(wd.paidAt).toBeInstanceOf(Date);
+    expect(wd.amount).toBe(30000);
+    expect(wd.destination).toBe("wallet");
+
+    const je = await prisma.journalEntry.findUniqueOrThrow({
+      where: { txRef: `REFBONUS-${res.withdrawalId}` },
+      include: { postings: true },
+    });
+    const accounts = je.postings.map((p) => `${p.account}:${p.direction}`);
+    expect(accounts).toContain("expense:referral_reward:DEBIT");
+    expect(accounts).toContain(`member_wallet:${wallet.id}:CREDIT`);
+
+    const audited = await prisma.auditLog.findFirst({
+      where: { action: "referral.bonus.withdrawn", targetId: res.withdrawalId! },
+    });
+    expect(audited).toBeTruthy();
+  });
+
+  it("refuses an amount above the balance and a non-positive amount, leaving the balance untouched", async () => {
+    const coop = await createCoop("RBW2");
+    const member = await bonusMember(coop.id, "2348091000002", 10000);
+    const actor = { id: member.id, phone: member.phone };
+
+    const over = await withdrawReferralBonus(
+      coop.id,
+      member.id,
+      { amount: 20000, destination: "wallet" },
+      actor,
+    );
+    expect(over.ok).toBe(false);
+    expect(over.message).toContain("Insufficient");
+
+    const zero = await withdrawReferralBonus(
+      coop.id,
+      member.id,
+      { amount: 0, destination: "wallet" },
+      actor,
+    );
+    expect(zero.ok).toBe(false);
+
+    const after = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+    expect(after.referralBonusBalance).toBe(10000);
+    expect(await prisma.referralWithdrawal.count()).toBe(0);
+  });
+
+  it("withdraws to the member's saved bank account and records the withdrawal", async () => {
+    const coop = await createCoop("RBW3");
+    const member = await bonusMember(coop.id, "2348091000003", 40000, {
+      name: "Ada Obi",
+      bank: true,
+    });
+
+    const res = await withdrawReferralBonus(
+      coop.id,
+      member.id,
+      { amount: 40000, destination: "bank" },
+      { id: member.id, phone: member.phone },
+    );
+    expect(res.ok).toBe(true);
+
+    const wd = await prisma.referralWithdrawal.findUniqueOrThrow({
+      where: { id: res.withdrawalId! },
+    });
+    expect(wd.status).toBe("paid");
+    expect(wd.destination).toBe("bank");
+    const after = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+    expect(after.referralBonusBalance).toBe(0);
+  });
+
+  it("refuses a bank withdrawal when the member has no saved account (refunded, failed)", async () => {
+    const coop = await createCoop("RBW4");
+    const member = await bonusMember(coop.id, "2348091000004", 15000);
+
+    const res = await withdrawReferralBonus(
+      coop.id,
+      member.id,
+      { amount: 15000, destination: "bank" },
+      { id: member.id, phone: member.phone },
+    );
+    expect(res.ok).toBe(false);
+    const wd = await prisma.referralWithdrawal.findUniqueOrThrow({
+      where: { id: res.withdrawalId! },
+    });
+    expect(wd.status).toBe("failed");
+    const after = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+    expect(after.referralBonusBalance).toBe(15000);
+  });
+
+  it("refunds the bonus when the bank payout definitely fails", async () => {
+    const coop = await createCoop("RBW5");
+    const member = await bonusMember(coop.id, "2348091000005", 20000, {
+      name: "Ada Obi",
+      bank: true,
+    });
+    paymentState.payoutFails = true;
+    try {
+      const res = await withdrawReferralBonus(
+        coop.id,
+        member.id,
+        { amount: 20000, destination: "bank" },
+        { id: member.id, phone: member.phone },
+      );
+      expect(res.ok).toBe(false);
+      const wd = await prisma.referralWithdrawal.findUniqueOrThrow({
+        where: { id: res.withdrawalId! },
+      });
+      expect(wd.status).toBe("failed");
+      const after = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+      expect(after.referralBonusBalance).toBe(20000);
+    } finally {
+      paymentState.payoutFails = false;
+    }
+  });
+
+  it("withdraws to airtime via the VTU adapter with the entered phone", async () => {
+    const coop = await createCoop("RBW6");
+    const member = await bonusMember(coop.id, "2348091000006", 25000);
+
+    // The VTU adapter is gated on VTU_PROVIDER + its secret. Enable the real
+    // Flutterwave adapter and stub fetch so the adapter's HTTP calls are local.
+    const prevProvider = process.env.VTU_PROVIDER;
+    const prevKey = process.env.FLUTTERWAVE_SECRET_KEY;
+    process.env.VTU_PROVIDER = "flutterwave";
+    process.env.FLUTTERWAVE_SECRET_KEY = "test-key";
+    clearVtuBillerCache();
+
+    const calls: Array<{ url: string; body?: Record<string, unknown> }> = [];
+    const json = (obj: unknown) => ({ json: async () => obj }) as Response;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const u = String(url);
+        calls.push({ url: u, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (u.includes("/top-bill-categories")) {
+          return json({ status: "success", data: [{ code: "AIRTIME", country_code: "NG" }] });
+        }
+        if (u.includes("/payment")) {
+          return json({ status: "success", data: { tx_ref: "FLW-TX-1" } });
+        }
+        if (u.includes("/items")) {
+          return json({ status: "success", data: [{ item_code: "AT", is_airtime: true }] });
+        }
+        return json({
+          status: "success",
+          data: [
+            { biller_code: "MTN", name: "MTN" },
+            { biller_code: "GLO", name: "Glo" },
+            { biller_code: "AIRTEL", name: "Airtel" },
+            { biller_code: "9MOBILE", name: "9mobile" },
+          ],
+        });
+      }),
+    );
+
+    try {
+      const res = await withdrawReferralBonus(
+        coop.id,
+        member.id,
+        { amount: 25000, destination: "airtime", phone: "08031234567" },
+        { id: member.id, phone: member.phone },
+      );
+      expect(res.ok).toBe(true);
+
+      const wd = await prisma.referralWithdrawal.findUniqueOrThrow({
+        where: { id: res.withdrawalId! },
+      });
+      expect(wd.status).toBe("paid");
+      expect(wd.providerRef).toBe("FLW-TX-1");
+      expect(wd.phone).toBe("08031234567");
+
+      const payment = calls.find((c) => c.url.includes("/payment"));
+      expect(payment?.body).toMatchObject({
+        customer_id: "08031234567",
+        amount: 250,
+        reference: `REFBONUS-${res.withdrawalId}`,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      clearVtuBillerCache();
+      if (prevProvider === undefined) delete process.env.VTU_PROVIDER;
+      else process.env.VTU_PROVIDER = prevProvider;
+      if (prevKey === undefined) delete process.env.FLUTTERWAVE_SECRET_KEY;
+      else process.env.FLUTTERWAVE_SECRET_KEY = prevKey;
+    }
+  });
+
+  it("refuses an airtime withdrawal when no VTU provider is configured (balance unchanged)", async () => {
+    const coop = await createCoop("RBW7");
+    const member = await bonusMember(coop.id, "2348091000007", 10000);
+    const prevProvider = process.env.VTU_PROVIDER;
+    delete process.env.VTU_PROVIDER;
+    try {
+      const res = await withdrawReferralBonus(
+        coop.id,
+        member.id,
+        { amount: 10000, destination: "airtime", phone: "08031234567" },
+        { id: member.id, phone: member.phone },
+      );
+      expect(res.ok).toBe(false);
+      const after = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+      expect(after.referralBonusBalance).toBe(10000);
+      const wd = await prisma.referralWithdrawal.findUniqueOrThrow({
+        where: { id: res.withdrawalId! },
+      });
+      expect(wd.status).toBe("failed");
+    } finally {
+      if (prevProvider === undefined) delete process.env.VTU_PROVIDER;
+      else process.env.VTU_PROVIDER = prevProvider;
+    }
+  });
+
+  it("cannot overdraw — concurrent withdrawals cannot both succeed", async () => {
+    const coop = await createCoop("RBW8");
+    const member = await bonusMember(coop.id, "2348091000008", 10000);
+    const actor = { id: member.id, phone: member.phone };
+
+    const [a, b] = await Promise.all([
+      withdrawReferralBonus(coop.id, member.id, { amount: 10000, destination: "wallet" }, actor),
+      withdrawReferralBonus(coop.id, member.id, { amount: 10000, destination: "wallet" }, actor),
+    ]);
+
+    expect([a, b].filter((r) => r.ok).length).toBe(1);
+    const after = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+    expect(after.referralBonusBalance).toBe(0);
+    expect(
+      await prisma.referralWithdrawal.count({ where: { memberId: member.id, status: "paid" } }),
+    ).toBe(1);
+  });
+
+  it("lists referral withdrawals, scoped by member", async () => {
+    const coop = await createCoop("RBLIST");
+    const member = await bonusMember(coop.id, "2348091000091", 30000);
+    await withdrawReferralBonus(
+      coop.id,
+      member.id,
+      { amount: 10000, destination: "wallet" },
+      { id: member.id, phone: member.phone },
+    );
+
+    const res = await listReferralWithdrawals(coop.id, member.id);
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("₦100.00");
+
+    const other = await bonusMember(coop.id, "2348091000092", 0);
+    const empty = await listReferralWithdrawals(coop.id, other.id);
+    expect(empty.ok).toBe(true);
+    expect(empty.message.toLowerCase()).toContain("no referral withdrawals");
   });
 });
