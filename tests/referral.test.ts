@@ -1005,19 +1005,12 @@ describe("referral airtime reward via the Flutterwave adapter", () => {
   const FLW = "https://api.flutterwave.com/v3";
   const json = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
 
-  beforeEach(() => {
-    process.env.VTU_PROVIDER = "flutterwave";
-    process.env.FLUTTERWAVE_SECRET_KEY = "FLWSECK_TEST-abc";
-    clearVtuBillerCache();
-  });
-
-  afterEach(() => {
-    delete process.env.VTU_PROVIDER;
-    delete process.env.FLUTTERWAVE_SECRET_KEY;
-    vi.unstubAllGlobals();
-  });
-
-  it("pays an airtime reward end-to-end when the adapter resolves", async () => {
+  /**
+   * Route the discovery calls to a single MTN biller + airtime item, then
+   * delegate the bill-payment response (which may throw to simulate a network
+   * error). Returns the captured payment requests.
+   */
+  function stubFetch(payment: () => unknown) {
     const paymentCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
     vi.stubGlobal(
       "fetch",
@@ -1039,22 +1032,20 @@ describe("referral airtime reward via the Flutterwave adapter", () => {
           });
         }
         paymentCalls.push({ url, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
-        return json({
-          status: "success",
-          message: "Bill payment successful",
-          data: { tx_ref: "CF-FLYAPI-REFERRAL", reference: "247891569224" },
-        });
+        return json(payment());
       }),
     );
+    return paymentCalls;
+  }
 
-    const coop = await createCoop("REFAIR");
-    // An MTN number set as the referrer's own phone (no contactPhone) — the exact
-    // number the airtime branch would recharge.
+  /** A `qualified` airtime referral for an MTN referrer (phone set locally). */
+  async function airtimeReward(code: string, referredPhone: string) {
+    const coop = await createCoop(code);
     const referrer = await createTestMember(coop.id, {
       phone: "08031234567",
       name: "Ada Obi",
     });
-    const referred = await createTestMember(coop.id, { phone: "2348044440011" });
+    const referred = await createTestMember(coop.id, { phone: referredPhone });
     await recordReferral(coop.id, referrer.code, referred.id);
     const referral = await prisma.referral.findUniqueOrThrow({
       where: { referredMemberId: referred.id },
@@ -1068,6 +1059,28 @@ describe("referral airtime reward via the Flutterwave adapter", () => {
         rewardAmount: 50000,
       },
     });
+    return { coop, referral };
+  }
+
+  beforeEach(() => {
+    process.env.VTU_PROVIDER = "flutterwave";
+    process.env.FLUTTERWAVE_SECRET_KEY = "FLWSECK_TEST-abc";
+    clearVtuBillerCache();
+  });
+
+  afterEach(() => {
+    delete process.env.VTU_PROVIDER;
+    delete process.env.FLUTTERWAVE_SECRET_KEY;
+    vi.unstubAllGlobals();
+  });
+
+  it("pays an airtime reward end-to-end when the adapter resolves", async () => {
+    const paymentCalls = stubFetch(() => ({
+      status: "success",
+      message: "Bill payment successful",
+      data: { tx_ref: "CF-FLYAPI-REFERRAL", reference: "247891569224" },
+    }));
+    const { coop, referral } = await airtimeReward("REFAIR", "2348044440011");
 
     const res = await payReferralReward(coop.id, referral.id);
     expect(res.ok).toBe(true);
@@ -1081,13 +1094,47 @@ describe("referral airtime reward via the Flutterwave adapter", () => {
     });
     expect(audited).toBeTruthy();
 
-    // ₦500 (50,000 kobo) was bought as whole naira via the MTN airtime biller.
+    // ₦500 (50,000 kobo) was bought as whole naira via the MTN airtime biller,
+    // under the referral's deterministic reference.
     expect(paymentCalls).toHaveLength(1);
     expect(paymentCalls[0].url).toBe(`${FLW}/billers/BIL100/items/AT100/payment`);
     expect(paymentCalls[0].body).toMatchObject({
       country: "NG",
       customer_id: "08031234567",
       amount: 500,
+      reference: `REFERRAL-${referral.id}`,
     });
+  });
+
+  it("keeps the referral rewarded (no retry) when the airtime payment is UNSURE", async () => {
+    // The payment fetch itself rejects: the first payment may have landed, so a
+    // retry with the same reference would be a duplicate. Mirror the bank path.
+    stubFetch(() => {
+      throw new Error("socket hang up");
+    });
+    const { coop, referral } = await airtimeReward("REFAIRU", "2348044440012");
+
+    const res = await payReferralReward(coop.id, referral.id);
+
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referral.id } });
+    expect(after.status).toBe("rewarded");
+    expect(after.rewardedAt).toBeInstanceOf(Date);
+    expect(res.message.toLowerCase()).toContain("unconfirmed");
+    const warned = await prisma.auditLog.findFirst({
+      where: { action: "referral.reward.unconfirmed", targetId: referral.id },
+    });
+    expect(warned).toBeTruthy();
+  });
+
+  it("reverts to qualified when the airtime payment is a DEFINITE failure", async () => {
+    stubFetch(() => ({ status: "error", message: "Invalid customer id", data: null }));
+    const { coop, referral } = await airtimeReward("REFAIRF", "2348044440013");
+
+    const res = await payReferralReward(coop.id, referral.id);
+    expect(res.ok).toBe(false);
+
+    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referral.id } });
+    expect(after.status).toBe("qualified");
+    expect(after.rewardedAt).toBeNull();
   });
 });

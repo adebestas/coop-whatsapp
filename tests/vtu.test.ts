@@ -89,18 +89,50 @@ const SUCCESS_PAYMENT = {
 
 /**
  * Stub `global.fetch` with the real Flutterwave discovery + payment routing.
- * `payment` lets a test override the bill-payment response.
+ * Options let a test simulate network throws, unparseable bodies, and partial
+ * biller discovery.
  */
-function stubFlw(payment: () => unknown = () => SUCCESS_PAYMENT) {
+interface FlwStubOptions {
+  /** Override the bill-payment JSON body. */
+  payment?: () => unknown;
+  /** Reject the payment fetch itself (simulates a network error / timeout). */
+  paymentThrows?: boolean;
+  /** Make the payment response's `.json()` reject (unparseable body). */
+  jsonThrows?: boolean;
+  /** HTTP status for the payment response (default 200). */
+  paymentStatus?: number;
+  /** Override the discovered billers (to simulate partial/empty discovery). */
+  billers?: unknown[];
+}
+
+function stubFlw(opts: FlwStubOptions = {}) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const fn = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
     if (url.includes("/top-bill-categories")) return json(CATEGORIES);
-    if (/\/bills\/AIRTIME\/billers/.test(url)) return json(BILLERS);
+    if (/\/bills\/AIRTIME\/billers/.test(url)) {
+      return json({ ...BILLERS, data: opts.billers ?? BILLERS.data });
+    }
     const item = url.match(/\/billers\/([^/]+)\/items$/);
     if (item) return json(ITEMS[item[1]] ?? { status: "success", data: [] });
-    if (url.includes("/payment")) return json(payment());
+    if (url.includes("/payment")) {
+      if (opts.paymentThrows) throw new Error("socket hang up");
+      if (opts.jsonThrows) {
+        return {
+          ok: false,
+          status: opts.paymentStatus ?? 502,
+          json: async () => {
+            throw new Error("invalid json");
+          },
+        };
+      }
+      return {
+        ok: true,
+        status: opts.paymentStatus ?? 200,
+        json: async () => (opts.payment ? opts.payment() : SUCCESS_PAYMENT),
+      };
+    }
     return json({ status: "error", message: "unexpected url" });
   });
   vi.stubGlobal("fetch", fn);
@@ -247,7 +279,7 @@ describe("flutterwave recharge", () => {
 
   it("returns ok:false (never throws) on a non-success response", async () => {
     arm();
-    stubFlw(() => ({ status: "error", message: "Insufficient balance", data: null }));
+    stubFlw({ payment: () => ({ status: "error", message: "Insufficient balance", data: null }) });
     const provider = resolveVtuProvider()!;
 
     const res = await provider.recharge({
@@ -258,6 +290,98 @@ describe("flutterwave recharge", () => {
 
     expect(res.ok).toBe(false);
     expect(res.error).toContain("Insufficient balance");
+    // A clear, non-duplicate error is a DEFINITE failure — safe to retry.
+    expect(res.unsure).toBeUndefined();
+  });
+
+  it("does NOT cache a partial discovery (a second call re-discovers)", async () => {
+    arm();
+    // Only MTN + GLO are discoverable: an incomplete map must not be cached for
+    // 24h, which would silently kill airtime for the other networks.
+    const partial = BILLERS.data.filter((b) => b.name === "MTN" || b.name === "GLO");
+    const calls = stubFlw({ billers: partial });
+    const provider = resolveVtuProvider()!;
+
+    const first = await provider.recharge({
+      phone: "08031234567",
+      amountKobo: 50000,
+      reference: "p1",
+    });
+    expect(first.ok).toBe(true);
+    // A network missing from the partial map fails cleanly...
+    const missing = await provider.recharge({
+      phone: "08021234567",
+      amountKobo: 50000,
+      reference: "p2",
+    });
+    expect(missing.ok).toBe(false);
+
+    // ...and BOTH recharges re-ran discovery because nothing was cached.
+    expect(calls.filter((c) => c.url.includes("/bills/AIRTIME/billers")).length).toBe(2);
+    expect(calls.filter((c) => c.url.includes("/top-bill-categories")).length).toBe(2);
+  });
+
+  it("marks a thrown payment request as unsure (outcome unknown)", async () => {
+    arm();
+    stubFlw({ paymentThrows: true });
+    const provider = resolveVtuProvider()!;
+
+    const res = await provider.recharge({
+      phone: "08031234567",
+      amountKobo: 50000,
+      reference: "r",
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.unsure).toBe(true);
+  });
+
+  it("marks a duplicate-reference error as unsure (the first payment may have landed)", async () => {
+    arm();
+    stubFlw({
+      payment: () => ({ status: "error", message: "Duplicate transaction reference", data: null }),
+    });
+    const provider = resolveVtuProvider()!;
+
+    const res = await provider.recharge({
+      phone: "08031234567",
+      amountKobo: 50000,
+      reference: "r",
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.unsure).toBe(true);
+    expect(res.error).toContain("Duplicate");
+  });
+
+  it("marks a success without a tx_ref as unsure (no confirmed provider ref)", async () => {
+    arm();
+    stubFlw({ payment: () => ({ status: "success", message: "ok", data: { reference: "2478" } }) });
+    const provider = resolveVtuProvider()!;
+
+    const res = await provider.recharge({
+      phone: "08031234567",
+      amountKobo: 50000,
+      reference: "r",
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.unsure).toBe(true);
+  });
+
+  it("marks a non-200 / unparseable payment response as unsure (ambiguous)", async () => {
+    arm();
+    stubFlw({ jsonThrows: true, paymentStatus: 502 });
+    const provider = resolveVtuProvider()!;
+
+    const res = await provider.recharge({
+      phone: "08031234567",
+      amountKobo: 50000,
+      reference: "r",
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.unsure).toBe(true);
   });
 
   it("returns ok:false for an unknown network without calling the API", async () => {

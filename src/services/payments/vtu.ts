@@ -24,17 +24,34 @@ export interface VtuProvider {
     /** Amount to recharge, in KOBO (e.g. 50000 = ₦500). */
     amountKobo: number;
     reference: string;
-  }): Promise<{ ok: boolean; providerRef?: string; error?: string }>;
+  }): Promise<{
+    ok: boolean;
+    providerRef?: string;
+    error?: string;
+    /**
+     * The outcome is UNKNOWN — the request may have reached the provider
+     * (network error/timeout, or an ambiguous duplicate-reference response).
+     * Callers must NOT retry with the same reference (it could double-charge)
+     * and must treat this like the bank payout "unsure" status: reconcile,
+     * never revert.
+     */
+    unsure?: boolean;
+  }>;
 }
 
 /** Flutterwave API base for the v3 Bill Payments endpoints. */
 const FLUTTERWAVE_BASE = "https://api.flutterwave.com/v3";
 /** The Flutterwave bill category code for airtime. */
 const AIRTIME_CATEGORY_CODE = "AIRTIME";
-/** Biller/item discovery is cached for 24h; only a successful discovery is cached. */
+/** Biller/item discovery is cached for 24h; only a COMPLETE discovery is cached. */
 const BILLER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/** Hard per-request timeout for every Flutterwave call (discovery + payment). */
+const FLUTTERWAVE_TIMEOUT_MS = 15_000;
 
 export type Network = "MTN" | "GLO" | "AIRTEL" | "9MOBILE";
+
+/** Every live network — a discovered map is only cacheable when it covers them all. */
+const ALL_NETWORKS: Network[] = ["MTN", "GLO", "AIRTEL", "9MOBILE"];
 
 /**
  * Nigerian mobile prefixes -> network. Prefixes are the local (national) 4- or
@@ -149,24 +166,46 @@ export function networkForPhone(phone: string): Network | null {
   return PREFIX_TO_NETWORK[local.slice(0, 5)] ?? PREFIX_TO_NETWORK[local.slice(0, 4)] ?? null;
 }
 
-/** Match a biller's display name(s) to a network, or null when unrecognised. */
+/**
+ * Match a biller's display name(s) to a network using whole-word tokens (plus a
+ * compact exact form, e.g. `9 Mobile` -> `9mobile`), so unrelated names that
+ * merely contain a substring (e.g. a hypothetical "Glow" biller) are not
+ * misclassified. Returns null when nothing matches.
+ */
 function classifyNetwork(...names: string[]): Network | null {
-  const haystack = names.join(" ").toLowerCase();
+  const tokens = new Set<string>();
+  const compact: string[] = [];
+  for (const name of names) {
+    const lower = name.toLowerCase();
+    compact.push(lower.replace(/[^a-z0-9]/g, ""));
+    for (const token of lower.split(/[^a-z0-9]+/)) if (token) tokens.add(token);
+  }
   for (const { network, aliases } of NETWORK_ALIASES) {
-    if (aliases.some((alias) => haystack.includes(alias))) return network;
+    if (aliases.some((alias) => tokens.has(alias) || compact.includes(alias))) return network;
   }
   return null;
+}
+
+/** `fetch` with a hard per-request timeout; the abort surfaces as a rejection. */
+async function flwFetch(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FLUTTERWAVE_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
  * Discover the airtime biller + item code for each Nigerian network:
  * categories -> billers -> items. Throws on any upstream failure (so the caller
- * can decide), and never caches a partial/failed result.
+ * can decide); it does not cache — `getAirtimeBillers` decides cacheability.
  */
 async function discoverAirtimeBillers(apiKey: string): Promise<AirtimeBillerMap> {
   const headers = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
 
-  const categoryRes = await fetch(`${FLUTTERWAVE_BASE}/top-bill-categories?country=NG`, {
+  const categoryRes = await flwFetch(`${FLUTTERWAVE_BASE}/top-bill-categories?country=NG`, {
     method: "GET",
     headers,
   });
@@ -178,7 +217,7 @@ async function discoverAirtimeBillers(apiKey: string): Promise<AirtimeBillerMap>
     throw new Error(categories.message || "Flutterwave airtime category not available");
   }
 
-  const billerRes = await fetch(
+  const billerRes = await flwFetch(
     `${FLUTTERWAVE_BASE}/bills/${category.code}/billers?country=NG`,
     { method: "GET", headers },
   );
@@ -193,7 +232,7 @@ async function discoverAirtimeBillers(apiKey: string): Promise<AirtimeBillerMap>
     const network = classifyNetwork(biller.name ?? "", biller.short_name ?? "");
     if (!network || map[network]) continue;
 
-    const itemRes = await fetch(`${FLUTTERWAVE_BASE}/billers/${biller.biller_code}/items`, {
+    const itemRes = await flwFetch(`${FLUTTERWAVE_BASE}/billers/${biller.biller_code}/items`, {
       method: "GET",
       headers,
     });
@@ -208,13 +247,38 @@ async function discoverAirtimeBillers(apiKey: string): Promise<AirtimeBillerMap>
   return map;
 }
 
-/** Return the cached airtime biller map, discovering it on first use. */
+/** A discovered map is only cacheable once it covers every airtime network. */
+function isCompleteMap(map: AirtimeBillerMap): boolean {
+  return ALL_NETWORKS.every((network) => map[network] !== undefined);
+}
+
+/**
+ * Return the cached airtime biller map, discovering it on first use.
+ *
+ * Only a COMPLETE map (all four networks) is cached. A partial/empty discovery —
+ * e.g. a Flutterwave biller rename broke name matching — is returned for this
+ * call but NOT cached, so the next attempt re-discovers instead of silently
+ * failing for the full 24h TTL.
+ */
 async function getAirtimeBillers(apiKey: string): Promise<AirtimeBillerMap> {
   const now = Date.now();
   if (billerCache && now - billerCache.at < BILLER_CACHE_TTL_MS) return billerCache.map;
   const map = await discoverAirtimeBillers(apiKey);
-  billerCache = { at: now, map };
+  if (isCompleteMap(map)) billerCache = { at: now, map };
   return map;
+}
+
+/**
+ * Whether a non-success payment response is AMBIGUOUS — a previous submission
+ * with the same reference may have landed, so retrying could double-charge.
+ * A duplicate-reference error is ambiguous; an unparseable body is too (we
+ * cannot tell what happened). A clear, non-duplicate error is a definite failure.
+ */
+function isAmbiguousFailure(message: string, body: FlwEnvelope<FlwPaymentData> | null): boolean {
+  if (!body) return true;
+  return /duplicate|already (been )?(used|processed|initiated|submitted)|reference.*already/i.test(
+    message,
+  );
 }
 
 /** Build a Flutterwave Bills airtime provider bound to `apiKey`. */
@@ -254,7 +318,7 @@ function createFlutterwaveProvider(apiKey: string): VtuProvider {
       }
 
       try {
-        const res = await fetch(
+        const res = await flwFetch(
           `${FLUTTERWAVE_BASE}/billers/${biller.billerCode}/items/${biller.itemCode}/payment`,
           {
             method: "POST",
@@ -264,17 +328,28 @@ function createFlutterwaveProvider(apiKey: string): VtuProvider {
         );
         const body = (await res.json().catch(() => null)) as FlwEnvelope<FlwPaymentData> | null;
         if (body?.status === "success") {
-          const providerRef = body.data?.tx_ref ?? body.data?.reference ?? reference;
-          return { ok: true, providerRef };
+          // A confirmed success MUST carry the provider transaction ref; without
+          // it we cannot claim the recharge landed, so treat it as UNSURE.
+          const txRef = body.data?.tx_ref?.trim();
+          if (txRef) return { ok: true, providerRef: txRef };
+          return {
+            ok: false,
+            unsure: true,
+            error: "Flutterwave returned success without a tx_ref (unconfirmed).",
+          };
         }
-        return {
-          ok: false,
-          error: body?.message ?? `Flutterwave bill payment failed (HTTP ${res.status}).`,
-        };
+        const message = body?.message ?? `Flutterwave bill payment failed (HTTP ${res.status}).`;
+        if (isAmbiguousFailure(message, body)) {
+          // The first payment may have gone through; a retry could double-charge.
+          return { ok: false, unsure: true, error: message };
+        }
+        return { ok: false, error: message };
       } catch (err) {
+        // Network error / timeout — the payment MAY have been submitted.
         return {
           ok: false,
-          error: `Flutterwave bill payment request failed: ${
+          unsure: true,
+          error: `Flutterwave bill payment request failed (outcome unknown): ${
             err instanceof Error ? err.message : String(err)
           }`,
         };

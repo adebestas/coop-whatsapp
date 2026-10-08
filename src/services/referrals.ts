@@ -299,8 +299,8 @@ type RewardPrep =
  * Outcomes (never throws):
  *  - wallet      → credits the referrer's wallet (balanced journal) → `rewarded`
  *  - bank ok     → payout to the referrer's saved account           → `rewarded`
- *  - bank unsure → stays `rewarded`, audited for reconciliation    → no retry
- *  - bank failed / airtime gated / any error → stays `qualified`   → retryable
+ *  - bank/airtime unsure → stays `rewarded`, audited for reconciliation → no retry
+ *  - bank failed / airtime gated / any other error → stays `qualified`  → retryable
  */
 export async function payReferralReward(
   coopId: string,
@@ -422,11 +422,33 @@ export async function payReferralReward(
       const result = await provider.recharge({
         phone,
         // `amount` is Kobo, matching the reward snapshot (`rewardAmount`).
-        // The (future) VTU/Flutterwave adapter converts kobo → naira at the seam.
+        // The VTU adapter converts kobo → naira at the seam.
         amountKobo: amount,
         reference: `REFERRAL-${referralId}`,
       });
-      if (!result.ok) throw new Error(result.error ?? "airtime recharge failed");
+      if (!result.ok) {
+        if (result.unsure) {
+          // The provider call may have landed (network error / timeout / an
+          // ambiguous duplicate-reference response). A retry with the same
+          // deterministic reference could double-recharge, so keep it `rewarded`
+          // and audit for reconciliation — exactly like the bank `unsure` path.
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: "",
+            actorId: referrerId,
+            action: "referral.reward.unconfirmed",
+            targetType: "referral",
+            targetId: referralId,
+            amount,
+            detail: `Airtime referral reward of ${formatBalance(amount)} to ${phone} was submitted but is UNCONFIRMED (${result.error ?? "outcome unknown"}) — reconcile before any retry.`,
+          }).catch(() => {});
+          return {
+            ok: true,
+            message: `Referral reward submitted but UNCONFIRMED — it will be reconciled; do NOT retry.`,
+          };
+        }
+        throw new Error(result.error ?? "airtime recharge failed");
+      }
       paidTo = `${phone} (airtime)`;
     } else {
       throw new Error(`unknown reward type "${rewardType}"`);
