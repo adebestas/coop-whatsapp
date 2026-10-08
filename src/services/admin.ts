@@ -92,6 +92,14 @@ import {
   getActiveOmbudsman,
   type CaseDetail,
 } from "./ombudsman.js";
+import {
+  generateReport,
+  listReports,
+  markFiled,
+  setRegulatorProfile,
+  type PackType,
+  type PeriodType,
+} from "./regulator-reporting.js";
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
 
@@ -1227,6 +1235,86 @@ export async function handleAdminCommand(
           )
           .join("\n");
         await sendText({ to: phone, text: `*Recent activity*\n\n${body}` });
+        return true;
+      }
+
+      case "regreport": {
+        // `regreport filed <id>` marks a generated pack as filed.
+        if (args[0]?.toLowerCase() === "filed") {
+          const res = await markFiled(coopId, args[1] ?? "", { id: admin.id, phone });
+          await sendText({ to: phone, text: res.message });
+          return true;
+        }
+        const period = args[0];
+        const packRaw = args[1]?.toLowerCase();
+        if (
+          !period ||
+          !/^\d{4}-\d{2}$/.test(period) ||
+          (packRaw !== "statutory" && packRaw !== "nfiu" && packRaw !== "both")
+        ) {
+          await sendText({
+            to: phone,
+            text:
+              "Usage: *regreport <YYYY-MM> <statutory|nfiu|both> [monthly|quarterly]*.\n" +
+              "Mark one filed: *regreport filed <id>*.",
+          });
+          return true;
+        }
+        const periodType: PeriodType = args[2]?.toLowerCase() === "quarterly" ? "quarterly" : "monthly";
+        const gen = await generateReport(coopId, period, periodType, packRaw as PackType, admin.id);
+        await sendText({ to: phone, text: gen.message });
+        return true;
+      }
+
+      case "regulatorconfig": {
+        // regulatorconfig [label...] [type] [email] [monthlyDueDay] [quarterlyDueDay]
+        const cfg: {
+          label?: string;
+          type?: string;
+          contactEmail?: string;
+          monthlyDueDay?: number;
+          quarterlyDueDay?: number;
+        } = {};
+        const rest = [...args];
+        if (rest.length && /^\d{1,2}$/.test(rest[rest.length - 1])) {
+          cfg.quarterlyDueDay = Number(rest.pop());
+        }
+        if (rest.length && /^\d{1,2}$/.test(rest[rest.length - 1])) {
+          cfg.monthlyDueDay = Number(rest.pop());
+        }
+        if (rest.length && rest[rest.length - 1].includes("@")) {
+          cfg.contactEmail = rest.pop();
+        }
+        const typeIdx = rest
+          .map((t, i) => ({ t, i }))
+          .filter(({ t }) => ["ministry", "cbn", "nfiu", "custom"].includes(t.toLowerCase()))
+          .map(({ i }) => i)
+          .pop();
+        if (typeIdx !== undefined) cfg.type = rest.splice(typeIdx, 1)[0].toLowerCase();
+        const cfgLabel = rest.join(" ").trim();
+        if (cfgLabel) cfg.label = cfgLabel;
+        const res = await setRegulatorProfile(coopId, cfg, { id: admin.id, phone });
+        await sendText({ to: phone, text: res.message });
+        return true;
+      }
+
+      case "regreportstatus": {
+        const res = await listReports(coopId);
+        if (!res.reports || res.reports.length === 0) {
+          await sendText({ to: phone, text: res.message });
+          return true;
+        }
+        const lines = res.reports.map((r) => {
+          const due = r.dueAt ? r.dueAt.toISOString().slice(0, 10) : "—";
+          const flag = r.status === "filed" ? "✅ filed" : "⏳ generated";
+          return `• *${r.period}* ${r.periodType} ${r.packType} — ${flag} (due ${due}) · id ${r.id.slice(-6)}`;
+        });
+        await sendText({
+          to: phone,
+          text:
+            `*📋 Regulator packs (${res.reports.length})*\n\n${lines.join("\n")}\n\n` +
+            `Mark one filed: *regreport filed <id>*.`,
+        });
         return true;
       }
 

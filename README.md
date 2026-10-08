@@ -546,6 +546,33 @@ configured salaries.
 files, saves them under `exports/`, emails download links to the requesting super
 admin (SMTP config), and returns dashboard links. Exports are audited.
 
+## Regulator reporting
+
+Cooperatives file **statutory financial returns** and **NFIU AML summaries** with
+their regulator (state Ministry of Cooperatives, CBN, NFIU, or a custom label).
+Both are produced as **Excel + PDF + CSV** from existing ledger/AML data — pack
+generation is read-only and adds no new accounting.
+
+- **Configure the regulator** — `regulatorconfig <label> [type] [email] [monthlyDue] [quarterlyDue]`
+  (type is one of `ministry`, `cbn`, `nfiu`, `custom`; due days default to the
+  10th for monthly returns and the 15th for quarterly). Setting a regulator also
+  switches scheduled reporting on.
+- **Generate on demand** — `regreport <YYYY-MM> <statutory|nfiu|both> [monthly|quarterly]`
+  writes the pack, archives it under `exports/`, and replies with the file paths
+  and the filing due date.
+- **Scheduled packs** — a daily scheduler job generates the monthly pack after
+  month-end and the quarterly pack after quarter-end for every coop with
+  reporting enabled, and reminds admins when a pack's filing due date is near or
+  past.
+- **Track filing** — `regreportstatus` lists generated/filed packs; once
+  submitted to the regulator, `regreport filed <id>` marks it filed. Filing is
+  always manual (no regulator-portal submission). Every generation, config change
+  and filing action is audited.
+
+Statutory packs contain the balance sheet, profit & loss, PAR aging, PEARLS
+ratios, and membership/savings/loans summaries. NFIU packs contain STR/SAR counts
+by status and the large-transaction (≥ ₦5M) list. All admin-only.
+
 ## Guarantor default deductions
 
 When a loan is **2+ months overdue**, each confirmed guarantor gets a

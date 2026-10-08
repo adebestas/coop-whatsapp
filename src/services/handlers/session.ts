@@ -226,7 +226,11 @@ export function buildAdminMenu(): string {
     `• *risk* — AI loan risk assessment\n` +
     `• *par* — portfolio-at-risk aging report\n` +
     `• *provisionrates* — loan-loss provision rates\n` +
-    `• *provision* — run the monthly loan-loss provision (super admin)\n\n` +
+    `• *provision* — run the monthly loan-loss provision (super admin)\n` +
+    `• *regulatorconfig <label> [type] [email] [monthlyDue] [quarterlyDue]* — set the regulator to file with\n` +
+    `• *regreport <YYYY-MM> <statutory\\|nfiu\\|both>* — generate a regulator pack\n` +
+    `• *regreportstatus* — view generated/filed regulator packs\n` +
+    `• *regreport filed <id>* — mark a regulator pack filed\n\n` +
     `*Committees (super admin):* *addcommittee <credit\\|supervisory\\|board> <name> [size]*, *appoint <type> <member code> [chair]*, *removecommittee <type> <member code>*, *committees*\n` +
     `*Committees (members):* *cvote <loan id> approve\\|reject*, *committeequeue*, *supervisoryfreeze <member code> [reason]*, *supervisoryunfreeze <member code>*\n\n` +
     `*Meetings:* *startmeeting <agm\\|sgm> <title> [quorum%]*, *openmeeting <id>*, *closemeeting <id>*, *addmotion <meeting id> <title> \\| <description> [kind]*, *closemotion <id>*, *meetingminutes <id>*\n\n` +

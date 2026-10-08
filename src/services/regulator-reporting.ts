@@ -422,3 +422,215 @@ export async function generateReport(
     files,
   };
 }
+
+/** Valid `RegulatorProfile.type` values (no Prisma enum — plain strings). */
+const REGULATOR_TYPES = new Set(["ministry", "cbn", "nfiu", "custom"]);
+
+/** A compact view of a `RegulatorReport` for the admin console. */
+export interface ReportSummary {
+  id: string;
+  period: string;
+  periodType: string;
+  packType: string;
+  status: string;
+  dueAt: Date | null;
+  filedAt: Date | null;
+  files: { xlsx: string; pdf: string; csv: string } | null;
+}
+
+/**
+ * Configure (create or update) a coop's active `RegulatorProfile`: the regulator
+ * label/type, optional contact email, and the monthly/quarterly filing due days.
+ * Also flips `CooperativeConfig.regulatorReportingEnabled` on so the scheduler
+ * begins generating packs. Coop-scoped write via `withTx` + `setCoopContext`,
+ * audited as `regulator.profile_set`.
+ */
+export async function setRegulatorProfile(
+  coopId: string,
+  input: {
+    label?: string;
+    type?: string;
+    contactEmail?: string;
+    monthlyDueDay?: number;
+    quarterlyDueDay?: number;
+  },
+  actor: { id: string; phone: string },
+): Promise<{ ok: boolean; message: string }> {
+  const type = input.type?.trim().toLowerCase();
+  if (type && !REGULATOR_TYPES.has(type)) {
+    return {
+      ok: false,
+      message: `Unknown regulator type *${input.type}*. Use *ministry*, *cbn*, *nfiu* or *custom*.`,
+    };
+  }
+  for (const [label, day] of [
+    ["Monthly", input.monthlyDueDay],
+    ["Quarterly", input.quarterlyDueDay],
+  ] as const) {
+    if (day !== undefined && (!Number.isInteger(day) || day < 1 || day > 28)) {
+      return { ok: false, message: `${label} due day must be between 1 and 28.` };
+    }
+  }
+
+  const label = input.label?.trim();
+  const existing = await prisma.regulatorProfile.findFirst({
+    where: { cooperativeId: coopId, active: true },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!existing && !label) {
+    return {
+      ok: false,
+      message:
+        "Provide a regulator label, e.g. *regulatorconfig Lagos State Ministry ministry 10 15*.",
+    };
+  }
+
+  const profile = await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    if (existing) {
+      return tx.regulatorProfile.update({
+        where: { id: existing.id },
+        data: {
+          ...(label ? { label } : {}),
+          ...(type ? { type } : {}),
+          ...(input.contactEmail !== undefined ? { contactEmail: input.contactEmail || null } : {}),
+          ...(input.monthlyDueDay !== undefined ? { monthlyDueDay: input.monthlyDueDay } : {}),
+          ...(input.quarterlyDueDay !== undefined ? { quarterlyDueDay: input.quarterlyDueDay } : {}),
+        },
+      });
+    }
+    return tx.regulatorProfile.create({
+      data: {
+        cooperativeId: coopId,
+        label: label!,
+        type: type ?? "custom",
+        contactEmail: input.contactEmail || null,
+        monthlyDueDay: input.monthlyDueDay ?? DEFAULT_DUE.monthlyDueDay,
+        quarterlyDueDay: input.quarterlyDueDay ?? DEFAULT_DUE.quarterlyDueDay,
+      },
+    });
+  });
+
+  // A configured regulator means the coop now files returns — switch scheduled
+  // generation on so the scheduler produces the packs.
+  await prisma.cooperativeConfig.upsert({
+    where: { cooperativeId: coopId },
+    create: { cooperativeId: coopId, regulatorReportingEnabled: true },
+    update: { regulatorReportingEnabled: true },
+  });
+
+  await audit({
+    cooperativeId: coopId,
+    actorPhone: actor.phone,
+    actorId: actor.id,
+    actorRole: "admin",
+    action: "regulator.profile_set",
+    targetType: "regulatorProfile",
+    targetId: profile.id,
+    detail: `Regulator set to ${profile.label} (${profile.type}); monthly due ${profile.monthlyDueDay}, quarterly due ${profile.quarterlyDueDay}`,
+  });
+
+  return {
+    ok: true,
+    message:
+      `✅ Regulator set to *${profile.label}* (${profile.type}).\n` +
+      `🗓️ Monthly returns due day *${profile.monthlyDueDay}*, quarterly due day *${profile.quarterlyDueDay}*. ` +
+      `Scheduled packs are now enabled.`,
+  };
+}
+
+/**
+ * Mark a generated regulator pack as filed. `reportId` may be a full id or a
+ * unique suffix (matching the shorter ids shown in chat). Coop-scoped write via
+ * `withTx` + `setCoopContext`, audited as `regulator.report_filed`.
+ */
+export async function markFiled(
+  coopId: string,
+  reportId: string,
+  actor: { id: string; phone: string },
+): Promise<{ ok: boolean; message: string }> {
+  const ref = reportId?.trim();
+  if (!ref) return { ok: false, message: "Usage: *regreport filed <report id>*." };
+
+  const report = await prisma.regulatorReport.findFirst({
+    where: { cooperativeId: coopId, id: { endsWith: ref } },
+    orderBy: { generatedAt: "desc" },
+  });
+  if (!report) {
+    return { ok: false, message: `No regulator report matching *${ref}* in your cooperative.` };
+  }
+  if (report.status === "filed") {
+    return {
+      ok: true,
+      message: `ℹ️ The *${report.period}* ${report.periodType} pack is already marked filed.`,
+    };
+  }
+
+  const filedAt = new Date();
+  await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+    await tx.regulatorReport.update({
+      where: { id: report.id },
+      data: { status: "filed", filedAt },
+    });
+  });
+
+  await audit({
+    cooperativeId: coopId,
+    actorPhone: actor.phone,
+    actorId: actor.id,
+    actorRole: "admin",
+    action: "regulator.report_filed",
+    targetType: "regulatorReport",
+    targetId: report.id,
+    detail: `${report.periodType} ${report.packType} pack for ${report.period} marked filed`,
+  });
+
+  return {
+    ok: true,
+    message: `✅ *${report.period}* ${report.periodType} regulator pack marked *filed*.`,
+  };
+}
+
+/** List a coop's generated/filed regulator packs, newest due first. */
+export async function listReports(
+  coopId: string,
+): Promise<{ ok: boolean; message: string; reports?: ReportSummary[] }> {
+  const rows = await prisma.regulatorReport.findMany({
+    where: { cooperativeId: coopId },
+    orderBy: [{ dueAt: "desc" }, { generatedAt: "desc" }],
+    take: 50,
+  });
+
+  const reports: ReportSummary[] = rows.map((r) => {
+    let files: ReportSummary["files"] = null;
+    if (r.files) {
+      try {
+        files = JSON.parse(r.files) as ReportSummary["files"];
+      } catch {
+        files = null;
+      }
+    }
+    return {
+      id: r.id,
+      period: r.period,
+      periodType: r.periodType,
+      packType: r.packType,
+      status: r.status,
+      dueAt: r.dueAt,
+      filedAt: r.filedAt,
+      files,
+    };
+  });
+
+  if (reports.length === 0) {
+    return {
+      ok: true,
+      message:
+        "No regulator packs generated yet. Use *regreport <period> <statutory|nfiu|both>* to create one.",
+      reports,
+    };
+  }
+
+  return { ok: true, message: `*📋 Regulator packs (${reports.length})*`, reports };
+}

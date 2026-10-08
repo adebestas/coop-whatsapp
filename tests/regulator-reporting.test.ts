@@ -8,10 +8,14 @@ import {
   statutoryPack,
   nfiuPack,
   generateReport,
+  setRegulatorProfile,
+  markFiled,
+  listReports,
   type PackType,
 } from "../src/services/regulator-reporting.js";
 import { runRegulatorReports } from "../src/services/scheduler.js";
-import { notifyMember } from "../src/lib/messaging.js";
+import { handleAdminCommand } from "../src/services/admin.js";
+import { notifyMember, sendText } from "../src/lib/messaging.js";
 
 async function makeContrib(
   coopId: string,
@@ -555,5 +559,239 @@ describe("runRegulatorReports", () => {
     const created = await runRegulatorReports(new Date("2026-04-05T12:00:00Z"));
     expect(created).toBe(0);
     expect(await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } })).toBe(0);
+  });
+});
+
+describe("setRegulatorProfile", () => {
+  it("creates the profile, enables scheduled reporting and audits", async () => {
+    const coop = await createTestCoop("REG20");
+    const admin = await createTestMember(coop.id, { phone: "2348000010030", role: "superadmin" });
+
+    const res = await setRegulatorProfile(
+      coop.id,
+      {
+        label: "Lagos State Ministry of Cooperatives",
+        type: "ministry",
+        contactEmail: "returns@lagos.gov.ng",
+        monthlyDueDay: 12,
+        quarterlyDueDay: 20,
+      },
+      { id: admin.id, phone: admin.phone },
+    );
+    expect(res.ok).toBe(true);
+
+    const profile = await prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coop.id, active: true },
+    });
+    expect(profile).not.toBeNull();
+    expect(profile!.label).toBe("Lagos State Ministry of Cooperatives");
+    expect(profile!.type).toBe("ministry");
+    expect(profile!.contactEmail).toBe("returns@lagos.gov.ng");
+    expect(profile!.monthlyDueDay).toBe(12);
+    expect(profile!.quarterlyDueDay).toBe(20);
+
+    const cfg = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coop.id } });
+    expect(cfg?.regulatorReportingEnabled).toBe(true);
+
+    const audited = await prisma.auditLog.findFirst({
+      where: { cooperativeId: coop.id, action: "regulator.profile_set" },
+    });
+    expect(audited).not.toBeNull();
+  });
+
+  it("updates the existing active profile in place rather than adding another", async () => {
+    const coop = await createTestCoop("REG21");
+    const admin = await createTestMember(coop.id, { phone: "2348000010031", role: "superadmin" });
+    const actor = { id: admin.id, phone: admin.phone };
+
+    await setRegulatorProfile(coop.id, { label: "Ministry A", type: "ministry" }, actor);
+    const res = await setRegulatorProfile(coop.id, { label: "NFIU Unit", type: "nfiu" }, actor);
+    expect(res.ok).toBe(true);
+
+    const profiles = await prisma.regulatorProfile.findMany({ where: { cooperativeId: coop.id } });
+    expect(profiles).toHaveLength(1);
+    expect(profiles[0].label).toBe("NFIU Unit");
+    expect(profiles[0].type).toBe("nfiu");
+  });
+
+  it("rejects an unknown regulator type without writing", async () => {
+    const coop = await createTestCoop("REG22");
+    const admin = await createTestMember(coop.id, { phone: "2348000010032", role: "superadmin" });
+
+    const res = await setRegulatorProfile(
+      coop.id,
+      { label: "Bad", type: "irs" },
+      { id: admin.id, phone: admin.phone },
+    );
+    expect(res.ok).toBe(false);
+    expect(await prisma.regulatorProfile.count({ where: { cooperativeId: coop.id } })).toBe(0);
+  });
+
+  it("requires a label when no profile exists yet", async () => {
+    const coop = await createTestCoop("REG23");
+    const admin = await createTestMember(coop.id, { phone: "2348000010033", role: "superadmin" });
+
+    const res = await setRegulatorProfile(
+      coop.id,
+      { type: "ministry" },
+      { id: admin.id, phone: admin.phone },
+    );
+    expect(res.ok).toBe(false);
+    expect(await prisma.regulatorProfile.count({ where: { cooperativeId: coop.id } })).toBe(0);
+  });
+});
+
+describe("markFiled", () => {
+  it("sets status filed, stamps filedAt and audits", async () => {
+    const coop = await createTestCoop("REG24");
+    const admin = await createTestMember(coop.id, { phone: "2348000010034", role: "superadmin" });
+
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026-03",
+        periodType: "monthly",
+        packType: "both",
+        status: "generated",
+        dueAt: new Date("2026-04-10T00:00:00Z"),
+      },
+    });
+
+    const res = await markFiled(coop.id, report.id, { id: admin.id, phone: admin.phone });
+    expect(res.ok).toBe(true);
+
+    const updated = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(updated!.status).toBe("filed");
+    expect(updated!.filedAt).toBeInstanceOf(Date);
+
+    const audited = await prisma.auditLog.findFirst({
+      where: { cooperativeId: coop.id, action: "regulator.report_filed", targetId: report.id },
+    });
+    expect(audited).not.toBeNull();
+  });
+
+  it("resolves a report by id suffix and is a no-op when already filed", async () => {
+    const coop = await createTestCoop("REG25");
+    const admin = await createTestMember(coop.id, { phone: "2348000010035", role: "superadmin" });
+
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026-03",
+        periodType: "monthly",
+        packType: "statutory",
+        status: "generated",
+      },
+    });
+
+    const actor = { id: admin.id, phone: admin.phone };
+    const first = await markFiled(coop.id, report.id.slice(-6), actor);
+    expect(first.ok).toBe(true);
+    const second = await markFiled(coop.id, report.id, actor);
+    expect(second.ok).toBe(true);
+
+    const updated = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(updated!.status).toBe("filed");
+  });
+
+  it("reports failure for an unknown report id", async () => {
+    const coop = await createTestCoop("REG26");
+    const admin = await createTestMember(coop.id, { phone: "2348000010036", role: "superadmin" });
+
+    const res = await markFiled(coop.id, "does-not-exist", { id: admin.id, phone: admin.phone });
+    expect(res.ok).toBe(false);
+  });
+});
+
+describe("listReports", () => {
+  it("lists generated and filed packs for the cooperative", async () => {
+    const coop = await createTestCoop("REG27");
+    await prisma.regulatorReport.createMany({
+      data: [
+        {
+          cooperativeId: coop.id,
+          period: "2026-02",
+          periodType: "monthly",
+          packType: "both",
+          status: "filed",
+          filedAt: new Date("2026-03-09T00:00:00Z"),
+        },
+        {
+          cooperativeId: coop.id,
+          period: "2026-03",
+          periodType: "monthly",
+          packType: "both",
+          status: "generated",
+        },
+      ],
+    });
+
+    const res = await listReports(coop.id);
+    expect(res.ok).toBe(true);
+    expect(res.reports).toHaveLength(2);
+    const statuses = res.reports!.map((r) => r.status).sort();
+    expect(statuses).toEqual(["filed", "generated"]);
+    expect(res.message).toMatch(/regulator/i);
+  });
+
+  it("returns an empty list when nothing has been generated", async () => {
+    const coop = await createTestCoop("REG28");
+    const res = await listReports(coop.id);
+    expect(res.ok).toBe(true);
+    expect(res.reports).toEqual([]);
+  });
+});
+
+describe("regulator admin commands", () => {
+  it("configures the regulator, lists packs and marks one filed via chat", async () => {
+    const coop = await createTestCoop("REG29");
+    const admin = await createTestMember(coop.id, { phone: "2348000010039", role: "superadmin" });
+
+    await handleAdminCommand(admin.phone, "regulatorconfig", [
+      "Lagos",
+      "Ministry",
+      "ministry",
+      "returns@lagos.gov.ng",
+      "10",
+      "15",
+    ]);
+    const profile = await prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coop.id, active: true },
+    });
+    expect(profile?.label).toBe("Lagos Ministry");
+    expect(profile?.type).toBe("ministry");
+    expect(profile?.contactEmail).toBe("returns@lagos.gov.ng");
+    expect(profile?.monthlyDueDay).toBe(10);
+    expect(profile?.quarterlyDueDay).toBe(15);
+
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026-03",
+        periodType: "monthly",
+        packType: "both",
+        status: "generated",
+      },
+    });
+
+    vi.clearAllMocks();
+    await handleAdminCommand(admin.phone, "regreportstatus", []);
+    const listed = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => String(c[0].text))
+      .join("\n");
+    expect(listed).toMatch(/2026-03/);
+
+    await handleAdminCommand(admin.phone, "regreport", ["filed", report.id.slice(-6)]);
+    const updated = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(updated!.status).toBe("filed");
+  });
+
+  it("does not handle regulator commands for ordinary members", async () => {
+    const coop = await createTestCoop("REG30");
+    const member = await createTestMember(coop.id, { phone: "2348000010040" });
+
+    const handled = await handleAdminCommand(member.phone, "regreportstatus", []);
+    expect(handled).toBe(false);
   });
 });
