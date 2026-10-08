@@ -865,19 +865,20 @@ export async function runProactiveAlerts(now = new Date()): Promise<number> {
 const DEFAULT_SLA_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Notify every active platform ombudsman. Never throws. */
-async function notifyActiveOmbudsmen(text: string): Promise<void> {
-  const ombudsmen = await prisma.ombudsman.findMany({
-    where: { active: true },
-    select: { phone: true },
-  });
-  await Promise.all(ombudsmen.map((o) => sendText({ to: o.phone, text }))).catch(() => {});
+/** Notify the given active ombudsman phones. Never throws. */
+async function notifyOmbudsmen(phones: string[], text: string): Promise<void> {
+  if (phones.length === 0) return;
+  await Promise.all(phones.map((to) => sendText({ to, text }))).catch(() => {});
 }
 
 /**
  * Insert an `auto`-escalated case + its `escalated` event. Returns the case id,
  * or `null` when the unique `(cooperativeId, sourceType, sourceId)` index
  * already has a case for this source (P2002) — the idempotent re-tick path.
+ * The caller pre-filters already-cased sources, so the P2002 path is only a
+ * belt-and-braces guard for a race; it must never be the primary mechanism
+ * (an aborted statement would poison the shared per-coop transaction on
+ * PostgreSQL).
  */
 async function createAutoCaseOrSkip(data: {
   cooperativeId: string;
@@ -921,56 +922,80 @@ async function createAutoCaseOrSkip(data: {
  * Auto-escalate grievances left open past the cooperative's `ombudsmanSlaDays`.
  * For each cooperative, every `open` grievance older than the SLA cutoff that has
  * no existing case for its source gets a `Grievance`-sourced case with
- * `escalatedBy: "auto"`. One case per source is guaranteed by the partial unique
- * index, so overlapping ticks are idempotent (P2002 -> already escalated).
- * Audits each action, notifies active ombudsmen, and returns the number created.
+ * `escalatedBy: "auto"`. Idempotency is achieved by PRE-FILTERING already-cased
+ * sources out of the query — the shared per-coop transaction must never hit a
+ * P2002 (an aborted statement poisons the transaction on PostgreSQL). Audits each
+ * action, notifies active ombudsmen, and returns the number created. One coop's
+ * failure is logged and skipped so it cannot abort the remaining coops.
  */
 export async function runOmbudsmanEscalations(now = new Date()): Promise<number> {
+  // Load active ombudsmen once for the whole run, not per created case.
+  const ombudsmanPhones = (
+    await prisma.ombudsman.findMany({ where: { active: true }, select: { phone: true } })
+  ).map((o) => o.phone);
+
   let created = 0;
   await forEachCoop(async (coopId) => {
-    const config = await prisma.cooperativeConfig.findUnique({
-      where: { cooperativeId: coopId },
-      select: { ombudsmanSlaDays: true },
-    });
-    const slaDays = config?.ombudsmanSlaDays ?? DEFAULT_SLA_DAYS;
-    const cutoff = new Date(now.getTime() - slaDays * DAY_MS);
-    const slaDueAt = new Date(now.getTime() + slaDays * DAY_MS);
-
-    const stale = await prisma.grievance.findMany({
-      where: {
-        cooperativeId: coopId,
-        status: "open",
-        createdAt: { lt: cutoff },
-      },
-    });
-
-    for (const g of stale) {
-      const caseId = await createAutoCaseOrSkip({
-        cooperativeId: coopId,
-        memberId: g.memberId,
-        grievanceId: g.id,
-        summary: g.message,
-        slaDueAt,
+    try {
+      const config = await prisma.cooperativeConfig.findUnique({
+        where: { cooperativeId: coopId },
+        select: { ombudsmanSlaDays: true },
       });
-      if (!caseId) continue; // already escalated by a previous tick
-      created++;
+      const slaDays = config?.ombudsmanSlaDays ?? DEFAULT_SLA_DAYS;
+      const cutoff = new Date(now.getTime() - slaDays * DAY_MS);
+      const slaDueAt = new Date(now.getTime() + slaDays * DAY_MS);
 
-      await audit({
-        cooperativeId: coopId,
-        actorPhone: "system",
-        actorId: null,
-        actorRole: "system",
-        action: "ombudsman.case_escalated",
-        targetType: "ombudsman_case",
-        targetId: caseId,
-        detail: `auto-escalated grievance ${g.id} past ${slaDays}-day SLA: ${g.message}`,
-      }).catch(() => {});
+      // Pre-fetch sources already escalated for this coop and exclude them, so no
+      // insert can violate the unique index inside the shared transaction.
+      const alreadyCased = await prisma.ombudsmanCase.findMany({
+        where: { cooperativeId: coopId, sourceType: "grievance", sourceId: { not: null } },
+        select: { sourceId: true },
+      });
+      const casedIds = alreadyCased
+        .map((c) => c.sourceId)
+        .filter((s): s is string => s !== null);
 
-      await notifyActiveOmbudsmen(
-        `⚖️ *Auto-escalated ombudsman case* #${caseId.slice(-6)}\n\n` +
-          `Grievance open past the ${slaDays}-day SLA:\n${g.message}\n\n` +
-          `Reply *cases* to review.`,
-      );
+      const stale = await prisma.grievance.findMany({
+        where: {
+          cooperativeId: coopId,
+          status: "open",
+          createdAt: { lt: cutoff },
+          ...(casedIds.length ? { id: { notIn: casedIds } } : {}),
+        },
+      });
+
+      for (const g of stale) {
+        const caseId = await createAutoCaseOrSkip({
+          cooperativeId: coopId,
+          memberId: g.memberId,
+          grievanceId: g.id,
+          summary: g.message,
+          slaDueAt,
+        });
+        if (!caseId) continue; // raced with another tick — already escalated
+        created++;
+
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: "system",
+          actorId: null,
+          actorRole: "system",
+          action: "ombudsman.case_escalated",
+          targetType: "ombudsman_case",
+          targetId: caseId,
+          detail: `auto-escalated grievance ${g.id} past ${slaDays}-day SLA: ${g.message}`,
+        }).catch(() => {});
+
+        await notifyOmbudsmen(
+          ombudsmanPhones,
+          `⚖️ *Auto-escalated ombudsman case* #${caseId.slice(-6)}\n\n` +
+            `Grievance open past the ${slaDays}-day SLA:\n${g.message}\n\n` +
+            `Reply *cases* to review.`,
+        );
+      }
+    } catch (err) {
+      // One cooperative's failure must not abort escalation for the rest.
+      log.error("[scheduler] ombudsman SLA escalation failed", { coopId, err: String(err) });
     }
   });
   return created;

@@ -258,6 +258,39 @@ describe("auto-SLA escalation", () => {
     expect(count).toBe(0);
     expect(await prisma.ombudsmanCase.count({ where: { sourceId: g.id } })).toBe(0);
   });
+
+  it("a second tick over an already-escalated grievance creates no case and does not error", async () => {
+    const coop = await createTestCoop("OMB10");
+    const member = await createTestMember(coop.id, { phone: "2348000040091" });
+    await prisma.cooperativeConfig.create({
+      data: { cooperativeId: coop.id, ombudsmanSlaDays: 7 },
+    });
+    const g = await prisma.grievance.create({
+      data: {
+        cooperativeId: coop.id,
+        memberId: member.id,
+        message: "Case already open",
+        createdAt: new Date(Date.now() - 10 * DAY_MS),
+      },
+    });
+    // A case already exists for this source (e.g. a prior tick).
+    await prisma.ombudsmanCase.create({
+      data: {
+        cooperativeId: coop.id,
+        memberId: member.id,
+        sourceType: "grievance",
+        sourceId: g.id,
+        category: "other",
+        summary: "Case already open",
+        status: "open",
+        escalatedBy: "auto",
+      },
+    });
+
+    const count = await runOmbudsmanEscalations(new Date());
+    expect(count).toBe(0);
+    expect(await prisma.ombudsmanCase.count({ where: { sourceId: g.id } })).toBe(1);
+  });
 });
 
 describe("member escalate command", () => {
