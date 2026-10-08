@@ -22,15 +22,24 @@ export async function handleOnboardStart(phone: string): Promise<void> {
 }
 
 export async function handleJoinStart(phone: string, args: string[]): Promise<void> {
+  // Optional `ref <code>`: capture the referrer's member code so a referral can
+  // be recorded once the member is created. Unknown/malformed codes are rejected
+  // later (at record time) — the join itself always proceeds.
+  const refIdx = args.findIndex((a) => a.toLowerCase() === "ref");
+  const referrerCode = refIdx >= 0 ? args[refIdx + 1]?.toUpperCase() : undefined;
   if (args[0]) {
+    const data = {
+      joinCode: args[0].toUpperCase(),
+      ...(referrerCode ? { referrerCode } : {}),
+    };
     await prisma.session.upsert({
       where: { phone },
       create: {
         phone,
         state: "awaiting_name",
-        data: JSON.stringify({ joinCode: args[0].toUpperCase() }),
+        data: JSON.stringify(data),
       },
-      update: { state: "awaiting_name", data: JSON.stringify({ joinCode: args[0].toUpperCase() }) },
+      update: { state: "awaiting_name", data: JSON.stringify(data) },
     });
     await sendText({
       to: phone,

@@ -3,6 +3,7 @@ import { hashPin } from "../lib/security.js";
 import { audit } from "./audit.js";
 import { LIMITS, formatBalance } from "../lib/money.js";
 import { getCoopConfig } from "./coop-config.js";
+import { recordReferral, qualifyReferral } from "./referrals.js";
 import { getRedis } from "../lib/cache.js";
 
 export { formatBalance } from "../lib/money.js";
@@ -52,6 +53,7 @@ export async function findOrCreateMember(
   dateOfBirth?: Date,
   nextOfKin?: { name: string; phone: string },
   phoneVerified = false,
+  referrerCode?: string,
 ): Promise<JoinResult> {
   const coop = await prisma.cooperative.findUnique({ where: { code: coopCode } });
   if (!coop) {
@@ -124,6 +126,12 @@ export async function findOrCreateMember(
       wallet: { create: {} },
     },
   });
+
+  // Capture the referral (if the member joined with a `ref <code>`). Never let a
+  // bad/unknown code break onboarding — the referral is simply not recorded.
+  if (referrerCode) {
+    await recordReferral(coop.id, referrerCode, member.id).catch(() => {});
+  }
 
   return {
     ok: true,
@@ -352,6 +360,8 @@ export async function createContribution(
     balanceAfter: balance,
     detail: formatBalance(amount),
   });
+  // A member's first contribution qualifies any pending referral for them.
+  await qualifyReferral(member.cooperativeId, member.id).catch(() => {});
   return {
     ok: true,
     message: `✅ Saved ${formatBalance(amount)}.\nYour new balance is *${formatBalance(balance)}*.\n\nReply *balance* anytime to check.`,

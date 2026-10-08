@@ -684,6 +684,7 @@ export async function handleAwaitingInput(
         data.dateOfBirth ? new Date(data.dateOfBirth) : undefined,
         data.nokName && data.nokPhone ? { name: data.nokName, phone: data.nokPhone } : undefined,
         data.phoneVerified ?? false,
+        data.referrerCode,
       );
       // Log NDPR consent if consent was given during registration
       if (result.ok && result.memberId && data.consentGiven) {
