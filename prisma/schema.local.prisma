@@ -1180,6 +1180,7 @@ model CooperativeConfig {
   agmQuorumPercent         Int      @default(25)
   directDebitEnabled       Boolean  @default(false)
   directDebitMaxCap        Int      @default(0) // kobo; 0 = no extra coop cap
+  ombudsmanSlaDays         Int      @default(7) // days the ombudsman has to decide a case
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
@@ -1741,4 +1742,53 @@ model RefundRequest {
 
   @@index([cooperativeId, status])
   @@index([cooperativeId, memberId])
+}
+
+// Platform-level independent ombudsman (not tied to a cooperative).
+model Ombudsman {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String   @unique
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+// A case escalated to the ombudsman (a grievance or a dispute). Platform-level:
+// references a cooperative but is not coop-RLS-scoped.
+model OmbudsmanCase {
+  id            String    @id @default(cuid())
+  cooperativeId String
+  memberId      String
+  sourceType    String // grievance | dispute
+  sourceId      String?
+  category      String // loan_rejection | dividend | freeze | suspension | other
+  summary       String
+  status        String    @default("open") // open | investigating | decided | closed
+  escalatedBy   String // member | auto
+  slaDueAt      DateTime?
+  decision      String?
+  decisionById  String?
+  decidedAt     DateTime?
+  remedy        String? // JSON: { action, detail, appliedAt }
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  events        OmbudsmanCaseEvent[]
+
+  @@index([cooperativeId, status])
+  @@index([memberId])
+  @@index([status, slaDueAt])
+}
+
+// The case timeline.
+model OmbudsmanCaseEvent {
+  id        String   @id @default(cuid())
+  caseId    String
+  case      OmbudsmanCase @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  actorId   String
+  actorRole String // member | ombudsman | system
+  action    String // escalated | investigating | info_requested | decided | remedy_applied | closed
+  detail    String
+  createdAt DateTime @default(now())
+
+  @@index([caseId, createdAt])
 }
