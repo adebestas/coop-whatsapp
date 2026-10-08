@@ -1250,6 +1250,8 @@ export async function handleAdminCommand(
         if (
           !period ||
           !/^\d{4}-\d{2}$/.test(period) ||
+          Number(period.slice(5)) < 1 ||
+          Number(period.slice(5)) > 12 ||
           (packRaw !== "statutory" && packRaw !== "nfiu" && packRaw !== "both")
         ) {
           await sendText({
@@ -1276,10 +1278,15 @@ export async function handleAdminCommand(
           quarterlyDueDay?: number;
         } = {};
         const rest = [...args];
-        if (rest.length && /^\d{1,2}$/.test(rest[rest.length - 1])) {
+        const isDueDay = (s: string | undefined): boolean => s !== undefined && /^\d{1,2}$/.test(s);
+        if (
+          rest.length >= 2 &&
+          isDueDay(rest[rest.length - 1]) &&
+          isDueDay(rest[rest.length - 2])
+        ) {
           cfg.quarterlyDueDay = Number(rest.pop());
-        }
-        if (rest.length && /^\d{1,2}$/.test(rest[rest.length - 1])) {
+          cfg.monthlyDueDay = Number(rest.pop());
+        } else if (rest.length && isDueDay(rest[rest.length - 1])) {
           cfg.monthlyDueDay = Number(rest.pop());
         }
         if (rest.length && rest[rest.length - 1].includes("@")) {

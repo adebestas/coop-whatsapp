@@ -228,7 +228,7 @@ export function buildAdminMenu(): string {
     `• *provisionrates* — loan-loss provision rates\n` +
     `• *provision* — run the monthly loan-loss provision (super admin)\n` +
     `• *regulatorconfig <label> [type] [email] [monthlyDue] [quarterlyDue]* — set the regulator to file with\n` +
-    `• *regreport <YYYY-MM> <statutory\\|nfiu\\|both>* — generate a regulator pack\n` +
+    `• *regreport <YYYY-MM> <statutory\\|nfiu\\|both> [monthly\\|quarterly]* — generate a regulator pack\n` +
     `• *regreportstatus* — view generated/filed regulator packs\n` +
     `• *regreport filed <id>* — mark a regulator pack filed\n\n` +
     `*Committees (super admin):* *addcommittee <credit\\|supervisory\\|board> <name> [size]*, *appoint <type> <member code> [chair]*, *removecommittee <type> <member code>*, *committees*\n` +

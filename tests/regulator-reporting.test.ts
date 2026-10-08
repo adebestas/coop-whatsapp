@@ -794,4 +794,50 @@ describe("regulator admin commands", () => {
     const handled = await handleAdminCommand(member.phone, "regreportstatus", []);
     expect(handled).toBe(false);
   });
+
+  it("treats a single trailing due-day as the monthly due day", async () => {
+    const coop = await createTestCoop("REG31");
+    const admin = await createTestMember(coop.id, { phone: "2348000010041", role: "superadmin" });
+
+    await handleAdminCommand(admin.phone, "regulatorconfig", ["Lagos", "ministry", "12"]);
+
+    const profile = await prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coop.id, active: true },
+    });
+    expect(profile?.type).toBe("ministry");
+    expect(profile?.label).toBe("Lagos");
+    expect(profile?.monthlyDueDay).toBe(12);
+    expect(profile?.quarterlyDueDay).toBe(15);
+  });
+
+  it("keeps the two-number form as monthly then quarterly", async () => {
+    const coop = await createTestCoop("REG32");
+    const admin = await createTestMember(coop.id, { phone: "2348000010042", role: "superadmin" });
+
+    await handleAdminCommand(admin.phone, "regulatorconfig", ["Lagos", "ministry", "7", "21"]);
+
+    const profile = await prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coop.id, active: true },
+    });
+    expect(profile?.monthlyDueDay).toBe(7);
+    expect(profile?.quarterlyDueDay).toBe(21);
+  });
+
+  it("rejects an out-of-range period month without generating a report", async () => {
+    const coop = await createTestCoop("REG33");
+    const admin = await createTestMember(coop.id, { phone: "2348000010043", role: "superadmin" });
+
+    vi.clearAllMocks();
+    await handleAdminCommand(admin.phone, "regreport", ["2026-13", "both"]);
+    const text = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => String(c[0].text))
+      .join("\n");
+    expect(text).toMatch(/usage/i);
+    expect(await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } })).toBe(0);
+
+    vi.clearAllMocks();
+    await handleAdminCommand(admin.phone, "regreport", ["2026-00", "both"]);
+    expect(await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } })).toBe(0);
+  });
 });
