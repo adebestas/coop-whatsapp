@@ -19,6 +19,7 @@ import {
   openJuniorAccount,
 } from "../savings-products.js";
 import { listMandates } from "../mandates.js";
+import { escalateCase } from "../ombudsman.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 import { resolveProvider, listBanks, type Bank } from "../payments/index.js";
 import { savePayee } from "../../lib/beneficiaries.js";
@@ -900,6 +901,41 @@ export async function handleBankConfirmStep(
     data,
     `Authorize automatic debits of up to *${formatBalance(data.mandateCap ?? 0)}* per collection? Enter your 4-digit PIN to confirm.`,
   );
+}
+
+/**
+ * Escalate a cooperative matter (a grievance) to the independent, platform-level
+ * ombudsman. `escalate <grievance id> [reason]`.
+ */
+export async function handleEscalate(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    return;
+  }
+  const sourceId = args[0];
+  if (!sourceId) {
+    await sendText({
+      to: phone,
+      text:
+        "Usage: *escalate <grievance id> [reason]* — escalate an unresolved grievance to the independent ombudsman.\n" +
+        "Reply *grievances* to find your grievance id.",
+    });
+    return;
+  }
+  const reason = args.slice(1).join(" ").trim();
+  const result = await escalateCase(
+    member.cooperativeId,
+    member.id,
+    {
+      sourceType: "grievance",
+      sourceId,
+      category: "other",
+      summary: reason || "Member escalation of an unresolved grievance",
+    },
+    { id: member.id, phone },
+  );
+  await sendText({ to: phone, text: result.message });
 }
 
 /** Save a favorite payee through the guided bank flow: account -> bank -> confirm. */

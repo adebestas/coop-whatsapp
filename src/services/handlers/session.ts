@@ -168,7 +168,8 @@ export function buildFullMenu(
     `• *dividend <rate>* — dividend calculator\n` +
     `• *meetings* — general meetings; *attend <id>* / *proxy <id> <code>*\n` +
     `• *motions <meeting id>* / *motionvote <motion id> <yes\\|no\\|abstain>*\n` +
-    `• *byelaws* / *grievance <msg>* / *reserveinfo*\n\n` +
+    `• *byelaws* / *grievance <msg>* / *reserveinfo*\n` +
+    `• *escalate <grievance id> [reason]* — escalate to the independent ombudsman\n\n` +
     `*🎓 Learn*\n` +
     `• *class* / *next* — financial literacy lessons\n\n` +
     `*⚙️ Settings & help*\n` +

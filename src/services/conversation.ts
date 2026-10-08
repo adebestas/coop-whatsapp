@@ -92,6 +92,7 @@ import {
   handleMandateStatus,
   handleCancelMandate,
   handleAddPayee,
+  handleEscalate,
 } from "./handlers/money.js";
 import {
   handleValidateClaim,
@@ -1034,6 +1035,11 @@ async function handleMessageInner(
           `⚠️ If no response by the deadline, the matter will be *automatically escalated* to the cooperative's dispute resolution committee.\n\n` +
           `Reply *grievances* to check status.`,
       });
+      break;
+    }
+
+    case "escalate": {
+      await handleEscalate(phone, args);
       break;
     }
 
