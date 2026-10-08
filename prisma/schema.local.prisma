@@ -81,6 +81,7 @@ subscription       Subscription?
   mandates           Mandate[]
   refunds            RefundRequest[]
   referrals          Referral[]
+  referralWithdrawals ReferralWithdrawal[]
   regulatorProfiles  RegulatorProfile[]
   regulatorReports   RegulatorReport[]
 
@@ -280,6 +281,8 @@ model Member {
   refunds                 RefundRequest[]     @relation("MemberRefunds")
   referralsMade           Referral[]          @relation("Referrer")
   referralReceived        Referral?           @relation("ReferredMember")
+  referralBonusBalance    Int                 @default(0) // kobo; withdrawable referral bonus
+  referralWithdrawals     ReferralWithdrawal[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -1773,6 +1776,26 @@ model Referral {
   createdAt        DateTime  @default(now())
 
   @@index([cooperativeId, referrerId])
+  @@index([cooperativeId, status])
+}
+
+// A member-initiated withdrawal from their accumulated referral bonus.
+model ReferralWithdrawal {
+  id            String    @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId      String
+  member        Member    @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  amount        Int // kobo
+  destination   String // wallet | bank | airtime
+  phone         String? // airtime destination number
+  status        String    @default("pending") // pending | paid | failed
+  providerRef   String?
+  note          String?
+  createdAt     DateTime  @default(now())
+  paidAt        DateTime?
+
+  @@index([cooperativeId, memberId])
   @@index([cooperativeId, status])
 }
 

@@ -41,6 +41,7 @@ BEGIN
     'Mandate','MandateDebit',
     'RefundRequest',
     'Referral',
+    'ReferralWithdrawal',
     'RegulatorProfile','RegulatorReport',
     'Meeting','Motion',
     'Unit','Vote','WithdrawalRequest',
