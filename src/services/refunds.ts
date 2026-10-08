@@ -18,17 +18,6 @@ export interface RefundResult {
   refundId?: string;
 }
 
-export interface ApproveRefundOptions {
-  /**
-   * Set ONLY by the platform-ombudsman remedy path (`applyRemedy` in
-   * `ombudsman.ts`), after it has verified an active `Ombudsman` phone. The
-   * independent ombudsman is empowered to approve a remedy refund directly, so
-   * the super-admin maker-checker requirement is bypassed for this call. Never
-   * set from a chat/admin handler.
-   */
-  ombudsmanApproved?: boolean;
-}
-
 /** Resolve a refund by full id or a trailing id suffix, scoped to one coop. */
 async function resolveRefund(coopId: string, idOrSuffix: string) {
   if (!idOrSuffix) return null;
@@ -112,20 +101,62 @@ export async function recommendRefund(
 }
 
 /**
- * Checker step: only a super admin can approve. Claims the request atomically
- * (`pending` -> `approved`), pays the member's saved bank account through the
- * shared payout path, then marks `paid` (or `failed` and alerts). Reuses the
- * deterministic `Payout` row + balanced `expense:refund` / `assets:bank` journal.
+ * Checker step: only a super admin can approve. The maker-checker gate is kept
+ * intact for every chat/admin caller; it delegates to the shared payout core.
  */
 export async function approveRefund(
   coopId: string,
   refundId: string,
   actor: RefundActor,
-  options: ApproveRefundOptions = {},
 ): Promise<RefundResult> {
-  if (!options.ombudsmanApproved && actor.role !== "superadmin") {
+  if (actor.role !== "superadmin") {
     return { ok: false, message: "Only *super admins* can approve refunds." };
   }
+  return approveRefundCore(coopId, refundId, actor);
+}
+
+/**
+ * Ombudsman remedy path: the independent platform ombudsman is empowered to
+ * approve a remedy refund directly, bypassing the super-admin requirement. This
+ * helper **verifies the caller is an active ombudsman itself** (phone match), so
+ * it cannot be used as a blanket bypass; it is not reachable from any chat/admin
+ * handler.
+ */
+export async function approveRefundAsOmbudsman(
+  coopId: string,
+  refundId: string,
+  actor: { id: string; phone: string },
+): Promise<RefundResult> {
+  const ombudsman = await prisma.ombudsman.findFirst({
+    where: { phone: actor.phone, active: true },
+    select: { id: true },
+  });
+  if (!ombudsman) {
+    return {
+      ok: false,
+      message: "Only the independent ombudsman can approve a remedy refund.",
+    };
+  }
+  return approveRefundCore(coopId, refundId, {
+    id: actor.id,
+    phone: actor.phone,
+    role: "ombudsman",
+  });
+}
+
+/**
+ * Shared payout core. Callers MUST have already authorized the approver
+ * (`approveRefund` enforces super-admin; `approveRefundAsOmbudsman` enforces an
+ * active ombudsman). Claims the request atomically (`pending` -> `approved`),
+ * pays the member's saved bank account through the shared payout path, then
+ * marks `paid` (or `failed` and alerts). Reuses the deterministic `Payout` row +
+ * balanced `expense:refund` / `assets:bank` journal.
+ */
+async function approveRefundCore(
+  coopId: string,
+  refundId: string,
+  actor: RefundActor,
+): Promise<RefundResult> {
   const refund = await resolveRefund(coopId, refundId);
   if (!refund) return { ok: false, message: "Refund request not found." };
   // A `failed` refund is retryable ONLY when the provider explicitly declined

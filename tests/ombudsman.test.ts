@@ -655,4 +655,57 @@ describe("ombudsman remedies", () => {
     expect(refund?.status).toBe("paid");
     expect(refund?.amount).toBe(500000);
   });
+
+  it("atomically claims the case so concurrent remedies cause exactly one payout", async () => {
+    const { member, caseId, actor } = await seedRemedyCase({ bank: true });
+
+    const results = await Promise.all([
+      applyRemedy(caseId, "refund", { amount: 500000, reason: "first" }, actor),
+      applyRemedy(caseId, "refund", { amount: 500000, reason: "second" }, actor),
+    ]);
+
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(payoutSpy).toHaveBeenCalledTimes(1);
+    expect(await prisma.payout.count()).toBe(1);
+    expect(await prisma.refundRequest.count({ where: { status: "paid" } })).toBe(1);
+
+    const c = await prisma.ombudsmanCase.findUnique({ where: { id: caseId } });
+    expect(JSON.parse(c!.remedy!).status).toBe("applied");
+  });
+
+  it("resets the claim when a refund payout fails cleanly so it can be retried", async () => {
+    // No saved bank account → the refund cannot be paid (no money moves).
+    const { member, caseId, actor } = await seedRemedyCase({});
+
+    const failed = await applyRemedy(
+      caseId,
+      "refund",
+      { amount: 500000, reason: "retry me" },
+      actor,
+    );
+    expect(failed.ok).toBe(false);
+    // The claim is released so a retry is possible, and the orphan refund is
+    // rejected so it cannot be paid independently.
+    const afterFail = await prisma.ombudsmanCase.findUnique({ where: { id: caseId } });
+    expect(afterFail!.remedy).toBeNull();
+    expect(await prisma.refundRequest.count({ where: { status: "paid" } })).toBe(0);
+    expect(await prisma.refundRequest.count()).toBe(1);
+    expect((await prisma.refundRequest.findFirst())!.status).toBe("rejected");
+
+    // Add a bank account, then retry — the remedy now succeeds.
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
+    });
+    const retry = await applyRemedy(
+      caseId,
+      "refund",
+      { amount: 500000, reason: "retry me" },
+      actor,
+    );
+    expect(retry.ok).toBe(true);
+    expect(await prisma.refundRequest.count({ where: { status: "paid" } })).toBe(1);
+    expect(await prisma.payout.count()).toBe(1);
+    expect(payoutSpy).toHaveBeenCalledTimes(1);
+  });
 });

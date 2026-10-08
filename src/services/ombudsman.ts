@@ -2,7 +2,7 @@ import { prisma, withTx } from "../lib/prisma.js";
 import { setCoopContext } from "../lib/tenant-context.js";
 import { audit } from "./audit.js";
 import { sendText, notifyMember } from "../lib/messaging.js";
-import { recommendRefund, approveRefund } from "./refunds.js";
+import { recommendRefund, approveRefundAsOmbudsman } from "./refunds.js";
 import { formatBalance } from "../lib/money.js";
 import { Prisma } from "@prisma/client";
 
@@ -477,14 +477,66 @@ export async function decideCase(
 
 export type RemedyAction = "unfreeze" | "refund";
 
+/** Reset a remedy claim back to null — only if it is still exactly our claim. */
+async function resetRemedyClaim(caseId: string, claim: string): Promise<void> {
+  await prisma.ombudsmanCase.updateMany({
+    where: { id: caseId, remedy: claim },
+    data: { remedy: null },
+  });
+}
+
+/**
+ * Record a completed remedy. For `unfreeze` the member's freeze fields are
+ * cleared in the same coop-context transaction; the final `remedy` JSON and the
+ * `remedy_applied` event are written for both actions.
+ */
+async function recordRemedy(
+  c: { id: string; cooperativeId: string; memberId: string },
+  action: RemedyAction,
+  detail: string,
+  actorId: string,
+): Promise<void> {
+  const remedy = JSON.stringify({
+    action,
+    detail,
+    appliedAt: new Date().toISOString(),
+    status: "applied",
+  });
+  await withTx(async (tx) => {
+    await setCoopContext(tx as never, c.cooperativeId);
+    if (action === "unfreeze") {
+      await tx.member.update({
+        where: { id: c.memberId },
+        data: { frozenAt: null, supervisoryFrozenAt: null },
+      });
+    }
+    await tx.ombudsmanCase.update({ where: { id: c.id }, data: { remedy } });
+    await tx.ombudsmanCaseEvent.create({
+      data: {
+        caseId: c.id,
+        actorId,
+        actorRole: "ombudsman",
+        action: "remedy_applied",
+        detail,
+      },
+    });
+  });
+}
+
 /**
  * Ombudsman-only: apply a binding remedy to a case. `unfreeze` lifts both the
  * member's self-freeze and any Supervisory Committee freeze (inside
- * `withCoopContext`); `refund` pays the member through the existing
- * maker-checker refund flow with the ombudsman acting as the approver (the
- * admin-recommend step is bypassed). Records the `remedy` JSON + a
- * `remedy_applied` event, audits the action, and notifies the member. One remedy
- * per case.
+ * `withCoopContext`); `refund` pays the member through the existing refund flow
+ * with the ombudsman acting as the approver (the admin-recommend step is
+ * bypassed).
+ *
+ * The case is **atomically claimed** (`remedy: null` -> a `status: "applying"`
+ * marker) before any money moves or state changes, so two concurrent calls
+ * cannot both proceed — exactly one pays. The claim is reset to null on a clean
+ * failure (no money moved) so the remedy can be retried, but is deliberately
+ * LEFT in place when a payout outcome is unconfirmed, so it is never re-paid
+ * automatically. Records the final `remedy` JSON + a `remedy_applied` event,
+ * audits the action, and notifies the member.
  */
 export async function applyRemedy(
   caseId: string,
@@ -521,68 +573,99 @@ export async function applyRemedy(
   });
   if (!member) return { ok: false, message: "The member on this case no longer exists." };
 
-  let detail: string;
   let amount: number | undefined;
-
-  if (action === "unfreeze") {
-    detail = `Wallet unfrozen by ombudsman remedy (case #${c.id.slice(-6)})`;
-  } else {
-    const refundAmount = params.amount;
-    if (!Number.isInteger(refundAmount) || (refundAmount ?? 0) <= 0) {
+  let reason = "";
+  if (action === "refund") {
+    if (!Number.isInteger(params.amount) || (params.amount ?? 0) <= 0) {
       return {
         ok: false,
         message: "Give the refund amount in naira, e.g. *remedy <id> refund 5000*.",
       };
     }
-    amount = refundAmount as number;
-    const reason = (
-      params.reason?.trim() || `Ombudsman remedy (case #${c.id.slice(-6)})`
-    ).slice(0, 200);
-
-    // The ombudsman bypasses the admin-recommend step and acts as the approver:
-    // create the request, then approve it through the shared payout path.
-    const recommended = await recommendRefund(c.cooperativeId, c.memberId, amount, reason, {
-      id: actor.id,
-      phone: actor.phone,
-      role: "ombudsman",
-    });
-    if (!recommended.ok || !recommended.refundId) {
-      return { ok: false, message: recommended.message };
-    }
-    const paid = await approveRefund(
-      c.cooperativeId,
-      recommended.refundId,
-      { id: actor.id, phone: actor.phone, role: "ombudsman" },
-      { ombudsmanApproved: true },
-    );
-    if (!paid.ok) {
-      return { ok: false, message: paid.message };
-    }
-    detail =
-      `Refund of ${formatBalance(amount)} ordered for ${member.name} — ${reason} ` +
-      `(refund #${recommended.refundId.slice(-6)})`;
+    amount = params.amount as number;
+    reason = (params.reason?.trim() || `Ombudsman remedy (case #${c.id.slice(-6)})`).slice(0, 200);
   }
 
-  const remedy = JSON.stringify({ action, detail, appliedAt: new Date().toISOString() });
-  await withTx(async (tx) => {
-    await setCoopContext(tx as never, c.cooperativeId);
-    if (action === "unfreeze") {
-      await tx.member.update({
-        where: { id: c.memberId },
-        data: { frozenAt: null, supervisoryFrozenAt: null },
-      });
-    }
-    await tx.ombudsmanCase.update({ where: { id: c.id }, data: { remedy } });
-    await tx.ombudsmanCaseEvent.create({
-      data: {
-        caseId: c.id,
-        actorId: actor.id,
-        actorRole: "ombudsman",
-        action: "remedy_applied",
-        detail,
-      },
-    });
+  // Atomic claim: exactly one concurrent remedy proceeds. Every other caller
+  // sees count === 0 and is refused rather than paying a second time.
+  const claim = JSON.stringify({
+    action,
+    status: "applying",
+    appliedAt: new Date().toISOString(),
   });
+  const claimed = await prisma.ombudsmanCase.updateMany({
+    where: { id: c.id, remedy: null },
+    data: { remedy: claim },
+  });
+  if (claimed.count === 0) {
+    return { ok: false, message: "This case already has a remedy applied or one is in progress." };
+  }
+
+  let detail: string;
+  try {
+    if (action === "unfreeze") {
+      detail = `Wallet unfrozen by ombudsman remedy (case #${c.id.slice(-6)})`;
+      await recordRemedy(c, action, detail, actor.id);
+    } else {
+      // Ombudsman bypasses the admin-recommend step and acts as the approver:
+      // create the request, then approve it through the shared payout path.
+      const recommended = await recommendRefund(c.cooperativeId, c.memberId, amount!, reason, {
+        id: actor.id,
+        phone: actor.phone,
+        role: "ombudsman",
+      });
+      if (!recommended.ok || !recommended.refundId) {
+        await resetRemedyClaim(c.id, claim);
+        return { ok: false, message: recommended.message };
+      }
+      const paid = await approveRefundAsOmbudsman(c.cooperativeId, recommended.refundId, {
+        id: actor.id,
+        phone: actor.phone,
+      });
+      if (!paid.ok) {
+        const refund = await prisma.refundRequest.findUnique({
+          where: { id: recommended.refundId },
+          select: { status: true, payoutRef: true },
+        });
+        const unsure =
+          refund?.status === "failed" && (refund.payoutRef ?? "").startsWith("unsure:");
+        if (unsure) {
+          // The transfer may already have been sent — keep the claim so this case
+          // is never re-paid automatically; a human must reconcile.
+          await prisma.ombudsmanCase.update({
+            where: { id: c.id },
+            data: {
+              remedy: JSON.stringify({
+                action,
+                status: "unconfirmed",
+                appliedAt: new Date().toISOString(),
+              }),
+            },
+          });
+          return { ok: false, message: paid.message };
+        }
+        // No money moved: cancel the orphan request and reset the claim so the
+        // remedy can be retried cleanly.
+        await withTx(async (tx) => {
+          await setCoopContext(tx as never, c.cooperativeId);
+          await tx.refundRequest.updateMany({
+            where: { id: recommended.refundId, status: { in: ["pending", "failed"] } },
+            data: { status: "rejected", reason: `${reason} (ombudsman remedy failed)` },
+          });
+        });
+        await resetRemedyClaim(c.id, claim);
+        return { ok: false, message: paid.message };
+      }
+      detail =
+        `Refund of ${formatBalance(amount!)} ordered for ${member.name} — ${reason} ` +
+        `(refund #${recommended.refundId.slice(-6)})`;
+      await recordRemedy(c, action, detail, actor.id);
+    }
+  } catch (err) {
+    // Unexpected failure before completion — release the claim for a retry.
+    await resetRemedyClaim(c.id, claim);
+    throw err;
+  }
 
   await audit({
     cooperativeId: c.cooperativeId,

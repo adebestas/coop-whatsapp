@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanupDatabase, createTestCoop, createTestMember, prisma } from "./setup.js";
-import { recommendRefund, approveRefund, rejectRefund } from "../src/services/refunds.js";
+import { recommendRefund, approveRefund, rejectRefund, approveRefundAsOmbudsman } from "../src/services/refunds.js";
 import { resolveProvider } from "../src/services/payments/index.js";
 
 /**
@@ -198,6 +198,44 @@ describe("refund maker-checker", () => {
     expect(res.ok).toBe(false);
     const row = await prisma.refundRequest.findUnique({ where: { id: rec.refundId! } });
     expect(row!.status).toBe("failed");
+    expect(payoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("approveRefundAsOmbudsman lets an active ombudsman approve directly", async () => {
+    const { coop, member, recommendActor } = await setup();
+    const ombudsman = await prisma.ombudsman.create({
+      data: { name: "Ada Ombuds", phone: "2348000099999", active: true },
+    });
+    const rec = await recommendRefund(coop.id, member.id, 500000, "Double payment", recommendActor);
+
+    const res = await approveRefundAsOmbudsman(coop.id, rec.refundId!, {
+      id: ombudsman.id,
+      phone: ombudsman.phone,
+    });
+
+    expect(res.ok).toBe(true);
+    const row = await prisma.refundRequest.findUnique({ where: { id: rec.refundId! } });
+    expect(row!.status).toBe("paid");
+    expect(row!.approvedById).toBe(ombudsman.id);
+    expect(payoutSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("approveRefundAsOmbudsman refuses a caller who is not an active ombudsman", async () => {
+    const { coop, member, recommendActor } = await setup();
+    // An inactive ombudsman phone must not authorize a payout.
+    await prisma.ombudsman.create({
+      data: { name: "Retired", phone: "2348000088888", active: false },
+    });
+    const rec = await recommendRefund(coop.id, member.id, 500000, "Double payment", recommendActor);
+
+    const res = await approveRefundAsOmbudsman(coop.id, rec.refundId!, {
+      id: "someone",
+      phone: "2348000088888",
+    });
+
+    expect(res.ok).toBe(false);
+    const row = await prisma.refundRequest.findUnique({ where: { id: rec.refundId! } });
+    expect(row!.status).toBe("pending");
     expect(payoutSpy).not.toHaveBeenCalled();
   });
 });
