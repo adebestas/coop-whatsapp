@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
@@ -11,9 +11,15 @@ import { uploadToS3 } from "../lib/s3.js";
 import { audit } from "./audit.js";
 import { quorumMet, resolveMeeting } from "./meetings.js";
 
-const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
+export const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
 
 export type ExportKind = "members" | "transactions" | "pnl";
+
+/** A named set of string rows — the shared unit for every export writer. */
+export interface ReportSheet {
+  name: string;
+  rows: string[][];
+}
 
 export interface ExportResult {
   ok: boolean;
@@ -416,8 +422,8 @@ async function pnlData(cooperativeId: string): Promise<{ name: string; rows: str
 
 // ---------- file writers ----------
 
-async function writeXlsx(path: string, sheet: { name: string; rows: string[][] }) {
-  const wb = new ExcelJS.Workbook();
+/** Append one named sheet (bold header row, auto width) to a workbook. */
+function addWorkbookSheet(wb: ExcelJS.Workbook, sheet: ReportSheet) {
   const ws = wb.addWorksheet(sheet.name.slice(0, 31));
   ws.addRows(sheet.rows);
   ws.getRow(1).font = { bold: true };
@@ -427,26 +433,99 @@ async function writeXlsx(path: string, sheet: { name: string; rows: string[][] }
       ...sheet.rows.map((r) => String(r[ws.columns.indexOf(col)] ?? "").length + 2),
     );
   });
+}
+
+/** Write one sheet to an .xlsx workbook (existing single-sheet export shape). */
+export async function writeXlsx(path: string, sheet: ReportSheet) {
+  const wb = new ExcelJS.Workbook();
+  addWorkbookSheet(wb, sheet);
   await wb.xlsx.writeFile(path);
 }
 
-async function writePdf(path: string, title: string, sheet: { rows: string[][] }) {
+/** Write many sheets into a single .xlsx workbook, one tab per sheet. */
+export async function writeXlsxMany(path: string, sheets: ReportSheet[]) {
+  const wb = new ExcelJS.Workbook();
+  for (const sheet of sheets) addWorkbookSheet(wb, sheet);
+  await wb.xlsx.writeFile(path);
+}
+
+/** Stream one sheet's rows under a title at 8pt (existing export shape). */
+function writePdfRows(doc: PDFKit.PDFDocument, rows: string[][]) {
+  doc.fontSize(8);
+  for (const row of rows.slice(0, 400)) {
+    doc.text(row.map((c) => String(c ?? "").replace(/\n/g, " ")).join("  |  "));
+    if (doc.y > 780) {
+      doc.addPage();
+      doc.fontSize(8);
+    }
+  }
+}
+
+/** Write one sheet to a PDF under the given title (existing export shape). */
+export async function writePdf(path: string, title: string, sheet: ReportSheet) {
   return new Promise<void>((resolve, reject) => {
     const doc = new PDFDocument({ margin: 30, size: "A4" });
     const stream = doc.pipe(createWriteStream(path));
     doc.fontSize(14).text(title, { underline: true }).moveDown();
-    doc.fontSize(8);
-    for (const row of sheet.rows.slice(0, 400)) {
-      doc.text(row.map((c) => String(c ?? "").replace(/\n/g, " ")).join("  |  "));
-      if (doc.y > 780) {
-        doc.addPage();
-        doc.fontSize(8);
-      }
+    writePdfRows(doc, sheet.rows);
+    doc.end();
+    stream.on("finish", () => resolve());
+    stream.on("error", reject);
+  });
+}
+
+/** Write many sheets to a PDF, each on a new page under its own heading. */
+export async function writePdfMany(path: string, title: string, sheets: ReportSheet[]) {
+  return new Promise<void>((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 30, size: "A4" });
+    const stream = doc.pipe(createWriteStream(path));
+    doc.fontSize(14).text(title, { underline: true }).moveDown();
+    let first = true;
+    for (const sheet of sheets) {
+      if (!first) doc.addPage();
+      first = false;
+      doc.fontSize(11).text(sheet.name, { underline: true }).moveDown(0.5);
+      writePdfRows(doc, sheet.rows);
     }
     doc.end();
     stream.on("finish", () => resolve());
     stream.on("error", reject);
   });
+}
+
+/** Quote a CSV cell when it contains a comma, quote or newline. */
+function csvCell(value: unknown): string {
+  const s = String(value ?? "");
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** Write many sheets to one .csv, each preceded by a `# <name>` comment line. */
+export async function writeCsv(path: string, sheets: ReportSheet[]) {
+  const lines: string[] = [];
+  for (const sheet of sheets) {
+    lines.push(`# ${sheet.name}`);
+    for (const row of sheet.rows) lines.push(row.map(csvCell).join(","));
+    lines.push("");
+  }
+  await writeFile(path, lines.join("\n"), "utf8");
+}
+
+/**
+ * Build the three report artifacts (xlsx + pdf + csv) for a named set of sheets
+ * at `basePath` (extension-less). Returns the written paths.
+ */
+export async function buildReportFiles(
+  basePath: string,
+  title: string,
+  sheets: ReportSheet[],
+): Promise<{ xlsx: string; pdf: string; csv: string }> {
+  const xlsx = `${basePath}.xlsx`;
+  const pdf = `${basePath}.pdf`;
+  const csv = `${basePath}.csv`;
+  await writeXlsxMany(xlsx, sheets);
+  await writePdfMany(pdf, title, sheets);
+  await writeCsv(csv, sheets);
+  return { xlsx, pdf, csv };
 }
 
 async function emailFiles(
