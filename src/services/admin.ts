@@ -322,6 +322,8 @@ async function handleCommitteeCommand(
 
 /** Commands an active platform ombudsman can use from chat (not coop members). */
 const OMBUDSMAN_COMMANDS = new Set(["cases", "case", "investigate", "decide"]);
+/** Valid `OmbudsmanCase.status` values (no Prisma enum — plain strings). */
+const CASE_STATUSES = new Set(["open", "investigating", "decided", "closed"]);
 
 /** Render a case + its timeline for the ombudsman console. */
 function formatCaseDetail(c: CaseDetail): string {
@@ -357,6 +359,13 @@ export async function handleOmbudsmanCommand(
 
   if (cmd === "cases") {
     const status = args[0]?.trim().toLowerCase() || undefined;
+    if (status && !CASE_STATUSES.has(status)) {
+      await sendText({
+        to: phone,
+        text: "Unknown status. Use one of: *open*, *investigating*, *decided*, *closed*.",
+      });
+      return true;
+    }
     const res = await listCases(status);
     if (!res.cases || res.cases.length === 0) {
       await sendText({ to: phone, text: res.message });

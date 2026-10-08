@@ -367,18 +367,20 @@ export async function investigateCase(
     return { ok: false, message: "This case has already been decided." };
   }
 
-  await prisma.ombudsmanCase.update({
-    where: { id: c.id },
-    data: { status: "investigating" },
-  });
-  await prisma.ombudsmanCaseEvent.create({
-    data: {
-      caseId: c.id,
-      actorId: actor.id,
-      actorRole: "ombudsman",
-      action: "investigating",
-      detail,
-    },
+  await withTx(async (tx) => {
+    await tx.ombudsmanCase.update({
+      where: { id: c.id },
+      data: { status: "investigating" },
+    });
+    await tx.ombudsmanCaseEvent.create({
+      data: {
+        caseId: c.id,
+        actorId: actor.id,
+        actorRole: "ombudsman",
+        action: "investigating",
+        detail,
+      },
+    });
   });
 
   await audit({
@@ -421,20 +423,25 @@ export async function decideCase(
   const lookup = await lookupCase(caseId);
   if (!lookup.ok) return { ok: false, message: lookup.message };
   const c = lookup.case;
+  if (c.status === "decided" || c.status === "closed") {
+    return { ok: false, message: "This case has already been decided or closed." };
+  }
 
   const decidedAt = new Date();
-  await prisma.ombudsmanCase.update({
-    where: { id: c.id },
-    data: { status: "decided", decision: detail, decisionById: actor.id, decidedAt },
-  });
-  await prisma.ombudsmanCaseEvent.create({
-    data: {
-      caseId: c.id,
-      actorId: actor.id,
-      actorRole: "ombudsman",
-      action: "decided",
-      detail,
-    },
+  await withTx(async (tx) => {
+    await tx.ombudsmanCase.update({
+      where: { id: c.id },
+      data: { status: "decided", decision: detail, decisionById: actor.id, decidedAt },
+    });
+    await tx.ombudsmanCaseEvent.create({
+      data: {
+        caseId: c.id,
+        actorId: actor.id,
+        actorRole: "ombudsman",
+        action: "decided",
+        detail,
+      },
+    });
   });
 
   await audit({

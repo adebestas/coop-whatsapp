@@ -435,4 +435,55 @@ describe("ombudsman decisions", () => {
     expect(decided!.status).toBe("decided");
     expect(decided!.decision).toBe("refund");
   });
+
+  it("refuses to re-decide an already-decided or closed case", async () => {
+    const { caseId, ombudsman } = await seedEscalatedCase();
+    const actor = { id: ombudsman.id, phone: ombudsman.phone };
+
+    const first = await decideCase(caseId, "Refund", actor);
+    expect(first.ok).toBe(true);
+
+    const second = await decideCase(caseId, "Reverse everything", actor);
+    expect(second.ok).toBe(false);
+    expect(second.message).toMatch(/already|closed/i);
+
+    const c = await prisma.ombudsmanCase.findUnique({ where: { id: caseId } });
+    expect(c!.decision).toBe("Refund");
+    expect(await prisma.ombudsmanCaseEvent.count({ where: { caseId, action: "decided" } })).toBe(1);
+
+    await prisma.ombudsmanCase.update({ where: { id: caseId }, data: { status: "closed" } });
+    const closed = await decideCase(caseId, "reopen", actor);
+    expect(closed.ok).toBe(false);
+  });
+
+  it("rolls back the status change if the timeline event cannot be written", async () => {
+    const { caseId, ombudsman } = await seedEscalatedCase();
+    // A null actorId violates the required OmbudsmanCaseEvent.actorId field, so
+    // the event insert throws after the status update has been issued.
+    await expect(
+      investigateCase(caseId, "boom", { id: null as unknown as string, phone: ombudsman.phone }),
+    ).rejects.toThrow();
+
+    const c = await prisma.ombudsmanCase.findUnique({ where: { id: caseId } });
+    expect(c!.status).toBe("open");
+    expect(
+      await prisma.ombudsmanCaseEvent.count({ where: { caseId, action: "investigating" } }),
+    ).toBe(0);
+  });
+
+  it("rejects an unknown cases status filter with a hint", async () => {
+    const { ombudsman } = await seedEscalatedCase();
+    vi.mocked(sendText).mockClear();
+
+    await handleMessage(ombudsman.phone, "cases bogus");
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(texts).toMatch(/open/);
+    expect(texts).toMatch(/investigating/);
+    expect(texts).toMatch(/decided/);
+    expect(texts).toMatch(/closed/);
+    expect(texts).not.toMatch(/Ombudsman cases \(/);
+  });
 });
