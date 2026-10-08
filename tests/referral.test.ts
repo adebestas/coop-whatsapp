@@ -369,9 +369,18 @@ describe("referral reward payment", () => {
     ).toBe("qualified");
 
     // ...and the reconciliation job retries the whole qualified queue and pays it
-    // via the real payout path (which writes the Payout row).
+    // via the real payout path (which writes the Payout row). The payout MUST run
+    // with NO ambient transaction: the `qualified → rewarded` claim has committed
+    // first, so a later rollback/timeout cannot double-pay.
+    const realSendToBank = vi.mocked(sendToBank).getMockImplementation()!;
+    let txAtPayout: boolean | null = null;
+    vi.mocked(sendToBank).mockImplementationOnce(async (opts) => {
+      txAtPayout = txStorage.getStore() !== undefined;
+      return realSendToBank(opts);
+    });
     const paid = await runReferralPayouts();
     expect(paid).toBe(1);
+    expect(txAtPayout).toBe(false);
 
     const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
     expect(after.status).toBe("rewarded");
@@ -400,8 +409,15 @@ describe("referral reward payment", () => {
     const admin = await createTestMember(coop.id, { phone: "2348090000400", role: "admin" });
 
     await handleMessage(admin.phone, `referralpay ${referralId}`);
+    // The payout is deferred past the chat transaction, so the reply is the
+    // "triggered" acknowledgement — but the deferred work has flushed by the time
+    // `handleMessage` resolves, so the referral is already `rewarded`.
+    expect(textsSent().toLowerCase()).toContain("triggered");
     const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
     expect(after.status).toBe("rewarded");
+    expect(
+      await prisma.payout.findFirst({ where: { idempotencyKey: `REFERRAL-${referralId}` } }),
+    ).toBeTruthy();
 
     // The Board can pause the program — a retry must then be refused, not paid.
     const second = await setupReward("REFADM2", {

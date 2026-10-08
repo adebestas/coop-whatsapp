@@ -101,6 +101,7 @@ import {
   type PeriodType,
 } from "./regulator-reporting.js";
 import { setReferralConfig, setReferralEnabled, referralReport, payReferralReward } from "./referrals.js";
+import { enqueueAfterCommit } from "../lib/deferred.js";
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
 
@@ -1473,8 +1474,25 @@ export async function handleAdminCommand(
           await sendText({ to: phone, text: `No referral found for *${refArg}*.` });
           return true;
         }
-        const payRes = await payReferralReward(coopId, match.id);
-        await sendText({ to: phone, text: payRes.message });
+        // The chat handler runs under `withCoopContext` (an ambient tx), and
+        // `payReferralReward` must commit its claim BEFORE the provider call —
+        // so defer the payout past the chat transaction. `enqueueAfterCommit`
+        // returns false with no ambient scope (direct call), so fall back to an
+        // immediate await there. The reconciliation job is the safety net.
+        const triggered = enqueueAfterCommit(async () => {
+          await payReferralReward(coopId, match.id).catch((err) => {
+            console.error("[referral] admin referralpay failed", err);
+          });
+        });
+        if (!triggered) {
+          const payRes = await payReferralReward(coopId, match.id);
+          await sendText({ to: phone, text: payRes.message });
+          return true;
+        }
+        await sendText({
+          to: phone,
+          text: "Referral reward payment triggered — it will complete shortly; check *referralreport*.",
+        });
         return true;
       }
 

@@ -1169,24 +1169,48 @@ export async function runRegulatorReports(
  * `payReferralReward` (idempotent; moves `qualified → rewarded`) on every
  * `qualified` row. One referral's failure is logged and never stops the sweep.
  * Returns the number of rewards actually paid.
+ *
+ * Deliberately NOT `forEachCoop`: `payReferralReward` commits its
+ * `qualified → rewarded` claim BEFORE calling the provider, which is only safe
+ * with no ambient transaction. `forEachCoop` wraps each coop in a `withTx` that
+ * `withTx` would reuse — leaving the claim uncommitted across the provider call
+ * and risking a double-pay if a later rollback/timeout follows money moving. So
+ * only the DB READS are scoped to a short `withCoopContext` (committed before we
+ * return); the pay loop then runs outside any transaction.
  */
 export async function runReferralPayouts(now = new Date()): Promise<number> {
   let paid = 0;
-  await forEachCoop(async (coopId) => {
-    const config = await prisma.cooperativeConfig.findUnique({
-      where: { cooperativeId: coopId },
-      select: { referralEnabled: true },
-    });
-    if (config?.referralEnabled !== true) return;
+  const coopIds = await listCooperativeIds();
+  for (const coopId of coopIds) {
+    let qualifiedIds: string[];
+    try {
+      qualifiedIds = await withCoopContext(coopId, async () => {
+        const config = await prisma.cooperativeConfig.findUnique({
+          where: { cooperativeId: coopId },
+          select: { referralEnabled: true },
+        });
+        if (config?.referralEnabled !== true) return [];
+        const rows = await prisma.referral.findMany({
+          where: { cooperativeId: coopId, status: "qualified" },
+          select: { id: true },
+        });
+        return rows.map((r) => r.id);
+      });
+    } catch (err) {
+      // One coop's read failure must not abort the rest.
+      log.error("[scheduler] referral payout scan failed", {
+        coopId,
+        at: now.toISOString(),
+        err: String(err),
+      });
+      continue;
+    }
 
-    const qualified = await prisma.referral.findMany({
-      where: { cooperativeId: coopId, status: "qualified" },
-      select: { id: true },
-    });
-
-    for (const referral of qualified) {
+    // No ambient transaction here: each `payReferralReward` call manages its own
+    // short tx for the claim, then runs the provider payout with nothing open.
+    for (const referralId of qualifiedIds) {
       try {
-        const res = await payReferralReward(coopId, referral.id);
+        const res = await payReferralReward(coopId, referralId);
         if (res.ok) {
           paid++;
         } else {
@@ -1194,7 +1218,7 @@ export async function runReferralPayouts(now = new Date()): Promise<number> {
           // `qualified` and is retried on the next sweep.
           log.warn("[scheduler] referral payout not completed", {
             coopId,
-            referralId: referral.id,
+            referralId,
             at: now.toISOString(),
             message: res.message,
           });
@@ -1202,13 +1226,13 @@ export async function runReferralPayouts(now = new Date()): Promise<number> {
       } catch (err) {
         log.error("[scheduler] referral payout failed", {
           coopId,
-          referralId: referral.id,
+          referralId,
           at: now.toISOString(),
           err: String(err),
         });
       }
     }
-  });
+  }
   return paid;
 }
 
