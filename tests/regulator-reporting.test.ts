@@ -1,12 +1,14 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import { formatBalance } from "../src/lib/money.js";
 import {
   reportPeriod,
   periodDueAt,
   statutoryPack,
+  nfiuPack,
   generateReport,
+  type PackType,
 } from "../src/services/regulator-reporting.js";
 
 async function makeContrib(
@@ -56,6 +58,57 @@ async function makeLoan(
       dueDate,
       memberId,
       cooperativeId: coopId,
+    },
+  });
+}
+
+async function makeSTR(
+  coopId: string,
+  memberId: string,
+  status: string,
+  amount: number,
+  createdAt: Date,
+) {
+  return prisma.sTR.create({
+    data: { cooperativeId: coopId, memberId, amount, reason: "period test", status, createdAt },
+  });
+}
+
+async function makeWithdrawal(
+  coopId: string,
+  memberId: string,
+  amount: number,
+  status: string,
+  createdAt: Date,
+) {
+  return prisma.withdrawalRequest.create({
+    data: {
+      amount,
+      status,
+      bankAccountNumber: "0123456789",
+      bankCode: "058",
+      memberId,
+      cooperativeId: coopId,
+      createdAt,
+    },
+  });
+}
+
+async function makePayout(
+  coopId: string,
+  memberId: string,
+  amount: number,
+  status: string,
+  createdAt: Date,
+) {
+  return prisma.payout.create({
+    data: {
+      amount,
+      reference: `po_${Math.random().toString(36).slice(2)}`,
+      status,
+      memberId,
+      cooperativeId: coopId,
+      createdAt,
     },
   });
 }
@@ -156,6 +209,54 @@ describe("statutoryPack", () => {
   });
 });
 
+describe("nfiuPack", () => {
+  it("summarises STR counts by status and lists large transactions for the period", async () => {
+    const coop = await createTestCoop("REG5");
+    const member = await createTestMember(coop.id, { phone: "2348000010005" });
+
+    // STRs within March 2026: 2 pending, 1 filed. The April STR is excluded.
+    await makeSTR(coop.id, member.id, "pending", 500_000_000, new Date("2026-03-05T10:00:00Z"));
+    await makeSTR(coop.id, member.id, "pending", 600_000_000, new Date("2026-03-15T10:00:00Z"));
+    await makeSTR(coop.id, member.id, "filed", 700_000_000, new Date("2026-03-25T10:00:00Z"));
+    await makeSTR(coop.id, member.id, "pending", 800_000_000, new Date("2026-04-02T10:00:00Z"));
+
+    // Large (≥ ₦5M) money-out within the period: one withdrawal + one payout.
+    await makeWithdrawal(coop.id, member.id, 500_000_000, "paid", new Date("2026-03-10T10:00:00Z"));
+    await makePayout(coop.id, member.id, 900_000_000, "successful", new Date("2026-03-20T10:00:00Z"));
+    // Excluded: below threshold, wrong status, and out-of-period.
+    await makeWithdrawal(coop.id, member.id, 400_000_000, "paid", new Date("2026-03-11T10:00:00Z"));
+    await makeWithdrawal(coop.id, member.id, 500_000_000, "pending", new Date("2026-03-12T10:00:00Z"));
+    await makePayout(coop.id, member.id, 600_000_000, "successful", new Date("2026-04-10T10:00:00Z"));
+
+    const pack = await nfiuPack(coop.id, "2026-03");
+
+    const strSheet = sheet(pack, /str|sar/i);
+    expect(strSheet).toBeTruthy();
+    const strRows = strSheet!.rows;
+    expect(strRows.find((r) => r[0] === "pending")?.[1]).toBe("2");
+    expect(strRows.find((r) => r[0] === "filed")?.[1]).toBe("1");
+    expect(strRows.find((r) => /total/i.test(r[0]))?.[1]).toBe("3");
+
+    const largeSheet = sheet(pack, /large|transaction/i);
+    expect(largeSheet).toBeTruthy();
+    // Header + the two in-period large money-out transactions only.
+    expect(largeSheet!.rows.length).toBe(3);
+    const largeText = largeSheet!.rows.flat().join(" ");
+    expect(largeText).toContain(formatBalance(500_000_000));
+    expect(largeText).toContain(formatBalance(900_000_000));
+    expect(largeText).toContain(member.code);
+    expect(largeText).not.toContain(formatBalance(400_000_000));
+  });
+
+  it("returns an empty large-transaction list when there are none", async () => {
+    const coop = await createTestCoop("REG6b");
+    const pack = await nfiuPack(coop.id, "2026-03");
+    const largeSheet = sheet(pack, /large|transaction/i);
+    expect(largeSheet).toBeTruthy();
+    expect(largeSheet!.rows.length).toBe(1);
+  });
+});
+
 describe("generateReport", () => {
   it("writes xlsx + pdf + csv, persists a generated report, and audits", async () => {
     const coop = await createTestCoop("REG2");
@@ -222,9 +323,67 @@ describe("generateReport", () => {
 
   it("rejects unsupported pack types without writing a report", async () => {
     const coop = await createTestCoop("REG4");
-    const res = await generateReport(coop.id, "2026-03", "monthly", "nfiu");
+    const res = await generateReport(coop.id, "2026-03", "monthly", "bogus" as PackType);
     expect(res.ok).toBe(false);
     expect(res.reportId).toBeUndefined();
     expect(await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } })).toBe(0);
+  });
+
+  it("generates an NFIU-only pack containing only AML sheets", async () => {
+    const coop = await createTestCoop("REG7");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010007",
+      role: "superadmin",
+    });
+    await makeWithdrawal(coop.id, admin.id, 500_000_000, "paid", new Date("2026-03-10T10:00:00Z"));
+
+    const res = await generateReport(coop.id, "2026-03", "monthly", "nfiu", admin.id);
+    expect(res.ok).toBe(true);
+    expect(res.reportId).toBeTruthy();
+
+    const report = await prisma.regulatorReport.findUnique({
+      where: {
+        cooperativeId_period_periodType_packType: {
+          cooperativeId: coop.id,
+          period: "2026-03",
+          periodType: "monthly",
+          packType: "nfiu",
+        },
+      },
+    });
+    expect(report).not.toBeNull();
+
+    const csv = await readFile(res.files!.csv, "utf8");
+    expect(csv).toMatch(/STR|SAR/i);
+    expect(csv).toMatch(/large|transaction/i);
+    expect(csv).not.toMatch(/Balance Sheet/i);
+  });
+
+  it("generates both sheet groups for packType both", async () => {
+    const coop = await createTestCoop("REG8");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010008",
+      role: "superadmin",
+    });
+    await makeContrib(coop.id, admin.id, 150000);
+
+    const res = await generateReport(coop.id, "2026-03", "monthly", "both", admin.id);
+    expect(res.ok).toBe(true);
+
+    const csv = await readFile(res.files!.csv, "utf8");
+    expect(csv).toMatch(/Balance Sheet/i);
+    expect(csv).toMatch(/STR|SAR/i);
+
+    const report = await prisma.regulatorReport.findUnique({
+      where: {
+        cooperativeId_period_periodType_packType: {
+          cooperativeId: coop.id,
+          period: "2026-03",
+          periodType: "monthly",
+          packType: "both",
+        },
+      },
+    });
+    expect(report).not.toBeNull();
   });
 });

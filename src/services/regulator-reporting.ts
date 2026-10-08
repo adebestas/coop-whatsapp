@@ -7,6 +7,7 @@ import { computePnl } from "./ledger.js";
 import { computePar, computePearls } from "./provisioning.js";
 import { audit } from "./audit.js";
 import { formatBalance } from "../lib/money.js";
+import { LARGE_TX_THRESHOLD } from "./aml.js";
 import { EXPORT_DIR, buildReportFiles, type ReportSheet } from "./exports.js";
 
 export type PeriodType = "monthly" | "quarterly";
@@ -186,6 +187,94 @@ export async function statutoryPack(coopId: string, period: string): Promise<Rep
   return [balanceSheet, profits, parAging, pearlsSheet, membership, savingsSheet, loansSheet];
 }
 
+/**
+ * Build the NFIU AML summaries pack for a cooperative and period, READ-ONLY:
+ * STR/SAR counts grouped by status, and the large-transaction (≥ ₦5M) money-out
+ * list (paid withdrawals + successful payouts) drawn from the AML service.
+ */
+export async function nfiuPack(coopId: string, period: string): Promise<ReportSheet[]> {
+  const { start, end } = periodRange(period);
+  const inPeriod = { createdAt: { gte: start, lte: end } };
+
+  const [strs, withdrawals, payouts] = await Promise.all([
+    prisma.sTR.findMany({
+      where: { cooperativeId: coopId, ...inPeriod },
+      select: { status: true, amount: true },
+    }),
+    prisma.withdrawalRequest.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "paid",
+        amount: { gte: LARGE_TX_THRESHOLD },
+        ...inPeriod,
+      },
+      include: { member: { select: { name: true, code: true } } },
+    }),
+    prisma.payout.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "successful",
+        amount: { gte: LARGE_TX_THRESHOLD },
+        ...inPeriod,
+      },
+      include: { member: { select: { name: true, code: true } } },
+    }),
+  ]);
+
+  // STR/SAR counts + total amount, grouped by filing status.
+  const byStatus = new Map<string, { count: number; total: number }>();
+  for (const str of strs) {
+    const entry = byStatus.get(str.status) ?? { count: 0, total: 0 };
+    entry.count += 1;
+    entry.total += str.amount;
+    byStatus.set(str.status, entry);
+  }
+  const strRows: string[][] = [["Status", "Count", "Total amount"]];
+  for (const status of [...byStatus.keys()].sort()) {
+    const entry = byStatus.get(status)!;
+    strRows.push([status, String(entry.count), formatBalance(entry.total)]);
+  }
+  strRows.push([
+    "Total",
+    String(strs.length),
+    formatBalance(strs.reduce((sum, s) => sum + s.amount, 0)),
+  ]);
+  const strSheet: ReportSheet = { name: "STR-SAR Summary", rows: strRows };
+
+  // Large-transaction list (≥ ₦5M), money-out only, oldest first.
+  const large = [
+    ...withdrawals.map((w) => ({
+      date: w.createdAt,
+      type: "withdrawal",
+      member: w.member.name,
+      code: w.member.code,
+      amount: w.amount,
+    })),
+    ...payouts.map((p) => ({
+      date: p.createdAt,
+      type: "payout",
+      member: p.member.name,
+      code: p.member.code,
+      amount: p.amount,
+    })),
+  ].sort((a, b) => a.date.getTime() - b.date.getTime());
+  const largeSheet: ReportSheet = {
+    name: "Large Transactions",
+    rows: [
+      ["Date", "Type", "Member", "Code", "Amount"],
+      ...large.map((tx) => [
+        tx.date.toISOString().slice(0, 10),
+        tx.type,
+        tx.member,
+        tx.code,
+        formatBalance(tx.amount),
+      ]),
+    ],
+  };
+
+  return [strSheet, largeSheet];
+}
+
 /** The due-day profile for a coop, falling back to the schema defaults. */
 async function dueProfile(coopId: string): Promise<RegulatorDueProfile> {
   const profile = await prisma.regulatorProfile.findFirst({
@@ -202,8 +291,8 @@ async function dueProfile(coopId: string): Promise<RegulatorDueProfile> {
 /**
  * Generate a regulator report pack for a coop and period: write xlsx + pdf +
  * csv, then upsert the `RegulatorReport` (idempotent per period/type/pack) and
- * audit the generation. Only the statutory pack exists today; the NFIU pack is
- * a later task.
+ * audit the generation. `statutory` returns the financial-returns sheets;
+ * `nfiu` the AML summaries; `both` combines them.
  */
 export async function generateReport(
   coopId: string,
@@ -212,10 +301,10 @@ export async function generateReport(
   packType: PackType,
   actorId?: string,
 ): Promise<GenerateReportResult> {
-  if (packType !== "statutory") {
+  if (packType !== "statutory" && packType !== "nfiu" && packType !== "both") {
     return {
       ok: false,
-      message: `The *${packType}* pack is not yet implemented. Generate the *statutory* pack for now.`,
+      message: `Unknown pack type *${packType}*. Use *statutory*, *nfiu* or *both*.`,
     };
   }
 
@@ -224,7 +313,13 @@ export async function generateReport(
     dueProfile(coopId),
   ]);
 
-  const sheets = await statutoryPack(coopId, period);
+  const sheets: ReportSheet[] = [];
+  if (packType === "statutory" || packType === "both") {
+    sheets.push(...(await statutoryPack(coopId, period)));
+  }
+  if (packType === "nfiu" || packType === "both") {
+    sheets.push(...(await nfiuPack(coopId, period)));
+  }
   const dueAt = periodDueAt(period, periodType, profile);
 
   await mkdir(EXPORT_DIR, { recursive: true });
