@@ -1,17 +1,11 @@
 import { withTx } from "../lib/prisma.js";
 import { setCoopContext } from "../lib/tenant-context.js";
 import { audit } from "./audit.js";
-import { postJournal } from "./journal.js";
-import { sendToBank } from "./disbursements.js";
-import { resolveVtuProvider, networkForPhone } from "./payments/vtu.js";
-import { enqueueAfterCommit } from "../lib/deferred.js";
-import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "../lib/money.js";
 import { log } from "../lib/logger.js";
 
 const DEFAULT_REWARD_TYPE = "wallet";
 const DEFAULT_REWARD_AMOUNT = 50000;
-const INTERNAL_REWARD_ACCOUNT = "expense:referral_reward";
 
 export interface ReferralResult {
   ok: boolean;
@@ -126,12 +120,11 @@ export async function recordReferral(
 
 /**
  * Qualify a referral on the referred member's first qualifying contribution.
- * Snapshots the coop's reward type + amount at this moment, flips the row to
- * `qualified`, and asks the referrer to confirm the reward — it does NOT pay.
- * A confirmation prompt (with the reward details) is sent via
- * `notifyReferralReward`; the reward is disbursed only after the member replies
- * *confirmreward* and enters their PIN. Idempotent: a second call is a no-op and
- * leaves the snapshot untouched.
+ * Snapshots the coop's reward type + amount, credits the referrer's
+ * `referralBonusBalance` by that amount, and marks the row `rewarded`. The bonus
+ * is a running balance the referrer later withdraws (see `withdrawReferralBonus`),
+ * so qualification makes no provider call. Idempotent: a second call is a no-op
+ * and leaves the snapshot + balance untouched.
  */
 export async function qualifyReferral(
   coopId: string,
@@ -193,7 +186,7 @@ export async function qualifyReferral(
 
     const claimed = await tx.referral.updateMany({
       where: { id: referral.id, status: "pending" },
-      data: { status: "qualified", qualifiedAt: new Date(), rewardType, rewardAmount },
+      data: { status: "rewarded", qualifiedAt: new Date(), rewardType, rewardAmount },
     });
     if (claimed.count === 0) {
       return {
@@ -204,6 +197,14 @@ export async function qualifyReferral(
       };
     }
 
+    // Grant the bonus in the SAME transaction as the claim — credit the
+    // referrer's running bonus balance. No provider call: the member later
+    // withdraws from this balance.
+    await tx.member.update({
+      where: { id: referral.referrerId },
+      data: { referralBonusBalance: { increment: rewardAmount } },
+    });
+
     return {
       ok: true,
       qualified: true,
@@ -211,7 +212,7 @@ export async function qualifyReferral(
       referrerId: referral.referrerId,
       rewardType,
       rewardAmount,
-      message: `Referral qualified — *${formatBalance(rewardAmount)}* ${rewardType} reward pending.`,
+      message: `Referral qualified — *${formatBalance(rewardAmount)}* credited to the referrer's bonus balance.`,
     };
   });
 
@@ -220,29 +221,12 @@ export async function qualifyReferral(
       cooperativeId: coopId,
       actorPhone: "",
       actorId: referredMemberId,
-      action: "referral.qualified",
+      action: "referral.bonus.credited",
       targetType: "referral",
       targetId: outcome.referralId,
       amount: outcome.rewardAmount,
-      detail: `${outcome.rewardType} reward of ${formatBalance(outcome.rewardAmount ?? 0)} for referrer ${outcome.referrerId}`,
+      detail: `Credited ${formatBalance(outcome.rewardAmount ?? 0)} referral bonus for referrer ${outcome.referrerId}`,
     }).catch(() => {});
-
-    // Confirmation prompt: NO reward is auto-paid. The referrer is asked to
-    // confirm the pending reward (and later enter their PIN). Inside a
-    // deferred-send scope (the top-up money-in path) the prompt is queued to run
-    // AFTER the credit transaction commits, so it never executes with a DB
-    // transaction open. Outside any scope (the deductions path) it runs
-    // immediately. Either way it is fail-safe: a prompt error is logged and
-    // audited, never propagated into the money-in flow.
-    if (outcome.referralId) {
-      const prompt = () =>
-        notifyReferralReward(coopId, outcome.referralId!).catch((err) => {
-          console.warn("[referral] reward prompt failed:", err);
-        });
-      if (!enqueueAfterCommit(prompt)) {
-        await prompt();
-      }
-    }
   }
 
   if (outcome.rejected && outcome.referralId) {
@@ -258,465 +242,6 @@ export async function qualifyReferral(
   }
 
   return { ok: outcome.ok, message: outcome.message, referralId: outcome.referralId };
-}
-
-/** Load the member's most recent `qualified` referral (their pending reward). */
-export async function latestQualifiedReferral(
-  coopId: string,
-  referrerId: string,
-): Promise<{ id: string } | null> {
-  return withTx(async (tx) => {
-    await setCoopContext(tx as never, coopId);
-    return tx.referral.findFirst({
-      where: { cooperativeId: coopId, referrerId, status: "qualified" },
-      orderBy: [{ qualifiedAt: "desc" }, { createdAt: "desc" }],
-      select: { id: true },
-    });
-  });
-}
-
-type ReferrerPrompt = {
-  id: string;
-  name: string;
-  phone: string;
-  contactPhone: string | null;
-  bankAccountNumber: string | null;
-  bankCode: string | null;
-  bankName: string | null;
-  altChannelId: string | null;
-  preferredChannel: string | null;
-  optedOut: boolean;
-} | null;
-
-/** Mask a bank account number for display: first four digits, then `****`. */
-function maskAccountNumber(account: string): string {
-  const digits = account.replace(/\D/g, "");
-  return digits.length > 4 ? `${digits.slice(0, 4)}****` : digits;
-}
-
-/** The referrer's real recharge phone (contactPhone first, never a `tg:` id). */
-function airtimePhoneOf(referrer: ReferrerPrompt): string {
-  if (!referrer) return "";
-  return (
-    referrer.contactPhone?.trim() ||
-    (referrer.phone && !referrer.phone.startsWith("tg:") ? referrer.phone : "")
-  );
-}
-
-/** Build the human-readable reward details line shown in the confirm prompt. */
-function rewardDetailsText(rewardType: string, amount: number, referrer: ReferrerPrompt): string {
-  const amt = formatBalance(amount);
-  if (rewardType === "bank") {
-    if (referrer?.bankAccountNumber) {
-      const bank = referrer.bankName ? ` (${referrer.bankName})` : "";
-      return `${amt} to your bank account ${maskAccountNumber(referrer.bankAccountNumber)}${bank}`;
-    }
-    return `${amt} to your bank account`;
-  }
-  if (rewardType === "airtime") {
-    const phone = airtimePhoneOf(referrer);
-    if (!phone) return `${amt} airtime`;
-    const network = networkForPhone(phone);
-    return network ? `${amt} airtime to ${phone} (${network})` : `${amt} airtime to ${phone}`;
-  }
-  return `${amt} to your wallet`;
-}
-
-/**
- * Send the referrer a confirmation prompt for a `qualified` referral — the
- * details of the pending reward plus how to claim it (*confirmreward* /
- * *cancelreward*). Never pays: disbursement happens only after the member
- * confirms and enters their PIN. Safe to call with no ambient transaction (the
- * reads self-contextualize); the send is deferred inside a deferred-send scope.
- * Audits `referral.reward.prompted`.
- *
- * Returns `{ ok: false }` (and sends nothing) when the referral is missing or no
- * longer `qualified`.
- */
-export async function notifyReferralReward(
-  coopId: string,
-  referralId: string,
-): Promise<{ ok: boolean; message: string }> {
-  const prep = await withTx(async (tx) => {
-    await setCoopContext(tx as never, coopId);
-    const referral = await tx.referral.findUnique({ where: { id: referralId } });
-    if (!referral || referral.cooperativeId !== coopId) {
-      return { kind: "not_found" as const };
-    }
-    if (referral.status !== "qualified") {
-      return { kind: "not_qualified" as const, status: referral.status };
-    }
-    const referrer = await tx.member.findUnique({
-      where: { id: referral.referrerId },
-      select: {
-        id: true,
-        name: true,
-        phone: true,
-        contactPhone: true,
-        bankAccountNumber: true,
-        bankCode: true,
-        bankName: true,
-        altChannelId: true,
-        preferredChannel: true,
-        optedOut: true,
-      },
-    });
-    return { kind: "proceed" as const, referral, referrer };
-  });
-
-  if (prep.kind === "not_found") return { ok: false, message: "Referral not found." };
-  if (prep.kind === "not_qualified") {
-    return { ok: false, message: `Referral is ${prep.status}; there is no reward to confirm.` };
-  }
-
-  const { referral, referrer } = prep;
-  const amount = referral.rewardAmount ?? 0;
-  const rewardType = referral.rewardType ?? DEFAULT_REWARD_TYPE;
-  const details = rewardDetailsText(rewardType, amount, referrer);
-
-  // A short note when the reward cannot currently be paid, so the member is not
-  // promised something the confirm PIN step will then refuse.
-  const notes: string[] = [];
-  if (rewardType === "bank" && !referrer?.bankAccountNumber) {
-    notes.push("Add a bank account to receive it.");
-  }
-  if (rewardType === "airtime") {
-    const phone = airtimePhoneOf(referrer);
-    if (!phone) notes.push("Add a phone number to receive it.");
-    else if (!resolveVtuProvider())
-      notes.push("Airtime payouts are enabled once a provider is configured.");
-  }
-
-  const text =
-    `🎁 Your referral reward is ready: ${details}.\n\n` +
-    `Reply *confirmreward* to receive it, or *cancelreward* to skip.` +
-    (notes.length ? `\n\n_${notes.join(" ")}_` : "");
-
-  if (referrer) {
-    await notifyMember(referrer, text).catch((err) =>
-      log.error("[referral] failed to send reward prompt", {
-        referralId,
-        err: String(err),
-      }),
-    );
-  }
-
-  await audit({
-    cooperativeId: coopId,
-    actorPhone: "",
-    actorId: referral.referrerId,
-    action: "referral.reward.prompted",
-    targetType: "referral",
-    targetId: referralId,
-    amount,
-    detail: `Prompted ${formatBalance(amount)} ${rewardType} referral reward for confirmation`,
-  }).catch(() => {});
-
-  return { ok: true, message: "Referral reward confirmation prompt sent." };
-}
-
-/** Thrown when a reward cannot be paid yet (e.g. airtime with no VTU provider). */
-class RewardGatedError extends Error {}
-
-type RewardReferrer = {
-  id: string;
-  name: string;
-  phone: string;
-  contactPhone: string | null;
-  bankAccountNumber: string | null;
-  bankCode: string | null;
-  bankName: string | null;
-} | null;
-
-type RewardPrep =
-  | { kind: "not_found" }
-  | { kind: "not_qualified"; status: string }
-  | {
-      kind: "proceed";
-      referralId: string;
-      referrerId: string;
-      rewardType: string;
-      amount: number;
-      referrer: RewardReferrer;
-    };
-
-/**
- * Pay the snapshotted reward for a referral that is currently `qualified`.
- *
- * Idempotent and safe under concurrency: an atomic `qualified → rewarded` claim
- * (inside the cooperative's RLS context) guarantees exactly one caller proceeds
- * to pay, and the wallet credit is further guarded by a deterministic journal
- * txRef. On a DEFINITE payment failure the referral is reverted to `qualified`
- * so a later retry can pay it — never stranded as `rewarded` without money
- * moving. An `unsure` payout (provider accepted but unconfirmed) is NOT
- * retryable: it stays `rewarded` and is audited for reconciliation.
- *
- * All DB work is self-contextualized (`withTx` + `setCoopContext`) so this is
- * correct when called standalone with no ambient context and under RLS-FORCE.
- * The provider bank payout itself runs OUTSIDE any transaction.
- *
- * Outcomes (never throws):
- *  - wallet      → credits the referrer's wallet (balanced journal) → `rewarded`
- *  - bank ok     → payout to the referrer's saved account           → `rewarded`
- *  - bank/airtime unsure → stays `rewarded`, audited for reconciliation → no retry
- *  - bank failed / airtime gated / any other error → stays `qualified`  → retryable
- */
-export async function payReferralReward(
-  coopId: string,
-  referralId: string,
-): Promise<{ ok: boolean; message: string }> {
-  // Read + atomic claim + referrer lookup, all inside the coop RLS context.
-  const prep = await withTx(async (tx): Promise<RewardPrep> => {
-    await setCoopContext(tx as never, coopId);
-    const referral = await tx.referral.findUnique({ where: { id: referralId } });
-    if (!referral || referral.cooperativeId !== coopId) {
-      return { kind: "not_found" };
-    }
-    if (referral.status !== "qualified") {
-      return { kind: "not_qualified", status: referral.status };
-    }
-    const amount = referral.rewardAmount ?? 0;
-    const rewardType = referral.rewardType ?? DEFAULT_REWARD_TYPE;
-    if (amount <= 0) {
-      return { kind: "not_qualified", status: "no-amount" };
-    }
-    const claimed = await tx.referral.updateMany({
-      where: { id: referralId, status: "qualified" },
-      data: { status: "rewarded", rewardedAt: new Date() },
-    });
-    if (claimed.count === 0) {
-      return { kind: "not_qualified", status: "rewarded" };
-    }
-    const referrer = await tx.member.findUnique({
-      where: { id: referral.referrerId },
-      select: {
-        id: true,
-        name: true,
-        phone: true,
-        contactPhone: true,
-        bankAccountNumber: true,
-        bankCode: true,
-        bankName: true,
-      },
-    });
-    return {
-      kind: "proceed",
-      referralId,
-      referrerId: referral.referrerId,
-      rewardType,
-      amount,
-      referrer,
-    };
-  });
-
-  if (prep.kind === "not_found") return { ok: false, message: "Referral not found." };
-  if (prep.kind === "not_qualified") {
-    return prep.status === "rewarded"
-      ? { ok: true, message: "Referral reward already paid." }
-      : { ok: false, message: `Referral is ${prep.status}; there is no reward to pay.` };
-  }
-
-  const { rewardType, amount, referrerId, referrer } = prep;
-  let paidTo: string;
-  try {
-    if (rewardType === "wallet") {
-      const name = await payWalletReward(coopId, referralId, referrerId, amount);
-      paidTo = `${name}'s wallet`;
-    } else if (rewardType === "bank") {
-      if (!referrer) throw new Error("referrer no longer exists");
-      if (!referrer.bankAccountNumber || !referrer.bankCode) {
-        throw new Error("referrer has no saved bank account");
-      }
-      // Runs OUTSIDE any DB transaction (we are past the claim's `withTx`).
-      const result = await sendToBank({
-        memberId: referrer.id,
-        amount,
-        bankAccountNumber: referrer.bankAccountNumber,
-        bankCode: referrer.bankCode,
-        bankName: referrer.bankName ?? undefined,
-        note: `Referral reward for ${referrer.name}`,
-        idempotencyKey: `REFERRAL-${referralId}`,
-      });
-      if (!result.ok) {
-        if (result.status === "unsure") {
-          // The provider ACCEPTED the transfer but it is unconfirmed. A retry
-          // could double-pay, so keep it `rewarded` and flag for reconciliation.
-          await audit({
-            cooperativeId: coopId,
-            actorPhone: "",
-            actorId: referrerId,
-            action: "referral.reward.unconfirmed",
-            targetType: "referral",
-            targetId: referralId,
-            amount,
-            detail: `Referral reward of ${formatBalance(amount)} to ${referrer.name} was submitted but is UNCONFIRMED (${result.message}) — reconcile before any retry.`,
-          }).catch(() => {});
-          return {
-            ok: true,
-            message: `Referral reward submitted but UNCONFIRMED — it will be reconciled; do NOT retry.`,
-          };
-        }
-        throw new Error(result.message);
-      }
-      paidTo = `${referrer.name}'s bank account`;
-    } else if (rewardType === "airtime") {
-      const provider = resolveVtuProvider();
-      if (!provider) {
-        throw new RewardGatedError(
-          "Airtime reward not enabled yet — it stays ready and is re-offered once a VTU provider is configured.",
-        );
-      }
-      if (!referrer) throw new Error("referrer no longer exists");
-      // Airtime needs a REAL phone. `contactPhone` first; otherwise the member's
-      // own number only when it is a WhatsApp number (Telegram members carry a
-      // `tg:<chatId>` pseudo-phone, which no VTU API can recharge).
-      const phone =
-        referrer.contactPhone?.trim() ||
-        (referrer.phone && !referrer.phone.startsWith("tg:") ? referrer.phone : "");
-      if (!phone) {
-        throw new RewardGatedError(
-          "Airtime reward skipped — the referrer has no real phone number on file. Add one, or pay by *wallet*/*bank*.",
-        );
-      }
-      const result = await provider.recharge({
-        phone,
-        // `amount` is Kobo, matching the reward snapshot (`rewardAmount`).
-        // The VTU adapter converts kobo → naira at the seam.
-        amountKobo: amount,
-        reference: `REFERRAL-${referralId}`,
-      });
-      if (!result.ok) {
-        if (result.unsure) {
-          // The provider call may have landed (network error / timeout / an
-          // ambiguous duplicate-reference response). A retry with the same
-          // deterministic reference could double-recharge, so keep it `rewarded`
-          // and audit for reconciliation — exactly like the bank `unsure` path.
-          await audit({
-            cooperativeId: coopId,
-            actorPhone: "",
-            actorId: referrerId,
-            action: "referral.reward.unconfirmed",
-            targetType: "referral",
-            targetId: referralId,
-            amount,
-            detail: `Airtime referral reward of ${formatBalance(amount)} to ${phone} was submitted but is UNCONFIRMED (${result.error ?? "outcome unknown"}) — reconcile before any retry.`,
-          }).catch(() => {});
-          return {
-            ok: true,
-            message: `Referral reward submitted but UNCONFIRMED — it will be reconciled; do NOT retry.`,
-          };
-        }
-        throw new Error(result.error ?? "airtime recharge failed");
-      }
-      paidTo = `${phone} (airtime)`;
-    } else {
-      throw new Error(`unknown reward type "${rewardType}"`);
-    }
-  } catch (err) {
-    // A DEFINITE failure — revert so a later retry can pay it. Never leave the
-    // referral stranded as `rewarded` when no money moved.
-    await revertToQualified(coopId, referralId);
-    if (err instanceof RewardGatedError) {
-      return { ok: false, message: err.message };
-    }
-    return {
-      ok: false,
-      message: `Referral reward could not be paid: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-
-  await audit({
-    cooperativeId: coopId,
-    actorPhone: "",
-    actorId: referrerId,
-    action: "referral.rewarded",
-    targetType: "referral",
-    targetId: referralId,
-    amount,
-    detail: `Paid ${formatBalance(amount)} ${rewardType} referral reward to ${paidTo}`,
-  }).catch(() => {});
-
-  return {
-    ok: true,
-    message: `✅ Referral reward of *${formatBalance(amount)}* paid to ${paidTo}.`,
-  };
-}
-
-/**
- * Credit the referrer's wallet with a balanced journal entry. The journal txRef
- * is deterministic (`REFERRAL-<referralId>`) and `throwOnDuplicate` aborts the
- * whole transaction on a replay, so the wallet increment can never run twice.
- * A duplicate is treated as an idempotent success (already credited). All reads
- * and writes run inside the cooperative's RLS context.
- */
-async function payWalletReward(
-  coopId: string,
-  referralId: string,
-  referrerId: string,
-  amount: number,
-): Promise<string> {
-  try {
-    return await withTx(async (tx) => {
-      await setCoopContext(tx as never, coopId);
-      const referrer = await tx.member.findUnique({
-        where: { id: referrerId },
-        include: { wallet: true },
-      });
-      if (!referrer) throw new Error("referrer no longer exists");
-      if (!referrer.wallet) throw new Error("referrer has no wallet");
-
-      const walletId = referrer.wallet.id;
-      await postJournal(
-        {
-          cooperativeId: coopId,
-          txRef: `REFERRAL-${referralId}`,
-          description: `Referral reward for ${referrer.name} — ${formatBalance(amount)}`,
-          postings: [
-            { account: INTERNAL_REWARD_ACCOUNT, direction: "DEBIT", amount },
-            {
-              account: `member_wallet:${walletId}`,
-              direction: "CREDIT",
-              amount,
-              memberId: referrerId,
-            },
-          ],
-          throwOnDuplicate: true,
-        },
-        tx as never,
-      );
-      await tx.wallet.update({
-        where: { id: walletId },
-        data: { balance: { increment: amount } },
-      });
-      return referrer.name;
-    });
-  } catch (err) {
-    if ((err as { code?: string })?.code === "P2002") {
-      // Journal already posted — the wallet was credited on a prior attempt.
-      const name = await withTx(async (tx) => {
-        await setCoopContext(tx as never, coopId);
-        const r = await tx.member.findUnique({ where: { id: referrerId }, select: { name: true } });
-        return r?.name ?? "referrer";
-      }).catch(() => "referrer");
-      return name;
-    }
-    throw err;
-  }
-}
-
-/** Revert a claimed reward that could not be paid, so a later retry can pay it. */
-async function revertToQualified(coopId: string, referralId: string): Promise<void> {
-  try {
-    await withTx(async (tx) => {
-      await setCoopContext(tx as never, coopId);
-      await tx.referral.updateMany({
-        where: { id: referralId, status: "rewarded" },
-        data: { status: "qualified", rewardedAt: null },
-      });
-    });
-  } catch {
-    // best-effort revert — a later reconcile/retry can still repair the row
-  }
 }
 
 /** Valid `referralRewardType` values (no Prisma enum — plain strings). */

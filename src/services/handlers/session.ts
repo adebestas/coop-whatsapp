@@ -29,9 +29,7 @@ import { createCooperative, generateMemberFileNumber } from "../cooperative.js";
 import { confirmDividendDistribution } from "../dividends.js";
 import { hashPin, verifyPin } from "../../lib/security.js";
 import { createMandate, cancelMandate } from "../mandates.js";
-import { myReferrals, payReferralReward, latestQualifiedReferral } from "../referrals.js";
-import { audit } from "../audit.js";
-import { enqueueAfterCommit } from "../../lib/deferred.js";
+import { myReferrals } from "../referrals.js";
 
 /** A half-finished flow expires after this long. */
 /** OTP codes expire after this long. */
@@ -162,7 +160,6 @@ export function buildFullMenu(
     `• *ledger* — cooperative ledger (transparency)\n` +
     `• *code* — your member code\n` +
     `• *myrefcode* / *referrals* — share your referral code & track rewards\n` +
-    `• *confirmreward* / *cancelreward* — receive or skip a referral reward\n` +
     `• *phone <number>* — add/update your phone\n` +
     `• *changephone <number>* — move your account to a new number (OTP + admin approval)\n` +
     `• *mydata* / *deleteaccount* — your data (NDPR)\n\n` +
@@ -237,8 +234,7 @@ export function buildAdminMenu(): string {
     `• *regreportstatus* — view generated/filed regulator packs\n` +
     `• *regreport filed <id>* — mark a regulator pack filed\n` +
     `• *referralconfig [on\\|off] [wallet\\|bank\\|airtime] [amount] [maxRewards]* — configure referrals\n` +
-    `• *referralreport* — referral summary for the coop\n` +
-    `• *referralpay <id>* — re-send a qualified referral reward prompt\n\n` +
+    `• *referralreport* — referral summary for the coop\n\n` +
     `*Committees (super admin):* *addcommittee <credit\\|supervisory\\|board> <name> [size]*, *appoint <type> <member code> [chair]*, *removecommittee <type> <member code>*, *committees*\n` +
     `*Committees (members):* *cvote <loan id> approve\\|reject*, *committeequeue*, *supervisoryfreeze <member code> [reason]*, *supervisoryunfreeze <member code>*, *referralpause* / *referralresume* (Board)\n\n` +
     `*Meetings:* *startmeeting <agm\\|sgm> <title> [quorum%]*, *openmeeting <id>*, *closemeeting <id>*, *addmotion <meeting id> <title> \\| <description> [kind]*, *closemotion <id>*, *meetingminutes <id>*\n\n` +
@@ -274,56 +270,6 @@ export async function handleReferrals(phone: string): Promise<void> {
   }
   const res = await myReferrals(member.cooperativeId, member.id);
   await sendText({ to: phone, text: res.message });
-}
-
-/**
- * `confirmreward` — arm the PIN challenge for the member's latest `qualified`
- * referral. The reward is disbursed only after the PIN is entered (see the
- * `awaiting_referral_reward_pin` handler).
- */
-export async function handleConfirmReward(phone: string): Promise<void> {
-  const member = await getMemberByPhone(phone);
-  if (!member) {
-    await sendText({
-      to: phone,
-      text: "You need to join a cooperative first. Reply *join <code>*.",
-    });
-    return;
-  }
-  const referral = await latestQualifiedReferral(member.cooperativeId, member.id);
-  if (!referral) {
-    await sendText({
-      to: phone,
-      text: "You have no referral reward waiting to be confirmed right now.",
-    });
-    return;
-  }
-  await issueSecretChallenge(
-    phone,
-    "awaiting_referral_reward_pin",
-    { referralId: referral.id },
-    "Enter your 4-digit PIN to receive your referral reward.",
-  );
-}
-
-/**
- * `cancelreward` — leave the referral `qualified` (no state change). It will be
- * re-offered by the scheduler, or the member can confirm it any time.
- */
-export async function handleCancelReward(phone: string): Promise<void> {
-  const member = await getMemberByPhone(phone);
-  if (!member) {
-    await sendText({
-      to: phone,
-      text: "You need to join a cooperative first. Reply *join <code>*.",
-    });
-    return;
-  }
-  await sendText({
-    to: phone,
-    text:
-      "No problem — your referral reward stays ready. Reply *confirmreward* whenever you want to receive it.",
-  });
 }
 
 export function buildOmbudsmanMenu(): string {
@@ -1197,84 +1143,6 @@ export async function handleAwaitingInput(
       await sendText({
         to: phone,
         text: result.message + "\n\nReply *menu* to see other options.",
-      });
-      break;
-    }
-
-    case "awaiting_referral_reward_pin": {
-      const input = text.trim();
-      if (input.toLowerCase() === "menu" || input.toLowerCase() === "cancel") {
-        await prisma.session.upsert({
-          where: { phone },
-          create: { phone, state: "idle" },
-          update: { state: "idle", data: "{}" },
-        });
-        await sendText({
-          to: phone,
-          text: "Referral reward skipped for now. Reply *confirmreward* whenever you're ready.",
-        });
-        return;
-      }
-      const member = await getMemberByPhone(phone);
-      if (!member) {
-        await sendText({
-          to: phone,
-          text: "You need to join a cooperative first. Reply *join <code>* to get started.",
-        });
-        return;
-      }
-      const pinCheck = await verifyMemberPin(member, input);
-      if (!pinCheck.ok) {
-        const msg = pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel.";
-        await sendText({ to: phone, text: msg });
-        await issueSecretChallenge(phone, "awaiting_referral_reward_pin", data, msg);
-        return;
-      }
-      const referralId = data.referralId;
-      await prisma.session.upsert({
-        where: { phone },
-        create: { phone, state: "idle" },
-        update: { state: "idle", data: "{}" },
-      });
-      if (!referralId) {
-        await sendText({
-          to: phone,
-          text: "That referral reward request expired. Reply *confirmreward* to start again.",
-        });
-        return;
-      }
-      // Audit the member's confirmation (PIN-verified) before disbursing.
-      await audit({
-        cooperativeId: member.cooperativeId,
-        actorPhone: phone,
-        actorId: member.id,
-        actorRole: member.role,
-        action: "referral.reward.confirmed",
-        targetType: "referral",
-        targetId: referralId,
-        detail: "Referrer confirmed a referral reward with their PIN",
-      }).catch(() => {});
-      // The chat handler is ONE transaction: the provider payout must run AFTER
-      // it commits, so defer it. `enqueueAfterCommit` returns false with no
-      // ambient scope, so fall back to an immediate await there.
-      const pay = () => payReferralReward(member.cooperativeId, referralId);
-      const queued = enqueueAfterCommit(async () => {
-        await pay().catch((err) => {
-          console.error("[referral] reward payment failed", err);
-        });
-      });
-      if (!queued) {
-        const result = await pay();
-        await sendText({
-          to: phone,
-          text: result.message + "\n\nReply *menu* to see other options.",
-        });
-        return;
-      }
-      await sendText({
-        to: phone,
-        text:
-          "✅ Confirmed — your referral reward is being paid now. You'll receive a message when it's done.",
       });
       break;
     }

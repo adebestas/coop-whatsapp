@@ -3,20 +3,14 @@ import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./set
 import {
   recordReferral,
   qualifyReferral,
-  payReferralReward,
   myReferrals,
   setReferralConfig,
   referralReport,
-  notifyReferralReward,
 } from "../src/services/referrals.js";
 import { handleAwaitingInput } from "../src/services/handlers/session.js";
 import { handleJoinStart } from "../src/services/handlers/join.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 import { requestManualCredit, approveManualCredit } from "../src/services/manualcredit.js";
-import { sendToBank } from "../src/services/disbursements.js";
-import { runReferralRewardPrompts } from "../src/services/scheduler.js";
-import { clearVtuBillerCache } from "../src/services/payments/vtu.js";
-import { txStorage } from "../src/lib/prisma.js";
 import { enqueueAfterCommit, withDeferredSends } from "../src/lib/deferred.js";
 import type { BotState } from "../src/services/conversation.js";
 import { handleMessage } from "../src/services/conversation.js";
@@ -119,7 +113,7 @@ describe("referrals", () => {
     expect(await prisma.referral.count()).toBe(0);
   });
 
-  it("qualifies on the first contribution and snapshots the reward from config", async () => {
+  it("qualifies on the first contribution, credits the bonus balance and marks it rewarded", async () => {
     const coop = await createCoop("REF4");
     const referrer = await createTestMember(coop.id, { phone: "2348011110031" });
     const referred = await createTestMember(coop.id, { phone: "2348011110032" });
@@ -146,13 +140,27 @@ describe("referrals", () => {
     const referral = await prisma.referral.findUnique({
       where: { referredMemberId: referred.id },
     });
-    expect(referral?.status).toBe("qualified");
+    expect(referral?.status).toBe("rewarded");
     expect(referral?.qualifiedAt).toBeInstanceOf(Date);
     expect(referral?.rewardType).toBe("bank");
     expect(referral?.rewardAmount).toBe(12345);
+
+    // The bonus lands in the referrer's running balance — no payout/disbursement.
+    const credited = await prisma.member.findUniqueOrThrow({ where: { id: referrer.id } });
+    expect(credited.referralBonusBalance).toBe(12345);
+    expect(await prisma.referralWithdrawal.count()).toBe(0);
+    expect(await prisma.payout.count()).toBe(0);
+    expect(
+      (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
+    ).toBe(0);
+
+    const audited = await prisma.auditLog.findFirst({
+      where: { action: "referral.bonus.credited", targetId: referral!.id },
+    });
+    expect(audited).toBeTruthy();
   });
 
-  it("is idempotent — a second qualify is a no-op", async () => {
+  it("is idempotent — a second qualify is a no-op and credits the balance once", async () => {
     const coop = await createCoop("REF5");
     const referrer = await createTestMember(coop.id, { phone: "2348011110041" });
     const referred = await createTestMember(coop.id, { phone: "2348011110042" });
@@ -161,6 +169,7 @@ describe("referrals", () => {
     const first = await prisma.referral.findUnique({
       where: { referredMemberId: referred.id },
     });
+    const afterFirst = await prisma.member.findUniqueOrThrow({ where: { id: referrer.id } });
 
     const second = await qualifyReferral(coop.id, referred.id);
     expect(second.ok).toBe(true);
@@ -168,254 +177,11 @@ describe("referrals", () => {
     const after = await prisma.referral.findUnique({
       where: { referredMemberId: referred.id },
     });
-    // Qualification no longer pays: it leaves the referral `qualified` and
-    // prompts the referrer to confirm. The snapshot timestamp is untouched.
-    expect(after?.status).toBe("qualified");
+    // The bonus is granted exactly once at qualification; the snapshot is untouched.
+    expect(after?.status).toBe("rewarded");
     expect(after?.qualifiedAt?.getTime()).toBe(first?.qualifiedAt?.getTime());
-  });
-});
-
-describe("referral reward payment", () => {
-  /** Create a coop with a referrer + referred member and a `qualified` referral. */
-  async function setupReward(
-    code: string,
-    opts: {
-      rewardType: string;
-      rewardAmount: number;
-      referrerName?: string;
-      bank?: boolean;
-    },
-  ) {
-    const coop = await createCoop(code);
-    const referrer = await createTestMember(coop.id, {
-      phone: "2348044440000",
-      name: opts.referrerName ?? "Ada Obi",
-    });
-    const referred = await createTestMember(coop.id, { phone: "2348044440001" });
-    await recordReferral(coop.id, referrer.code, referred.id);
-
-    const referral = await prisma.referral.findUniqueOrThrow({
-      where: { referredMemberId: referred.id },
-    });
-    await prisma.referral.update({
-      where: { id: referral.id },
-      data: {
-        status: "qualified",
-        qualifiedAt: new Date(),
-        rewardType: opts.rewardType,
-        rewardAmount: opts.rewardAmount,
-      },
-    });
-    if (opts.bank) {
-      await prisma.member.update({
-        where: { id: referrer.id },
-        data: { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
-      });
-    }
-    return { coop, referrer, referralId: referral.id };
-  }
-
-  it("credits the referrer's wallet and posts a balanced journal", async () => {
-    const { coop, referrer, referralId } = await setupReward("REFPW", {
-      rewardType: "wallet",
-      rewardAmount: 25000,
-    });
-
-    const res = await payReferralReward(coop.id, referralId);
-    expect(res.ok).toBe(true);
-
-    const referral = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(referral.status).toBe("rewarded");
-    expect(referral.rewardedAt).toBeInstanceOf(Date);
-
-    const wallet = await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } });
-    expect(wallet.balance).toBe(25000);
-
-    const entry = await prisma.journalEntry.findUnique({
-      where: { txRef: `REFERRAL-${referralId}` },
-      include: { postings: true },
-    });
-    expect(entry).toBeTruthy();
-    const debit = entry!.postings.find((p) => p.direction === "DEBIT");
-    const credit = entry!.postings.find((p) => p.direction === "CREDIT");
-    expect(debit?.account).toBe("expense:referral_reward");
-    expect(debit?.amount).toBe(25000);
-    expect(credit?.account).toBe(`member_wallet:${wallet.id}`);
-    expect(credit?.amount).toBe(25000);
-
-    const audited = await prisma.auditLog.findFirst({ where: { action: "referral.rewarded" } });
-    expect(audited).toBeTruthy();
-  });
-
-  it("pays the referrer's saved bank account via the existing payout path", async () => {
-    const { coop, referrer, referralId } = await setupReward("REFPB", {
-      rewardType: "bank",
-      rewardAmount: 30000,
-      referrerName: "Ada Obi",
-      bank: true,
-    });
-
-    const res = await payReferralReward(coop.id, referralId);
-    expect(res.ok).toBe(true);
-
-    const referral = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(referral.status).toBe("rewarded");
-
-    const payout = await prisma.payout.findFirst({
-      where: { idempotencyKey: `REFERRAL-${referralId}` },
-    });
-    expect(payout).toBeTruthy();
-    expect(payout?.amount).toBe(30000);
-    expect(payout?.memberId).toBe(referrer.id);
-
-    // A bank payout must NOT also credit the wallet.
-    const wallet = await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } });
-    expect(wallet.balance).toBe(0);
-  });
-
-  it("leaves the referral qualified when airtime has no VTU provider configured", async () => {
-    const { coop, referralId } = await setupReward("REFPV", {
-      rewardType: "airtime",
-      rewardAmount: 20000,
-    });
-
-    const res = await payReferralReward(coop.id, referralId);
-    expect(res.ok).toBe(false);
-    expect(res.message.toLowerCase()).toContain("not enabled");
-
-    const referral = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(referral.status).toBe("qualified");
-    expect(referral.rewardedAt).toBeNull();
-  });
-
-  it("is idempotent — a second payment is a no-op", async () => {
-    const { coop, referrer, referralId } = await setupReward("REFPI", {
-      rewardType: "wallet",
-      rewardAmount: 7000,
-    });
-
-    expect((await payReferralReward(coop.id, referralId)).ok).toBe(true);
-    expect((await payReferralReward(coop.id, referralId)).ok).toBe(true);
-
-    const wallet = await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } });
-    expect(wallet.balance).toBe(7000);
-    expect(await prisma.journalEntry.count({ where: { txRef: `REFERRAL-${referralId}` } })).toBe(1);
-  });
-
-  it("keeps the referral rewarded (no retry) when the bank payout is 'unsure'", async () => {
-    const { coop, referralId } = await setupReward("REFUN", {
-      rewardType: "bank",
-      rewardAmount: 33000,
-      bank: true,
-    });
-
-    vi.mocked(sendToBank).mockImplementationOnce(async () => ({
-      ok: false,
-      status: "unsure",
-      message: "awaiting provider authorization",
-    }));
-
-    const res = await payReferralReward(coop.id, referralId);
-
-    // An unsure payout must NOT revert to `qualified` (a retry could double-pay).
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(after.status).toBe("rewarded");
-    expect(after.rewardedAt).toBeInstanceOf(Date);
-    expect(res.message.toLowerCase()).toContain("unconfirmed");
-
-    const warned = await prisma.auditLog.findFirst({
-      where: { action: "referral.reward.unconfirmed" },
-    });
-    expect(warned).toBeTruthy();
-  });
-
-  it("reverts a DEFINITE bank failure back to qualified (retryable)", async () => {
-    const { coop, referralId } = await setupReward("REFDF", {
-      rewardType: "bank",
-      rewardAmount: 41000,
-      bank: true,
-    });
-
-    vi.mocked(sendToBank).mockImplementationOnce(async () => ({
-      ok: false,
-      status: "failed",
-      message: "provider rejected the transfer",
-    }));
-
-    const res = await payReferralReward(coop.id, referralId);
-    expect(res.ok).toBe(false);
-
-    // A definite failure moves NO money, so the referral must not be stranded
-    // as `rewarded` — it reverts to `qualified` for a later retry.
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(after.status).toBe("qualified");
-    expect(after.rewardedAt).toBeNull();
-  });
-
-  it("runReferralRewardPrompts re-prompts a `qualified` referral, is deduped per day, and does not pay", async () => {
-    const { referrer, referralId } = await setupReward("REFJOB", {
-      rewardType: "bank",
-      rewardAmount: 44000,
-      bank: true,
-    });
-
-    const now = new Date("2026-10-08T12:00:00Z");
-    const first = await runReferralRewardPrompts(now);
-    expect(first).toBe(1);
-
-    // A re-prompt NEVER pays: the referral stays `qualified` and no money moves.
-    expect(
-      (await prisma.referral.findUniqueOrThrow({ where: { id: referralId } })).status,
-    ).toBe("qualified");
-    expect(
-      await prisma.payout.count({ where: { idempotencyKey: `REFERRAL-${referralId}` } }),
-    ).toBe(0);
-    expect((await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance).toBe(
-      0,
-    );
-    expect(textsSent()).toContain("confirmreward");
-
-    // The same day's second sweep is deduped (claimOnce) — a strict no-op.
-    expect(await runReferralRewardPrompts(now)).toBe(0);
-  });
-
-  it("admin `referralpay` re-sends the confirmation prompt and does not pay", async () => {
-    const { coop, referralId } = await setupReward("REFADM", {
-      rewardType: "bank",
-      rewardAmount: 46000,
-      bank: true,
-    });
-    const admin = await createTestMember(coop.id, { phone: "2348090000400", role: "admin" });
-
-    await handleMessage(admin.phone, `referralpay ${referralId}`);
-
-    // It is a NUDGE only — the referral is NOT paid; the referrer gets the prompt.
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(after.status).toBe("qualified");
-    expect(after.rewardedAt).toBeNull();
-    expect(
-      await prisma.payout.count({ where: { idempotencyKey: `REFERRAL-${referralId}` } }),
-    ).toBe(0);
-    expect(textsSent()).toContain("confirmreward");
-
-    // The Board can pause the program — a nudge must then be refused.
-    const second = await setupReward("REFADM2", {
-      rewardType: "bank",
-      rewardAmount: 47000,
-      bank: true,
-    });
-    await prisma.cooperativeConfig.update({
-      where: { cooperativeId: second.coop.id },
-      data: { referralEnabled: false },
-    });
-    const admin2 = await createTestMember(second.coop.id, {
-      phone: "2348090000401",
-      role: "admin",
-    });
-    await handleMessage(admin2.phone, `referralpay ${second.referralId}`);
-    const untouched = await prisma.referral.findUniqueOrThrow({ where: { id: second.referralId } });
-    expect(untouched.status).toBe("qualified");
-    expect(textsSent().toLowerCase()).toContain("not enabled");
+    const afterSecond = await prisma.member.findUniqueOrThrow({ where: { id: referrer.id } });
+    expect(afterSecond.referralBonusBalance).toBe(afterFirst.referralBonusBalance);
   });
 });
 
@@ -437,82 +203,6 @@ describe("referral reward deferral (after-commit)", () => {
     expect(enqueueAfterCommit(async () => {})).toBe(false);
   });
 
-  it("prompts the referrer only after the top-up credit transaction commits", async () => {
-    const coop = await createCoop("REFORD");
-    const referrer = await createTestMember(coop.id, {
-      phone: "2348055550001",
-      name: "Ada Obi",
-    });
-    const referred = await createTestMember(coop.id, { phone: "2348055550002" });
-    await prisma.cooperativeConfig.upsert({
-      where: { cooperativeId: coop.id },
-      create: {
-        cooperativeId: coop.id,
-        referralEnabled: true,
-        referralRewardType: "bank",
-        referralRewardAmount: 40000,
-      },
-      update: {
-        cooperativeId: coop.id,
-        referralEnabled: true,
-        referralRewardType: "bank",
-        referralRewardAmount: 40000,
-      },
-    });
-    await prisma.member.update({
-      where: { id: referrer.id },
-      data: { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
-    });
-    await recordReferral(coop.id, referrer.code, referred.id);
-    await prisma.member.update({
-      where: { id: referred.id },
-      data: { virtualAccountNumber: "9000000555" },
-    });
-
-    // Capture the state at PROMPT time: the referral prompt must run with no DB
-    // transaction open (deferred past `withCoopContext`'s tx), and only after the
-    // money-in credit has committed.
-    const reference = "monnify-TX-REFORD-1";
-    let txOpenAtPrompt: boolean | null = null;
-    let contributionCommittedAtPrompt = false;
-    const realNotifyMember = vi.mocked(notifyMember).getMockImplementation()!;
-    vi.mocked(notifyMember).mockImplementation(async (member, text) => {
-      if (String(text).includes("confirmreward")) {
-        txOpenAtPrompt = txStorage.getStore() !== undefined;
-        contributionCommittedAtPrompt =
-          (await prisma.contribution.findFirst({ where: { reference } })) !== null;
-      }
-      return realNotifyMember(member as never, text);
-    });
-
-    try {
-      await handlePaymentNotification({
-        transactionId: "TX-REFORD-1",
-        reference: "MEM-reford-1",
-        accountNumber: "9000000555",
-        amount: 500000,
-        currency: "NGN",
-        status: "successful",
-        provider: "monnify",
-        raw: {},
-      });
-
-      expect(txOpenAtPrompt).toBe(false);
-      expect(contributionCommittedAtPrompt).toBe(true);
-      expect(textsSent()).toContain("confirmreward");
-
-      const referral = await prisma.referral.findUnique({
-        where: { referredMemberId: referred.id },
-      });
-      // Confirmation is required — the reward is NOT auto-paid.
-      expect(referral?.status).toBe("qualified");
-      expect(
-        (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
-      ).toBe(0);
-    } finally {
-      vi.mocked(notifyMember).mockImplementation(realNotifyMember);
-    }
-  });
 });
 
 describe("referral registration step", () => {
@@ -625,13 +315,16 @@ describe("referral qualification on real money-in paths", () => {
     const referral = await prisma.referral.findUnique({
       where: { referredMemberId: referred.id },
     });
-    // Qualification prompts the referrer but pays nothing: the reward is only
-    // disbursed after the member confirms with *confirmreward* + their PIN.
-    expect(referral?.status).toBe("qualified");
+    // Qualification credits the referrer's bonus balance inline (same tx) and
+    // marks the referral rewarded — no prompt, no provider call.
+    expect(referral?.status).toBe("rewarded");
     expect(referral?.qualifiedAt).toBeInstanceOf(Date);
+    const credited = await prisma.member.findUniqueOrThrow({ where: { id: referrer.id } });
+    expect(credited.referralBonusBalance).toBe(50000);
     const referrerWallet = await prisma.wallet.findUnique({ where: { memberId: referrer.id } });
     expect(referrerWallet?.balance).toBe(0);
-    expect(textsSent()).toContain("confirmreward");
+    expect(await prisma.referralWithdrawal.count()).toBe(0);
+    expect(textsSent()).not.toContain("confirmreward");
   });
 
   it("does not qualify on a duplicate top-up delivery", async () => {
@@ -702,186 +395,6 @@ describe("referral qualification on real money-in paths", () => {
     });
     expect(referral?.status).toBe("pending");
     expect(referral?.qualifiedAt).toBeNull();
-  });
-});
-
-describe("referral reward confirmation", () => {
-  let seq = 0;
-
-  /** Seed a `qualified` referral for a referrer, with the given reward snapshot. */
-  async function qualifiedReward(
-    code: string,
-    opts: { rewardType: string; rewardAmount: number; phone?: string; bank?: boolean },
-  ) {
-    seq++;
-    const coop = await createCoop(code);
-    const referrer = await createTestMember(coop.id, {
-      phone: opts.phone ?? `2348044449${String(seq).padStart(3, "0")}`,
-      name: "Ada Obi",
-    });
-    const referred = await createTestMember(coop.id, {
-      phone: `2348044459${String(seq).padStart(3, "0")}`,
-    });
-    await recordReferral(coop.id, referrer.code, referred.id);
-    const referral = await prisma.referral.findUniqueOrThrow({
-      where: { referredMemberId: referred.id },
-    });
-    await prisma.referral.update({
-      where: { id: referral.id },
-      data: {
-        status: "qualified",
-        qualifiedAt: new Date(),
-        rewardType: opts.rewardType,
-        rewardAmount: opts.rewardAmount,
-      },
-    });
-    if (opts.bank) {
-      await prisma.member.update({
-        where: { id: referrer.id },
-        data: { bankAccountNumber: "0123456789", bankCode: "058", bankName: "GTBank" },
-      });
-    }
-    return { coop, referrer, referralId: referral.id };
-  }
-
-  it("qualifyReferral prompts the referrer and does not pay", async () => {
-    const coop = await createCoop("REFCNF1");
-    const referrer = await createTestMember(coop.id, { phone: "2348077010001" });
-    const referred = await createTestMember(coop.id, { phone: "2348077010002" });
-    await prisma.cooperativeConfig.update({
-      where: { cooperativeId: coop.id },
-      data: { referralRewardType: "wallet", referralRewardAmount: 50000 },
-    });
-    await recordReferral(coop.id, referrer.code, referred.id);
-
-    const res = await qualifyReferral(coop.id, referred.id);
-    expect(res.ok).toBe(true);
-
-    const referral = await prisma.referral.findUniqueOrThrow({
-      where: { referredMemberId: referred.id },
-    });
-    expect(referral.status).toBe("qualified");
-    expect(referral.rewardedAt).toBeNull();
-    expect(
-      (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
-    ).toBe(0);
-
-    const text = textsSent();
-    expect(text).toContain("referral reward is ready");
-    expect(text).toContain("₦500.00");
-    expect(text).toContain("wallet");
-    expect(text).toContain("confirmreward");
-    expect(text).toContain("cancelreward");
-  });
-
-  it("bank prompt shows the masked account and bank name", async () => {
-    const { coop, referralId } = await qualifiedReward("REFCNF2", {
-      rewardType: "bank",
-      rewardAmount: 30000,
-      bank: true,
-    });
-    const res = await notifyReferralReward(coop.id, referralId);
-    expect(res.ok).toBe(true);
-
-    const text = textsSent();
-    expect(text).toContain("₦300.00");
-    expect(text).toContain("0123****");
-    expect(text).toContain("GTBank");
-    expect(text).toContain("confirmreward");
-
-    const prompted = await prisma.auditLog.findFirst({
-      where: { action: "referral.reward.prompted", targetId: referralId },
-    });
-    expect(prompted).toBeTruthy();
-  });
-
-  it("airtime prompt shows the phone, amount and network", async () => {
-    const { coop, referralId } = await qualifiedReward("REFCNF3", {
-      rewardType: "airtime",
-      rewardAmount: 20000,
-      phone: "08031234567",
-    });
-    const res = await notifyReferralReward(coop.id, referralId);
-    expect(res.ok).toBe(true);
-
-    const text = textsSent();
-    expect(text).toContain("₦200.00");
-    expect(text).toContain("08031234567");
-    expect(text).toContain("MTN");
-  });
-
-  it("confirmreward arms the PIN challenge; the correct PIN pays the reward", async () => {
-    const { referrer, referralId } = await qualifiedReward("REFCNF4", {
-      rewardType: "wallet",
-      rewardAmount: 25000,
-    });
-
-    await handleMessage(referrer.phone, "confirmreward");
-    const session = await prisma.session.findUnique({ where: { phone: referrer.phone } });
-    expect(session?.state).toBe("awaiting_referral_reward_pin");
-    expect(dataOf(session?.data).referralId).toBe(referralId);
-
-    await handleMessage(referrer.phone, "1234");
-
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(after.status).toBe("rewarded");
-    expect(after.rewardedAt).toBeInstanceOf(Date);
-    expect(
-      (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
-    ).toBe(25000);
-
-    const confirmed = await prisma.auditLog.findFirst({
-      where: { action: "referral.reward.confirmed", targetId: referralId },
-    });
-    expect(confirmed).toBeTruthy();
-    const disbursed = await prisma.auditLog.findFirst({
-      where: { action: "referral.rewarded", targetId: referralId },
-    });
-    expect(disbursed).toBeTruthy();
-  });
-
-  it("a wrong PIN re-challenges and moves no money", async () => {
-    const { referrer, referralId } = await qualifiedReward("REFCNF5", {
-      rewardType: "wallet",
-      rewardAmount: 25000,
-    });
-
-    await handleMessage(referrer.phone, "confirmreward");
-    await handleMessage(referrer.phone, "9999");
-
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(after.status).toBe("qualified");
-    expect(
-      (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
-    ).toBe(0);
-    const session = await prisma.session.findUnique({ where: { phone: referrer.phone } });
-    expect(session?.state).toBe("awaiting_referral_reward_pin");
-  });
-
-  it("cancelreward leaves the referral qualified and pays nothing", async () => {
-    const { referrer, referralId } = await qualifiedReward("REFCNF6", {
-      rewardType: "wallet",
-      rewardAmount: 25000,
-    });
-
-    await handleMessage(referrer.phone, "cancelreward");
-
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referralId } });
-    expect(after.status).toBe("qualified");
-    expect(
-      (await prisma.wallet.findUniqueOrThrow({ where: { memberId: referrer.id } })).balance,
-    ).toBe(0);
-  });
-
-  it("confirmreward with no qualified reward replies without arming a PIN", async () => {
-    const coop = await createCoop("REFCNF7");
-    const member = await createTestMember(coop.id, { phone: "2348077020001" });
-
-    await handleMessage(member.phone, "confirmreward");
-
-    const session = await prisma.session.findUnique({ where: { phone: member.phone } });
-    expect(session?.state).toBe("idle");
-    expect(textsSent().toLowerCase()).toContain("no referral reward");
   });
 });
 
@@ -1169,143 +682,5 @@ describe("referral board controls", () => {
     });
     expect(cfg.referralEnabled).toBe(true);
     expect(textsSent()).toContain("Board Committee");
-  });
-});
-
-describe("referral airtime reward via the Flutterwave adapter", () => {
-  const FLW = "https://api.flutterwave.com/v3";
-  const json = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
-
-  /**
-   * Route the discovery calls to a single MTN biller + airtime item, then
-   * delegate the bill-payment response (which may throw to simulate a network
-   * error). Returns the captured payment requests.
-   */
-  function stubFetch(payment: () => unknown) {
-    const paymentCalls: Array<{ url: string; body: Record<string, unknown> }> = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: unknown, init?: RequestInit) => {
-        const url = String(input);
-        if (url.includes("/top-bill-categories")) {
-          return json({ status: "success", data: [{ code: "AIRTIME", country_code: "NG" }] });
-        }
-        if (url.includes("/bills/AIRTIME/billers")) {
-          return json({
-            status: "success",
-            data: [{ biller_code: "BIL100", name: "MTN", short_name: "MTN" }],
-          });
-        }
-        if (url.endsWith("/items")) {
-          return json({
-            status: "success",
-            data: [{ item_code: "AT100", is_airtime: true, category_name: "Airtime" }],
-          });
-        }
-        paymentCalls.push({ url, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
-        return json(payment());
-      }),
-    );
-    return paymentCalls;
-  }
-
-  /** A `qualified` airtime referral for an MTN referrer (phone set locally). */
-  async function airtimeReward(code: string, referredPhone: string) {
-    const coop = await createCoop(code);
-    const referrer = await createTestMember(coop.id, {
-      phone: "08031234567",
-      name: "Ada Obi",
-    });
-    const referred = await createTestMember(coop.id, { phone: referredPhone });
-    await recordReferral(coop.id, referrer.code, referred.id);
-    const referral = await prisma.referral.findUniqueOrThrow({
-      where: { referredMemberId: referred.id },
-    });
-    await prisma.referral.update({
-      where: { id: referral.id },
-      data: {
-        status: "qualified",
-        qualifiedAt: new Date(),
-        rewardType: "airtime",
-        rewardAmount: 50000,
-      },
-    });
-    return { coop, referral };
-  }
-
-  beforeEach(() => {
-    process.env.VTU_PROVIDER = "flutterwave";
-    process.env.FLUTTERWAVE_SECRET_KEY = "FLWSECK_TEST-abc";
-    clearVtuBillerCache();
-  });
-
-  afterEach(() => {
-    delete process.env.VTU_PROVIDER;
-    delete process.env.FLUTTERWAVE_SECRET_KEY;
-    vi.unstubAllGlobals();
-  });
-
-  it("pays an airtime reward end-to-end when the adapter resolves", async () => {
-    const paymentCalls = stubFetch(() => ({
-      status: "success",
-      message: "Bill payment successful",
-      data: { tx_ref: "CF-FLYAPI-REFERRAL", reference: "247891569224" },
-    }));
-    const { coop, referral } = await airtimeReward("REFAIR", "2348044440011");
-
-    const res = await payReferralReward(coop.id, referral.id);
-    expect(res.ok).toBe(true);
-
-    // Money moved: the referral is `rewarded` and audited.
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referral.id } });
-    expect(after.status).toBe("rewarded");
-    expect(after.rewardedAt).toBeInstanceOf(Date);
-    const audited = await prisma.auditLog.findFirst({
-      where: { action: "referral.rewarded", targetId: referral.id },
-    });
-    expect(audited).toBeTruthy();
-
-    // ₦500 (50,000 kobo) was bought as whole naira via the MTN airtime biller,
-    // under the referral's deterministic reference.
-    expect(paymentCalls).toHaveLength(1);
-    expect(paymentCalls[0].url).toBe(`${FLW}/billers/BIL100/items/AT100/payment`);
-    expect(paymentCalls[0].body).toMatchObject({
-      country: "NG",
-      customer_id: "08031234567",
-      amount: 500,
-      reference: `REFERRAL-${referral.id}`,
-    });
-  });
-
-  it("keeps the referral rewarded (no retry) when the airtime payment is UNSURE", async () => {
-    // The payment fetch itself rejects: the first payment may have landed, so a
-    // retry with the same reference would be a duplicate. Mirror the bank path.
-    stubFetch(() => {
-      throw new Error("socket hang up");
-    });
-    const { coop, referral } = await airtimeReward("REFAIRU", "2348044440012");
-
-    const res = await payReferralReward(coop.id, referral.id);
-
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referral.id } });
-    expect(after.status).toBe("rewarded");
-    expect(after.rewardedAt).toBeInstanceOf(Date);
-    expect(res.message.toLowerCase()).toContain("unconfirmed");
-    const warned = await prisma.auditLog.findFirst({
-      where: { action: "referral.reward.unconfirmed", targetId: referral.id },
-    });
-    expect(warned).toBeTruthy();
-  });
-
-  it("reverts to qualified when the airtime payment is a DEFINITE failure", async () => {
-    stubFetch(() => ({ status: "error", message: "Invalid customer id", data: null }));
-    const { coop, referral } = await airtimeReward("REFAIRF", "2348044440013");
-
-    const res = await payReferralReward(coop.id, referral.id);
-    expect(res.ok).toBe(false);
-
-    const after = await prisma.referral.findUniqueOrThrow({ where: { id: referral.id } });
-    expect(after.status).toBe("qualified");
-    expect(after.rewardedAt).toBeNull();
   });
 });

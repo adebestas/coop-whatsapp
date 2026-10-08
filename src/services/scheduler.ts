@@ -18,7 +18,6 @@ import {
   type PackType,
   type GenerateReportDeps,
 } from "./regulator-reporting.js";
-import { notifyReferralReward } from "./referrals.js";
 
 /**
  * Background jobs: recurring contribution reminders + monthly interest on
@@ -1157,81 +1156,10 @@ export async function runRegulatorReports(
   return created;
 }
 
-// ---- Referral reward re-prompts ----
-
-/**
- * Re-send the confirmation prompt for every `qualified` referral reward that is
- * still unpaid.
- *
- * A reward is never auto-paid: `qualifyReferral` only prompts the referrer, who
- * must reply *confirmreward* and enter their PIN. Members who skip or ignore the
- * prompt have their referral left `qualified` — this sweep re-offers it, deduped
- * to at most once per referral per day (`claimOnce`), and does NOT pay. One
- * referral's failure is logged and never stops the sweep. Returns the number of
- * prompts sent.
- *
- * Deliberately NOT `forEachCoop`: only the DB READS are scoped to a short
- * `withCoopContext` (committed before we return); the prompts then run outside
- * any transaction, so the send never executes with a tx open.
- */
-export async function runReferralRewardPrompts(now = new Date()): Promise<number> {
-  let prompted = 0;
-  const day = now.toISOString().slice(0, 10);
-  const coopIds = await listCooperativeIds();
-  for (const coopId of coopIds) {
-    let qualifiedIds: string[];
-    try {
-      qualifiedIds = await withCoopContext(coopId, async () => {
-        const config = await prisma.cooperativeConfig.findUnique({
-          where: { cooperativeId: coopId },
-          select: { referralEnabled: true },
-        });
-        if (config?.referralEnabled !== true) return [];
-        const rows = await prisma.referral.findMany({
-          where: { cooperativeId: coopId, status: "qualified" },
-          select: { id: true },
-        });
-        return rows.map((r) => r.id);
-      });
-    } catch (err) {
-      // One coop's read failure must not abort the rest.
-      log.error("[scheduler] referral reward prompt scan failed", {
-        coopId,
-        at: now.toISOString(),
-        err: String(err),
-      });
-      continue;
-    }
-
-    // No ambient transaction here: `notifyReferralReward` reads in its own short
-    // tx and sends outside any tx.
-    for (const referralId of qualifiedIds) {
-      // Dedupe per referral per day so a member is not nagged on every tick.
-      if (
-        !(await claimOnce("referral-reward-prompt", `${referralId}:${day}`, 2 * 24 * 3600))
-      ) {
-        continue;
-      }
-      try {
-        const res = await notifyReferralReward(coopId, referralId);
-        if (res.ok) prompted++;
-      } catch (err) {
-        log.error("[scheduler] referral reward prompt failed", {
-          coopId,
-          referralId,
-          at: now.toISOString(),
-          err: String(err),
-        });
-      }
-    }
-  }
-  return prompted;
-}
-
 /** One scheduler tick: reminders, statements, birthdays, anniversaries,
  *  guarantor defaults, status posts, VA cleanup, retention, STR escalation,
- *  ombudsman SLA escalation, regulator packs, referral reward re-prompts,
- *  proactive alerts, backup verification. */
+ *  ombudsman SLA escalation, regulator packs, proactive alerts, backup
+ *  verification. */
 export async function runSchedulerTick(): Promise<void> {
   const { checkAnniversaries } = await import("./anniversary.js");
   const { scanGuarantorDefaults, executeDueDeductions } = await import("./guarantordeduction.js");
@@ -1292,9 +1220,6 @@ export async function runSchedulerTick(): Promise<void> {
   );
   await runRegulatorReports().catch((err) =>
     log.error("[scheduler] regulator reports failed", { err: String(err) }),
-  );
-  await runReferralRewardPrompts().catch((err) =>
-    log.error("[scheduler] referral reward prompts failed", { err: String(err) }),
   );
   await runProactiveAlerts().catch((err) =>
     log.error("[scheduler] proactive alerts failed", { err: String(err) }),

@@ -100,8 +100,7 @@ import {
   type PackType,
   type PeriodType,
 } from "./regulator-reporting.js";
-import { setReferralConfig, setReferralEnabled, referralReport, notifyReferralReward } from "./referrals.js";
-import { enqueueAfterCommit } from "../lib/deferred.js";
+import { setReferralConfig, setReferralEnabled, referralReport } from "./referrals.js";
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
 
@@ -1438,61 +1437,6 @@ export async function handleAdminCommand(
       case "referralreport": {
         const res = await referralReport(coopId);
         await sendText({ to: phone, text: res.message });
-        return true;
-      }
-
-      case "referralpay":
-      case "referralretry": {
-        // Re-send the referral reward CONFIRMATION prompt (a nudge). Rewards are
-        // member-confirmed now, so this never pays: the referrer must reply
-        // *confirmreward* and enter their PIN. Keep the program's enablement gate.
-        const refArg = args[0]?.trim();
-        if (!refArg) {
-          await sendText({
-            to: phone,
-            text: "Usage: *referralpay <referral id>* — re-send a qualified referral reward prompt (from *referralreport*).",
-          });
-          return true;
-        }
-        const refConfig = await prisma.cooperativeConfig.findUnique({
-          where: { cooperativeId: coopId },
-          select: { referralEnabled: true },
-        });
-        if (refConfig?.referralEnabled !== true) {
-          await sendText({
-            to: phone,
-            text: "Referrals are not enabled for this cooperative — turn them on with *referralconfig on* first.",
-          });
-          return true;
-        }
-        // Accept the full id or the short suffix shown in `referralreport`.
-        const refs = await prisma.referral.findMany({
-          where: { cooperativeId: coopId },
-          select: { id: true },
-        });
-        const match = refs.find((r) => r.id === refArg || r.id.endsWith(refArg));
-        if (!match) {
-          await sendText({ to: phone, text: `No referral found for *${refArg}*.` });
-          return true;
-        }
-        // The chat handler runs under `withCoopContext` (an ambient tx); the
-        // prompt send must not run inside it, so defer past the chat
-        // transaction. `enqueueAfterCommit` returns false with no ambient scope
-        // (direct call), so fall back to an immediate await there.
-        const triggered = enqueueAfterCommit(async () => {
-          await notifyReferralReward(coopId, match.id).catch((err) => {
-            console.error("[referral] admin referralpay prompt failed", err);
-          });
-        });
-        if (!triggered) {
-          const res = await notifyReferralReward(coopId, match.id);
-          await sendText({ to: phone, text: res.message });
-          return true;
-        }
-        await sendText({
-          to: phone,
-          text: "Referral reward confirmation prompt re-sent — the member must reply *confirmreward* and enter their PIN to receive it.",
-        });
         return true;
       }
 
