@@ -230,6 +230,12 @@ export const FlowDataSchema = z.object({
   bankIntent: z.string().optional(),
   bankAccount: z.string().optional(),
   bankCode: z.string().optional(),
+  insuranceProduct: z.string().optional(),
+  insurancePlan: z.string().optional(),
+  insuranceConfirm: z.boolean().optional(),
+  awaiting_insurance_product: z.boolean().optional(),
+  awaiting_insurance_plan: z.boolean().optional(),
+  awaiting_insurance_confirm: z.boolean().optional(),
   bankName: z.string().optional(),
   bankAccountName: z.string().optional(),
   payeeName: z.string().optional(),
@@ -263,6 +269,9 @@ export const SECRET_STATES: BotState[] = [
   "awaiting_mandate_pin",
   "awaiting_cancelmandate_pin",
   "awaiting_delete_account_pin",
+  "awaiting_insurance_product",
+  "awaiting_insurance_plan",
+  "awaiting_insurance_confirm",
 ];
 
 /** Metadata about how a message arrived (channel-specific extras). */

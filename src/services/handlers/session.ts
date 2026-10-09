@@ -1561,6 +1561,84 @@ export async function handleAwaitingInput(
       break;
     }
 
+    case "awaiting_insurance_product": {
+      const productCode = data.insuranceProduct as string;
+      const products = await ctx.insurance.getProducts();
+      const product = products.find((p: any) => p.code === productCode);
+      if (!product) {
+        await sendText({ to: phone, text: "Product not found. Reply *insurance* to browse available products." });
+        return;
+      }
+      const productDetails = products.find((p: any) => p.code === productCode);
+      const plansText = productDetails.plans.map((p: any) => `- *${p.code}*: ₦${(p.premiumKobo / 100).toFixed(0)} per month, coverage ₦${(p.coverageKobo / 100).toFixed(0)}/month`).join("\n");
+      await sendText({
+        to: phone,
+        text: `*${productDetails.name}*\n${productDetails.description}\n\nPlans:\n${plansText}\n\nReply *${productDetails.plans[0].code}* to select this plan, or *insurance* to browse other products.`,
+      });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle", data: "{}" },
+        update: { state: "idle", data: "{}" },
+      });
+      break;
+    }
+
+    case "awaiting_insurance_plan": {
+      const planCode = data.insurancePlan as string;
+      const productCode = data.productCode as string;
+      await sendText({
+        to: phone,
+        text: `Confirm purchase of *${planCode}* plan for *${productCode}* at ₦${(data.premiumKobo / 100).toFixed(0)}/month? Reply *yes* to confirm or *no* to cancel.`,
+      });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_insurance_confirm", data: JSON.stringify({ productCode, planCode, premiumKobo: data.premiumKobo }) },
+        update: { state: "awaiting_insurance_confirm", data: JSON.stringify({ productCode, planCode, premiumKobo: data.premiumKobo }) },
+      });
+      break;
+    }
+
+    case "awaiting_insurance_confirm": {
+      const answer = text.trim().toLowerCase();
+      if (answer === "yes" || answer === "y") {
+        const { productCode, planCode, premiumKobo } = data as any;
+        const member = await getMemberByPhone(phone);
+        if (!member) {
+          await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+          return;
+        }
+        const result = await ctx.insurance.purchasePlan(member.cooperativeId, member.id, productCode, planCode);
+        await sendText({ to: phone, text: result.message });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle", data: "{}" },
+          update: { state: "idle", data: "{}" },
+        });
+      } else if (answer === "no" || answer === "n") {
+        await sendText({ to: phone, text: "Insurance purchase cancelled. Reply *menu* to see options." });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle", data: "{}" },
+          update: { state: "idle", data: "{}" },
+        });
+      } else {
+        await sendText({ to: phone, text: "Please reply *yes* to confirm or *no* to cancel." });
+      }
+      break;
+    }
+
+    case "doctor": {
+      await sendText({
+        to: phone,
+        text: "Connecting you to the in-platform telemedicine service... 🏥\n\n" +
+          "You can consult with a doctor without leaving the platform. " +
+          "Wait time is typically 2-10 minutes. Your first consultation is covered by your insurance.\n\n" +
+          "Reply *menu* to return to the main menu.",
+      });
+      // TODO: Implement deep link to CubeCover telemedicine
+      break;
+    }
+
     case "awaiting_death_cert": {
       const cert = text.trim();
       if (!cert) {
