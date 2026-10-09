@@ -1919,7 +1919,7 @@ model InsuranceClaim {
   status          String    @default("pending")
   cubecoverClaimId String?
   description     String?
-  documents       String[]
+  documents       String
   payoutKobo      Int?
   payoutDestination String?
   createdAt       DateTime  @default(now())

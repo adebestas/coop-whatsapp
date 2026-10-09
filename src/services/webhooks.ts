@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { prisma } from "../lib/prisma.js";
+import { InsuranceService } from "../services/insurance/index.js";
 import { monnifyAdapter } from "./payments/monnify.js";
 import { paystackAdapter } from "./payments/paystack.js";
 import { flutterwaveAdapter } from "./payments/flutterwave.js";
+import { CubeCoverClient } from "./insurance/cubecover.js";
 import { handlePaymentNotification } from "./payments/topup.js";
 import type { PaymentNotification, ProviderAdapter } from "./payments/index.js";
 import { applyDividendPayoutUpdate } from "./dividends.js";
@@ -35,6 +37,24 @@ const adapters: Record<string, ProviderAdapter> = {
   flutterwave: flutterwaveAdapter,
 };
 
+const cubecoverAdapter: ProviderAdapter = {
+  name: "cubecover",
+  verifyWebhook(rawBody: string, headers: Record<string, string | string[] | undefined>): boolean {
+    const client = new CubeCoverClient({
+      apiKey: process.env.CUBECOVER_API_KEY!,
+      baseUrl: process.env.CUBECOVER_BASE_URL || 'https://api.cubecover.ai',
+    });
+    return client.verifyWebhook(rawBody, headers["verif-hash"] as string);
+  },
+  parseNotification(body: unknown): any {
+    const client = new CubeCoverClient({
+      apiKey: process.env.CUBECOVER_API_KEY!,
+      baseUrl: process.env.CUBECOVER_BASE_URL || 'https://api.cubecover.ai',
+    });
+    return client.parseNotification(body);
+  },
+};
+
 const SIGNATURE_HEADERS: Record<string, string> = {
   "monnify-signature": "monnify",
   "x-paystack-signature": "paystack",
@@ -48,6 +68,9 @@ export function detectProvider(
     const value = headers[header];
     if ((Array.isArray(value) ? value[0] : value)?.length) return provider;
   }
+  // Check for CubeCover via verif-hash header
+  const ccValue = headers["verif-hash"];
+  if ((Array.isArray(ccValue) ? ccValue[0] : ccValue)?.length) return "cubecover";
   return null;
 }
 
@@ -227,11 +250,41 @@ export async function processPaymentWebhook(
       });
     }
 
-    // Recognised event, but not a credit we act on (e.g. charge.failed,
-    // transfer.success for a coop-initiated payout, or a provider health
-    // ping). Acknowledge with 200 so the provider stops retrying — never
-    // 4xx, which would make them hammer us.
+    // Unrecognised event — acknowledge with 200 so the provider stops retrying.
     return { httpStatus: 200, body: { status: "ignored" } };
+  }
+
+  // Handle CubeCover insurance webhook events
+  if (providerName === "cubecover") {
+    const insuranceService = new InsuranceService({
+      prisma: prisma as any,
+      cubecover: new CubeCoverClient({
+        apiKey: process.env.CUBECOVER_API_KEY!,
+        baseUrl: process.env.CUBECOVER_BASE_URL || 'https://api.cubecover.ai',
+      }),
+    });
+    await insuranceService.handleWebhook(
+      notification.event,
+      notification.data as Record<string, unknown>,
+    );
+    // Record the insurance webhook event for dedup, then acknowledge
+    const insuranceEventId = `cubecover:${notification.event}:${JSON.stringify(notification.data)}`;
+    try {
+      await prisma.webhookEvent.create({
+        data: {
+          id: insuranceEventId,
+          provider: "cubecover",
+          kind: "insurance_update",
+          payloadHash: createHash("sha256").update(rawBody).digest("hex"),
+          status: "processed",
+        },
+      });
+    } catch (err: any) {
+      if (err?.code !== "P2002") {
+        console.error(`[webhook] failed to record insurance delivery`, err);
+      }
+    }
+    return { httpStatus: 200, body: { status: "ok", event: insuranceEventId } };
   }
 
   const eventId = `${providerName}:${notification.transactionId}`;
