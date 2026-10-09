@@ -29,7 +29,8 @@ import { createCooperative, generateMemberFileNumber } from "../cooperative.js";
 import { confirmDividendDistribution } from "../dividends.js";
 import { hashPin, verifyPin } from "../../lib/security.js";
 import { createMandate, cancelMandate } from "../mandates.js";
-import { myReferrals } from "../referrals.js";
+import { myReferrals, getReferralBonus, withdrawReferralBonus } from "../referrals.js";
+import { enqueueAfterCommit } from "../../lib/deferred.js";
 
 /** A half-finished flow expires after this long. */
 /** OTP codes expire after this long. */
@@ -270,6 +271,58 @@ export async function handleReferrals(phone: string): Promise<void> {
   }
   const res = await myReferrals(member.cooperativeId, member.id);
   await sendText({ to: phone, text: res.message });
+}
+
+/** Valid referral-bonus withdrawal destinations (no Prisma enum — plain strings). */
+const BONUS_DESTINATIONS = new Set(["wallet", "bank", "airtime"]);
+
+/** Parse a destination reply: a name, a 1/2/3 menu choice, or null. */
+function parseBonusDestination(raw: string): "wallet" | "bank" | "airtime" | null {
+  const t = raw.trim().toLowerCase();
+  if (t === "1" || t === "wallet") return "wallet";
+  if (t === "2" || t === "bank") return "bank";
+  if (t === "3" || t === "airtime") return "airtime";
+  return null;
+}
+
+/** Show the member's running referral bonus balance + how to withdraw it. */
+export async function handleReferralBonus(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  const res = await getReferralBonus(member.cooperativeId, member.id);
+  if (!res.ok) {
+    await sendText({ to: phone, text: res.message });
+    return;
+  }
+  await sendText({
+    to: phone,
+    text:
+      `${res.message}\n\n` +
+      (res.balance > 0
+        ? `Reply *withdrawbonus* to move any amount to your wallet, your saved bank account, or airtime to any phone number.`
+        : `Refer a friend to start earning — reply *myrefcode* for your referral code.`),
+  });
+}
+
+/** Start the guided referral-bonus withdrawal flow (amount first). */
+export async function handleStartBonusWithdrawal(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    return;
+  }
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_bonus_amount", data: "{}" },
+    update: { state: "awaiting_bonus_amount", data: "{}" },
+  });
+  await sendText({
+    to: phone,
+    text: "How much of your referral bonus would you like to withdraw? Reply an amount in naira, e.g. *500*.",
+  });
 }
 
 export function buildOmbudsmanMenu(): string {
@@ -1228,6 +1281,184 @@ export async function handleAwaitingInput(
         to: phone,
         text: result.message + "\n\nReply *menu* to see other options.",
       });
+      break;
+    }
+
+    case "awaiting_bonus_amount": {
+      const amount = parseNaira(text);
+      if (amount === null) {
+        await sendText({ to: phone, text: "That doesn't look like a valid amount. Try e.g. *500*." });
+        return;
+      }
+      const member = await getMemberByPhone(phone);
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+        });
+        return;
+      }
+      const bonus = await getReferralBonus(member.cooperativeId, member.id);
+      if (!bonus.ok || amount > bonus.balance) {
+        await sendText({
+          to: phone,
+          text:
+            `That's more than your referral bonus balance of *${formatBalance(bonus.balance)}*. ` +
+            `Enter a smaller amount, or reply *menu* to cancel.`,
+        });
+        return;
+      }
+      const cfg = await prisma.cooperativeConfig.findUnique({
+        where: { cooperativeId: member.cooperativeId },
+      });
+      const defaultDest = (cfg?.referralRewardType ?? "wallet").toLowerCase();
+      await prisma.session.upsert({
+        where: { phone },
+        create: {
+          phone,
+          state: "awaiting_bonus_destination",
+          data: JSON.stringify({ ...data, bonusAmount: amount }),
+        },
+        update: {
+          state: "awaiting_bonus_destination",
+          data: JSON.stringify({ ...data, bonusAmount: amount }),
+        },
+      });
+      await sendText({
+        to: phone,
+        text:
+          `Where should we send it?\n\n` +
+          `• *1* — your wallet\n` +
+          `• *2* — your saved bank account\n` +
+          `• *3* — airtime to any number\n\n` +
+          `Reply *1*, *2* or *3* (or *wallet*, *bank*, *airtime*). Default: *${defaultDest}*.`,
+      });
+      break;
+    }
+
+    case "awaiting_bonus_destination": {
+      const member = await getMemberByPhone(phone);
+      const cfg = member
+        ? await prisma.cooperativeConfig.findUnique({
+            where: { cooperativeId: member.cooperativeId },
+          })
+        : null;
+      const configured = (cfg?.referralRewardType ?? "wallet").toLowerCase();
+      const raw = text.trim().toLowerCase();
+      const destination =
+        raw === "" || raw === "default" || raw === "skip"
+          ? ((BONUS_DESTINATIONS.has(configured) ? configured : "wallet") as
+              | "wallet"
+              | "bank"
+              | "airtime")
+          : parseBonusDestination(raw);
+      if (!destination) {
+        await sendText({ to: phone, text: "Reply *1* (wallet), *2* (bank) or *3* (airtime)." });
+        return;
+      }
+      if (destination === "airtime") {
+        await prisma.session.upsert({
+          where: { phone },
+          create: {
+            phone,
+            state: "awaiting_bonus_phone",
+            data: JSON.stringify({ ...data, bonusDestination: destination }),
+          },
+          update: {
+            state: "awaiting_bonus_phone",
+            data: JSON.stringify({ ...data, bonusDestination: destination }),
+          },
+        });
+        await sendText({
+          to: phone,
+          text: "Which phone number should receive the airtime? Any number, e.g. *08012345678*.",
+        });
+        return;
+      }
+      await issueSecretChallenge(
+        phone,
+        "awaiting_bonus_pin",
+        { ...data, bonusDestination: destination },
+        "Enter your 4-digit PIN to confirm the withdrawal.",
+      );
+      break;
+    }
+
+    case "awaiting_bonus_phone": {
+      const airtimePhone = normalizePhone(text);
+      if (!airtimePhone) {
+        await sendText({
+          to: phone,
+          text: "That doesn't look like a valid number. Try e.g. *08012345678*.",
+        });
+        return;
+      }
+      await issueSecretChallenge(
+        phone,
+        "awaiting_bonus_pin",
+        { ...data, bonusPhone: airtimePhone },
+        "Enter your 4-digit PIN to confirm the airtime withdrawal.",
+      );
+      break;
+    }
+
+    case "awaiting_bonus_pin": {
+      const input = text.trim();
+      if (input.toLowerCase() === "menu" || input.toLowerCase() === "cancel") {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({
+          to: phone,
+          text: "Withdrawal cancelled. Reply *menu* to start something else.",
+        });
+        return;
+      }
+      const member = await getMemberByPhone(phone);
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+        });
+        return;
+      }
+      const pinCheck = await verifyMemberPin(member, input);
+      if (!pinCheck.ok) {
+        const msg = pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel.";
+        await sendText({ to: phone, text: msg });
+        await issueSecretChallenge(phone, "awaiting_bonus_pin", data, msg);
+        return;
+      }
+      const amount = data.bonusAmount ?? 0;
+      const destination = (data.bonusDestination ?? "wallet") as "wallet" | "bank" | "airtime";
+      const airtimePhone = data.bonusPhone;
+      // Leave the flow BEFORE the disbursement so a replayed PIN cannot withdraw twice.
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle", data: "{}" },
+      });
+      // The chat handler is ONE transaction, so the provider payout must run
+      // after it commits. Fall back to an immediate await when there is no scope.
+      const disburse = async () => {
+        const result = await withdrawReferralBonus(
+          member.cooperativeId,
+          member.id,
+          { amount, destination, phone: airtimePhone },
+          { id: member.id, phone },
+        );
+        await sendText({
+          to: phone,
+          text: result.message + "\n\nReply *menu* to see other options.",
+        });
+      };
+      if (!enqueueAfterCommit(disburse)) {
+        await disburse();
+      } else {
+        await sendText({ to: phone, text: "⏳ Processing your referral bonus withdrawal…" });
+      }
       break;
     }
 

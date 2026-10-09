@@ -992,3 +992,169 @@ describe("referral bonus withdrawal", () => {
     expect(empty.message.toLowerCase()).toContain("no referral withdrawals");
   });
 });
+
+describe("referral bonus commands & guided withdrawal", () => {
+  async function bonusMember(
+    coopId: string,
+    phone: string,
+    bonus: number,
+    extra: { name?: string } = {},
+  ) {
+    const member = await createTestMember(coopId, { phone, name: extra.name });
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { referralBonusBalance: bonus },
+    });
+    return member;
+  }
+
+  it("referralbonus shows the balance and how to withdraw", async () => {
+    const coop = await createCoop("RBBC1");
+    const member = await bonusMember(coop.id, "2348092000001", 50000, { name: "Ada Obi" });
+
+    await handleMessage(member.phone, "referralbonus");
+
+    expect(textsSent()).toContain("₦500.00");
+    expect(textsSent().toLowerCase()).toContain("withdrawbonus");
+  });
+
+  it("withdrawbonus guides amount → destination → PIN and disburses after commit (deferred)", async () => {
+    const coop = await createCoop("RBFLOW");
+    const member = await bonusMember(coop.id, "2348092000002", 50000, { name: "Ada Obi" });
+
+    await handleMessage(member.phone, "withdrawbonus");
+    let session = await sessionOf(member.phone);
+    expect(session?.state).toBe("awaiting_bonus_amount");
+
+    await handleAwaitingInput(
+      member.phone,
+      "awaiting_bonus_amount",
+      "300",
+      session?.data ?? "{}",
+    );
+    session = await sessionOf(member.phone);
+    expect(session?.state).toBe("awaiting_bonus_destination");
+    expect(dataOf(session?.data).bonusAmount).toBe(30000);
+
+    await handleAwaitingInput(
+      member.phone,
+      "awaiting_bonus_destination",
+      "wallet",
+      session?.data ?? "{}",
+    );
+    session = await sessionOf(member.phone);
+    expect(session?.state).toBe("awaiting_bonus_pin");
+    expect(dataOf(session?.data).bonusDestination).toBe("wallet");
+
+    // The chat handler runs inside a deferred-send scope: the payout must not be
+    // debited until the scope (transaction) commits.
+    await withDeferredSends(async () => {
+      await handleAwaitingInput(member.phone, "awaiting_bonus_pin", "1234", session?.data ?? "{}");
+      const mid = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+      expect(mid.referralBonusBalance).toBe(50000);
+    });
+
+    const after = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+    expect(after.referralBonusBalance).toBe(20000);
+    const wallet = await prisma.wallet.findUniqueOrThrow({ where: { memberId: member.id } });
+    expect(wallet.balance).toBe(30000);
+    expect(
+      await prisma.referralWithdrawal.count({ where: { memberId: member.id, status: "paid" } }),
+    ).toBe(1);
+    expect(textsSent()).toContain("₦300.00");
+  });
+
+  it("uses the configured referralRewardType as the default destination", async () => {
+    const coop = await createCoop("RBDEF");
+    await prisma.cooperativeConfig.update({
+      where: { cooperativeId: coop.id },
+      data: { referralRewardType: "bank" },
+    });
+    const member = await bonusMember(coop.id, "2348092000003", 50000);
+
+    await handleMessage(member.phone, "withdrawbonus");
+    let session = await sessionOf(member.phone);
+    await handleAwaitingInput(member.phone, "awaiting_bonus_amount", "100", session?.data ?? "{}");
+    session = await sessionOf(member.phone);
+    await handleAwaitingInput(
+      member.phone,
+      "awaiting_bonus_destination",
+      "default",
+      session?.data ?? "{}",
+    );
+    session = await sessionOf(member.phone);
+    expect(session?.state).toBe("awaiting_bonus_pin");
+    expect(dataOf(session?.data).bonusDestination).toBe("bank");
+  });
+
+  it("captures an airtime phone then asks for the PIN", async () => {
+    const coop = await createCoop("RBAIR");
+    const member = await bonusMember(coop.id, "2348092000004", 20000);
+
+    await handleMessage(member.phone, "withdrawbonus");
+    let session = await sessionOf(member.phone);
+    await handleAwaitingInput(member.phone, "awaiting_bonus_amount", "100", session?.data ?? "{}");
+    session = await sessionOf(member.phone);
+    await handleAwaitingInput(
+      member.phone,
+      "awaiting_bonus_destination",
+      "airtime",
+      session?.data ?? "{}",
+    );
+    session = await sessionOf(member.phone);
+    expect(session?.state).toBe("awaiting_bonus_phone");
+
+    await handleAwaitingInput(
+      member.phone,
+      "awaiting_bonus_phone",
+      "08031234567",
+      session?.data ?? "{}",
+    );
+    session = await sessionOf(member.phone);
+    expect(session?.state).toBe("awaiting_bonus_pin");
+    expect(dataOf(session?.data).bonusPhone).toBe("2348031234567");
+  });
+
+  it("re-challenges on a wrong PIN without debiting the bonus", async () => {
+    const coop = await createCoop("RBADPIN");
+    const member = await bonusMember(coop.id, "2348092000005", 50000);
+
+    await handleMessage(member.phone, "withdrawbonus");
+    let session = await sessionOf(member.phone);
+    await handleAwaitingInput(member.phone, "awaiting_bonus_amount", "300", session?.data ?? "{}");
+    session = await sessionOf(member.phone);
+    await handleAwaitingInput(
+      member.phone,
+      "awaiting_bonus_destination",
+      "wallet",
+      session?.data ?? "{}",
+    );
+    session = await sessionOf(member.phone);
+
+    await handleAwaitingInput(member.phone, "awaiting_bonus_pin", "0000", session?.data ?? "{}");
+
+    session = await sessionOf(member.phone);
+    expect(session?.state).toBe("awaiting_bonus_pin");
+    const after = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
+    expect(after.referralBonusBalance).toBe(50000);
+    expect(await prisma.referralWithdrawal.count()).toBe(0);
+  });
+
+  it("referralreport includes bonus outstanding and withdrawal figures", async () => {
+    const coop = await createCoop("RBRPT");
+    const member = await bonusMember(coop.id, "2348092000006", 50000);
+
+    await withdrawReferralBonus(
+      coop.id,
+      member.id,
+      { amount: 20000, destination: "wallet" },
+      { id: member.id, phone: member.phone },
+    );
+
+    const res = await referralReport(coop.id);
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("Bonus outstanding");
+    expect(res.message).toContain("₦300.00");
+    expect(res.message.toLowerCase()).toContain("withdrawal");
+  });
+});

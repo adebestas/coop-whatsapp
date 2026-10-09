@@ -67,6 +67,8 @@ import {
   parseNaira,
   handleMyRefCode,
   handleReferrals,
+  handleReferralBonus,
+  handleStartBonusWithdrawal,
 } from "./handlers/session.js";
 import { handleJoinStart, handleOnboardStart } from "./handlers/join.js";
 import {
@@ -164,6 +166,10 @@ export type BotState =
   | "awaiting_guarantor_2"
   | "awaiting_withdraw_amount"
   | "awaiting_withdraw_pin"
+  | "awaiting_bonus_amount"
+  | "awaiting_bonus_destination"
+  | "awaiting_bonus_phone"
+  | "awaiting_bonus_pin"
   | "awaiting_repay_pin"
   | "awaiting_buyshares_pin"
   | "awaiting_bank_account"
@@ -210,6 +216,9 @@ export const FlowDataSchema = z.object({
   loanBankName: z.string().optional(),
   loanId: z.string().optional(),
   withdrawAmount: z.number().positive().optional(),
+  bonusAmount: z.number().positive().optional(),
+  bonusDestination: z.string().optional(),
+  bonusPhone: z.string().optional(),
   shareCount: z.number().positive().optional(),
   mandateCap: z.number().positive().optional(),
   mandateId: z.string().optional(),
@@ -248,6 +257,7 @@ export const SECRET_STATES: BotState[] = [
   "awaiting_pin",
   "awaiting_pin_confirm",
   "awaiting_withdraw_pin",
+  "awaiting_bonus_pin",
   "awaiting_repay_pin",
   "awaiting_buyshares_pin",
   "awaiting_mandate_pin",
@@ -742,6 +752,14 @@ async function handleMessageInner(
 
     case "referrals":
       await handleReferrals(phone);
+      break;
+
+    case "referralbonus":
+      await handleReferralBonus(phone);
+      break;
+
+    case "withdrawbonus":
+      await handleStartBonusWithdrawal(phone);
       break;
 
     case "phone":

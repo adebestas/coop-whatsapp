@@ -423,20 +423,37 @@ export async function setReferralEnabled(
  * Coop-scoped read via `withTx` + `setCoopContext`.
  */
 export async function referralReport(coopId: string): Promise<{ ok: boolean; message: string }> {
-  const { config, rows } = await withTx(async (tx) => {
+  const { config, rows, bonusOutstanding, withdrawals } = await withTx(async (tx) => {
     await setCoopContext(tx as never, coopId);
     const config = await tx.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
     const rows = await tx.referral.findMany({
       where: { cooperativeId: coopId },
       select: { status: true, rewardAmount: true },
     });
-    return { config, rows };
+    const bonus = await tx.member.aggregate({
+      where: { cooperativeId: coopId },
+      _sum: { referralBonusBalance: true },
+    });
+    const withdrawals = await tx.referralWithdrawal.findMany({
+      where: { cooperativeId: coopId },
+      select: { status: true, amount: true },
+    });
+    return {
+      config,
+      rows,
+      bonusOutstanding: bonus._sum.referralBonusBalance ?? 0,
+      withdrawals,
+    };
   });
 
   const count = (status: string) => rows.filter((r) => r.status === status).length;
   const paid = rows
     .filter((r) => r.status === "rewarded")
     .reduce((sum, r) => sum + (r.rewardAmount ?? 0), 0);
+  const wdCount = (status: string) => withdrawals.filter((w) => w.status === status).length;
+  const withdrawn = withdrawals
+    .filter((w) => w.status === "paid")
+    .reduce((sum, w) => sum + w.amount, 0);
   const amount = config?.referralRewardAmount ?? DEFAULT_REWARD_AMOUNT;
   const rewardType = config?.referralRewardType ?? DEFAULT_REWARD_TYPE;
   const cap = config?.referralMaxRewards ?? 0;
@@ -453,7 +470,11 @@ export async function referralReport(coopId: string): Promise<{ ok: boolean; mes
       `• Qualified (unpaid): *${count("qualified")}*\n` +
       `• Rewarded: *${count("rewarded")}*\n` +
       `• Rejected: *${count("rejected")}*\n\n` +
-      `Rewards paid: *${formatBalance(paid)}*`,
+      `Rewards paid: *${formatBalance(paid)}*\n` +
+      `Bonus outstanding: *${formatBalance(bonusOutstanding)}*\n` +
+      `Withdrawals: *${withdrawals.length}* ` +
+      `(paid *${wdCount("paid")}*, pending *${wdCount("pending")}*, failed *${wdCount("failed")}*)\n` +
+      `Withdrawn: *${formatBalance(withdrawn)}*`,
   };
 }
 

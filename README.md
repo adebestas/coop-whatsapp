@@ -82,6 +82,8 @@ tests/                   # vitest smoke tests
 | `reserveinfo` | Statutory reserve fund info |
 | `grievance <complaint>` | Submit a grievance to the cooperative |
 | `byelaws` | View the cooperative's registered byelaws |
+| `myrefcode` / `referrals` | Your referral code and the referrals you've earned |
+| `referralbonus` / `withdrawbonus` | See your referral bonus balance / withdraw it (wallet, saved bank account, or airtime) |
 
 > **Voice notes:** on WhatsApp you can send a voice note instead of typing a command — it is transcribed and processed as text (requires `GROQ_API_KEY` + `WHATSAPP_TOKEN`).
 
@@ -590,24 +592,27 @@ neither recorded nor paid.
   code when the bot asks *"were you referred by a member?"*. Reply `skip` (or leave
   it blank) to join without one — no referral is recorded. Unknown and self-referral
   codes are rejected; the join itself always succeeds.
-- **Reward types** — `wallet` (credits the referrer's wallet), `bank` (payout to
-  their saved account), or `airtime` (a **gated** VTU recharge). The default reward
-  is **₦500**.
-- **Member-confirmed payout** — a reward is **never paid automatically**. When a
-  referral qualifies the referrer gets a prompt with the reward details (wallet:
-  amount; bank: amount + masked account + bank; airtime: amount + phone + network):
-  *"Reply confirmreward to receive it, or cancelreward to skip."* `confirmreward`
-  then asks for the member's **PIN**, and the reward is disbursed only on a correct
-  PIN. `cancelreward` (or ignoring the prompt) leaves the referral `qualified`; the
-  scheduler re-offers it later, at most **once per referral per day**. A reward that
-  cannot be paid yet (gated airtime with no VTU provider, or a bank payout that was
-  definitely rejected) simply stays `qualified` until it can be — it is never
-  silently lost.
+- **Reward types** — a qualifying referral credits the referrer's **running bonus
+  balance** (the default reward is **₦500**). The bonus is not paid out
+  automatically; the member chooses where to send it when they withdraw.
+- **Bonus balance & withdrawal** — `referralbonus` shows the member's current
+  withdrawable balance. `withdrawbonus` starts a guided flow:
+  1. **amount** — any amount up to the balance (partial withdrawals allowed);
+  2. **destination** — `wallet`, `bank`, or `airtime`, defaulting to the
+     cooperative's configured reward type (the member can change it);
+  3. **phone** — only for `airtime`; **any** number, no ownership check;
+  4. **PIN** — the member's transaction PIN confirms the withdrawal.
+  - `wallet` credits the member's wallet; `bank` pays to the member's **saved**
+    account (refused when none is on file); `airtime` recharges the entered
+    number through the VTU adapter (gated — refused when no VTU provider is
+    configured). Every withdrawal is recorded and audited; a definite payout
+    failure refunds the balance, and an `unsure` outcome is left pending for
+    reconciliation. The flow is channel-agnostic — it works on **WhatsApp and
+    Telegram**.
 - **Configuration** — `referralconfig [on|off] [wallet|bank|airtime] [amount] [maxRewards]`
   (admin/super admin) updates the program; `referralreport` summarises the whole
-  cooperative (counts by status, rewards paid, and any qualified-but-unpaid rewards);
-  `referralpay <id>` **re-sends the confirmation prompt** to the member (a nudge —
-  it never force-pays). Every config change is audited.
+  cooperative (counts by status, rewards paid, total bonus **outstanding**, and
+  withdrawal counts). Every config change is audited.
 - **Board pause/activate** — the governance **Board committee** can pause or resume
   the program at any time with `referralpause` / `referralresume` (active Board
   members or the super admin), which toggles `referralEnabled`.
