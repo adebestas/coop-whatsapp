@@ -1887,3 +1887,47 @@ model RegulatorReport {
   @@unique([cooperativeId, period, periodType, packType])
   @@index([cooperativeId, status])
 }
+
+// ---- CubeCover insurance policies & claims ----
+model InsurancePolicy {
+  id              String   @id @default(cuid())
+  cooperativeId   String
+  memberId        String
+  productCode     String    // "supercare" | "superfix"
+  planCode        String    // "starter" | "basic" | "plus" | "elite" | "standard"
+  status          String    @default("active")
+  cubecoverPolicyId String?
+  premiumKobo     Int
+  coverageKobo    Int
+  startDate       DateTime  @default(now())
+  endDate         DateTime?
+  autoRenew       Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([cooperativeId, memberId])
+  @@index([cooperativeId, status])
+}
+
+model InsuranceClaim {
+  id              String   @id @default(cuid())
+  cooperativeId   String
+  memberId        String
+  policyId        String
+  claimType       String
+  amountKobo      Int
+  status          String    @default("pending")
+  cubecoverClaimId String?
+  description     String?
+  documents       String[]
+  payoutKobo      Int?
+  payoutDestination String?
+  createdAt       DateTime  @default(now())
+  processedAt     DateTime?
+  paidAt          DateTime?
+
+  @@index([cooperativeId, memberId])
+  @@index([cooperativeId, status])
+  @@index([policyId])
+}
+

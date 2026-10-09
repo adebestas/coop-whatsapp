@@ -42,6 +42,8 @@ BEGIN
     'RefundRequest',
     'Referral',
     'ReferralWithdrawal',
+    'InsurancePolicy',
+    'InsuranceClaim',
     'RegulatorProfile','RegulatorReport',
     'Meeting','Motion',
     'Unit','Vote','WithdrawalRequest',
