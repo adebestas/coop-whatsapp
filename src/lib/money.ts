@@ -29,13 +29,14 @@ export function formatBalance(kobo: number): string {
 }
 
 /**
- * Format amount for provider APIs (Paystack expects kobo, Monnify expects naira)
+ * Format amount for provider APIs (Paystack expects kobo, Monnify/Flutterwave expect naira)
  */
-export function forProvider(amount: number, provider: "paystack" | "monnify"): number {
+export function forProvider(amount: number, provider: "paystack" | "monnify" | "flutterwave"): number {
   switch (provider) {
     case "paystack":
       return amount; // Already in kobo
     case "monnify":
+    case "flutterwave":
       return toNaira(amount); // Convert to naira
   }
 }

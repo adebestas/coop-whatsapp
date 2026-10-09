@@ -234,6 +234,7 @@ export interface TransferStatus {
 import { timingSafeEqual } from "node:crypto";
 import { monnifyAdapter } from "./monnify.js";
 import { paystackAdapter } from "./paystack.js";
+import { flutterwaveAdapter } from "./flutterwave.js";
 import { RedisCircuitBreaker } from "../../lib/redis-mutex.js";
 import { BANK_CODES } from "../../lib/banks.js";
 
@@ -272,12 +273,14 @@ function adapterFor(name: string): ProviderAdapter | null {
       return paystackAdapter;
     case "monnify":
       return monnifyAdapter;
+    case "flutterwave":
+      return flutterwaveAdapter;
     default:
       return null;
   }
 }
 
-const ALL_PROVIDERS = ["monnify", "paystack"];
+const ALL_PROVIDERS = ["monnify", "paystack", "flutterwave"];
 
 /** Preferred provider first (env or explicit), then any healthy fallback. */
 export async function resolveProvider(preferred?: string): Promise<ProviderAdapter> {

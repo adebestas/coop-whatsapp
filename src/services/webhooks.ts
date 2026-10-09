@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { monnifyAdapter } from "./payments/monnify.js";
 import { paystackAdapter } from "./payments/paystack.js";
+import { flutterwaveAdapter } from "./payments/flutterwave.js";
 import { handlePaymentNotification } from "./payments/topup.js";
 import type { PaymentNotification, ProviderAdapter } from "./payments/index.js";
 import { applyDividendPayoutUpdate } from "./dividends.js";
@@ -31,11 +32,13 @@ import { incCounter } from "../lib/metrics.js";
 const adapters: Record<string, ProviderAdapter> = {
   monnify: monnifyAdapter,
   paystack: paystackAdapter,
+  flutterwave: flutterwaveAdapter,
 };
 
 const SIGNATURE_HEADERS: Record<string, string> = {
   "monnify-signature": "monnify",
   "x-paystack-signature": "paystack",
+  "verif-hash": "flutterwave",
 };
 
 export function detectProvider(
