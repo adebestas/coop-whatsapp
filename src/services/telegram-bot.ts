@@ -86,6 +86,7 @@ async function setTelegramCommands(): Promise<void> {
     { command: "insights", description: "AI financial analysis" },
     // Support & governance
     { command: "support", description: "Open a support ticket (e.g. /support issue)" },
+    { command: "insurance", description: "Insurance: /insurance - browse, /mypolicy - view, /claim - submit claim" },
     { command: "tickets", description: "See your support tickets" },
     { command: "grievance", description: "Submit a complaint to admin" },
     { command: "reserveinfo", description: "Reserve Fund dashboard" },

@@ -8,6 +8,7 @@ import { createTicket, listTickets, resolveTicket } from "../support.js";
 import { listPosts } from "../posts.js";
 import { myDeduction, requestMonthWaiver } from "../deductions.js";
 import { validateClaim, confirmFamily } from "../deathclaims.js";
+import { approveInsuranceClaim, rejectInsuranceClaim, listMemberInsuranceClaims } from "../insurance/index.js";
 import { generateContextualHelp } from "../../lib/ai-support.js";
 import { verifyMemberPin } from "../pin.js";
 import { issueSecretChallenge } from "./session.js";
@@ -49,6 +50,45 @@ export async function handleConfirm(phone: string, args: string[]): Promise<void
     return;
   }
   const result = await confirmGuarantee(phone, code);
+  await sendText({ to: phone, text: result.message });
+}
+
+export async function handleApproveInsuranceClaim(phone: string, args: string[]): Promise<void> {
+  const claimId = args[0];
+  if (!claimId) {
+    await sendText({
+      to: phone,
+      text: "Usage: *approveinsuranceclaim <claim id>* — approve the claim for payout.",
+    });
+    return;
+  }
+  const result = await approveInsuranceClaim(claimId);
+  await sendText({ to: phone, text: result.message });
+}
+
+export async function handleRejectInsuranceClaim(phone: string, args: string[]): Promise<void> {
+  const claimId = args[0];
+  if (!claimId) {
+    await sendText({
+      to: phone,
+      text: "Usage: *rejectinsuranceclaim <claim id>* — reject the claim.",
+    });
+    return;
+  }
+  const result = await rejectInsuranceClaim(claimId);
+  await sendText({ to: phone, text: result.message });
+}
+
+export async function handleListInsuranceClaims(phone: string, args: string[]): Promise<void> {
+  const memberCode = args[0];
+  if (!memberCode) {
+    await sendText({
+      to: phone,
+      text: "Usage: *listinsuranceclaims <member code>* — list insurance claims for a member.",
+    });
+    return;
+  }
+  const result = await listMemberInsuranceClaims(memberCode);
   await sendText({ to: phone, text: result.message });
 }
 
