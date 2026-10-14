@@ -1,5 +1,39 @@
 import { prisma, withTx } from "./prisma.js";
 import { withDeferredSends } from "./deferred.js";
+import { runWithContext } from "./runtime-context.js";
+import { DEFAULT_CURRENCY } from "./currency.js";
+import type { Locale } from "./i18n.js";
+
+interface CoopMeta {
+  currency: string;
+  locale: Locale;
+  at: number;
+}
+const coopMetaCache = new Map<string, CoopMeta>();
+const COOP_META_TTL_MS = 5 * 60 * 1000;
+
+export function invalidateCoopMeta(coopId: string): void {
+  coopMetaCache.delete(coopId);
+}
+
+export async function getCoopMeta(
+  coopId: string,
+  tx: typeof prisma = prisma,
+): Promise<{ currency: string; locale: Locale }> {
+  const cached = coopMetaCache.get(coopId);
+  if (cached && Date.now() - cached.at < COOP_META_TTL_MS) return cached;
+  const coop = await tx.cooperative.findUnique({
+    where: { id: coopId },
+    select: { currency: true, locale: true },
+  });
+  const meta: CoopMeta = {
+    currency: coop?.currency ?? DEFAULT_CURRENCY,
+    locale: (coop?.locale ?? "en") as Locale,
+    at: Date.now(),
+  };
+  coopMetaCache.set(coopId, meta);
+  return meta;
+}
 
 /**
  * Set the Row-Level-Security tenant GUC on the CURRENT transaction.
@@ -38,7 +72,10 @@ export async function withCoopContext<T>(
   return withDeferredSends(() =>
     withTx(async (tx) => {
       await setCoopContext(tx as never, cooperativeId);
-      return fn(tx as unknown as typeof prisma);
+      const meta = await getCoopMeta(cooperativeId, tx as unknown as typeof prisma);
+      return runWithContext({ currency: meta.currency, locale: meta.locale }, () =>
+        fn(tx as unknown as typeof prisma),
+      );
     }),
   );
 }
