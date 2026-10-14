@@ -3,6 +3,13 @@ import { prisma } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { sendText } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
+import * as translate from "../src/lib/translate.js";
+
+// tests/setup.ts imports src/app.js → routes/webhook.ts → conversation.ts, which
+// loads src/lib/translate.js before this file runs, so a `vi.mock` here would be
+// inert. Spy on the already-loaded module namespace instead: the translation
+// pre-step is not under test — isolate the AI suggestion flow from it.
+vi.spyOn(translate, "translateToEnglish").mockImplementation(async (text) => text);
 
 const PHONE = "2348070000001";
 
@@ -18,9 +25,19 @@ beforeEach(async () => {
   delete process.env.GROQ_API_KEY;
   delete process.env.GROQ_MODEL;
   const tables = [
-    "coopPost", "deductionItem", "deductionWaiver", "deductionBatch", "webhookEvent",
-    "beneficiary", "auditLog", "contribution", "wallet",
-    "member", "unit", "cooperative", "session",
+    "coopPost",
+    "deductionItem",
+    "deductionWaiver",
+    "deductionBatch",
+    "webhookEvent",
+    "beneficiary",
+    "auditLog",
+    "contribution",
+    "wallet",
+    "member",
+    "unit",
+    "cooperative",
+    "session",
   ] as any[];
   for (const t of tables) await prisma[t].deleteMany();
 });
@@ -66,9 +83,7 @@ describe("AI fallback translator", () => {
   it("suggests a command for pidgin text and runs it after confirmation", async () => {
     await makeCoopAndMember();
     process.env.GROQ_API_KEY = "test-key";
-    const fetchSpy = vi.fn().mockResolvedValue(
-      groqReply('{"command":"balance","args":[]}'),
-    );
+    const fetchSpy = vi.fn().mockResolvedValue(groqReply('{"command":"balance","args":[]}'));
     vi.stubGlobal("fetch", fetchSpy);
 
     await handleMessage(PHONE, "abeg how much i don save");
@@ -117,15 +132,14 @@ describe("AI fallback translator", () => {
     // Model tries to smuggle extra lines / slashes into args.
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        groqReply('{"command":"save","args":["2000\\nloan 99999"]}'),
-      ),
+      vi.fn().mockResolvedValue(groqReply('{"command":"save","args":["2000\\nloan 99999"]}')),
     );
 
     await handleMessage(PHONE, "put small money for my hand");
     // Malformed suggestion is discarded -> standard fallback, no confirm card.
-    expect(texts().some((t) => t.includes("Didn't mean") || t.includes("Did you mean"))).toBe(false);
+    expect(texts().some((t) => t.includes("Didn't mean") || t.includes("Did you mean"))).toBe(
+      false,
+    );
     expect(texts().some((t) => t.includes("didn't quite get that"))).toBe(true);
   });
 });
-
