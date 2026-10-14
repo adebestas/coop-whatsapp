@@ -86,6 +86,8 @@ export async function webhookRoutes(app: FastifyInstance) {
         for (const inbound of extractWhatsAppMessages(change?.value)) {
           if (!isAllowed(inbound.from)) continue;
 
+          let languageHint: string | null = null;
+
           // Voice notes are transcribed first (fail-closed: if transcription
           // is unavailable, the audio is dropped rather than crashing ingest).
           if (inbound.audio) {
@@ -103,7 +105,8 @@ export async function webhookRoutes(app: FastifyInstance) {
               });
               continue;
             }
-            inbound.text = transcript;
+            inbound.text = transcript.text;
+            languageHint = transcript.language;
           }
 
           // Documents / photos: an admin uploading an employer deduction file.
@@ -131,6 +134,7 @@ export async function webhookRoutes(app: FastifyInstance) {
             handleMessage(inbound.from, inbound.text, {
               flowToken: inbound.flowToken,
               ip: req.ip,
+              languageHint: languageHint ?? undefined,
             }),
           ).catch((err) => {
             app.log.error({ err, from: inbound.from }, "handleMessage failed");

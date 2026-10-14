@@ -20,7 +20,7 @@ import { listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js"
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
 import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js";
 import { requestPhoneChange } from "./phone-change.js";
-import { detectLocale, type Locale } from "../lib/i18n.js";
+import { detectLocale, localeFromLanguageCode, type Locale } from "../lib/i18n.js";
 import { runWithLocale, getLocale } from "../lib/runtime-context.js";
 import { translateToEnglish } from "../lib/translate.js";
 
@@ -369,6 +369,8 @@ export interface MessageMeta {
   telegramMessageId?: number;
   /** Client IP for anomaly detection. */
   ip?: string;
+  /** Whisper-detected language code from a voice note (e.g. "yo"). */
+  languageHint?: string;
 }
 
 function isAwaitingState(state: BotState): boolean {
@@ -416,7 +418,8 @@ export async function handleMessage(
   if (coops.length <= 1) {
     const coopId = coops[0]?.id ?? null;
     if (coopId) {
-      const detected = detectLocale(text);
+      const hinted = localeFromLanguageCode(meta.languageHint);
+      const detected = hinted && hinted !== "en" ? hinted : detectLocale(text);
       const commandText = detected === "en" ? text : await translateToEnglish(text, detected);
       return withCoopContext(coopId, async () => {
         const member = await getMemberByPhone(phone, coopId);
@@ -444,7 +447,8 @@ export async function handleMessage(
   const session = await prisma.session.findUnique({ where: { phone } });
   const selected = session?.selectedCoopId ?? null;
   if (selected && coops.some((c) => c.id === selected)) {
-    const detected = detectLocale(text);
+    const hinted = localeFromLanguageCode(meta.languageHint);
+    const detected = hinted && hinted !== "en" ? hinted : detectLocale(text);
     const commandText = detected === "en" ? text : await translateToEnglish(text, detected);
     return withCoopContext(selected, async () => {
       const member = await getMemberByPhone(phone, selected);

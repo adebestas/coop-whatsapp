@@ -39,6 +39,20 @@ export function detectLocale(text: string): Locale {
   return "en";
 }
 
+const WHISPER_LOCALE: Record<string, Locale> = {
+  en: "en",
+  yo: "yoruba",
+  ha: "hausa",
+  ig: "igbo",
+  pcm: "pidgin",
+};
+
+/** Map a Whisper/ISO-639-1 language code to a supported Locale, or null. */
+export function localeFromLanguageCode(code: string | null | undefined): Locale | null {
+  if (!code) return null;
+  return WHISPER_LOCALE[code.toLowerCase()] ?? null;
+}
+
 /** Tell the LLM which language to answer in. */
 export function languageInstruction(locale: Locale): string {
   switch (locale) {
