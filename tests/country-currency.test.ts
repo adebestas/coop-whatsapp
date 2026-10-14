@@ -1,11 +1,14 @@
 // tests/country-currency.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
   currencyForCountry,
   countryForCurrency,
   countryFromPhone,
 } from "../src/lib/currency.js";
-import { createCooperative } from "../src/services/cooperative.js";
+import { createCooperative, clearMemberCache } from "../src/services/cooperative.js";
+import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
+import { handleAdminCommand } from "../src/services/admin.js";
+import { postJournal } from "../src/services/journal.js";
 
 describe("country → currency", () => {
   it("maps countries to currencies", () => {
@@ -35,5 +38,44 @@ describe("country → currency", () => {
     });
     expect(coop.country).toBe("GH");
     expect(coop.currency).toBe("GHS");
+  });
+});
+
+describe("setconfig country guard", () => {
+  beforeEach(async () => {
+    clearMemberCache();
+    await cleanupDatabase();
+  });
+
+  it("allows the country/currency change when no journal entry exists", async () => {
+    const coop = await createTestCoop("CCY1");
+    const admin = await createTestMember(coop.id, { phone: "2348000050001", role: "superadmin" });
+
+    await handleAdminCommand(admin.phone, "setconfig", ["country", "GH"]);
+
+    const after = await prisma.cooperative.findUnique({ where: { id: coop.id } });
+    expect(after?.country).toBe("GH");
+    expect(after?.currency).toBe("GHS");
+  });
+
+  it("blocks the country/currency change once any journal entry exists", async () => {
+    const coop = await createTestCoop("CCY2");
+    const admin = await createTestMember(coop.id, { phone: "2348000050011", role: "superadmin" });
+
+    const posted = await postJournal({
+      cooperativeId: coop.id,
+      description: "Historical contribution",
+      postings: [
+        { account: "assets:bank", direction: "DEBIT", amount: 100000 },
+        { account: "income:contribution", direction: "CREDIT", amount: 100000 },
+      ],
+    });
+    expect(posted.posted).toBe(true);
+
+    await handleAdminCommand(admin.phone, "setconfig", ["country", "GH"]);
+
+    const after = await prisma.cooperative.findUnique({ where: { id: coop.id } });
+    expect(after?.country).toBe("NG");
+    expect(after?.currency).toBe("NGN");
   });
 });

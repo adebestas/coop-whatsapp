@@ -3161,9 +3161,7 @@ export async function handleAdminCommand(
             await sendText({ to: phone, text: `Unsupported country *${value}*. Supported: ${Object.keys(COUNTRY_CURRENCY).join(", ")}.` });
             return true;
           }
-          const moved = await prisma.wallet.count({
-            where: { member: { cooperativeId: coopId }, balance: { gt: 0 } },
-          });
+          const moved = await prisma.journalEntry.count({ where: { cooperativeId: coopId } });
           if (moved > 0) {
             await sendText({ to: phone, text: "Country can't be changed after money has moved in this cooperative." });
             return true;
