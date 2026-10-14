@@ -175,7 +175,8 @@ export const flutterwaveAdapter: ProviderAdapter = {
     const b = parsed.data;
     if (!b.event?.startsWith("transfer.")) return null;
     const d = b.data;
-    const status = d.status === "SUCCESSFUL" ? "successful" : d.status === "FAILED" ? "failed" : null;
+    const status =
+      d.status === "SUCCESSFUL" ? "successful" : d.status === "FAILED" ? "failed" : null;
     if (!status) return null;
     return {
       reference: d.reference ?? "",
@@ -188,28 +189,23 @@ export const flutterwaveAdapter: ProviderAdapter = {
 
   async getTransferStatus(reference: string): Promise<TransferStatus> {
     try {
-      const res = await api<any>(
-        "GET",
-        `/transfers/${encodeURIComponent(reference)}/verify`,
-      );
+      const res = await api<any>("GET", `/transfers/${encodeURIComponent(reference)}/verify`);
       const d = res.data;
       const status: TransferStatus["status"] =
         d.status === "SUCCESSFUL"
           ? "successful"
           : d.status === "FAILED"
-          ? "failed"
-          : d.status === "PENDING" || d.status === "PENDING_APPROVAL"
-          ? "pending"
-          : "unknown";
+            ? "failed"
+            : d.status === "PENDING" || d.status === "PENDING_APPROVAL"
+              ? "pending"
+              : "unknown";
       return { status, providerRef: d.flw_ref };
     } catch (err: any) {
       return { status: "unknown", error: String(err?.message ?? err) };
     }
   },
 
-  async createVirtualAccount(
-    params: CreateVirtualAccountParams,
-  ): Promise<VirtualAccountData> {
+  async createVirtualAccount(params: CreateVirtualAccountParams): Promise<VirtualAccountData> {
     const res = await api<{
       data: {
         account_number: string;
@@ -238,32 +234,23 @@ export const flutterwaveAdapter: ProviderAdapter = {
     };
   },
 
-  async resolveAccount(
-    params: ResolveAccountParams,
-  ): Promise<ResolveAccountResult> {
+  async resolveAccount(params: ResolveAccountParams): Promise<ResolveAccountResult> {
     try {
       const res = await api<{
         data: { account_name: string; account_number: string; bank_code: string };
-      }>(
-        "POST",
-        "/accounts/resolve",
-        {
-          account_number: params.accountNumber,
-          account_bank: params.bankCode,
-        },
-      );
+      }>("POST", "/accounts/resolve", {
+        account_number: params.accountNumber,
+        account_bank: params.bankCode,
+      });
       return { ok: true, name: res.data.account_name };
     } catch (err: any) {
       return { ok: false, error: err?.message ?? "account resolution failed" };
     }
   },
 
-  async listBanks(): Promise<Bank[]> {
+  async listBanks(_currency?: string): Promise<Bank[]> {
     try {
-      const res = await api<{ data: Array<{ code: string; name: string }> }>(
-        "GET",
-        "/banks/NG",
-      );
+      const res = await api<{ data: Array<{ code: string; name: string }> }>("GET", "/banks/NG");
       if (!Array.isArray(res.data)) return [];
       return res.data
         .map((b) => ({ code: String(b.code ?? ""), name: String(b.name ?? "") }))

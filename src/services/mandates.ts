@@ -3,10 +3,12 @@ import { prisma, withTx } from "../lib/prisma.js";
 import {
   setCoopContext,
   withCoopContext,
+  getCoopMeta,
   resolveCoopByMandateDebitRef,
   resolveCoopByMandateProviderId,
   resolveCoopByMandateReference,
 } from "../lib/tenant-context.js";
+import { getCurrency } from "../lib/runtime-context.js";
 import { audit } from "./audit.js";
 import { formatBalance } from "../lib/money.js";
 import { postJournal } from "./journal.js";
@@ -63,7 +65,14 @@ function toSummary(m: {
 
 /** Split a CSV column into a de-duplicated, order-preserving list. */
 function csvSet(value: string): string[] {
-  return [...new Set(value.split(",").map((s) => s.trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      value
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 /**
@@ -127,7 +136,7 @@ export async function createMandate(
     };
   }
 
-  const provider = await resolveProvider();
+  const provider = await resolveProvider(undefined, getCurrency());
 
   const providerReference = `MAN-${randomUUID()}`;
   const result = await provider.createMandate?.({
@@ -250,11 +259,7 @@ export async function cancelMandate(
     where: {
       cooperativeId: coopId,
       memberId: actor.id,
-      OR: [
-        { id: mandateId },
-        { id: { startsWith: mandateId } },
-        { id: { endsWith: mandateId } },
-      ],
+      OR: [{ id: mandateId }, { id: { startsWith: mandateId } }, { id: { endsWith: mandateId } }],
     },
   });
   if (!mandate) return { ok: false, message: "Mandate not found." };
@@ -263,7 +268,7 @@ export async function cancelMandate(
   }
 
   if (mandate.providerMandateId) {
-    const provider = await resolveProvider(mandate.provider);
+    const provider = await resolveProvider(mandate.provider, getCurrency());
     const cancelled = await provider.cancelMandate?.({
       providerMandateId: mandate.providerMandateId,
     });
@@ -386,7 +391,10 @@ async function applyPaystackMandateStatus(
   // leaves the mandate untouched and the provider's redelivery re-runs
   // activation instead of the mandate being stuck pending forever.
   try {
-    const provider = await resolveProvider("paystack");
+    // This webhook path runs OUTSIDE withCoopContext, so the ambient currency is
+    // not this cooperative's — resolve it explicitly before routing the provider.
+    const { currency } = await getCoopMeta(coopId);
+    const provider = await resolveProvider("paystack", currency);
     const result = await provider.triggerActivationCharge?.({
       providerMandateId: authorizationCode,
       providerCustomerId: context.providerCustomerId,
@@ -450,7 +458,10 @@ export async function pauseMandate(
       targetId: mandate.id,
       detail: "whole mandate",
     }).catch(() => {});
-    return { ok: true, message: "⏸️ Mandate paused. No debits will be collected until you resume." };
+    return {
+      ok: true,
+      message: "⏸️ Mandate paused. No debits will be collected until you resume.",
+    };
   }
 
   const paused = csvSet(mandate.pausedPurposes);
@@ -719,9 +730,7 @@ export async function settleDebit(
             // Only a savings debit is savings. Loan/group money is credited to
             // the wallet so the purpose service can debit it, but it must not
             // inflate `totalSaved`.
-            ...(debit.purpose === "savings"
-              ? { totalSaved: { increment: debit.amount } }
-              : {}),
+            ...(debit.purpose === "savings" ? { totalSaved: { increment: debit.amount } } : {}),
           },
         });
         await tx.mandateDebit.update({

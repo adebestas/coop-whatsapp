@@ -2,6 +2,7 @@ import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { sendText, sendLongText, notifyMember } from "../lib/messaging.js";
 import { cacheDel } from "../lib/cache.js";
 import { invalidateCoopMeta } from "../lib/tenant-context.js";
+import { getCurrency } from "../lib/runtime-context.js";
 import { COUNTRY_CURRENCY, currencyForCountry } from "../lib/currency.js";
 import { LOCALES } from "./conversation.js";
 import { normalizeTitle, displayTitle } from "./posts.js";
@@ -244,7 +245,14 @@ async function handleCommitteeCommand(
     }
 
     // Reject vote — decide the committee, then terminate the loan.
-    const outcome = await recordCommitteeVote(coopId, "credit", "loan", loan.id, member.id, "reject");
+    const outcome = await recordCommitteeVote(
+      coopId,
+      "credit",
+      "loan",
+      loan.id,
+      member.id,
+      "reject",
+    );
     await sendText({ to: phone, text: outcome.message });
     if (outcome.ok && outcome.decided === "rejected") {
       const updated = await prisma.loan.updateMany({
@@ -441,7 +449,10 @@ export async function handleOmbudsmanCommand(
 
   if (cmd === "case") {
     const res = await getCase(args[0] ?? "");
-    await sendText({ to: phone, text: res.ok && res.case ? formatCaseDetail(res.case) : res.message });
+    await sendText({
+      to: phone,
+      text: res.ok && res.case ? formatCaseDetail(res.case) : res.message,
+    });
     return true;
   }
 
@@ -466,8 +477,7 @@ export async function handleOmbudsmanCommand(
     if (!caseRef || (action !== "unfreeze" && action !== "refund")) {
       await sendText({
         to: phone,
-        text:
-          "Usage: *remedy <case id> unfreeze* or *remedy <case id> refund <amount naira> [reason]*.",
+        text: "Usage: *remedy <case id> unfreeze* or *remedy <case id> refund <amount naira> [reason]*.",
       });
       return true;
     }
@@ -1309,7 +1319,8 @@ export async function handleAdminCommand(
           });
           return true;
         }
-        const periodType: PeriodType = args[2]?.toLowerCase() === "quarterly" ? "quarterly" : "monthly";
+        const periodType: PeriodType =
+          args[2]?.toLowerCase() === "quarterly" ? "quarterly" : "monthly";
         const gen = await generateReport(coopId, period, periodType, packRaw as PackType, admin.id);
         await sendText({ to: phone, text: gen.message });
         return true;
@@ -1644,7 +1655,9 @@ export async function handleAdminCommand(
         if (hasSize) {
           addSize = parseInt(lastArg, 10);
         } else {
-          const cfg = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
+          const cfg = await prisma.cooperativeConfig.findUnique({
+            where: { cooperativeId: coopId },
+          });
           addSize =
             addType === "credit"
               ? (cfg?.creditCommitteeSize ?? 3)
@@ -1665,7 +1678,10 @@ export async function handleAdminCommand(
 
       case "appoint": {
         if (!isSuper) {
-          await sendText({ to: phone, text: "Only the *super admin* can appoint committee members." });
+          await sendText({
+            to: phone,
+            text: "Only the *super admin* can appoint committee members.",
+          });
           return true;
         }
         const appointType = args[0]?.toLowerCase();
@@ -2163,7 +2179,10 @@ export async function handleAdminCommand(
 
       case "par": {
         if (unitAdmin) {
-          await sendText({ to: phone, text: "Only the cooperative admin can view portfolio risk." });
+          await sendText({
+            to: phone,
+            text: "Only the cooperative admin can view portfolio risk.",
+          });
           return true;
         }
         const par = await computePar(coopId);
@@ -2186,7 +2205,10 @@ export async function handleAdminCommand(
 
       case "provisionrates": {
         if (unitAdmin) {
-          await sendText({ to: phone, text: "Only the cooperative admin can view provision rates." });
+          await sendText({
+            to: phone,
+            text: "Only the cooperative admin can view provision rates.",
+          });
           return true;
         }
         const rates = await provisionRates(coopId);
@@ -2246,7 +2268,7 @@ export async function handleAdminCommand(
         }
 
         // Resolve + verify the beneficiary's name from their bank account.
-        const provider = await resolveProvider();
+        const provider = await resolveProvider(undefined, getCurrency());
         let beneficiaryName = "";
         if (provider.resolveAccount) {
           const resolved = await provider.resolveAccount!({ accountNumber, bankCode });
@@ -3158,12 +3180,18 @@ export async function handleAdminCommand(
         if (key === "country") {
           const iso = value.toUpperCase();
           if (!Object.prototype.hasOwnProperty.call(COUNTRY_CURRENCY, iso)) {
-            await sendText({ to: phone, text: `Unsupported country *${value}*. Supported: ${Object.keys(COUNTRY_CURRENCY).join(", ")}.` });
+            await sendText({
+              to: phone,
+              text: `Unsupported country *${value}*. Supported: ${Object.keys(COUNTRY_CURRENCY).join(", ")}.`,
+            });
             return true;
           }
           const moved = await prisma.journalEntry.count({ where: { cooperativeId: coopId } });
           if (moved > 0) {
-            await sendText({ to: phone, text: "Country can't be changed after money has moved in this cooperative." });
+            await sendText({
+              to: phone,
+              text: "Country can't be changed after money has moved in this cooperative.",
+            });
             return true;
           }
           await prisma.cooperative.update({
@@ -3171,8 +3199,18 @@ export async function handleAdminCommand(
             data: { country: iso, currency: currencyForCountry(iso) },
           });
           invalidateCoopMeta(coopId);
-          await audit({ cooperativeId: coopId, actorPhone: phone, actorId: admin.id, actorRole: "superadmin", action: "config.set", detail: `country = ${iso}` });
-          await sendText({ to: phone, text: `✅ Country set to *${iso}* (currency *${currencyForCountry(iso)}*).` });
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: phone,
+            actorId: admin.id,
+            actorRole: "superadmin",
+            action: "config.set",
+            detail: `country = ${iso}`,
+          });
+          await sendText({
+            to: phone,
+            text: `✅ Country set to *${iso}* (currency *${currencyForCountry(iso)}*).`,
+          });
           return true;
         }
         const validKeys = new Set([
@@ -3550,7 +3588,13 @@ export async function handleAdminCommand(
         const target = args[0];
         const amount = toKobo(Number(args[1]));
         const reason = args.slice(2).join(" ").trim();
-        if (!target || !Number.isFinite(amount) || amount <= 0 || reason.length < 3 || reason.length > 200) {
+        if (
+          !target ||
+          !Number.isFinite(amount) ||
+          amount <= 0 ||
+          reason.length < 3 ||
+          reason.length > 200
+        ) {
           await sendText({
             to: phone,
             text: "Usage: *recommendrefund <member code|id> <amount> <reason>* — e.g. *recommendrefund MEM001 5000 Double payment* (reason up to 200 characters).",
@@ -3623,11 +3667,17 @@ export async function handleAdminCommand(
           });
           return true;
         }
-        const startRes = await startMeeting(coopId, type, title, hasQuorum ? Number(lastArg) : undefined, {
-          id: admin.id,
-          role: admin.role,
-          phone,
-        });
+        const startRes = await startMeeting(
+          coopId,
+          type,
+          title,
+          hasQuorum ? Number(lastArg) : undefined,
+          {
+            id: admin.id,
+            role: admin.role,
+            phone,
+          },
+        );
         await sendText({ to: phone, text: startRes.message });
         return true;
       }
@@ -4145,7 +4195,10 @@ export async function handleAdminCommand(
 
       case "newgroup": {
         if (unitAdmin) {
-          await sendText({ to: phone, text: "Only the cooperative admin can create savings groups." });
+          await sendText({
+            to: phone,
+            text: "Only the cooperative admin can create savings groups.",
+          });
           return true;
         }
         const [type, name, code, amountArg, cycleArg] = args;
@@ -4169,7 +4222,10 @@ export async function handleAdminCommand(
 
       case "closegroupcycle": {
         if (unitAdmin) {
-          await sendText({ to: phone, text: "Only the cooperative admin can close a group cycle." });
+          await sendText({
+            to: phone,
+            text: "Only the cooperative admin can close a group cycle.",
+          });
           return true;
         }
         const id = args[0];
@@ -4247,7 +4303,10 @@ export async function handleAdminCommand(
 
       case "newproduct": {
         if (unitAdmin) {
-          await sendText({ to: phone, text: "Only the cooperative admin can create savings products." });
+          await sendText({
+            to: phone,
+            text: "Only the cooperative admin can create savings products.",
+          });
           return true;
         }
         const type = (args[0] ?? "").trim().toLowerCase();
@@ -4277,7 +4336,10 @@ export async function handleAdminCommand(
 
       case "products": {
         if (unitAdmin) {
-          await sendText({ to: phone, text: "Only the cooperative admin can view all savings products." });
+          await sendText({
+            to: phone,
+            text: "Only the cooperative admin can view all savings products.",
+          });
           return true;
         }
         const listed = await listProducts(coopId);

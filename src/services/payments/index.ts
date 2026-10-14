@@ -186,8 +186,11 @@ export interface ProviderAdapter {
   payout?(params: PayoutParams): Promise<PayoutResult>;
   /** Resolve an account and return the registered account name */
   resolveAccount?(params: ResolveAccountParams): Promise<ResolveAccountResult>;
-  /** List the provider's supported banks (for the guided account-entry flow). */
-  listBanks?(): Promise<Bank[]>;
+  /**
+   * List the provider's supported banks (for the guided account-entry flow).
+   * `currency` lets a multi-currency provider return the matching bank set.
+   */
+  listBanks?(currency?: string): Promise<Bank[]>;
   /**
    * Validate an incoming webhook request. `rawBody` is the EXACT bytes the
    * provider sent (captured before JSON parsing) — signatures must be
@@ -285,7 +288,10 @@ function adapterFor(name: string): ProviderAdapter | null {
 const ALL_PROVIDERS = ["monnify", "paystack", "flutterwave"];
 
 /** Preferred provider first (env or explicit), then any healthy fallback. */
-export async function resolveProvider(preferred?: string, currency?: string): Promise<ProviderAdapter> {
+export async function resolveProvider(
+  preferred?: string,
+  currency?: string,
+): Promise<ProviderAdapter> {
   const supported = currency ? providersForCurrency(currency) : ALL_PROVIDERS;
   const configured = (preferred ?? process.env.PAYMENT_PROVIDER ?? "monnify").toLowerCase();
   const first = supported.includes(configured) ? configured : supported[0];
@@ -365,11 +371,11 @@ export function clearBankCache(): void {
  * provider call fails or returns nothing. The cache is only populated on a
  * successful provider response so a transient outage is not sticky.
  */
-export async function listBanks(provider?: ProviderAdapter): Promise<Bank[]> {
+export async function listBanks(provider?: ProviderAdapter, currency?: string): Promise<Bank[]> {
   if (bankCache && Date.now() - bankCache.at < BANK_CACHE_TTL_MS) return bankCache.banks;
   try {
-    const p = provider ?? (await resolveProvider());
-    const banks = await p.listBanks?.();
+    const p = provider ?? (await resolveProvider(undefined, currency));
+    const banks = await p.listBanks?.(currency);
     if (banks && banks.length) {
       bankCache = { at: Date.now(), banks };
       return banks;

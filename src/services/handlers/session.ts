@@ -39,6 +39,7 @@ import { enqueueAfterCommit } from "../../lib/deferred.js";
 import { insuranceService } from "./insurance.js";
 import type { Product } from "../insurance/cubecover.js";
 import { resolveProvider } from "../payments/index.js";
+import { getCurrency } from "../../lib/runtime-context.js";
 import { namesMatch } from "../disbursements.js";
 import { accountMismatchWarning } from "../../lib/ai-notice.js";
 
@@ -266,7 +267,10 @@ export function buildAdminMenu(): string {
 export async function handleMyRefCode(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   await sendText({
@@ -283,7 +287,10 @@ export async function handleMyRefCode(phone: string): Promise<void> {
 export async function handleReferrals(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const res = await myReferrals(member.cooperativeId, member.id);
@@ -306,7 +313,10 @@ function parseBonusDestination(raw: string): "wallet" | "bank" | "airtime" | nul
 export async function handleReferralBonus(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const res = await getReferralBonus(member.cooperativeId, member.id);
@@ -328,7 +338,10 @@ export async function handleReferralBonus(phone: string): Promise<void> {
 export async function handleStartBonusWithdrawal(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   await prisma.session.upsert({
@@ -1220,7 +1233,7 @@ export async function handleAwaitingInput(
       let accountName: string | null = null;
       let mismatch = false;
       try {
-        const provider = await resolveProvider();
+        const provider = await resolveProvider(undefined, getCurrency());
         const resolved = await provider.resolveAccount?.({
           accountNumber: data.loanAccount ?? "",
           bankCode: bank.code,
@@ -1560,7 +1573,10 @@ export async function handleAwaitingInput(
     case "awaiting_bonus_amount": {
       const amount = parseNaira(text);
       if (amount === null) {
-        await sendText({ to: phone, text: "That doesn't look like a valid amount. Try e.g. *500*." });
+        await sendText({
+          to: phone,
+          text: "That doesn't look like a valid amount. Try e.g. *500*.",
+        });
         return;
       }
       const member = await getMemberByPhone(phone);
@@ -1621,9 +1637,7 @@ export async function handleAwaitingInput(
       const destination =
         raw === "" || raw === "default" || raw === "skip"
           ? ((BONUS_DESTINATIONS.has(configured) ? configured : "wallet") as
-              | "wallet"
-              | "bank"
-              | "airtime")
+              "wallet" | "bank" | "airtime")
           : parseBonusDestination(raw);
       if (!destination) {
         await sendText({ to: phone, text: "Reply *1* (wallet), *2* (bank) or *3* (airtime)." });
@@ -1787,7 +1801,10 @@ export async function handleAwaitingInput(
         create: { phone, state: "idle" },
         update: { state: "idle", data: "{}" },
       });
-      await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
+      await sendText({
+        to: phone,
+        text: result.message + "\n\nReply *menu* to see other options.",
+      });
       break;
     }
 
@@ -1830,7 +1847,10 @@ export async function handleAwaitingInput(
         create: { phone, state: "idle" },
         update: { state: "idle", data: "{}" },
       });
-      await sendText({ to: phone, text: result.message + "\n\nReply *menu* to see other options." });
+      await sendText({
+        to: phone,
+        text: result.message + "\n\nReply *menu* to see other options.",
+      });
       break;
     }
 
@@ -1977,7 +1997,10 @@ export async function handleAwaitingInput(
           update: { state: "idle", data: "{}" },
         });
       } else if (answer === "no" || answer === "n") {
-        await sendText({ to: phone, text: "Insurance purchase cancelled. Reply *menu* to see options." });
+        await sendText({
+          to: phone,
+          text: "Insurance purchase cancelled. Reply *menu* to see options.",
+        });
         await prisma.session.upsert({
           where: { phone },
           create: { phone, state: "idle" },
@@ -2119,8 +2142,7 @@ export async function handleAwaitingInput(
         });
         await sendText({
           to: phone,
-          text:
-            "✅ You're enrolled! Learn at your own pace with *class*, then take the quiz with *class quiz*.",
+          text: "✅ You're enrolled! Learn at your own pace with *class*, then take the quiz with *class quiz*.",
         });
       } else {
         await sendText({

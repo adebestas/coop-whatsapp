@@ -7,6 +7,7 @@ import { audit } from "./audit.js";
 import { notifySupers } from "./payanyone.js";
 import { applyDividendPayoutUpdate } from "./dividends.js";
 import { forEachCoop } from "../lib/tenant-context.js";
+import { getCurrency } from "../lib/runtime-context.js";
 
 /**
  * Transfer status polling — the safety net for the "crash after the provider
@@ -35,7 +36,7 @@ export function transferPollIntervalMs(): number {
 }
 
 async function statusFor(reference: string): Promise<TransferStatus> {
-  const provider = await resolveProvider();
+  const provider = await resolveProvider(undefined, getCurrency());
   if (!provider.getTransferStatus)
     return { status: "unknown", error: "provider has no getTransferStatus" };
   try {
@@ -51,319 +52,318 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
   const cutoff = new Date(now.getTime() - MIN_STUCK_MS);
 
   await forEachCoop(async (coopId) => {
-  // ---- Withdrawals (wallet already debited before paying) ----
-  const stuckWithdrawals = await prisma.withdrawalRequest.findMany({
-    where: { cooperativeId: coopId, status: "processing", createdAt: { lt: cutoff } },
-    include: { member: true },
-  });
-  for (const w of stuckWithdrawals) {
-    const st = await statusFor(`TFR-WDR-${w.id}`);
-    if (st.status === "successful") {
-      await withTxBatch([
-        prisma.withdrawalRequest.updateMany({
-          where: { id: w.id, status: "processing" },
-          data: { status: "paid", finalizedAt: now },
-        }),
-        prisma.member.update({
-          where: { id: w.memberId },
-          data: { lastWithdrawalAt: now, withdrawalOverride: false },
-        }),
-      ]);
-      // Audit trail: record the poller-confirmed transfer
-      await audit({
-        cooperativeId: w.cooperativeId,
-        actorPhone: "system-poller",
-        actorRole: "system",
-        action: "withdrawal.poller_confirmed",
-        targetType: "withdrawal",
-        targetId: w.id,
-        amount: w.amount,
-        detail: `Withdrawal ${w.id.slice(-6)} confirmed by provider polling`,
-      });
-      await recordLedger({
-        cooperativeId: w.cooperativeId,
-        type: "expense",
-        category: "withdrawal",
-        amount: w.amount,
-        note: `Withdrawal ${w.id.slice(-6)} confirmed by poller`,
-        reference: w.id,
-        fundType: "member",
-      });
-      actions.push(
-        `Withdrawal ${w.id.slice(-6)} (${formatBalance(w.amount)}) confirmed by provider — marked paid.`,
-      );
-      await notifySupers(
-        w.cooperativeId,
-        `✅ Poller: withdrawal *${w.id.slice(-6)}* for ${w.member.name} was confirmed ${"successful"} at the provider and is now marked paid.`,
-      );
-    } else if (st.status === "failed") {
-      const wallet = await prisma.wallet.findUnique({ where: { memberId: w.memberId } });
-      await withTxBatch([
-        ...(wallet
-          ? [
-              prisma.wallet.update({
-                where: { id: wallet.id },
-                data: { balance: { increment: w.amount } },
-              }),
-            ]
-          : []),
-        prisma.withdrawalRequest.updateMany({
-          where: { id: w.id, status: "processing" },
-          data: { status: "admin_approved" },
-        }),
-      ]);
-      actions.push(`Withdrawal ${w.id.slice(-6)} FAILED at provider — wallet refunded.`);
-      await notifySupers(
-        w.cooperativeId,
-        `↩️ Poller: withdrawal *${w.id.slice(-6)}* failed at the provider. Wallet refunded automatically.`,
-      );
-    }
-  }
-
-  // ---- Death claims (same debit-first saga) ----
-  const stuckClaims = await prisma.deathClaim.findMany({
-    where: {
-      cooperativeId: coopId,
-      status: "processing",
-      createdAt: { lt: cutoff },
-      familyAccountNumber: { not: null },
-    },
-    include: { member: true },
-  });
-  for (const c of stuckClaims) {
-    const st = await statusFor(`TFR-CLAIM-${c.id}`);
-    const amount = c.debitedAmount ?? 0;
-    if (st.status === "successful") {
-      await prisma.deathClaim.updateMany({
-        where: { id: c.id, status: "processing" },
-        data: { status: "paid", approvedAt: now, finalizedAt: now },
-      });
-      await audit({
-        cooperativeId: c.cooperativeId,
-        actorPhone: "system-poller",
-        actorRole: "system",
-        action: "deathclaim.poller_confirmed",
-        targetType: "deathclaim",
-        targetId: c.id,
-        amount,
-        detail: `Death claim ${c.id.slice(-6)} confirmed by provider polling`,
-      });
-      actions.push(`Death claim ${c.id.slice(-6)} confirmed by provider — closed as paid.`);
-      await notifySupers(
-        c.cooperativeId,
-        `🕊️ Poller: death claim *${c.id.slice(-6)}* (${c.member.name}) confirmed paid by the provider.`,
-      );
-    } else if (st.status === "failed") {
-      const wallet = await prisma.wallet.findUnique({ where: { memberId: c.memberId } });
-      if (amount > 0 && wallet) {
+    // ---- Withdrawals (wallet already debited before paying) ----
+    const stuckWithdrawals = await prisma.withdrawalRequest.findMany({
+      where: { cooperativeId: coopId, status: "processing", createdAt: { lt: cutoff } },
+      include: { member: true },
+    });
+    for (const w of stuckWithdrawals) {
+      const st = await statusFor(`TFR-WDR-${w.id}`);
+      if (st.status === "successful") {
         await withTxBatch([
-          prisma.wallet.update({
-            where: { id: wallet.id },
-            data: { balance: { increment: amount } },
+          prisma.withdrawalRequest.updateMany({
+            where: { id: w.id, status: "processing" },
+            data: { status: "paid", finalizedAt: now },
           }),
-          prisma.deathClaim.updateMany({
-            where: { id: c.id, status: "processing" },
-            data: { status: "validated" },
+          prisma.member.update({
+            where: { id: w.memberId },
+            data: { lastWithdrawalAt: now, withdrawalOverride: false },
           }),
         ]);
-      } else {
+        // Audit trail: record the poller-confirmed transfer
+        await audit({
+          cooperativeId: w.cooperativeId,
+          actorPhone: "system-poller",
+          actorRole: "system",
+          action: "withdrawal.poller_confirmed",
+          targetType: "withdrawal",
+          targetId: w.id,
+          amount: w.amount,
+          detail: `Withdrawal ${w.id.slice(-6)} confirmed by provider polling`,
+        });
+        await recordLedger({
+          cooperativeId: w.cooperativeId,
+          type: "expense",
+          category: "withdrawal",
+          amount: w.amount,
+          note: `Withdrawal ${w.id.slice(-6)} confirmed by poller`,
+          reference: w.id,
+          fundType: "member",
+        });
+        actions.push(
+          `Withdrawal ${w.id.slice(-6)} (${formatBalance(w.amount)}) confirmed by provider — marked paid.`,
+        );
+        await notifySupers(
+          w.cooperativeId,
+          `✅ Poller: withdrawal *${w.id.slice(-6)}* for ${w.member.name} was confirmed ${"successful"} at the provider and is now marked paid.`,
+        );
+      } else if (st.status === "failed") {
+        const wallet = await prisma.wallet.findUnique({ where: { memberId: w.memberId } });
+        await withTxBatch([
+          ...(wallet
+            ? [
+                prisma.wallet.update({
+                  where: { id: wallet.id },
+                  data: { balance: { increment: w.amount } },
+                }),
+              ]
+            : []),
+          prisma.withdrawalRequest.updateMany({
+            where: { id: w.id, status: "processing" },
+            data: { status: "admin_approved" },
+          }),
+        ]);
+        actions.push(`Withdrawal ${w.id.slice(-6)} FAILED at provider — wallet refunded.`);
+        await notifySupers(
+          w.cooperativeId,
+          `↩️ Poller: withdrawal *${w.id.slice(-6)}* failed at the provider. Wallet refunded automatically.`,
+        );
+      }
+    }
+
+    // ---- Death claims (same debit-first saga) ----
+    const stuckClaims = await prisma.deathClaim.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "processing",
+        createdAt: { lt: cutoff },
+        familyAccountNumber: { not: null },
+      },
+      include: { member: true },
+    });
+    for (const c of stuckClaims) {
+      const st = await statusFor(`TFR-CLAIM-${c.id}`);
+      const amount = c.debitedAmount ?? 0;
+      if (st.status === "successful") {
         await prisma.deathClaim.updateMany({
           where: { id: c.id, status: "processing" },
-          data: { status: "validated" },
+          data: { status: "paid", approvedAt: now, finalizedAt: now },
         });
+        await audit({
+          cooperativeId: c.cooperativeId,
+          actorPhone: "system-poller",
+          actorRole: "system",
+          action: "deathclaim.poller_confirmed",
+          targetType: "deathclaim",
+          targetId: c.id,
+          amount,
+          detail: `Death claim ${c.id.slice(-6)} confirmed by provider polling`,
+        });
+        actions.push(`Death claim ${c.id.slice(-6)} confirmed by provider — closed as paid.`);
+        await notifySupers(
+          c.cooperativeId,
+          `🕊️ Poller: death claim *${c.id.slice(-6)}* (${c.member.name}) confirmed paid by the provider.`,
+        );
+      } else if (st.status === "failed") {
+        const wallet = await prisma.wallet.findUnique({ where: { memberId: c.memberId } });
+        if (amount > 0 && wallet) {
+          await withTxBatch([
+            prisma.wallet.update({
+              where: { id: wallet.id },
+              data: { balance: { increment: amount } },
+            }),
+            prisma.deathClaim.updateMany({
+              where: { id: c.id, status: "processing" },
+              data: { status: "validated" },
+            }),
+          ]);
+        } else {
+          await prisma.deathClaim.updateMany({
+            where: { id: c.id, status: "processing" },
+            data: { status: "validated" },
+          });
+        }
+        await audit({
+          cooperativeId: c.cooperativeId,
+          actorPhone: "system-poller",
+          actorRole: "system",
+          action: "deathclaim.poller_refunded",
+          targetType: "deathclaim",
+          targetId: c.id,
+          amount,
+          detail: `Death claim ${c.id.slice(-6)} failed at provider — refunded ${amount} kobo`,
+        });
+        actions.push(
+          `Death claim ${c.id.slice(-6)} FAILED at provider — reverted${amount > 0 ? ", wallet refunded" : ""}.`,
+        );
+        await notifySupers(
+          c.cooperativeId,
+          `↩️ Poller: death claim *${c.id.slice(-6)}* failed at the provider — reverted${amount > 0 ? " and wallet refunded" : ""}.`,
+        );
       }
-      await audit({
-        cooperativeId: c.cooperativeId,
-        actorPhone: "system-poller",
-        actorRole: "system",
-        action: "deathclaim.poller_refunded",
-        targetType: "deathclaim",
-        targetId: c.id,
-        amount,
-        detail: `Death claim ${c.id.slice(-6)} failed at provider — refunded ${amount} kobo`,
-      });
-      actions.push(
-        `Death claim ${c.id.slice(-6)} FAILED at provider — reverted${amount > 0 ? ", wallet refunded" : ""}.`,
-      );
-      await notifySupers(
-        c.cooperativeId,
-        `↩️ Poller: death claim *${c.id.slice(-6)}* failed at the provider — reverted${amount > 0 ? " and wallet refunded" : ""}.`,
-      );
     }
-  }
 
-  // ---- Loan disbursements (no wallet involved) ----
-  const stuckLoans = await prisma.loan.findMany({
-    where: {
-      cooperativeId: coopId,
-      status: "approved",
-      disbursementStatus: "processing",
-      createdAt: { lt: cutoff },
-    },
-    include: { member: true },
-  });
-  for (const loan of stuckLoans) {
-    const st = await statusFor(`TFR-LOAN-${loan.id}`);
-    if (st.status === "successful") {
-      const adminCharge = loan.adminCharge ?? 0;
-      const disbursable = Math.max(0, loan.amount - adminCharge);
-      await prisma.loan.updateMany({
-        where: { id: loan.id, status: "approved" },
-        data: {
-          status: "disbursed",
-          disbursedAt: now,
-          disbursementStatus: "successful",
-          disbursementAmount: disbursable,
-          disbursementError: null,
-        },
-      });
-      await recordLedger({
-        cooperativeId: loan.cooperativeId,
-        type: "income",
-        category: "admin_charge",
-        amount: adminCharge,
-        note: `Admin charge on loan ${loan.id.slice(-6)} (confirmed by poller)`,
-        reference: loan.id,
-        fundType: "operational",
-      });
-      await audit({
-        cooperativeId: loan.cooperativeId,
-        actorPhone: "system-poller",
-        actorRole: "system",
-        action: "loan.poller_disbursed",
-        targetType: "loan",
-        targetId: loan.id,
-        amount: disbursable,
-        detail: `Loan ${loan.id.slice(-6)} disbursement confirmed by provider polling`,
-      });
-      actions.push(
-        `Loan ${loan.id.slice(-6)} disbursement confirmed by provider — marked disbursed.`,
-      );
-      await notifySupers(
-        loan.cooperativeId,
-        `🎉 Poller: loan *${loan.id.slice(-6)}* (${loan.member.name}) disbursement confirmed by the provider.`,
-      );
-    } else if (st.status === "failed") {
-      await prisma.loan.updateMany({
-        where: { id: loan.id, disbursementStatus: "processing" },
-        data: {
-          disbursementStatus: "failed",
-          disbursementError: st.error ?? "provider reported failure",
-        },
-      });
-      actions.push(`Loan ${loan.id.slice(-6)} disbursement FAILED at provider — retryable.`);
-      await notifySupers(
-        loan.cooperativeId,
-        `↩️ Poller: loan *${loan.id.slice(-6)}* disbursement failed at the provider. Reply *pending* to review.`,
-      );
-    }
-  }
-
-  // ---- Pay-anyone ----
-  const stuckExternals = await prisma.externalPayment.findMany({
-    where: { cooperativeId: coopId, status: "processing", createdAt: { lt: cutoff } },
-  });
-  for (const p of stuckExternals) {
-    const reference = `PAYANY-${p.id.slice(-8)}`;
-    const st = await statusFor(reference);
-    if (st.status === "successful") {
-      const provider = await resolveProvider();
-      await withTxBatch([
-        prisma.externalPayment.updateMany({
-          where: { id: p.id, status: "processing" },
-          data: { status: "paid", payoutReference: reference },
-        }),
-        prisma.payout.create({
+    // ---- Loan disbursements (no wallet involved) ----
+    const stuckLoans = await prisma.loan.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "approved",
+        disbursementStatus: "processing",
+        createdAt: { lt: cutoff },
+      },
+      include: { member: true },
+    });
+    for (const loan of stuckLoans) {
+      const st = await statusFor(`TFR-LOAN-${loan.id}`);
+      if (st.status === "successful") {
+        const adminCharge = loan.adminCharge ?? 0;
+        const disbursable = Math.max(0, loan.amount - adminCharge);
+        await prisma.loan.updateMany({
+          where: { id: loan.id, status: "approved" },
           data: {
-            amount: p.amount,
-            reference,
-            idempotencyKey: reference,
-            status: "successful",
-            provider: provider.name,
-            providerRef: st.providerRef,
-            note: `Pay-anyone → ${p.beneficiaryName}${p.purpose ? ` (${p.purpose})` : ""} (confirmed by poller)`,
-            memberId: p.initiatedById,
-            cooperativeId: p.cooperativeId,
+            status: "disbursed",
+            disbursedAt: now,
+            disbursementStatus: "successful",
+            disbursementAmount: disbursable,
+            disbursementError: null,
           },
-        }),
-      ]);
-      await recordLedger({
-        cooperativeId: p.cooperativeId,
-        type: "expense",
-        category: "external_payment",
-        amount: p.amount,
-        note: `Paid ${p.beneficiaryName} — confirmed by poller`,
-        reference: p.id,
-        fundType: "operational",
-      });
-      await audit({
-        cooperativeId: p.cooperativeId,
-        actorPhone: "system-poller",
-        actorRole: "system",
-        action: "payanyone.paid",
-        targetType: "external_payment",
-        targetId: p.id,
-        detail: `${formatBalance(p.amount)} confirmed by provider polling`,
-      });
-      actions.push(
-        `Pay-anyone ${p.id.slice(-6)} (${formatBalance(p.amount)}) confirmed by provider — marked paid.`,
-      );
-      await notifySupers(
-        p.cooperativeId,
-        `💸 Poller: pay-anyone *${p.id.slice(-6)}* to ${p.beneficiaryName} was confirmed by the provider and booked.`,
-      );
-    } else if (st.status === "failed") {
-      await prisma.externalPayment.updateMany({
-        where: { id: p.id, status: "processing" },
-        data: { status: "approved2", payoutReference: st.error ?? "provider reported failure" },
-      });
-      actions.push(`Pay-anyone ${p.id.slice(-6)} FAILED at provider — reverted for retry.`);
-      await notifySupers(
-        p.cooperativeId,
-        `↩️ Poller: pay-anyone *${p.id.slice(-6)}* failed at the provider — reverted so a super can retry the final approval.`,
-      );
+        });
+        await recordLedger({
+          cooperativeId: loan.cooperativeId,
+          type: "income",
+          category: "admin_charge",
+          amount: adminCharge,
+          note: `Admin charge on loan ${loan.id.slice(-6)} (confirmed by poller)`,
+          reference: loan.id,
+          fundType: "operational",
+        });
+        await audit({
+          cooperativeId: loan.cooperativeId,
+          actorPhone: "system-poller",
+          actorRole: "system",
+          action: "loan.poller_disbursed",
+          targetType: "loan",
+          targetId: loan.id,
+          amount: disbursable,
+          detail: `Loan ${loan.id.slice(-6)} disbursement confirmed by provider polling`,
+        });
+        actions.push(
+          `Loan ${loan.id.slice(-6)} disbursement confirmed by provider — marked disbursed.`,
+        );
+        await notifySupers(
+          loan.cooperativeId,
+          `🎉 Poller: loan *${loan.id.slice(-6)}* (${loan.member.name}) disbursement confirmed by the provider.`,
+        );
+      } else if (st.status === "failed") {
+        await prisma.loan.updateMany({
+          where: { id: loan.id, disbursementStatus: "processing" },
+          data: {
+            disbursementStatus: "failed",
+            disbursementError: st.error ?? "provider reported failure",
+          },
+        });
+        actions.push(`Loan ${loan.id.slice(-6)} disbursement FAILED at provider — retryable.`);
+        await notifySupers(
+          loan.cooperativeId,
+          `↩️ Poller: loan *${loan.id.slice(-6)}* disbursement failed at the provider. Reply *pending* to review.`,
+        );
+      }
     }
-  }
 
-  // ---- Dividend payouts (bank-out journal is posted at initiation; settle or
-  // reverse it here if the transfer callback was missed) ----
-  const stuckDividends = await prisma.dividendEntry.findMany({
-    where: {
-      dividend: { cooperativeId: coopId },
-      status: "processing",
-      createdAt: { lt: cutoff },
-      payoutId: { not: null },
-    },
-    include: { payout: true },
-  });
-  for (const entry of stuckDividends) {
-    const payout = entry.payout;
-    if (!payout?.provider) continue;
-    const reference = payout.idempotencyKey ?? payout.reference;
-    const st = await statusFor(reference);
-    if (st.status === "successful") {
-      await applyDividendPayoutUpdate({
-        provider: payout.provider,
-        reference,
-        status: "successful",
-      });
-      actions.push(`Dividend payout ${reference.slice(-10)} confirmed by provider — settled.`);
-      await notifySupers(
-        payout.cooperativeId,
-        `✅ Poller: dividend payout *${reference.slice(-10)}* was confirmed by the provider and settled.`,
-      );
-    } else if (st.status === "failed") {
-      await applyDividendPayoutUpdate({ provider: payout.provider, reference, status: "failed" });
-      actions.push(
-        `Dividend payout ${reference.slice(-10)} FAILED at provider — journal reversed.`,
-      );
-      await notifySupers(
-        payout.cooperativeId,
-        `↩️ Poller: dividend payout *${reference.slice(-10)}* failed at the provider. The bank-out journal was reversed.`,
-      );
+    // ---- Pay-anyone ----
+    const stuckExternals = await prisma.externalPayment.findMany({
+      where: { cooperativeId: coopId, status: "processing", createdAt: { lt: cutoff } },
+    });
+    for (const p of stuckExternals) {
+      const reference = `PAYANY-${p.id.slice(-8)}`;
+      const st = await statusFor(reference);
+      if (st.status === "successful") {
+        const provider = await resolveProvider(undefined, getCurrency());
+        await withTxBatch([
+          prisma.externalPayment.updateMany({
+            where: { id: p.id, status: "processing" },
+            data: { status: "paid", payoutReference: reference },
+          }),
+          prisma.payout.create({
+            data: {
+              amount: p.amount,
+              reference,
+              idempotencyKey: reference,
+              status: "successful",
+              provider: provider.name,
+              providerRef: st.providerRef,
+              note: `Pay-anyone → ${p.beneficiaryName}${p.purpose ? ` (${p.purpose})` : ""} (confirmed by poller)`,
+              memberId: p.initiatedById,
+              cooperativeId: p.cooperativeId,
+            },
+          }),
+        ]);
+        await recordLedger({
+          cooperativeId: p.cooperativeId,
+          type: "expense",
+          category: "external_payment",
+          amount: p.amount,
+          note: `Paid ${p.beneficiaryName} — confirmed by poller`,
+          reference: p.id,
+          fundType: "operational",
+        });
+        await audit({
+          cooperativeId: p.cooperativeId,
+          actorPhone: "system-poller",
+          actorRole: "system",
+          action: "payanyone.paid",
+          targetType: "external_payment",
+          targetId: p.id,
+          detail: `${formatBalance(p.amount)} confirmed by provider polling`,
+        });
+        actions.push(
+          `Pay-anyone ${p.id.slice(-6)} (${formatBalance(p.amount)}) confirmed by provider — marked paid.`,
+        );
+        await notifySupers(
+          p.cooperativeId,
+          `💸 Poller: pay-anyone *${p.id.slice(-6)}* to ${p.beneficiaryName} was confirmed by the provider and booked.`,
+        );
+      } else if (st.status === "failed") {
+        await prisma.externalPayment.updateMany({
+          where: { id: p.id, status: "processing" },
+          data: { status: "approved2", payoutReference: st.error ?? "provider reported failure" },
+        });
+        actions.push(`Pay-anyone ${p.id.slice(-6)} FAILED at provider — reverted for retry.`);
+        await notifySupers(
+          p.cooperativeId,
+          `↩️ Poller: pay-anyone *${p.id.slice(-6)}* failed at the provider — reverted so a super can retry the final approval.`,
+        );
+      }
     }
-  }
 
+    // ---- Dividend payouts (bank-out journal is posted at initiation; settle or
+    // reverse it here if the transfer callback was missed) ----
+    const stuckDividends = await prisma.dividendEntry.findMany({
+      where: {
+        dividend: { cooperativeId: coopId },
+        status: "processing",
+        createdAt: { lt: cutoff },
+        payoutId: { not: null },
+      },
+      include: { payout: true },
+    });
+    for (const entry of stuckDividends) {
+      const payout = entry.payout;
+      if (!payout?.provider) continue;
+      const reference = payout.idempotencyKey ?? payout.reference;
+      const st = await statusFor(reference);
+      if (st.status === "successful") {
+        await applyDividendPayoutUpdate({
+          provider: payout.provider,
+          reference,
+          status: "successful",
+        });
+        actions.push(`Dividend payout ${reference.slice(-10)} confirmed by provider — settled.`);
+        await notifySupers(
+          payout.cooperativeId,
+          `✅ Poller: dividend payout *${reference.slice(-10)}* was confirmed by the provider and settled.`,
+        );
+      } else if (st.status === "failed") {
+        await applyDividendPayoutUpdate({ provider: payout.provider, reference, status: "failed" });
+        actions.push(
+          `Dividend payout ${reference.slice(-10)} FAILED at provider — journal reversed.`,
+        );
+        await notifySupers(
+          payout.cooperativeId,
+          `↩️ Poller: dividend payout *${reference.slice(-10)}* failed at the provider. The bank-out journal was reversed.`,
+        );
+      }
+    }
   });
   return actions;
 }

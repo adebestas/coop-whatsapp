@@ -266,7 +266,7 @@ export const monnifyAdapter: ProviderAdapter = {
     }
   },
 
-  async listBanks(): Promise<Bank[]> {
+  async listBanks(_currency?: string): Promise<Bank[]> {
     if (!configured()) return [];
     try {
       const res = await api<MonnifyResponse<Array<{ code: string; name: string }>>>(
@@ -400,14 +400,16 @@ export const monnifyAdapter: ProviderAdapter = {
   async debitMandate(params: DebitMandateParams): Promise<DebitResult> {
     if (!configured()) return { ok: false, error: "Monnify is not configured" };
     try {
-      const res = await api<
-        MonnifyResponse<{ transactionReference: string; debitStatus: string }>
-      >("POST", "/api/v1/disbursements/debit", {
-        mandateId: params.providerMandateId,
-        amount: forProvider(params.amount, "monnify"),
-        reference: params.reference,
-        narration: params.narration,
-      });
+      const res = await api<MonnifyResponse<{ transactionReference: string; debitStatus: string }>>(
+        "POST",
+        "/api/v1/disbursements/debit",
+        {
+          mandateId: params.providerMandateId,
+          amount: forProvider(params.amount, "monnify"),
+          reference: params.reference,
+          narration: params.narration,
+        },
+      );
       if (!res.requestSuccessful) {
         return { ok: false, error: res.responseMessage ?? "debit rejected" };
       }

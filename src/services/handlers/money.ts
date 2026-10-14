@@ -22,6 +22,7 @@ import { listMandates } from "../mandates.js";
 import { escalateCase, type EscalateInput } from "../ombudsman.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 import { resolveProvider, listBanks, type Bank } from "../payments/index.js";
+import { getCurrency } from "../../lib/runtime-context.js";
 import { savePayee } from "../../lib/beneficiaries.js";
 import { accountMismatchWarning } from "../../lib/ai-notice.js";
 import { namesMatch } from "../disbursements.js";
@@ -365,7 +366,10 @@ export async function handleAnalytics(
 export async function handleShares(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const account = await getShareAccount(member.id);
@@ -387,12 +391,18 @@ export async function handleShares(phone: string): Promise<void> {
 export async function handleBuyShares(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const count = args[0] ? parseInt(args[0], 10) : NaN;
   if (!Number.isInteger(count) || count <= 0) {
-    await sendText({ to: phone, text: "How many shares? Reply *buyshares <count>*, e.g. *buyshares 5*." });
+    await sendText({
+      to: phone,
+      text: "How many shares? Reply *buyshares <count>*, e.g. *buyshares 5*.",
+    });
     return;
   }
   await issueSecretChallenge(
@@ -406,7 +416,10 @@ export async function handleBuyShares(phone: string, args: string[]): Promise<vo
 export async function handleGroupLoan(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const groupId = args[0];
@@ -427,7 +440,10 @@ export async function handleGroupLoan(phone: string, args: string[]): Promise<vo
 export async function handleProducts(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const listed = await listProducts(member.cooperativeId);
@@ -460,7 +476,10 @@ export async function handleProducts(phone: string): Promise<void> {
 export async function handleOpenProduct(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const productId = args[0];
@@ -485,7 +504,10 @@ export async function handleOpenProduct(phone: string, args: string[]): Promise<
 export async function handleOpenJunior(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const productId = args[0];
@@ -517,7 +539,10 @@ export async function handleOpenJunior(phone: string, args: string[]): Promise<v
 export async function handleSaveProduct(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const accountId = args[0];
@@ -537,7 +562,10 @@ export async function handleSaveProduct(phone: string, args: string[]): Promise<
 export async function handleWithdrawProduct(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const accountId = args[0];
@@ -557,7 +585,10 @@ export async function handleWithdrawProduct(phone: string, args: string[]): Prom
 export async function handleMyProducts(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const mine = await listMemberProducts(member.cooperativeId, member.id);
@@ -586,7 +617,10 @@ export async function handleMyProducts(phone: string): Promise<void> {
 export async function handleMatureProduct(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const accountId = args[0];
@@ -602,7 +636,10 @@ export async function handleMatureProduct(phone: string, args: string[]): Promis
 export async function handleMandate(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const cap = parseNaira(args[0]);
@@ -621,7 +658,10 @@ export async function handleMandate(phone: string, args: string[]): Promise<void
 export async function handleMandates(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const listed = await listMandates(member.cooperativeId, member.id);
@@ -648,12 +688,18 @@ export async function handleMandates(phone: string): Promise<void> {
 export async function handleMandateStatus(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const idRef = args[0];
   if (!idRef) {
-    await sendText({ to: phone, text: "Usage: *mandatestatus <mandate id>* — list them with *mandates*." });
+    await sendText({
+      to: phone,
+      text: "Usage: *mandatestatus <mandate id>* — list them with *mandates*.",
+    });
     return;
   }
   const listed = await listMandates(member.cooperativeId, member.id);
@@ -688,7 +734,10 @@ export async function handleMandateStatus(phone: string, args: string[]): Promis
 export async function handleCancelMandate(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const mandateId = args[0];
@@ -744,8 +793,8 @@ function matchBank(banks: Bank[], input: string): Bank | null {
 
 /** Fetch the bank list (cached, static fallback) and ask the member to pick one. */
 async function showBankList(phone: string, data: FlowData): Promise<void> {
-  const provider = await resolveProvider();
-  const banks = await listBanks(provider);
+  const provider = await resolveProvider(undefined, getCurrency());
+  const banks = await listBanks(provider, getCurrency());
   await setSession(phone, "awaiting_bank_choice", { ...data, bankChoices: banks });
   await sendText({ to: phone, text: bankListText(banks) });
 }
@@ -802,7 +851,7 @@ export async function handleBankChoiceStep(
     return;
   }
   const account = data.bankAccount ?? "";
-  const provider = await resolveProvider();
+  const provider = await resolveProvider(undefined, getCurrency());
   const resolved = await provider.resolveAccount?.({
     accountNumber: account,
     bankCode: picked.code,
@@ -918,13 +967,7 @@ export async function handleBankConfirmStep(
 }
 
 /** Valid dispute forms (no Prisma enum — plain strings). */
-const DISPUTE_CATEGORIES = new Set([
-  "loan_rejection",
-  "dividend",
-  "freeze",
-  "suspension",
-  "other",
-]);
+const DISPUTE_CATEGORIES = new Set(["loan_rejection", "dividend", "freeze", "suspension", "other"]);
 
 /**
  * Escalate a cooperative matter to the independent, platform-level ombudsman.
@@ -936,7 +979,10 @@ const DISPUTE_CATEGORIES = new Set([
 export async function handleEscalate(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
     return;
   }
 
@@ -993,7 +1039,10 @@ export async function handleEscalate(phone: string, args: string[]): Promise<voi
 export async function handleAddPayee(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
     return;
   }
   const name = args[0];

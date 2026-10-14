@@ -1,5 +1,6 @@
 import { prisma, withTx } from "../lib/prisma.js";
 import { setCoopContext } from "../lib/tenant-context.js";
+import { getCurrency } from "../lib/runtime-context.js";
 import { notifyMember } from "../lib/messaging.js";
 import {
   resolveProvider,
@@ -112,7 +113,7 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
   const member = await prisma.member.findUnique({ where: { id: opts.memberId } });
   if (!member) return { ok: false, status: "failed", message: "Member not found." };
 
-  const provider = await resolveProvider();
+  const provider = await resolveProvider(undefined, getCurrency());
   if (!provider.resolveAccount) {
     if (opts.skipNameCheck) {
       return payOut(opts, member, null);
@@ -175,7 +176,7 @@ async function payOut(
   },
   verifiedName: string | null,
 ): Promise<DisbursementResult> {
-  const provider = await resolveProvider();
+  const provider = await resolveProvider(undefined, getCurrency());
   // Deterministic reference: retries reuse the SAME key, so the provider and
   // our own unique constraint both reject a second execution.
   const reference = opts.idempotencyKey ?? `TFR-${opts.memberId.slice(-8)}-${Date.now()}`;
@@ -204,6 +205,7 @@ async function payOut(
         bankCode: opts.bankCode,
         recipientName: member.name,
         reference,
+        currency: getCurrency(),
       });
       if (!result.ok) {
         if (result.pending) {

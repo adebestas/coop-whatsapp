@@ -1,6 +1,7 @@
 import { prisma, withTxBatch } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { resolveProvider, markProviderDown } from "./payments/index.js";
+import { getCurrency } from "../lib/runtime-context.js";
 import { confirmAccountName } from "./disbursements.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { formatBalance } from "./cooperative.js";
@@ -297,7 +298,7 @@ async function payExternal(
     };
   }
 
-  const provider = await resolveProvider();
+  const provider = await resolveProvider(undefined, getCurrency());
   const reference = `PAYANY-${payment.id.slice(-8)}`;
 
   if (!provider.payout) {
@@ -348,6 +349,7 @@ async function payExternal(
       bankCode: payment.bankCode,
       recipientName: payment.beneficiaryName,
       reference,
+      currency: getCurrency(),
     });
     if (!result.ok) {
       // Provider refused — nothing moved. Revert for a clean retry.

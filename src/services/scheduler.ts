@@ -8,6 +8,7 @@ import { runAllAlerts } from "../lib/ai-alerts.js";
 import { alertSupers, AlertSeverity, logAndAlert } from "../lib/alerting.js";
 import { getRedis, claimOnce } from "../lib/cache.js";
 import { forEachCoop, withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
+import { getCurrency } from "../lib/runtime-context.js";
 import { log } from "../lib/logger.js";
 import { maskId } from "../lib/security.js";
 import { computeRepaymentDue } from "./loans.js";
@@ -384,12 +385,13 @@ async function dispatchMandateDebit(
 
   let result: { ok: boolean; error?: string } | undefined;
   try {
-    const provider = await resolveProvider(mandate.provider);
+    const provider = await resolveProvider(mandate.provider, getCurrency());
     result = await provider.debitMandate?.({
       providerMandateId: mandate.providerMandateId ?? "",
       amount,
       reference: providerRef,
       narration,
+      currency: getCurrency(),
     });
   } catch (err) {
     result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
@@ -447,12 +449,13 @@ export async function runMandateRetries(now = new Date()): Promise<number> {
       const narration = `Direct debit retry — ${debit.purpose} (${formatBalance(debit.amount)})`;
       let result: { ok: boolean; error?: string } | undefined;
       try {
-        const provider = await resolveProvider(debit.mandate.provider);
+        const provider = await resolveProvider(debit.mandate.provider, getCurrency());
         result = await provider.debitMandate?.({
           providerMandateId: debit.mandate.providerMandateId ?? "",
           amount: debit.amount,
           reference: debit.providerRef,
           narration,
+          currency: getCurrency(),
         });
       } catch (err) {
         result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
@@ -618,7 +621,10 @@ export async function runBirthdayGreetings(now = new Date()): Promise<number> {
             return true;
           } catch (err) {
             // Log the error but don't fail the entire batch
-            console.error(`[scheduler] Failed to send birthday greeting to ${maskId(m.phone)}:`, err);
+            console.error(
+              `[scheduler] Failed to send birthday greeting to ${maskId(m.phone)}:`,
+              err,
+            );
             return false;
           }
         }),
@@ -958,9 +964,7 @@ export async function runOmbudsmanEscalations(now = new Date()): Promise<number>
         where: { cooperativeId: coopId, sourceType: "grievance", sourceId: { not: null } },
         select: { sourceId: true },
       });
-      const casedIds = alreadyCased
-        .map((c) => c.sourceId)
-        .filter((s): s is string => s !== null);
+      const casedIds = alreadyCased.map((c) => c.sourceId).filter((s): s is string => s !== null);
 
       const stale = await prisma.grievance.findMany({
         where: {
