@@ -70,6 +70,7 @@ async function finishRegistration(phone: string): Promise<void> {
     awaiting_nok_phone: "08030000000",
     awaiting_pin: "1234",
     awaiting_pin_confirm: "1234",
+    awaiting_literacy_optin: "skip",
   };
   let session = await sessionOf(phone);
   let guard = 0;

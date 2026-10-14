@@ -23,6 +23,8 @@ import { escalateCase, type EscalateInput } from "../ombudsman.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
 import { resolveProvider, listBanks, type Bank } from "../payments/index.js";
 import { savePayee } from "../../lib/beneficiaries.js";
+import { accountMismatchWarning } from "../../lib/ai-notice.js";
+import { namesMatch } from "../disbursements.js";
 import type { FlowData } from "../conversation.js";
 
 export async function handleBalance(
@@ -814,11 +816,17 @@ export async function handleBankChoiceStep(
     });
     return;
   }
+  // The member's OWN account (withdraw / mandate) must match their registered
+  // name. Payees are other people's accounts — never warn there.
+  const member = await getMemberByPhone(phone);
+  const mismatch =
+    data.bankIntent !== "payee" && !!member && !namesMatch(resolved.name, member.name);
   await setSession(phone, "awaiting_bank_confirm", {
     ...data,
     bankCode: picked.code,
     bankName: picked.name,
     bankAccountName: resolved.name,
+    bankNameMismatch: mismatch,
   });
   await sendText({
     to: phone,
@@ -828,6 +836,12 @@ export async function handleBankChoiceStep(
       `Name on account: *${resolved.name}*\n\n` +
       `Is this correct? Reply *yes* to continue or *cancel* to stop.`,
   });
+  if (mismatch) {
+    await sendText({
+      to: phone,
+      text: await accountMismatchWarning(member!.name, resolved.name),
+    });
+  }
 }
 
 /** Step 3: the member confirmed the resolved name; continue the caller's flow. */

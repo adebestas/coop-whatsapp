@@ -84,6 +84,9 @@ subscription       Subscription?
   referralWithdrawals ReferralWithdrawal[]
   regulatorProfiles  RegulatorProfile[]
   regulatorReports   RegulatorReport[]
+  insurancePolicies  InsurancePolicy[]
+  insuranceClaims    InsuranceClaim[]
+  literacyCertificates LiteracyCertificate[]
 
   @@index([status])
   @@index([code])
@@ -225,6 +228,7 @@ model Member {
   voteCandidates          VoteCandidate[]     @relation("VoteCandidates")
   voteBallots             VoteBallot[]        @relation("VoteBallots")
   salaryAmount            Int? // monthly salary/stipend for super admins in kobo (0 = off)
+  literacyCertificate     LiteracyCertificate?
   salaryKind              String? // salary | stipend
   externalPaymentsInitiated ExternalPayment[] @relation("ExternalPayInitiator")
   externalPaymentsApproved1 ExternalPayment[] @relation("ExternalPayApprover1")
@@ -283,6 +287,8 @@ model Member {
   referralReceived        Referral?           @relation("ReferredMember")
   referralBonusBalance    Int                 @default(0) // kobo; withdrawable referral bonus
   referralWithdrawals     ReferralWithdrawal[]
+  insurancePolicies       InsurancePolicy[]
+  insuranceClaims         InsuranceClaim[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -606,8 +612,29 @@ model MemberProgress {
   lastLessonAt    DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  certificationOptIn Boolean  @default(false)
+  quizAttempts       Int      @default(0)
+  quizScore          Int?
+  quizPassedAt       DateTime?
 
   @@index([memberId])
+}
+
+model LiteracyCertificate {
+  id             String   @id @default(cuid())
+  cooperativeId  String
+  cooperative    Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId       String   @unique
+  member         Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  referenceCode  String   @unique
+  score          Int
+  totalQuestions Int
+  issuedAt       DateTime @default(now())
+  revokedAt      DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([cooperativeId])
 }
 
 // ---- Auto status posts ----
@@ -1194,6 +1221,10 @@ model CooperativeConfig {
   referralRewardType       String   @default("wallet") // wallet | bank | airtime
   referralRewardAmount     Int      @default(50000) // kobo = ₦500
   referralMaxRewards       Int      @default(0) // cap per referrer; 0 = unlimited
+  literacyCertificationEnabled Boolean @default(true)
+  literacyQuizPassMark         Int     @default(4)
+  literacyQuizQuestionCount    Int     @default(6)
+  certifiedLoanBoost           Int     @default(1)
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
@@ -1892,7 +1923,9 @@ model RegulatorReport {
 model InsurancePolicy {
   id              String   @id @default(cuid())
   cooperativeId   String
+  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
   memberId        String
+  member          Member      @relation(fields: [memberId], references: [id], onDelete: Cascade)
   productCode     String    // "supercare" | "superfix"
   planCode        String    // "starter" | "basic" | "plus" | "elite" | "standard"
   status          String    @default("active")
@@ -1904,6 +1937,7 @@ model InsurancePolicy {
   autoRenew       Boolean   @default(true)
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+  claims          InsuranceClaim[]
 
   @@index([cooperativeId, memberId])
   @@index([cooperativeId, status])
@@ -1912,14 +1946,17 @@ model InsurancePolicy {
 model InsuranceClaim {
   id              String   @id @default(cuid())
   cooperativeId   String
+  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
   memberId        String
+  member          Member      @relation(fields: [memberId], references: [id], onDelete: Cascade)
   policyId        String
+  policy          InsurancePolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
   claimType       String
   amountKobo      Int
   status          String    @default("pending")
   cubecoverClaimId String?
   description     String?
-  documents       String
+  documents       Json?
   payoutKobo      Int?
   payoutDestination String?
   createdAt       DateTime  @default(now())

@@ -3124,7 +3124,9 @@ export async function handleAdminCommand(
               "Usage: *setconfig <key> <value>*\n\n" +
               "Keys: loanInterestRate, serviceChargePercent, minContribution, minSavings, " +
               "minWithdrawal, maxWithdrawal, withdrawalCooldownMonths, lateFinePercent, " +
-              "maxLoanMultiplier, autoApproveLoans, requireGuarantors, minGuarantors",
+              "maxLoanMultiplier, autoApproveLoans, requireGuarantors, minGuarantors, " +
+              "literacyCertificationEnabled, literacyQuizPassMark, literacyQuizQuestionCount, " +
+              "certifiedLoanBoost",
           });
           return true;
         }
@@ -3141,12 +3143,19 @@ export async function handleAdminCommand(
           "autoApproveLoans",
           "requireGuarantors",
           "minGuarantors",
+          "literacyCertificationEnabled",
+          "literacyQuizPassMark",
+          "literacyQuizQuestionCount",
+          "certifiedLoanBoost",
         ]);
         if (!validKeys.has(key)) {
           await sendText({ to: phone, text: `Unknown config key: *${key}*.` });
           return true;
         }
-        const isBoolean = key === "autoApproveLoans" || key === "requireGuarantors";
+        const isBoolean =
+          key === "autoApproveLoans" ||
+          key === "requireGuarantors" ||
+          key === "literacyCertificationEnabled";
         let parsedValue: any;
         if (isBoolean) {
           parsedValue = value.toLowerCase() === "true" || value === "1";
@@ -3154,6 +3163,20 @@ export async function handleAdminCommand(
           parsedValue = Number(value);
           if (!Number.isFinite(parsedValue)) {
             await sendText({ to: phone, text: `Value must be a number for *${key}*.` });
+            return true;
+          }
+          // Bounded integer keys — reject out-of-range values before persisting.
+          const ranges: Record<string, [number, number]> = {
+            literacyQuizPassMark: [1, 12],
+            literacyQuizQuestionCount: [1, 12],
+            certifiedLoanBoost: [0, 10],
+          };
+          const range = ranges[key];
+          if (range && (parsedValue < range[0] || parsedValue > range[1])) {
+            await sendText({
+              to: phone,
+              text: `*${key}* must be between *${range[0]}* and *${range[1]}*.`,
+            });
             return true;
           }
         }
@@ -3187,8 +3210,86 @@ export async function handleAdminCommand(
           `• Auto-approve loans: *${config.autoApproveLoans ? "yes" : "no"}*`,
           `• Require guarantors: *${config.requireGuarantors ? "yes" : "no"}*`,
           `• Min guarantors: *${config.minGuarantors}*`,
+          `• Literacy certification: *${config.literacyCertificationEnabled ? "on" : "off"}*`,
+          `• Quiz pass mark: *${config.literacyQuizPassMark}*`,
+          `• Quiz questions: *${config.literacyQuizQuestionCount}*`,
+          `• Certified loan boost: *+${config.certifiedLoanBoost}x savings*`,
         ];
         await sendText({ to: phone, text: body.join("\n") });
+        return true;
+      }
+
+      case "verifycert": {
+        const code = args[0];
+        if (!code) {
+          await sendText({ to: phone, text: "Usage: *verifycert <reference code>*" });
+          return true;
+        }
+        const cert = await prisma.literacyCertificate.findFirst({
+          where: {
+            cooperativeId: coopId,
+            OR: [{ referenceCode: code }, { referenceCode: { endsWith: code } }],
+          },
+          include: { member: true },
+        });
+        if (!cert) {
+          await sendText({ to: phone, text: `No certificate found for *${code}*.` });
+          return true;
+        }
+        await sendText({
+          to: phone,
+          text:
+            `*Certificate ${cert.referenceCode}*\n` +
+            `Member: *${cert.member.name}* (${cert.member.code})\n` +
+            `Score: *${cert.score}/${cert.totalQuestions}*\n` +
+            `Issued: *${cert.issuedAt.toISOString().slice(0, 10)}*\n` +
+            `Status: *${cert.revokedAt ? "revoked" : "valid"}*`,
+        });
+        return true;
+      }
+
+      case "revokecert": {
+        const code = args[0];
+        if (!code) {
+          await sendText({ to: phone, text: "Usage: *revokecert <reference code>*" });
+          return true;
+        }
+        const cert = await prisma.literacyCertificate.findFirst({
+          where: {
+            cooperativeId: coopId,
+            OR: [{ referenceCode: code }, { referenceCode: { endsWith: code } }],
+          },
+          include: { member: true },
+        });
+        if (!cert) {
+          await sendText({ to: phone, text: `No certificate found for *${code}*.` });
+          return true;
+        }
+        if (cert.revokedAt) {
+          await sendText({
+            to: phone,
+            text: `Certificate *${cert.referenceCode}* is already revoked.`,
+          });
+          return true;
+        }
+        await prisma.literacyCertificate.update({
+          where: { id: cert.id },
+          data: { revokedAt: new Date() },
+        });
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: phone,
+          actorId: admin.id,
+          actorRole: "superadmin",
+          action: "literacy.certificate_revoked",
+          targetType: "LiteracyCertificate",
+          targetId: cert.id,
+          detail: `revoked ${cert.referenceCode} for ${cert.member.name}`,
+        });
+        await sendText({
+          to: phone,
+          text: `✅ Certificate *${cert.referenceCode}* for *${cert.member.name}* revoked.`,
+        });
         return true;
       }
 

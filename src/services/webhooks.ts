@@ -37,24 +37,6 @@ const adapters: Record<string, ProviderAdapter> = {
   flutterwave: flutterwaveAdapter,
 };
 
-const cubecoverAdapter: ProviderAdapter = {
-  name: "cubecover",
-  verifyWebhook(rawBody: string, headers: Record<string, string | string[] | undefined>): boolean {
-    const client = new CubeCoverClient({
-      apiKey: process.env.CUBECOVER_API_KEY!,
-      baseUrl: process.env.CUBECOVER_BASE_URL || 'https://api.cubecover.ai',
-    });
-    return client.verifyWebhook(rawBody, headers["verif-hash"] as string);
-  },
-  parseNotification(body: unknown): any {
-    const client = new CubeCoverClient({
-      apiKey: process.env.CUBECOVER_API_KEY!,
-      baseUrl: process.env.CUBECOVER_BASE_URL || 'https://api.cubecover.ai',
-    });
-    return client.parseNotification(body);
-  },
-};
-
 const SIGNATURE_HEADERS: Record<string, string> = {
   "monnify-signature": "monnify",
   "x-paystack-signature": "paystack",
@@ -64,13 +46,17 @@ const SIGNATURE_HEADERS: Record<string, string> = {
 export function detectProvider(
   headers: Record<string, string | string[] | undefined>,
 ): string | null {
+  // CubeCover carries its OWN signature header, checked FIRST so it is never
+  // confused with Flutterwave's `verif-hash` (both would otherwise collide, and
+  // the Flutterwave mapping below would silently win). NOTE: the header name is
+  // INFERRED — confirm against CubeCover's developer docs during onboarding.
+  const ccSig = headers["x-cubecover-signature"];
+  if ((Array.isArray(ccSig) ? ccSig[0] : ccSig)?.length) return "cubecover";
+
   for (const [header, provider] of Object.entries(SIGNATURE_HEADERS)) {
     const value = headers[header];
     if ((Array.isArray(value) ? value[0] : value)?.length) return provider;
   }
-  // Check for CubeCover via verif-hash header
-  const ccValue = headers["verif-hash"];
-  if ((Array.isArray(ccValue) ? ccValue[0] : ccValue)?.length) return "cubecover";
   return null;
 }
 
@@ -172,6 +158,67 @@ async function recordAndProcess(params: {
   }
 }
 
+/**
+ * CubeCover insurance webhook branch.
+ *
+ * CubeCover is NOT a payment provider, so it is deliberately kept out of the
+ * ProviderAdapter pipeline. It carries its own signature header (see
+ * detectProvider) and is verified + processed here. NOTE: the header name and
+ * HMAC scheme are INFERRED from CubeCover's public material — confirm against
+ * their developer docs during onboarding.
+ */
+async function handleCubeCoverWebhook(
+  rawBody: string,
+  headers: Record<string, string | string[] | undefined>,
+): Promise<WebhookOutcome> {
+  const client = new CubeCoverClient({
+    apiKey: process.env.CUBECOVER_API_KEY ?? "",
+    baseUrl: process.env.CUBECOVER_BASE_URL || "https://api.cubecover.ai",
+    webhookSecret: process.env.CUBECOVER_WEBHOOK_SECRET ?? "",
+  });
+
+  const sigHeader = headers["x-cubecover-signature"];
+  const signature = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
+  if (!client.verifyWebhook(rawBody, signature)) {
+    incCounter("webhook_signature_failures_total", { provider: "cubecover", endpoint: "credit" });
+    log.error("webhook signature verification failed", { provider: "cubecover", endpoint: "credit" });
+    return { httpStatus: 401, body: { error: "invalid signature" } };
+  }
+
+  let parsedBody: unknown;
+  try {
+    parsedBody = JSON.parse(rawBody);
+  } catch {
+    return { httpStatus: 400, body: { error: "invalid json" } };
+  }
+
+  const notification = client.parseNotification(parsedBody);
+  if (!notification) {
+    return { httpStatus: 200, body: { status: "ignored" } };
+  }
+
+  const insuranceService = new InsuranceService({ prisma: prisma as any, cubecover: client });
+  await insuranceService.handleWebhook(notification.event, notification.data);
+
+  const eventId = `cubecover:${notification.event}:${JSON.stringify(notification.data)}`;
+  try {
+    await prisma.webhookEvent.create({
+      data: {
+        id: eventId,
+        provider: "cubecover",
+        kind: "insurance_update",
+        payloadHash: createHash("sha256").update(rawBody).digest("hex"),
+        status: "processed",
+      },
+    });
+  } catch (err: any) {
+    if (err?.code !== "P2002") {
+      console.error(`[webhook] failed to record insurance delivery`, err);
+    }
+  }
+  return { httpStatus: 200, body: { status: "ok", event: eventId } };
+}
+
 export async function processPaymentWebhook(
   rawBody: string,
   headers: Record<string, string | string[] | undefined>,
@@ -180,6 +227,13 @@ export async function processPaymentWebhook(
   if (!providerName) {
     return { httpStatus: 400, body: { error: "no recognizable provider signature header" } };
   }
+
+  // CubeCover insurance webhook — NOT a payment provider, so it bypasses the
+  // ProviderAdapter pipeline and is verified/handled by its own branch.
+  if (providerName === "cubecover") {
+    return handleCubeCoverWebhook(rawBody, headers);
+  }
+
   const adapter = adapters[providerName];
   if (!adapter) {
     return { httpStatus: 400, body: { error: `unknown provider ${providerName}` } };
@@ -252,39 +306,6 @@ export async function processPaymentWebhook(
 
     // Unrecognised event — acknowledge with 200 so the provider stops retrying.
     return { httpStatus: 200, body: { status: "ignored" } };
-  }
-
-  // Handle CubeCover insurance webhook events
-  if (providerName === "cubecover") {
-    const insuranceService = new InsuranceService({
-      prisma: prisma as any,
-      cubecover: new CubeCoverClient({
-        apiKey: process.env.CUBECOVER_API_KEY!,
-        baseUrl: process.env.CUBECOVER_BASE_URL || 'https://api.cubecover.ai',
-      }),
-    });
-    await insuranceService.handleWebhook(
-      notification.event,
-      notification.data as Record<string, unknown>,
-    );
-    // Record the insurance webhook event for dedup, then acknowledge
-    const insuranceEventId = `cubecover:${notification.event}:${JSON.stringify(notification.data)}`;
-    try {
-      await prisma.webhookEvent.create({
-        data: {
-          id: insuranceEventId,
-          provider: "cubecover",
-          kind: "insurance_update",
-          payloadHash: createHash("sha256").update(rawBody).digest("hex"),
-          status: "processed",
-        },
-      });
-    } catch (err: any) {
-      if (err?.code !== "P2002") {
-        console.error(`[webhook] failed to record insurance delivery`, err);
-      }
-    }
-    return { httpStatus: 200, body: { status: "ok", event: insuranceEventId } };
   }
 
   const eventId = `${providerName}:${notification.transactionId}`;
@@ -397,6 +418,13 @@ export async function processPayoutWebhook(
   if (!providerName) {
     return { httpStatus: 400, body: { error: "no recognizable provider signature header" } };
   }
+
+  // CubeCover is not a payout provider. Yield so the combined route falls
+  // through to processPaymentWebhook, which owns the insurance branch.
+  if (providerName === "cubecover") {
+    return { httpStatus: 200, body: { status: "ignored" } };
+  }
+
   const adapter = adapters[providerName];
   if (!adapter) {
     return { httpStatus: 400, body: { error: `unknown provider ${providerName}` } };

@@ -32,6 +32,7 @@ export const prisma = new PrismaClient({
 vi.mock("../src/lib/whatsapp.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
   sendFlowMessage: vi.fn().mockResolvedValue(true),
+  sendDocument: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock("../src/lib/telegram.js", async (importOriginal) => {
@@ -42,6 +43,7 @@ vi.mock("../src/lib/telegram.js", async (importOriginal) => {
     sendTelegramKeyboard: vi.fn().mockResolvedValue(1),
     deleteTelegramMessage: vi.fn().mockResolvedValue(true),
     getTelegramUpdates: vi.fn().mockResolvedValue([]),
+    sendTelegramDocument: vi.fn().mockResolvedValue(true),
   };
 });
 

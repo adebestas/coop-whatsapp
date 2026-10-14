@@ -27,6 +27,40 @@ export interface TelegramUpdate {
   callback_query?: TelegramCallbackQuery;
 }
 
+export interface SendTelegramDocumentParams {
+  chatId: string | number;
+  filename: string;
+  data: Buffer;
+  caption?: string;
+}
+
+/**
+ * Send a document (e.g. a PDF certificate) to a Telegram chat.
+ * The document is uploaded as a multipart/form-data file.
+ */
+export async function sendTelegramDocument({
+  chatId,
+  filename,
+  data,
+  caption,
+}: SendTelegramDocumentParams): Promise<boolean> {
+  if (!config.telegram.token) return false;
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("document", new Blob([data], { type: "application/pdf" }), filename);
+  if (caption) form.append("caption", caption);
+  const res = await fetch(`${API_BASE}/bot${config.telegram.token}/sendDocument`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    console.error(`[telegram] sendDocument failed (${res.status}): ${body}`);
+    return false;
+  }
+  return true;
+}
+
 /**
  * Convert WhatsApp-style formatting to Telegram HTML.
  * WhatsApp: *bold*, _italic_, ~strikethrough~, ```code```

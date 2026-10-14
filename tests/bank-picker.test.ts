@@ -318,4 +318,47 @@ describe("guided bank picker flow", () => {
     expect(await sessionState(m.phone)).toBe("idle");
     expect(textsSent()).toMatch(/10 digits|account/i);
   });
+
+  it("warns when the resolved account name doesn't match the member's registered name", async () => {
+    const coop = await createTestCoop("BKP10");
+    const m = await createTestMember(coop.id, { phone: "2348000410001" });
+    await prisma.cooperativeConfig.create({
+      data: { cooperativeId: coop.id, directDebitEnabled: true },
+    });
+
+    await handleMessage(m.phone, "mandate 5000");
+    await handleMessage(m.phone, "0123456789");
+    await handleMessage(m.phone, "access");
+
+    expect(await sessionState(m.phone)).toBe("awaiting_bank_confirm");
+    expect(textsSent()).toMatch(/does not match/i);
+    expect(textsSent()).toContain("ADA OBI");
+  });
+
+  it("does not warn when the resolved account name matches the member's registered name", async () => {
+    const coop = await createTestCoop("BKP11");
+    const m = await createTestMember(coop.id, { phone: "2348000410002" });
+    await prisma.cooperativeConfig.create({
+      data: { cooperativeId: coop.id, directDebitEnabled: true },
+    });
+    paymentState.resolveName = m.name;
+
+    await handleMessage(m.phone, "mandate 5000");
+    await handleMessage(m.phone, "0123456789");
+    await handleMessage(m.phone, "access");
+
+    expect(await sessionState(m.phone)).toBe("awaiting_bank_confirm");
+    expect(textsSent()).not.toMatch(/does not match/i);
+  });
+
+  it("does not warn for a payee (someone else's account)", async () => {
+    const coop = await createTestCoop("BKP12");
+    const m = await createTestMember(coop.id, { phone: "2348000410003" });
+
+    await handleMessage(m.phone, "addpayee mama-ngozi 0123456789");
+    await handleMessage(m.phone, "access");
+
+    expect(await sessionState(m.phone)).toBe("awaiting_bank_confirm");
+    expect(textsSent()).not.toMatch(/does not match/i);
+  });
 });

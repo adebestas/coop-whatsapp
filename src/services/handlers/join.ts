@@ -98,6 +98,26 @@ export async function askNokName(phone: string, data: FlowData): Promise<void> {
   });
 }
 
+/**
+ * Optional financial-literacy certification opt-in, asked after the member is
+ * created (so we have a memberId to persist `MemberProgress.certificationOptIn`).
+ * Skippable and never blocks registration.
+ */
+export async function askLiteracyOptIn(phone: string, data: FlowData): Promise<void> {
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_literacy_optin", data: JSON.stringify(data) },
+    update: { state: "awaiting_literacy_optin", data: JSON.stringify(data) },
+  });
+  await sendText({
+    to: phone,
+    text:
+      "📘 *Optional:* join our free financial-literacy certification? " +
+      "It takes ~10 minutes and unlocks a higher loan limit once you pass.\n\n" +
+      "Reply *yes* to enroll or *skip*.",
+  });
+}
+
 /** Parse DD/MM (or DD-MM) into a date. Year is arbitrary — only month/day matter. */
 export function parseBirthday(raw: string): Date | null {
   const m = raw.trim().match(/^(\d{1,2})[/-](\d{1,2})$/);

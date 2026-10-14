@@ -42,6 +42,7 @@ BEGIN
     'RefundRequest',
     'Referral',
     'ReferralWithdrawal',
+    'LiteracyCertificate',
     'InsurancePolicy',
     'InsuranceClaim',
     'RegulatorProfile','RegulatorReport',

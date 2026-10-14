@@ -1,5 +1,5 @@
 import { prisma } from "../../lib/prisma.js";
-import { sendText, sendSecurePrompt } from "../../lib/messaging.js";
+import { sendText, sendSecurePrompt, sendDocument } from "../../lib/messaging.js";
 import { deleteTelegramMessage } from "../../lib/telegram.js";
 import { randomBytes, randomInt } from "node:crypto";
 import { hashOtp, verifyOtp } from "../../lib/security.js";
@@ -18,11 +18,16 @@ import { resolveBankCode } from "../../lib/banks.js";
 import { applyForLoan, repayLoan } from "../loans.js";
 import { buyShares } from "../shares.js";
 import { addGuarantor, requiredGuarantors } from "../guarantors.js";
+import type { LoanIntent } from "../../lib/ai-loan.js";
 import { requestWithdrawal } from "../withdrawals.js";
 import { submitCertificate } from "../deathclaims.js";
 import type { BotState, FlowData, MessageMeta } from "../conversation.js";
 import { FlowDataSchema, SECRET_STATES } from "../conversation.js";
-import { askEmail, askBirthday, askNokName, parseBirthday } from "./join.js";
+import { askEmail, askBirthday, askNokName, askLiteracyOptIn, parseBirthday } from "./join.js";
+import { getCoopConfig } from "../coop-config.js";
+import { getQuizQuestions, getTotalLessons, QUIZ_QUESTIONS } from "../literacy.js";
+import { issueCertificate, renderCertificatePdf } from "../literacy-certificate.js";
+import { config } from "../../config.js";
 import { verifyPhoneChangeOtp } from "../phone-change.js";
 import { getActiveElectionsForNewMember } from "../votes.js";
 import { createCooperative, generateMemberFileNumber } from "../cooperative.js";
@@ -31,6 +36,11 @@ import { hashPin, verifyPin } from "../../lib/security.js";
 import { createMandate, cancelMandate } from "../mandates.js";
 import { myReferrals, getReferralBonus, withdrawReferralBonus } from "../referrals.js";
 import { enqueueAfterCommit } from "../../lib/deferred.js";
+import { insuranceService } from "./insurance.js";
+import type { Product } from "../insurance/cubecover.js";
+import { resolveProvider } from "../payments/index.js";
+import { namesMatch } from "../disbursements.js";
+import { accountMismatchWarning } from "../../lib/ai-notice.js";
 
 /** A half-finished flow expires after this long. */
 /** OTP codes expire after this long. */
@@ -176,6 +186,8 @@ export function buildFullMenu(
     `• *escalate dispute <form> <ref> [reason]* — escalate a dispute (loan_rejection/dividend/freeze/suspension/other)\n\n` +
     `*🎓 Learn*\n` +
     `• *class* / *next* — financial literacy lessons\n\n` +
+    `*🏥 Health*\n` +
+    `• *doctor* — talk to a licensed doctor (24/7, via your SuperCare cover)\n\n` +
     `*⚙️ Settings & help*\n` +
     `• *freeze* / *unfreeze* — lock your account\n` +
     `• *payees* / *addpayee* / *delpayee* — saved payout accounts\n` +
@@ -213,6 +225,11 @@ export function buildAdminMenu(): string {
     `• *skipdebit <id>* — skip one pending direct debit\n` +
     `• *recommendrefund <member code|id> <amount> <reason>* — recommend a refund\n` +
     `• *approverefund <id>* / *rejectrefund <id> [reason]* — approve/reject a refund (super admin)\n` +
+    `• *insurance* — list insurance policies\n` +
+    `• *insuranceclaim <id>* — view claim details\n` +
+    `• *approveinsuranceclaim <id>* — approve claim for payout\n` +
+    `• *rejectinsuranceclaim <id>* — reject claim\n` +
+    `• *listinsuranceclaims <code>* — list claims for member\n` +
     `• *resolve <id> <response>* — resolve ticket/grievance\n` +
     `• *startvote unit|exec ...* — start an election\n` +
     `• *candidate* — add election candidate\n` +
@@ -418,6 +435,183 @@ async function askConsent(phone: string, data: FlowData): Promise<void> {
       `dpo@cooperative-app.ng\n\n` +
       `Reply *YES* to consent or *NO* to cancel.`,
   });
+}
+
+/** Persist a session step. Thin wrapper over the upsert the flow uses everywhere. */
+async function stageSession(phone: string, state: BotState, data: FlowData): Promise<void> {
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state, data: JSON.stringify(data) },
+    update: { state, data: JSON.stringify(data) },
+  });
+}
+
+/**
+ * Start the loan flow from a natural-language request. The AI has already
+ * extracted whatever it could; this stages the session at the earliest step
+ * whose value is still missing, carrying any guarantors the member named so
+ * they can be added automatically after the bank step. It performs NO money
+ * movement — the normal, validated loan flow still runs (bank → confirm →
+ * applyForLoan → guarantors).
+ */
+export async function startLoanFromNL(phone: string, intent: LoanIntent): Promise<void> {
+  const base = { pendingGuarantors: intent.guarantors };
+  if (intent.amountNaira === null) {
+    await stageSession(phone, "awaiting_loan_amount", base);
+    await sendText({ to: phone, text: "How much would you like to borrow? (e.g. *50000*)" });
+    return;
+  }
+  const amount = toKobo(intent.amountNaira);
+  if (intent.months === null) {
+    await stageSession(phone, "awaiting_loan_months", { ...base, loanAmount: amount });
+    await sendText({ to: phone, text: "For how many months? (1–12)" });
+    return;
+  }
+  await stageSession(phone, "awaiting_loan_bank_account", {
+    ...base,
+    loanAmount: amount,
+    loanMonths: intent.months,
+  });
+  await sendText({
+    to: phone,
+    text:
+      `Great — I've noted your loan details.\n\n` +
+      `The loan will be paid directly into your bank account.\n\n` +
+      `What's your *bank account number*? (10 digits, e.g. *0123456789*)`,
+  });
+}
+
+const QUIZ_LETTERS = ["A", "B", "C", "D"];
+
+interface QuizState {
+  questionIds: number[];
+  index: number;
+  answers: number[];
+}
+
+/** Send the current quiz question with its A/B/C/D options. */
+async function sendQuizQuestion(phone: string, quiz: QuizState): Promise<void> {
+  const q = QUIZ_QUESTIONS.find((x) => x.id === quiz.questionIds[quiz.index]);
+  if (!q) return;
+  const options = q.options.map((opt, i) => `${QUIZ_LETTERS[i]}. ${opt}`).join("\n");
+  await sendText({
+    to: phone,
+    text:
+      `📝 *Question ${quiz.index + 1}/${quiz.questionIds.length}*\n\n` +
+      `${q.question}\n\n${options}\n\n` +
+      `Reply with *A*, *B*, *C* or *D*.`,
+  });
+}
+
+/**
+ * Start (or restart) the financial-literacy quiz for a member. Only members who
+ * opted in and completed every lesson may take it. Questions are selected
+ * deterministically per attempt so retries vary.
+ */
+export async function startLiteracyQuiz(phone: string, memberId: string): Promise<void> {
+  const member = await prisma.member.findUnique({ where: { id: memberId } });
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
+    return;
+  }
+  const coopConfig = await getCoopConfig(member.cooperativeId);
+  if (!coopConfig.literacyCertificationEnabled) {
+    await sendText({
+      to: phone,
+      text: "Financial-literacy certification isn't enabled for your cooperative.",
+    });
+    return;
+  }
+  const progress = await prisma.memberProgress.findUnique({ where: { memberId } });
+  if (!progress || !progress.certificationOptIn) {
+    await sendText({
+      to: phone,
+      text:
+        "You're not enrolled in the certification yet. Reply *class* to learn about it, " +
+        "or ask your cooperative admin to enroll you.",
+    });
+    return;
+  }
+  const total = getTotalLessons();
+  const completed = JSON.parse(progress.completedLessons) as number[];
+  if (completed.length < total) {
+    await sendText({
+      to: phone,
+      text:
+        `Finish all ${total} lessons first — you've completed ${completed.length}. ` +
+        `Reply *class* to continue.`,
+    });
+    return;
+  }
+  const count = Math.max(1, Math.min(coopConfig.literacyQuizQuestionCount, QUIZ_QUESTIONS.length));
+  const questions = getQuizQuestions(count, `${memberId}:${progress.quizAttempts}`);
+  const quiz: QuizState = { questionIds: questions.map((q) => q.id), index: 0, answers: [] };
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "literacy_quiz", data: JSON.stringify({ memberId, quiz }) },
+    update: { state: "literacy_quiz", data: JSON.stringify({ memberId, quiz }) },
+  });
+  await sendQuizQuestion(phone, quiz);
+}
+
+/**
+ * Render and deliver a member's certificate as an in-chat PDF attachment,
+ * falling back to a text message with the reference + verify link if the
+ * attachment cannot be sent (never lose the outcome).
+ */
+async function deliverCertificate(
+  phone: string,
+  cert: { referenceCode: string; score: number; totalQuestions: number; issuedAt: Date },
+  member: { id: string; name: string; code: string; cooperativeId: string },
+): Promise<void> {
+  const coop = await prisma.cooperative.findUnique({ where: { id: member.cooperativeId } });
+  const suffix = cert.referenceCode.split("-").pop() ?? cert.referenceCode;
+  const caption =
+    `🎓 You're certified! Ref: ${cert.referenceCode}\n` +
+    `Verify: ${config.publicBaseUrl}/api/certificate/${suffix}`;
+  try {
+    const buffer = await renderCertificatePdf(
+      {
+        referenceCode: cert.referenceCode,
+        score: cert.score,
+        totalQuestions: cert.totalQuestions,
+        issuedAt: cert.issuedAt,
+      },
+      { name: member.name, code: member.code },
+      { displayName: coop?.name ?? "Cooperative" },
+    );
+    const ok = await sendDocument({
+      to: phone,
+      filename: `${coop?.code ?? "coop"}-literacy-certificate.pdf`,
+      mimeType: "application/pdf",
+      data: buffer,
+      caption,
+    });
+    if (!ok) throw new Error("sendDocument returned false");
+  } catch {
+    await sendText({ to: phone, text: caption });
+  }
+}
+
+/** Re-send a member's certificate (re-render + re-attach). */
+export async function resendCertificate(phone: string, memberId: string): Promise<void> {
+  const cert = await prisma.literacyCertificate.findUnique({ where: { memberId } });
+  if (!cert || cert.revokedAt) {
+    await sendText({
+      to: phone,
+      text: "You don't have an active certificate yet. Pass the quiz with *class quiz* to earn one.",
+    });
+    return;
+  }
+  const member = await prisma.member.findUnique({ where: { id: memberId } });
+  if (!member) {
+    await sendText({ to: phone, text: "You need to be a member first." });
+    return;
+  }
+  await deliverCertificate(phone, cert, member);
 }
 
 export async function handleAwaitingInput(
@@ -824,48 +1018,59 @@ export async function handleAwaitingInput(
           data: { dataConsentGiven: true },
         });
       }
-      await prisma.session.upsert({
-        where: { phone },
-        create: {
-          phone,
-          state: "awaiting_optin",
-          data: JSON.stringify({ memberId: result.memberId }),
-        },
-        update: { state: "awaiting_optin", data: JSON.stringify({ memberId: result.memberId }) },
-      });
-      await sendText({
-        to: phone,
-        text:
-          result.message +
-          "\n\n" +
-          "📱 *Message Consent*\n\n" +
-          "Do you consent to receive messages from this cooperative? " +
-          "This includes savings alerts, loan updates, and important notices.\n\n" +
-          "Reply *YES* to opt-in or *NO* to skip.",
-      });
+      // Optional financial-literacy certification opt-in. Only offered when the
+      // cooperative enables it; asked after member creation so we have a memberId
+      // to persist the choice. Never blocks registration.
+      const newMember =
+        result.ok && result.memberId
+          ? await prisma.member.findUnique({ where: { id: result.memberId } })
+          : null;
+      const coopConfig = newMember ? await getCoopConfig(newMember.cooperativeId) : null;
+
+      if (result.ok && result.memberId && coopConfig?.literacyCertificationEnabled) {
+        await sendText({ to: phone, text: result.message });
+        await askLiteracyOptIn(phone, { memberId: result.memberId });
+      } else {
+        await prisma.session.upsert({
+          where: { phone },
+          create: {
+            phone,
+            state: "awaiting_optin",
+            data: JSON.stringify({ memberId: result.memberId }),
+          },
+          update: { state: "awaiting_optin", data: JSON.stringify({ memberId: result.memberId }) },
+        });
+        await sendText({
+          to: phone,
+          text:
+            result.message +
+            "\n\n" +
+            "📱 *Message Consent*\n\n" +
+            "Do you consent to receive messages from this cooperative? " +
+            "This includes savings alerts, loan updates, and important notices.\n\n" +
+            "Reply *YES* to opt-in or *NO* to skip.",
+        });
+      }
 
       // Auto-notify new member of active elections they can participate in
-      if (result.ok && result.memberId) {
-        const newMember = await prisma.member.findUnique({ where: { id: result.memberId } });
-        if (newMember) {
-          const activeElections = await getActiveElectionsForNewMember(
-            newMember.cooperativeId,
-            newMember.unitId,
-          );
-          if (activeElections.length > 0) {
-            const electionLines = activeElections.map((e, i) => {
-              const typeTag = e.electionType === "workplace" || e.kind === "unit" ? "🏢" : "🏛️";
-              const pos = e.position ? ` — ${e.position}` : "";
-              return `${i + 1}. ${typeTag} ${e.title}${pos} — reply *vote ${e.id.slice(-6)} <candidate code>*`;
-            });
-            await sendText({
-              to: phone,
-              text:
-                `🗳️ Active elections you can vote in:\n\n` +
-                `${electionLines.join("\n")}\n\n` +
-                `View results with *pollresults <election id>*.`,
-            });
-          }
+      if (newMember) {
+        const activeElections = await getActiveElectionsForNewMember(
+          newMember.cooperativeId,
+          newMember.unitId,
+        );
+        if (activeElections.length > 0) {
+          const electionLines = activeElections.map((e, i) => {
+            const typeTag = e.electionType === "workplace" || e.kind === "unit" ? "🏢" : "🏛️";
+            const pos = e.position ? ` — ${e.position}` : "";
+            return `${i + 1}. ${typeTag} ${e.title}${pos} — reply *vote ${e.id.slice(-6)} <candidate code>*`;
+          });
+          await sendText({
+            to: phone,
+            text:
+              `🗳️ Active elections you can vote in:\n\n` +
+              `${electionLines.join("\n")}\n\n` +
+              `View results with *pollresults <election id>*.`,
+          });
         }
       }
       break;
@@ -1009,22 +1214,63 @@ export async function handleAwaitingInput(
         });
         return;
       }
+      // Resolve the account name (advisory): if it doesn't match the member's
+      // registered name, call their attention to it. Fail-open — the payout
+      // path re-verifies and blocks on mismatch anyway.
+      let accountName: string | null = null;
+      let mismatch = false;
+      try {
+        const provider = await resolveProvider();
+        const resolved = await provider.resolveAccount?.({
+          accountNumber: data.loanAccount ?? "",
+          bankCode: bank.code,
+        });
+        if (resolved?.ok && resolved.name) {
+          accountName = resolved.name;
+          const member = await getMemberByPhone(phone);
+          mismatch = !!member && !namesMatch(resolved.name, member.name);
+        }
+      } catch (err) {
+        console.warn("[loan] account-name resolution failed:", err);
+      }
       await prisma.session.upsert({
         where: { phone },
         create: {
           phone,
           state: "awaiting_loan_bank_confirm",
-          data: JSON.stringify({ ...data, loanBankCode: bank.code, loanBankName: bank.name }),
+          data: JSON.stringify({
+            ...data,
+            loanBankCode: bank.code,
+            loanBankName: bank.name,
+            bankAccountName: accountName ?? undefined,
+            bankNameMismatch: mismatch,
+          }),
         },
         update: {
           state: "awaiting_loan_bank_confirm",
-          data: JSON.stringify({ ...data, loanBankCode: bank.code, loanBankName: bank.name }),
+          data: JSON.stringify({
+            ...data,
+            loanBankCode: bank.code,
+            loanBankName: bank.name,
+            bankAccountName: accountName ?? undefined,
+            bankNameMismatch: mismatch,
+          }),
         },
       });
       await sendText({
         to: phone,
-        text: `You selected *${bank.name}*. Is this correct? Reply *yes* or *no*.`,
+        text:
+          `You selected *${bank.name}*` +
+          (accountName ? ` — name on account: *${accountName}*` : "") +
+          `. Is this correct? Reply *yes* or *no*.`,
       });
+      if (mismatch && accountName) {
+        const member = await getMemberByPhone(phone);
+        await sendText({
+          to: phone,
+          text: await accountMismatchWarning(member?.name ?? "", accountName),
+        });
+      }
       break;
     }
 
@@ -1056,23 +1302,50 @@ export async function handleAwaitingInput(
         });
         return;
       }
+      await sendText({ to: phone, text: result.message });
+      const borrower = await getMemberByPhone(phone);
+      const needed = requiredGuarantors(borrower?.role);
+
+      // Auto-add guarantors the member supplied up front (NL intake). Each
+      // addGuarantor() notifies the guarantor with their `confirm <code>`.
+      const pending = Array.isArray(data.pendingGuarantors) ? data.pendingGuarantors : [];
+      let added = 0;
+      for (const id of pending) {
+        if (added >= needed) break;
+        const g = await addGuarantor(phone, result.loanId, id);
+        await sendText({ to: phone, text: g.message });
+        if (!g.ok) break;
+        added++;
+      }
+
+      if (added >= needed) {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle" },
+        });
+        await sendText({
+          to: phone,
+          text: `That's all the guarantors needed. The loan can be approved once they confirm.`,
+        });
+        break;
+      }
+
+      const nextState: BotState = added === 0 ? "awaiting_guarantor_1" : "awaiting_guarantor_2";
       await prisma.session.upsert({
         where: { phone },
         create: {
           phone,
-          state: "awaiting_guarantor_1",
+          state: nextState,
           data: JSON.stringify({ loanId: result.loanId }),
         },
-        update: { state: "awaiting_guarantor_1", data: JSON.stringify({ loanId: result.loanId }) },
+        update: { state: nextState, data: JSON.stringify({ loanId: result.loanId }) },
       });
-      await sendText({ to: phone, text: result.message });
-      const borrower = await getMemberByPhone(phone);
-      const needed = requiredGuarantors(borrower?.role);
       await sendText({
         to: phone,
         text:
-          `To complete your application, you need *${needed} guarantor${needed === 1 ? "" : "s"}* who ${needed === 1 ? "is" : "are"} member${needed === 1 ? "" : "s"} of the cooperative.\n\n` +
-          `Send the *member code* of your first guarantor (e.g. *ABC123-DEFG*).`,
+          `To complete your application, you need *${needed} guarantor${needed === 1 ? "" : "s"}* in total.\n\n` +
+          `Send the *member code* or *phone number* of your ${added > 0 ? "next" : "first"} guarantor (e.g. *ABC123-DEFG*).`,
       });
       break;
     }
@@ -1562,38 +1835,108 @@ export async function handleAwaitingInput(
     }
 
     case "awaiting_insurance_product": {
-      const productCode = data.insuranceProduct as string;
-      const products = await ctx.insurance.getProducts();
-      const product = products.find((p: any) => p.code === productCode);
-      if (!product) {
-        await sendText({ to: phone, text: "Product not found. Reply *insurance* to browse available products." });
-        return;
+      const input = text.trim().toLowerCase();
+      if (input === "menu" || input === "cancel") {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({ to: phone, text: "Insurance cancelled. Reply *menu* to see options." });
+        break;
       }
-      const productDetails = products.find((p: any) => p.code === productCode);
-      const plansText = productDetails.plans.map((p: any) => `- *${p.code}*: ₦${(p.premiumKobo / 100).toFixed(0)} per month, coverage ₦${(p.coverageKobo / 100).toFixed(0)}/month`).join("\n");
-      await sendText({
-        to: phone,
-        text: `*${productDetails.name}*\n${productDetails.description}\n\nPlans:\n${plansText}\n\nReply *${productDetails.plans[0].code}* to select this plan, or *insurance* to browse other products.`,
-      });
+      let products: Product[];
+      try {
+        products = await insuranceService().getProducts();
+      } catch {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({
+          to: phone,
+          text: "Insurance is temporarily unavailable. No money was taken. Reply *menu* to return.",
+        });
+        break;
+      }
+      const product = products.find((p) => p.code.toLowerCase() === input);
+      if (!product) {
+        await sendText({
+          to: phone,
+          text: `Unknown product. Reply a code from the list (e.g. *${products[0]?.code ?? "..."}*) or *menu* to cancel.`,
+        });
+        break;
+      }
+      const plansText = product.plans
+        .map(
+          (p) =>
+            `• *${p.code}* — ₦${(p.premiumKobo / 100).toFixed(0)}/month, cover ₦${(p.coverageKobo / 100).toFixed(0)}`,
+        )
+        .join("\n");
+      const nextData = { insuranceProduct: product.code };
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "idle", data: "{}" },
-        update: { state: "idle", data: "{}" },
+        create: { phone, state: "awaiting_insurance_plan", data: JSON.stringify(nextData) },
+        update: { state: "awaiting_insurance_plan", data: JSON.stringify(nextData) },
+      });
+      await sendText({
+        to: phone,
+        text: `*${product.name}*\n${product.description}\n\nPlans:\n${plansText}\n\nReply a plan code (e.g. *${product.plans[0]?.code ?? "..."}*) to continue, or *menu* to cancel.`,
       });
       break;
     }
 
     case "awaiting_insurance_plan": {
-      const planCode = data.insurancePlan as string;
-      const productCode = data.productCode as string;
-      await sendText({
-        to: phone,
-        text: `Confirm purchase of *${planCode}* plan for *${productCode}* at ₦${(data.premiumKobo / 100).toFixed(0)}/month? Reply *yes* to confirm or *no* to cancel.`,
-      });
+      const input = text.trim().toLowerCase();
+      if (input === "menu" || input === "cancel") {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({ to: phone, text: "Insurance cancelled. Reply *menu* to see options." });
+        break;
+      }
+      const productCode = data.insuranceProduct ?? data.productCode ?? "";
+      let products: Product[];
+      try {
+        products = await insuranceService().getProducts();
+      } catch {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({
+          to: phone,
+          text: "Insurance is temporarily unavailable. No money was taken. Reply *menu* to return.",
+        });
+        break;
+      }
+      const product = products.find((p) => p.code === productCode);
+      const plan = product?.plans.find((p) => p.code.toLowerCase() === input);
+      if (!product || !plan) {
+        await sendText({
+          to: phone,
+          text: `Unknown plan. Reply a plan code from *${productCode}* or *menu* to cancel.`,
+        });
+        break;
+      }
+      const nextData = {
+        insuranceProduct: product.code,
+        productCode: product.code,
+        insurancePlan: plan.code,
+        premiumKobo: plan.premiumKobo,
+      };
       await prisma.session.upsert({
         where: { phone },
-        create: { phone, state: "awaiting_insurance_confirm", data: JSON.stringify({ productCode, planCode, premiumKobo: data.premiumKobo }) },
-        update: { state: "awaiting_insurance_confirm", data: JSON.stringify({ productCode, planCode, premiumKobo: data.premiumKobo }) },
+        create: { phone, state: "awaiting_insurance_confirm", data: JSON.stringify(nextData) },
+        update: { state: "awaiting_insurance_confirm", data: JSON.stringify(nextData) },
+      });
+      await sendText({
+        to: phone,
+        text: `Confirm *${product.name}* — *${plan.name}* at ₦${(plan.premiumKobo / 100).toFixed(0)}/month (cover ₦${(plan.coverageKobo / 100).toFixed(0)})?\n\nReply *yes* to confirm or *no* to cancel.`,
       });
       break;
     }
@@ -1601,41 +1944,48 @@ export async function handleAwaitingInput(
     case "awaiting_insurance_confirm": {
       const answer = text.trim().toLowerCase();
       if (answer === "yes" || answer === "y") {
-        const { productCode, planCode, premiumKobo } = data as any;
         const member = await getMemberByPhone(phone);
         if (!member) {
-          await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
-          return;
+          await sendText({
+            to: phone,
+            text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+          });
+          break;
         }
-        const result = await ctx.insurance.purchasePlan(member.cooperativeId, member.id, productCode, planCode);
-        await sendText({ to: phone, text: result.message });
+        const productCode = data.productCode ?? data.insuranceProduct ?? "";
+        const planCode = data.insurancePlan ?? "";
+        try {
+          const policy = await insuranceService().purchasePlan(
+            member.cooperativeId,
+            member.id,
+            productCode,
+            planCode,
+          );
+          await sendText({
+            to: phone,
+            text: `✅ Your *${productCode}* cover is active (plan *${planCode}*). Policy ref *${policy.id.slice(0, 8)}*.\n\nReply *menu* to return.`,
+          });
+        } catch {
+          await sendText({
+            to: phone,
+            text: "We couldn't complete the purchase right now (insurance service unavailable). No money was taken. Please try again later. Reply *menu*.",
+          });
+        }
         await prisma.session.upsert({
           where: { phone },
-          create: { phone, state: "idle", data: "{}" },
+          create: { phone, state: "idle" },
           update: { state: "idle", data: "{}" },
         });
       } else if (answer === "no" || answer === "n") {
         await sendText({ to: phone, text: "Insurance purchase cancelled. Reply *menu* to see options." });
         await prisma.session.upsert({
           where: { phone },
-          create: { phone, state: "idle", data: "{}" },
+          create: { phone, state: "idle" },
           update: { state: "idle", data: "{}" },
         });
       } else {
         await sendText({ to: phone, text: "Please reply *yes* to confirm or *no* to cancel." });
       }
-      break;
-    }
-
-    case "doctor": {
-      await sendText({
-        to: phone,
-        text: "Connecting you to the in-platform telemedicine service... 🏥\n\n" +
-          "You can consult with a doctor without leaving the platform. " +
-          "Wait time is typically 2-10 minutes. Your first consultation is covered by your insurance.\n\n" +
-          "Reply *menu* to return to the main menu.",
-      });
-      // TODO: Implement deep link to CubeCover telemedicine
       break;
     }
 
@@ -1679,6 +2029,119 @@ export async function handleAwaitingInput(
         update: { state: "idle", data: "{}" },
       });
       await handleDeleteAccountPin(phone, input);
+      break;
+    }
+
+    case "literacy_quiz": {
+      const memberId = data.memberId as string | undefined;
+      const quiz = data.quiz as QuizState | undefined;
+      if (!memberId || !quiz) {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle", data: "{}" },
+          update: { state: "idle", data: "{}" },
+        });
+        break;
+      }
+      const choice = QUIZ_LETTERS.indexOf(text.trim().toUpperCase());
+      const q = QUIZ_QUESTIONS.find((x) => x.id === quiz.questionIds[quiz.index]);
+      if (!q || choice < 0 || choice >= q.options.length) {
+        await sendText({ to: phone, text: "Please reply with *A*, *B*, *C* or *D*." });
+        await sendQuizQuestion(phone, quiz);
+        return;
+      }
+      const answers = [...quiz.answers, choice];
+      const nextIndex = quiz.index + 1;
+      if (nextIndex < quiz.questionIds.length) {
+        const nextQuiz: QuizState = { ...quiz, index: nextIndex, answers };
+        await prisma.session.upsert({
+          where: { phone },
+          create: {
+            phone,
+            state: "literacy_quiz",
+            data: JSON.stringify({ memberId, quiz: nextQuiz }),
+          },
+          update: { state: "literacy_quiz", data: JSON.stringify({ memberId, quiz: nextQuiz }) },
+        });
+        await sendQuizQuestion(phone, nextQuiz);
+        return;
+      }
+      // Quiz complete — score it.
+      const score = quiz.questionIds.reduce((acc, qid, i) => {
+        const question = QUIZ_QUESTIONS.find((x) => x.id === qid);
+        return acc + (question && answers[i] === question.answerIndex ? 1 : 0);
+      }, 0);
+      const member = await prisma.member.findUnique({ where: { id: memberId } });
+      const coopConfig = member ? await getCoopConfig(member.cooperativeId) : null;
+      const passMark = coopConfig?.literacyQuizPassMark ?? 4;
+      const passed = score >= passMark;
+      await prisma.memberProgress.update({
+        where: { memberId },
+        data: {
+          quizAttempts: { increment: 1 },
+          quizScore: score,
+          ...(passed ? { quizPassedAt: new Date() } : {}),
+        },
+      });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle", data: "{}" },
+        update: { state: "idle", data: "{}" },
+      });
+      if (passed && member) {
+        const cert = await issueCertificate({
+          memberId,
+          cooperativeId: member.cooperativeId,
+          score,
+          totalQuestions: quiz.questionIds.length,
+          actorPhone: phone,
+        });
+        await deliverCertificate(phone, cert, member);
+      } else {
+        await sendText({
+          to: phone,
+          text:
+            `You scored *${score}/${quiz.questionIds.length}*. You need *${passMark}* to pass.\n\n` +
+            `Review the lessons (*class* / *replay N*) and retry with *class quiz*.`,
+        });
+      }
+      break;
+    }
+
+    case "awaiting_literacy_optin": {
+      const answer = text.trim().toLowerCase();
+      const memberId = data.memberId as string | undefined;
+      if (memberId && (answer === "yes" || answer === "y")) {
+        await prisma.memberProgress.upsert({
+          where: { memberId },
+          create: { memberId, certificationOptIn: true },
+          update: { certificationOptIn: true },
+        });
+        await sendText({
+          to: phone,
+          text:
+            "✅ You're enrolled! Learn at your own pace with *class*, then take the quiz with *class quiz*.",
+        });
+      } else {
+        await sendText({
+          to: phone,
+          text: "No problem — you can enroll any time with *class*.",
+        });
+      }
+      // Continue to the message-consent step.
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "awaiting_optin", data: JSON.stringify({ memberId }) },
+        update: { state: "awaiting_optin", data: JSON.stringify({ memberId }) },
+      });
+      await sendText({
+        to: phone,
+        text:
+          "📱 *Message Consent*\n\n" +
+          "Do you consent to receive messages from this cooperative? " +
+          "This includes savings alerts, loan updates, and important notices.\n\n" +
+          "Reply *YES* to opt-in or *NO* to skip.",
+      });
       break;
     }
 

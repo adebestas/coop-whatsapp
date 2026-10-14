@@ -9,6 +9,8 @@ import { checkMoneyRateLimit, checkAIRateLimit } from "./fraud.js";
 import { aiEnabled, suggestCommand } from "../lib/ai.js";
 import { handleAIQuery, isNaturalLanguageQuery } from "../lib/ai-query.js";
 import { generateSupportResponse } from "../lib/ai-support.js";
+import { extractLoanRequest } from "../lib/ai-loan.js";
+import { toKobo } from "../lib/money.js";
 import { getLesson, getTotalLessons } from "./literacy.js";
 import { getReserveInfo } from "./dividends.js";
 import { formatBalance } from "./cooperative.js";
@@ -56,6 +58,51 @@ async function checkTierLimit(
   return null;
 }
 
+type MemberRow = Awaited<ReturnType<typeof getMemberByPhone>>;
+
+/**
+ * Shared guard for member money commands (save, loan, withdraw, …). Returns
+ * true when the flow may proceed; otherwise it sends the block reason and
+ * returns false. `amountKobo` is the movement amount for the tier cap (null
+ * when the command's arg isn't a single amount, e.g. mandate).
+ */
+async function moneyFlowAllowed(
+  phone: string,
+  member: MemberRow,
+  cmd: string,
+  amountKobo: number | null,
+): Promise<boolean> {
+  if (member && (member.status === "suspended" || member.status === "deceased")) {
+    await sendText({
+      to: phone,
+      text: "🔒 Your account is currently suspended. No money can move until a cooperative admin restores it. Please contact them to review.",
+    });
+    return false;
+  }
+  if (cmd !== "save" && member) {
+    const frozen = await isFrozen(member.id);
+    if (frozen.frozen) {
+      await sendText({ to: phone, text: frozen.message });
+      return false;
+    }
+  }
+  if (!(await checkMoneyRateLimit(phone))) {
+    await sendText({
+      to: phone,
+      text: "⏳ You've made several money requests in the last hour. For your safety, please wait a little before trying again.",
+    });
+    return false;
+  }
+  if (cmd !== "buyshares" && cmd !== "mandate" && amountKobo !== null && member) {
+    const tierError = await checkTierLimit(phone, amountKobo, member.id);
+    if (tierError) {
+      await sendText({ to: phone, text: `⛔ ${tierError}` });
+      return false;
+    }
+  }
+  return true;
+}
+
 import { z } from "zod"; // used by FlowDataSchema below
 
 import {
@@ -65,10 +112,13 @@ import {
   buildOmbudsmanMenu,
   handleAwaitingInput,
   parseNaira,
+  startLoanFromNL,
   handleMyRefCode,
   handleReferrals,
   handleReferralBonus,
   handleStartBonusWithdrawal,
+  startLiteracyQuiz,
+  resendCertificate,
 } from "./handlers/session.js";
 import { handleJoinStart, handleOnboardStart } from "./handlers/join.js";
 import {
@@ -100,6 +150,7 @@ import {
   handleAddPayee,
   handleEscalate,
 } from "./handlers/money.js";
+import { handleDoctor, handleInsurance } from "./handlers/insurance.js";
 import {
   handleValidateClaim,
   handleConfirmClaim,
@@ -185,10 +236,15 @@ export type BotState =
   | "awaiting_consent"
   | "awaiting_delete_account_pin"
   | "awaiting_optin"
+  | "awaiting_literacy_optin"
+  | "literacy_quiz"
   | "awaiting_onboard_name"
   | "awaiting_onboard_code"
   | "awaiting_onboard_state"
-  | "awaiting_onboard_phone";
+  | "awaiting_onboard_phone"
+  | "awaiting_insurance_product"
+  | "awaiting_insurance_plan"
+  | "awaiting_insurance_confirm";
 
 // ===== Session Data Schema (validates against corruption/tampering) =====
 export const FlowDataSchema = z.object({
@@ -215,6 +271,9 @@ export const FlowDataSchema = z.object({
   loanBankCode: z.string().optional(),
   loanBankName: z.string().optional(),
   loanId: z.string().optional(),
+  // Guarantors the member supplied up front (e.g. via the AI intake) to add
+  // automatically once the loan is created.
+  pendingGuarantors: z.array(z.string()).optional(),
   withdrawAmount: z.number().positive().optional(),
   bonusAmount: z.number().positive().optional(),
   bonusDestination: z.string().optional(),
@@ -233,11 +292,13 @@ export const FlowDataSchema = z.object({
   insuranceProduct: z.string().optional(),
   insurancePlan: z.string().optional(),
   insuranceConfirm: z.boolean().optional(),
-  awaiting_insurance_product: z.boolean().optional(),
-  awaiting_insurance_plan: z.boolean().optional(),
-  awaiting_insurance_confirm: z.boolean().optional(),
+  productCode: z.string().optional(),
+  premiumKobo: z.number().optional(),
   bankName: z.string().optional(),
   bankAccountName: z.string().optional(),
+  // True when the resolved account name didn't match the member's registered
+  // name — the flow warns them and lets them decide.
+  bankNameMismatch: z.boolean().optional(),
   payeeName: z.string().optional(),
   bankChoices: z.array(z.object({ code: z.string(), name: z.string() })).optional(),
   deathClaimId: z.string().optional(),
@@ -251,6 +312,15 @@ export const FlowDataSchema = z.object({
   flowToken: z.string().optional(),
   consentGiven: z.boolean().optional(),
   memberId: z.string().optional(),
+  // In-progress literacy quiz: the selected question ids, the current index,
+  // and the answers chosen so far (option indices).
+  quiz: z
+    .object({
+      questionIds: z.array(z.number()),
+      index: z.number(),
+      answers: z.array(z.number()),
+    })
+    .optional(),
   tgPinBuf: z.string().optional(),
   keyboardMsgId: z.number().optional(),
   tgPinPrompt: z.string().optional(),
@@ -574,6 +644,14 @@ async function handleMessageInner(
       await handleShares(phone);
       break;
 
+    case "doctor":
+      await handleDoctor(phone);
+      break;
+
+    case "insurance":
+      await handleInsurance(phone);
+      break;
+
     case "save":
     case "loan":
     case "repay":
@@ -589,27 +667,6 @@ async function handleMessageInner(
     case "mandatestatus":
     case "cancelmandate":
     case "grouploan": {
-      if (member && (member.status === "suspended" || member.status === "deceased")) {
-        await sendText({
-          to: phone,
-          text: "🔒 Your account is currently suspended. No money can move until a cooperative admin restores it. Please contact them to review.",
-        });
-        break;
-      }
-      if (cmd !== "save" && member) {
-        const frozen = await isFrozen(member.id);
-        if (frozen.frozen) {
-          await sendText({ to: phone, text: frozen.message });
-          break;
-        }
-      }
-      if (!(await checkMoneyRateLimit(phone))) {
-        await sendText({
-          to: phone,
-          text: "⏳ You've made several money requests in the last hour. For your safety, please wait a little before trying again.",
-        });
-        break;
-      }
       // Tier-based transaction limit check. TIER_LIMITS and contribution
       // amounts are stored in KOBO, so parse the user's naira into kobo before
       // comparing (otherwise a naira-vs-kobo mismatch silently disables the cap).
@@ -622,13 +679,7 @@ async function handleMessageInner(
           ? args[1]
           : args[0],
       );
-      if (cmd !== "buyshares" && cmd !== "mandate" && amt !== null && member) {
-        const tierError = await checkTierLimit(phone, amt, member.id);
-        if (tierError) {
-          await sendText({ to: phone, text: `⛔ ${tierError}` });
-          break;
-        }
-      }
+      if (!(await moneyFlowAllowed(phone, member, cmd, amt))) break;
       if (cmd === "save") await handleSave(phone, args);
       else if (cmd === "loan") await handleLoan(phone, args);
       else if (cmd === "repay") await handleRepay(phone, args);
@@ -858,6 +909,18 @@ async function handleMessageInner(
     case "next":
       await handleNextLesson(phone, member);
       break;
+
+    case "certificate": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to be a member first. Reply *join* to get started.",
+        });
+        break;
+      }
+      await resendCertificate(phone, member.id);
+      break;
+    }
 
     case "reserveinfo":
       await handleReserveInfo(phone, member);
@@ -1249,6 +1312,27 @@ async function handleMessageInner(
     }
 
     default: {
+      // Natural-language loan intake: a member can type "I need a loan of 150k,
+      // guarantors 080…, ABC123-XYZ" and the AI pre-fills the loan flow. This
+      // runs BEFORE the query branch below, because isNaturalLanguageQuery()
+      // returns true for any message that contains the word "loan".
+      if (
+        aiEnabled() &&
+        member &&
+        /\b(loan|borrow)\b/i.test(text) &&
+        text.trim().length >= 4 &&
+        !/^[\d\s.,]+$/.test(text)
+      ) {
+        if (await checkAIRateLimit(member.id)) {
+          const intent = await extractLoanRequest(text);
+          if (intent) {
+            const amountKobo = intent.amountNaira !== null ? toKobo(intent.amountNaira) : null;
+            if (!(await moneyFlowAllowed(phone, member, "loan", amountKobo))) break;
+            await startLoanFromNL(phone, intent);
+            return;
+          }
+        }
+      }
       if (aiEnabled() && text.trim().length >= 4 && !/^[\d\s.,]+$/.test(text)) {
         if (isNaturalLanguageQuery(text)) {
           if (!member) {
@@ -1362,6 +1446,12 @@ async function handleClass(
 
   const arg = args.join(" ").trim().toLowerCase();
 
+  // Start the certification quiz.
+  if (arg === "quiz") {
+    await startLiteracyQuiz(phone, member.id);
+    return;
+  }
+
   // Check for progress command
   if (arg === "progress") {
     const progress = await prisma.memberProgress.findUnique({ where: { memberId: member.id } });
@@ -1374,9 +1464,17 @@ async function handleClass(
     }
     const completed = JSON.parse(progress.completedLessons) as number[];
     const total = getTotalLessons();
+    const cert = await prisma.literacyCertificate.findUnique({ where: { memberId: member.id } });
+    const certLine = !progress.certificationOptIn
+      ? "\n\n📘 Certification: not enrolled (reply *class quiz* to learn more)."
+      : cert && !cert.revokedAt
+        ? `\n\n🎓 Certified! Ref: ${cert.referenceCode} (score ${cert.score}/${cert.totalQuestions}).`
+        : progress.quizPassedAt
+          ? "\n\n🎓 Certification: passed."
+          : `\n\n📘 Certification: enrolled — attempts: ${progress.quizAttempts}${progress.quizScore !== null ? `, last score: ${progress.quizScore}` : ""}. Reply *class quiz* to take the quiz.`;
     await sendText({
       to: phone,
-      text: `📚 *Your Progress*\n\nCompleted: ${completed.length}/${total} lessons\n${completed.map((l) => `✅ Lesson ${l}`).join("\n")}${progress.completedAt ? "\n\n🎉 Class completed!" : `\n\nReply *class* for Lesson ${progress.currentLesson}.`}`,
+      text: `📚 *Your Progress*\n\nCompleted: ${completed.length}/${total} lessons\n${completed.map((l) => `✅ Lesson ${l}`).join("\n")}${progress.completedAt ? "\n\n🎉 Class completed!" : `\n\nReply *class* for Lesson ${progress.currentLesson}.`}${certLine}`,
     });
     return;
   }

@@ -161,9 +161,20 @@ export async function applyForLoan(
     return { ok: false, message: `Maximum loan amount is *${formatBalance(LIMITS.MAX_LOAN)}*.` };
   }
 
-  // Rule: a loan can't exceed 2x the member's total savings.
+  // Rule: a loan can't exceed the member's savings multiple. Members who pass the
+  // financial-literacy quiz get a boosted cap, but only while the cooperative
+  // enables certification and their certificate is still valid (not revoked).
   const savings = member.wallet?.totalSaved ?? 0;
-  const loanMultiplier = LOAN_TO_SAVINGS_RATIO;
+  const config = await getCoopConfig(member.cooperativeId);
+  let boost = 0;
+  if (config.literacyCertificationEnabled && config.certifiedLoanBoost > 0) {
+    const cert = await prisma.literacyCertificate.findUnique({
+      where: { memberId: member.id },
+      select: { revokedAt: true },
+    });
+    if (cert && !cert.revokedAt) boost = config.certifiedLoanBoost;
+  }
+  const loanMultiplier = LOAN_TO_SAVINGS_RATIO + boost;
   const maxLoan = Math.floor(savings * loanMultiplier);
   if (maxLoan <= 0) {
     return {
@@ -172,12 +183,16 @@ export async function applyForLoan(
     };
   }
   if (amount > maxLoan) {
+    const boostNote =
+      boost === 0 && config.literacyCertificationEnabled && config.certifiedLoanBoost > 0
+        ? `\n🎓 Pass the financial-literacy quiz to raise your cap to *${LOAN_TO_SAVINGS_RATIO + config.certifiedLoanBoost}x*.`
+        : "";
     return {
       ok: false,
       message:
         `Loans are capped at *${loanMultiplier}x your savings*.\n` +
         `Your savings: ${formatBalance(savings)} → max loan: *${formatBalance(maxLoan)}*.\n` +
-        `Try a smaller amount or save more first.`,
+        `Try a smaller amount or save more first.${boostNote}`,
     };
   }
 
@@ -241,8 +256,9 @@ export async function applyForLoan(
       `Tenure: *${tenureMonths} months*\n` +
       `Interest: *${annualRateFor(tenureMonths)}% APR* declining balance → repay *${formatBalance(Math.round(total))}*\n` +
       `Monthly installment: *${formatBalance(Math.round(monthly))}*\n` +
-      `Admin charge: *${formatBalance(LOAN_ADMIN_CHARGE)}* (you'll receive ${formatBalance(amount - LOAN_ADMIN_CHARGE)})\n\n` +
-      `You still need to add *${needed} guarantor${needed > 1 ? "s" : ""}* before the loan can be approved.`,
+      `Admin charge: *${formatBalance(LOAN_ADMIN_CHARGE)}* (you'll receive ${formatBalance(amount - LOAN_ADMIN_CHARGE)})\n` +
+      (boost > 0 ? `🎓 Certified-member boost applied: cap raised to *${loanMultiplier}x your savings*.\n` : "") +
+      `\nYou still need to add *${needed} guarantor${needed > 1 ? "s" : ""}* before the loan can be approved.`,
   };
 }
 

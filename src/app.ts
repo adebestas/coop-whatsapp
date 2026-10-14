@@ -9,6 +9,7 @@ import { webhookRoutes } from "./routes/webhook.js";
 import { paymentWebhookRoutes } from "./routes/payments.js";
 import { adminApiRoutes } from "./routes/admin.js";
 import { serveExportFile } from "./routes/exports.js";
+import { certificateRoutes } from "./routes/certificate.js";
 import { prisma } from "./lib/prisma.js";
 import { isRedisConnected } from "./lib/cache.js";
 import { incCounter, renderMetrics } from "./lib/metrics.js";
@@ -144,6 +145,7 @@ export function buildApp() {
   void app.register(paymentWebhookRoutes);
   void app.register(adminApiRoutes);
   void app.register(serveExportFile);
+  void app.register(certificateRoutes);
 
   // Serve static files — admin dashboard
   const dashboardDir = path.resolve("/app/dashboard");

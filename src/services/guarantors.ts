@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { generateGuarantorCode } from "../lib/security.js";
 import { notifyMember } from "../lib/messaging.js";
+import { normalizePhone } from "../lib/phones.js";
 import { formatBalance, getMemberByPhone } from "./cooperative.js";
 
 export const REQUIRED_GUARANTORS = 2;
@@ -52,21 +53,43 @@ export async function addGuarantor(
     };
   }
 
-  const normalized = memberCode.trim().toUpperCase();
-  // Member codes are globally unique, but a guarantor only counts if they
-  // belong to the SAME cooperative — never a cross-tenant member.
-  const guarantor = await prisma.member.findUnique({ where: { code: normalized } });
-  if (!guarantor) {
-    return {
-      ok: false,
-      message: `No member found with code *${normalized}*. Ask the member to reply *code* to see theirs.`,
-    };
-  }
-  if (guarantor.cooperativeId !== member.cooperativeId) {
-    return {
-      ok: false,
-      message: `No member found with code *${normalized}*. Codes are cooperative-specific — ask a member of *your* cooperative.`,
-    };
+  // A guarantor is identified by their member code OR their phone number.
+  // A phone (or any other unrecognised token) that looks like a number is
+  // resolved scoped to the borrower's cooperative — never cross-tenant.
+  const raw = memberCode.trim();
+  const asPhone = normalizePhone(raw);
+  let guarantor: {
+    id: string;
+    name: string;
+    phone: string;
+    cooperativeId: string;
+    createdAt: Date;
+  } | null;
+  if (asPhone) {
+    guarantor = await getMemberByPhone(asPhone, member.cooperativeId);
+    if (!guarantor) {
+      return {
+        ok: false,
+        message: `No member of *your* cooperative is on the number *${raw}*. Check the number, or send their member code.`,
+      };
+    }
+  } else {
+    const normalized = raw.toUpperCase();
+    // Member codes are globally unique, but a guarantor only counts if they
+    // belong to the SAME cooperative — never a cross-tenant member.
+    guarantor = await prisma.member.findUnique({ where: { code: normalized } });
+    if (!guarantor) {
+      return {
+        ok: false,
+        message: `No member found with code *${normalized}*. Ask the member to reply *code* to see theirs.`,
+      };
+    }
+    if (guarantor.cooperativeId !== member.cooperativeId) {
+      return {
+        ok: false,
+        message: `No member found with code *${normalized}*. Codes are cooperative-specific — ask a member of *your* cooperative.`,
+      };
+    }
   }
   if (guarantor.id === loan.memberId) {
     return { ok: false, message: "You can't be your own guarantor. Pick another member." };

@@ -1,5 +1,5 @@
-import { sendText as sendWhatsApp, sendFlowMessage } from "./whatsapp.js";
-import { sendTelegramMessage, sendTelegramKeyboard, buildPinKeyboard } from "./telegram.js";
+import { sendText as sendWhatsApp, sendFlowMessage, sendDocument as sendWhatsAppDocument } from "./whatsapp.js";
+import { sendTelegramMessage, sendTelegramKeyboard, buildPinKeyboard, sendTelegramDocument } from "./telegram.js";
 import { config } from "../config.js";
 import { prisma } from "./prisma.js";
 import { enqueueDeferredSend } from "./deferred.js";
@@ -53,6 +53,31 @@ async function sendTextNow(params: { to: string; text: string }): Promise<boolea
   }
   if (WHATSAPP_PACING_MS > 0) await sleep(WHATSAPP_PACING_MS);
   return sendWhatsApp({ to, text });
+}
+
+export interface SendDocumentParams {
+  to: string;
+  filename: string;
+  mimeType: string;
+  data: Buffer;
+  caption?: string;
+}
+
+/**
+ * Channel-aware document sender (deferred-send aware, like sendText).
+ * WhatsApp: base64 document message. Telegram: multipart sendDocument.
+ */
+export async function sendDocument(params: SendDocumentParams): Promise<boolean> {
+  if (enqueueDeferredSend(() => sendDocumentNow(params))) return true;
+  return sendDocumentNow(params);
+}
+
+async function sendDocumentNow(params: SendDocumentParams): Promise<boolean> {
+  const { to, filename, mimeType, data, caption } = params;
+  if (to.startsWith("tg:")) {
+    return sendTelegramDocument({ chatId: to.slice(3), filename, data, caption });
+  }
+  return sendWhatsAppDocument({ to, filename, mimeType, data, caption });
 }
 
 /**

@@ -21,11 +21,26 @@ export const config = {
   telegram: {
     token: process.env.TELEGRAM_BOT_TOKEN ?? "",
   },
+  // CubeCover embedded insurance. The API endpoints/signature header below are
+  // INFERRED from CubeCover's public material — confirm them against the real
+  // developer docs during onboarding before go-live.
+  cubecover: {
+    apiKey: process.env.CUBECOVER_API_KEY ?? "",
+    baseUrl: process.env.CUBECOVER_BASE_URL ?? "https://api.cubecover.ai",
+    webhookSecret: process.env.CUBECOVER_WEBHOOK_SECRET ?? "",
+    // CubeCover delivers live doctor consultations through its own app/portal
+    // (no consultation API is exposed), so the telemedicine handoff deep-links
+    // the member out to CubeCover.
+    telemedicineUrl: process.env.CUBECOVER_TELEMEDICINE_URL ?? "https://cubecover.ai",
+  },
   allowedTestNumbers: (process.env.ALLOWED_TEST_NUMBERS ?? "")
     .split(",")
     .map((n) => n.trim())
     .filter(Boolean),
   defaultCoopCode: process.env.DEFAULT_COOP_CODE ?? "TEST01",
+  // Public base URL used to build shareable/verifiable links (e.g. certificate
+  // verification). Override in production with the real host.
+  publicBaseUrl: process.env.PUBLIC_BASE_URL ?? "https://coop.example",
 };
 
 export function validateConfig() {

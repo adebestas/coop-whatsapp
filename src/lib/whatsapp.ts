@@ -7,6 +7,54 @@ export interface SendTextParams {
   text: string;
 }
 
+export interface SendDocumentParams {
+  to: string;
+  filename: string;
+  mimeType: string;
+  data: Buffer;
+  caption?: string;
+}
+
+/**
+ * Send a document (e.g. a PDF certificate) via the WhatsApp Cloud API.
+ * The document is uploaded as a base64 media message.
+ */
+export async function sendDocument({
+  to,
+  filename,
+  mimeType,
+  data,
+  caption,
+}: SendDocumentParams): Promise<boolean> {
+  const url = `${API_BASE}/${config.whatsapp.phoneNumberId}/messages`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.whatsapp.token}`,
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to,
+      type: "document",
+      document: {
+        filename,
+        mime_type: mimeType,
+        caption: caption ?? "",
+        data: data.toString("base64"),
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    console.error(`[whatsapp] document send failed (${res.status}): ${body}`);
+    return false;
+  }
+  return true;
+}
+
 export async function sendText({ to, text }: SendTextParams): Promise<boolean> {
   if (text.length > 4096) {
     text = text.substring(0, 4093) + "...";

@@ -1,6 +1,10 @@
 import { PrismaClient } from '@prisma/client';
 import { CubeCoverClient } from './cubecover';
-import { enqueueAfterCommit } from '../deferred';
+import { prisma } from '../../lib/prisma.js';
+// The REAL deferred-send queue (src/lib/deferred.ts). Note: there is a legacy
+// no-op stub at src/services/deferred.ts — importing that would silently drop
+// the deferred premium debit, so it must never be used here.
+import { enqueueAfterCommit } from '../../lib/deferred.js';
 
 export interface InsuranceServiceConfig {
   prisma: PrismaClient;
@@ -43,7 +47,7 @@ export class InsuranceService {
     });
 
     // Defer premium deduction outside transaction
-    enqueueAfterCommit(() => {
+    enqueueAfterCommit(async () => {
       // TODO: Deduct premium from member wallet
     });
 
@@ -158,4 +162,56 @@ export class InsuranceService {
         break;
     }
   }
+}
+
+// ===== Admin claim actions (used by admin-actions.ts WhatsApp commands) =====
+
+/** Approve a claim for payout (admin override; CubeCover is notified separately). */
+export async function approveInsuranceClaim(claimId: string): Promise<{ message: string }> {
+  const claim = await prisma.insuranceClaim.findUnique({ where: { id: claimId } });
+  if (!claim) return { message: `No insurance claim found with id *${claimId}*.` };
+  if (claim.status === 'approved' || claim.status === 'paid') {
+    return { message: `Claim *${claimId}* is already ${claim.status}.` };
+  }
+  await prisma.insuranceClaim.update({
+    where: { id: claimId },
+    data: { status: 'approved', processedAt: new Date() },
+  });
+  return { message: `✅ Claim *${claimId}* approved for payout.` };
+}
+
+/** Reject a claim. */
+export async function rejectInsuranceClaim(claimId: string): Promise<{ message: string }> {
+  const claim = await prisma.insuranceClaim.findUnique({ where: { id: claimId } });
+  if (!claim) return { message: `No insurance claim found with id *${claimId}*.` };
+  if (claim.status === 'rejected') {
+    return { message: `Claim *${claimId}* is already rejected.` };
+  }
+  await prisma.insuranceClaim.update({
+    where: { id: claimId },
+    data: { status: 'rejected', processedAt: new Date() },
+  });
+  return { message: `Claim *${claimId}* rejected.` };
+}
+
+/** List the most recent insurance claims for a member (by member code). */
+export async function listMemberInsuranceClaims(memberCode: string): Promise<{ message: string }> {
+  const member = await prisma.member.findFirst({
+    where: { code: memberCode },
+    select: { id: true, name: true },
+  });
+  if (!member) return { message: `No member found with code *${memberCode}*.` };
+  const claims = await prisma.insuranceClaim.findMany({
+    where: { memberId: member.id },
+    orderBy: { createdAt: 'desc' },
+    take: 20,
+  });
+  if (!claims.length) {
+    return { message: `No insurance claims for *${member.name}* (${memberCode}).` };
+  }
+  const lines = claims.map(
+    (c) =>
+      `• *${c.id.slice(0, 8)}* — ${c.claimType}, ₦${(c.amountKobo / 100).toFixed(0)} — ${c.status}`,
+  );
+  return { message: `*Insurance claims for ${member.name}*\n\n${lines.join('\n')}` };
 }

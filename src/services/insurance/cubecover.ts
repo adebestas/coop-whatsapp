@@ -1,8 +1,13 @@
-import fetch from 'node-fetch';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 
 export interface CubeCoverConfig {
   apiKey: string;
   baseUrl: string;
+  /**
+   * Shared secret used to verify inbound webhook signatures. Falls back to
+   * process.env.CUBECOVER_WEBHOOK_SECRET when not passed explicitly.
+   */
+  webhookSecret?: string;
 }
 
 export interface Product {
@@ -26,6 +31,7 @@ export interface Policy {
   status: string;
   startDate: string;
   endDate?: string;
+  coverageKobo: number;
 }
 
 export interface Claim {
@@ -48,79 +54,80 @@ export class CubeCoverClient {
     this.config = config;
   }
 
-  private async request(path: string, options: RequestInit = {}): Promise<unknown> {
+  private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const url = `${this.config.baseUrl}${path}`;
     const response = await fetch(url, {
       ...options,
       headers: {
         'Authorization': `Bearer ${this.config.apiKey}`,
         'Content-Type': 'application/json',
-        ...options.headers,
+        ...(options.headers as Record<string, string> | undefined),
       },
     });
     if (!response.ok) {
       const errorBody = await response.text();
       throw new Error(`CubeCover API error: ${response.status} ${response.statusText} - ${errorBody}`);
     }
-    return response.json();
+    return (await response.json()) as T;
   }
 
   async getProducts(): Promise<Product[]> {
-    return this.request('/v1/products');
+    return this.request<Product[]>('/v1/products');
   }
 
   async getProduct(code: string): Promise<Product> {
-    return this.request(`/v1/products/${code}`);
+    return this.request<Product>(`/v1/products/${code}`);
   }
 
   async createQuote(params: { productCode: string; planCode: string; memberId: string }): Promise<{ quoteId: string; premiumKobo: number }> {
-    return this.request('/v1/quotes', {
+    return this.request<{ quoteId: string; premiumKobo: number }>('/v1/quotes', {
       method: 'POST',
       body: JSON.stringify(params),
     });
   }
 
   async purchasePolicy(params: { quoteId: string; memberId: string; paymentRef: string }): Promise<Policy> {
-    return this.request('/v1/policies', {
+    return this.request<Policy>('/v1/policies', {
       method: 'POST',
       body: JSON.stringify(params),
     });
   }
 
   async getPolicy(id: string): Promise<Policy> {
-    return this.request(`/v1/policies/${id}`);
+    return this.request<Policy>(`/v1/policies/${id}`);
   }
 
   async cancelPolicy(id: string): Promise<void> {
-    await this.request(`/v1/policies/${id}/cancel`, { method: 'POST' });
+    await this.request<unknown>(`/v1/policies/${id}/cancel`, { method: 'POST' });
   }
 
   async renewPolicy(id: string): Promise<Policy> {
-    return this.request(`/v1/policies/${id}/renew`, { method: 'POST' });
+    return this.request<Policy>(`/v1/policies/${id}/renew`, { method: 'POST' });
   }
 
   async submitClaim(params: { policyId: string; claimType: string; amountKobo: number; description?: string; documents?: string[] }): Promise<Claim> {
-    return this.request('/v1/claims', {
+    return this.request<Claim>('/v1/claims', {
       method: 'POST',
       body: JSON.stringify(params),
     });
   }
 
   async getClaim(id: string): Promise<Claim> {
-    return this.request(`/v1/claims/${id}`);
+    return this.request<Claim>(`/v1/claims/${id}`);
   }
 
   async listClaims(policyId: string): Promise<Claim[]> {
-    return this.request(`/v1/claims?policy_id=${policyId}`);
+    return this.request<Claim[]>(`/v1/claims?policy_id=${policyId}`);
   }
 
-  verifyWebhook(rawBody: string, signature: string): boolean {
-    const crypto = require('crypto');
-    const expected = crypto
-      .createHmac('sha256', process.env.CUBECOVER_WEBHOOK_SECRET || '')
-      .update(rawBody)
-      .digest('hex');
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  verifyWebhook(rawBody: string, signature: string | undefined): boolean {
+    const secret = this.config.webhookSecret ?? process.env.CUBECOVER_WEBHOOK_SECRET ?? '';
+    const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+    const a = Buffer.from(expected, 'utf8');
+    const b = Buffer.from(String(signature ?? ''), 'utf8');
+    // Length-unequal inputs would make timingSafeEqual throw; fail closed.
+    if (a.length !== b.length || a.length === 0) return false;
+    return timingSafeEqual(a, b);
   }
 
   parseNotification(body: unknown): CubeCoverEvent | null {
