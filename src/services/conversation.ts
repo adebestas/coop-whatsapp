@@ -20,11 +20,11 @@ import { listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js"
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
 import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js";
 import { requestPhoneChange } from "./phone-change.js";
-import { detectLocale, localeFromLanguageCode, type Locale } from "../lib/i18n.js";
+import { detectLocale, localeFromLanguageCode, t, LOCALES, type Locale } from "../lib/i18n.js";
 import { runWithLocale, getLocale } from "../lib/runtime-context.js";
 import { translateToEnglish } from "../lib/translate.js";
 
-export const LOCALES: Locale[] = ["en", "pidgin", "hausa", "yoruba", "igbo"];
+export { LOCALES } from "../lib/i18n.js";
 
 export function resolveMemberLocale(
   member: { locale?: string | null } | null,
@@ -614,19 +614,24 @@ async function handleMessageInner(
   if (member && /^language$/i.test(text.trim())) {
     await sendText({
       to: phone,
-      text: `🌐 Your language: *${resolveMemberLocale(member, getLocale(), text)}*\n\nReply *language <en|pidgin|hausa|yoruba|igbo>* to change it.`,
+      text: t("cmd.language.current", {
+        lang: resolveMemberLocale(member, getLocale(), text),
+      }),
     });
     return;
   }
   if (member && /^language\s+/i.test(text.trim())) {
     const want = text.trim().split(/\s+/)[1]?.toLowerCase() as Locale;
     if (!LOCALES.includes(want)) {
-      await sendText({ to: phone, text: `Unsupported language. Choose: ${LOCALES.join(", ")}.` });
+      await sendText({
+        to: phone,
+        text: t("error.unsupportedLanguage", { list: LOCALES.join(", ") }),
+      });
       return;
     }
     await prisma.member.update({ where: { id: member.id }, data: { locale: want } });
     invalidateMemberCache(phone, member.cooperativeId);
-    await sendText({ to: phone, text: `✅ Language set to *${want}*.` });
+    await sendText({ to: phone, text: t("cmd.language.set", { lang: want }, want) });
     return;
   }
 

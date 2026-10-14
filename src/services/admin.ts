@@ -4,7 +4,7 @@ import { cacheDel } from "../lib/cache.js";
 import { invalidateCoopMeta } from "../lib/tenant-context.js";
 import { getCurrency } from "../lib/runtime-context.js";
 import { COUNTRY_CURRENCY, currencyForCountry } from "../lib/currency.js";
-import { LOCALES } from "./conversation.js";
+import { LOCALES, t } from "../lib/i18n.js";
 import { normalizeTitle, displayTitle } from "./posts.js";
 import {
   buildBatch,
@@ -3160,7 +3160,7 @@ export async function handleAdminCommand(
           if (!LOCALES.includes(want as never)) {
             await sendText({
               to: phone,
-              text: `Unsupported language. Choose: ${LOCALES.join(", ")}.`,
+              text: t("error.unsupportedLanguage", { list: LOCALES.join(", ") }),
             });
             return true;
           }
@@ -3174,7 +3174,7 @@ export async function handleAdminCommand(
             action: "config.set",
             detail: `language = ${want}`,
           });
-          await sendText({ to: phone, text: `✅ Default language set to *${want}*.` });
+          await sendText({ to: phone, text: t("admin.config.language.set", { lang: want }) });
           return true;
         }
         if (key === "country") {

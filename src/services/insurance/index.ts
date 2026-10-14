@@ -1,7 +1,8 @@
 import { PrismaClient } from "@prisma/client";
 import { CubeCoverClient } from "./cubecover";
 import { prisma, withTx } from "../../lib/prisma.js";
-import { setCoopContext } from "../../lib/tenant-context.js";
+import { setCoopContext, getCoopMeta } from "../../lib/tenant-context.js";
+import { runWithContext } from "../../lib/runtime-context.js";
 import { postJournal } from "../journal.js";
 import { audit } from "../audit.js";
 import { formatBalance } from "../../lib/money.js";
@@ -353,57 +354,62 @@ export async function payoutInsuranceClaim(
   if (!claim) return { ok: false, message: `No claim for provider id *${cubecoverClaimId}*.` };
   if (claim.status === "paid") return { ok: true, message: `Claim *${claim.id}* already paid.` };
 
-  const payout = claim.payoutKobo ?? claim.amountKobo;
-  const wallet = await prisma.wallet.findUnique({ where: { memberId: claim.memberId } });
-  if (!wallet) return { ok: false, message: `No wallet for member *${claim.memberId}*.` };
+  // A webhook runs OUTSIDE any coop context, so establish the coop's currency
+  // before formatting any amount (journal description, audit, reply).
+  const { currency } = await getCoopMeta(claim.cooperativeId);
+  return runWithContext({ currency }, async () => {
+    const payout = claim.payoutKobo ?? claim.amountKobo;
+    const wallet = await prisma.wallet.findUnique({ where: { memberId: claim.memberId } });
+    if (!wallet) return { ok: false, message: `No wallet for member *${claim.memberId}*.` };
 
-  await withTx(async (tx) => {
-    await setCoopContext(tx as never, claim.cooperativeId);
-    await tx.wallet.update({
-      where: { id: wallet.id },
-      data: { balance: { increment: payout } },
+    await withTx(async (tx) => {
+      await setCoopContext(tx as never, claim.cooperativeId);
+      await tx.wallet.update({
+        where: { id: wallet.id },
+        data: { balance: { increment: payout } },
+      });
+      const posted = await postJournal(
+        {
+          cooperativeId: claim.cooperativeId,
+          txRef: `insurance_claim_payout_${claim.id}`,
+          description: `Insurance claim payout ${formatBalance(payout)}`,
+          postings: [
+            {
+              account: "expense:insurance_claim",
+              direction: "DEBIT",
+              amount: payout,
+              memberId: claim.memberId,
+            },
+            {
+              account: `member_wallet:${wallet.id}`,
+              direction: "CREDIT",
+              amount: payout,
+              memberId: claim.memberId,
+            },
+          ],
+        },
+        tx as never,
+      );
+      if (!posted.posted)
+        throw new Error(`insurance claim payout journal not posted: ${posted.reason}`);
+      await tx.insuranceClaim.update({
+        where: { id: claim.id },
+        data: { status: "paid", paidAt: new Date() },
+      });
     });
-    const posted = await postJournal(
-      {
-        cooperativeId: claim.cooperativeId,
-        txRef: `insurance_claim_payout_${claim.id}`,
-        description: `Insurance claim payout ${formatBalance(payout)}`,
-        postings: [
-          {
-            account: "expense:insurance_claim",
-            direction: "DEBIT",
-            amount: payout,
-            memberId: claim.memberId,
-          },
-          {
-            account: `member_wallet:${wallet.id}`,
-            direction: "CREDIT",
-            amount: payout,
-            memberId: claim.memberId,
-          },
-        ],
-      },
-      tx as never,
-    );
-    if (!posted.posted)
-      throw new Error(`insurance claim payout journal not posted: ${posted.reason}`);
-    await tx.insuranceClaim.update({
-      where: { id: claim.id },
-      data: { status: "paid", paidAt: new Date() },
-    });
-  });
 
-  await audit({
-    cooperativeId: claim.cooperativeId,
-    actorPhone: claim.memberId,
-    actorId: claim.memberId,
-    action: "insurance.claim.paid",
-    targetType: "insurance_claim",
-    targetId: claim.id,
-    amount: payout,
-    detail: `claim ${cubecoverClaimId} paid to wallet`,
+    await audit({
+      cooperativeId: claim.cooperativeId,
+      actorPhone: claim.memberId,
+      actorId: claim.memberId,
+      action: "insurance.claim.paid",
+      targetType: "insurance_claim",
+      targetId: claim.id,
+      amount: payout,
+      detail: `claim ${cubecoverClaimId} paid to wallet`,
+    });
+    return { ok: true, message: `✅ Claim *${claim.id}* paid (${formatBalance(payout)}).` };
   });
-  return { ok: true, message: `✅ Claim *${claim.id}* paid (${formatBalance(payout)}).` };
 }
 
 // ===== Admin claim actions (used by admin-actions.ts WhatsApp commands) =====

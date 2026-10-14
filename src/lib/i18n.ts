@@ -21,6 +21,9 @@ import { getLocale } from "./runtime-context.js";
 
 export type Locale = "en" | "pidgin" | "hausa" | "yoruba" | "igbo";
 
+/** The languages the assistant can reply in (English is the fallback). */
+export const LOCALES: Locale[] = ["en", "pidgin", "hausa", "yoruba", "igbo"];
+
 // Keyword heuristics. Ordered so more specific/overlapping languages win.
 const SIGNALS: Record<Exclude<Locale, "en">, RegExp> = {
   pidgin:
@@ -113,6 +116,21 @@ const DICTIONARY: Record<string, Record<Locale, string>> = {
     hausa: "Ba a goyi bayan wannan harshe. Zaɓi: {list}.",
     yoruba: "A ko ni ede yii. Yan: {list}.",
     igbo: "Anaghị akwado asụsụ a. Họrọ: {list}.",
+  },
+  "cmd.language.current": {
+    en: "🌐 Your language: *{lang}*\n\nReply *language <en|pidgin|hausa|yoruba|igbo>* to change it.",
+    pidgin:
+      "🌐 Your language na: *{lang}*\n\nReply *language <en|pidgin|hausa|yoruba|igbo>* to change am.",
+    hausa: "🌐 Harshenka: *{lang}*\n\nAmsa *language <en|pidgin|hausa|yoruba|igbo>* don canza shi.",
+    yoruba: "🌐 Ede re: *{lang}*\n\nDahun *language <en|pidgin|hausa|yoruba|igbo>* lati yipada.",
+    igbo: "🌐 Asụsụ gị: *{lang}*\n\nZaghachi *language <en|pidgin|hausa|yoruba|igbo>* iji gbanwee ya.",
+  },
+  "admin.config.language.set": {
+    en: "✅ Default language set to *{lang}*.",
+    pidgin: "✅ Default language don change to *{lang}*.",
+    hausa: "✅ An saita harshen da aka saba zuwa *{lang}*.",
+    yoruba: "✅ Ede aiyipada ti ṣeto si *{lang}*.",
+    igbo: "✅ Ede ndabere atọrọ na *{lang}*.",
   },
 };
 

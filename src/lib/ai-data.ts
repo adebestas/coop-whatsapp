@@ -263,7 +263,7 @@ export async function getSavingsTrend(cooperativeId: string, months: number = 6)
 
 /**
  * Financial memory — a reasoning bundle the AI can use to answer forward-looking
- * questions like "can I afford a ₦50k loan before December?".
+ * questions like "can I afford a 50k loan before December?".
  *
  * This is the persistent, deterministic persona state (savings trajectory,
  * standing debt capacity, projected affordability) that lets the assistant

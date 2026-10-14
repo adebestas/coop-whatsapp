@@ -27,7 +27,7 @@ const SYSTEM_PROMPT = `You extract loan-application details from a Nigerian coop
 Reply with STRICT JSON only: {"loan":null} when the message is NOT a request to borrow money.
 Otherwise reply {"loan":{"amount":<number|null>,"months":<number|null>,"guarantors":["<id>",...]}}.
 Rules:
-- amount is the requested principal in NAIRA as a plain number. "150k" means 150000, "1.5m" means 1500000, "₦150,000" means 150000. Use null if no amount is stated.
+- amount is the requested principal as a plain number in the account's currency. "150k" means 150000, "1.5m" means 1500000, "₦150,000" means 150000. Use null if no amount is stated.
 - months is the requested repayment tenure as an integer, 1-12. Use null if not stated.
 - guarantors lists the people the member named, EXACTLY as written — a phone number (e.g. 08031234567) or a member code (e.g. ABC123-XYZ). Empty array if none.
 - Do not invent values. Only extract what the message says.`;

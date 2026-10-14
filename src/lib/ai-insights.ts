@@ -51,7 +51,7 @@ Focus on:
 4. Recommendations for improvement
 
 Note: These are AI-generated observations, not financial advice.
-Use the format: ₦XX,XXX for amounts. Be specific with numbers.
+Use the account currency and format amounts like 12,345.67. Be specific with numbers.
 Keep it under 300 words. Be professional but warm.`,
           },
           {
