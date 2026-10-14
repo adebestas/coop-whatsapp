@@ -1,6 +1,8 @@
 import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { sendText, sendLongText, notifyMember } from "../lib/messaging.js";
 import { cacheDel } from "../lib/cache.js";
+import { invalidateCoopMeta } from "../lib/tenant-context.js";
+import { LOCALES } from "./conversation.js";
 import { normalizeTitle, displayTitle } from "./posts.js";
 import {
   buildBatch,
@@ -3126,8 +3128,30 @@ export async function handleAdminCommand(
               "minWithdrawal, maxWithdrawal, withdrawalCooldownMonths, lateFinePercent, " +
               "maxLoanMultiplier, autoApproveLoans, requireGuarantors, minGuarantors, " +
               "literacyCertificationEnabled, literacyQuizPassMark, literacyQuizQuestionCount, " +
-              "certifiedLoanBoost",
+              "certifiedLoanBoost, language",
           });
+          return true;
+        }
+        if (key === "language") {
+          const want = value.toLowerCase();
+          if (!LOCALES.includes(want as never)) {
+            await sendText({
+              to: phone,
+              text: `Unsupported language. Choose: ${LOCALES.join(", ")}.`,
+            });
+            return true;
+          }
+          await prisma.cooperative.update({ where: { id: coopId }, data: { locale: want } });
+          invalidateCoopMeta(coopId);
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: phone,
+            actorId: admin.id,
+            actorRole: "superadmin",
+            action: "config.set",
+            detail: `language = ${want}`,
+          });
+          await sendText({ to: phone, text: `✅ Default language set to *${want}*.` });
           return true;
         }
         const validKeys = new Set([
@@ -3195,6 +3219,10 @@ export async function handleAdminCommand(
 
       case "showconfig": {
         const config = await getCoopConfig(coopId);
+        const coop = await prisma.cooperative.findUnique({
+          where: { id: coopId },
+          select: { country: true, currency: true, locale: true },
+        });
         const body = [
           `*Cooperative Config*`,
           ``,
@@ -3214,6 +3242,9 @@ export async function handleAdminCommand(
           `• Quiz pass mark: *${config.literacyQuizPassMark}*`,
           `• Quiz questions: *${config.literacyQuizQuestionCount}*`,
           `• Certified loan boost: *+${config.certifiedLoanBoost}x savings*`,
+          `• Country: *${coop?.country ?? "NG"}*`,
+          `• Currency: *${coop?.currency ?? "NGN"}*`,
+          `• Default language: *${coop?.locale ?? "en"}*`,
         ];
         await sendText({ to: phone, text: body.join("\n") });
         return true;
