@@ -81,25 +81,27 @@ const KNOWN_COMMANDS = [
 
 interface FAQItem {
   question: string;
-  answer: string;
+  answer: string | (() => string);
   keywords: string[];
 }
 
 const FAQ_DATABASE: FAQItem[] = [
   {
     question: "How do I save money?",
-    answer: "Reply with *save <amount>* to save money. Example: *save 5000* saves ₦5,000.",
+    answer: () =>
+      `Reply with *save <amount>* to save money. Example: *save 5000* saves ${formatBalance(500000)}.`,
     keywords: ["save", "saving", "savings", "contribute", "contribution", "deposit", "money"],
   },
   {
     question: "How do I apply for a loan?",
-    answer:
-      "Reply with *loan <amount> <months>* to apply. Example: *loan 50000 3* applies for ₦50,000 over 3 months.",
+    answer: () =>
+      `Reply with *loan <amount> <months>* to apply. Example: *loan 50000 3* applies for ${formatBalance(5000000)} over 3 months.`,
     keywords: ["loan", "borrow", "credit", "apply", "application"],
   },
   {
     question: "How do I repay my loan?",
-    answer: "Reply with *repay <amount>* to repay. Example: *repay 10000* repays ₦10,000.",
+    answer: () =>
+      `Reply with *repay <amount>* to repay. Example: *repay 10000* repays ${formatBalance(1000000)}.`,
     keywords: ["repay", "repayment", "pay", "payment", "loan"],
   },
   {
@@ -195,7 +197,8 @@ export async function generateSupportResponse(
   const faqMatches = searchFAQ(truncated);
   if (faqMatches.length > 0 && faqMatches[0]) {
     const faq = faqMatches[0];
-    return `💡 *${faq.question}*\n\n${faq.answer}\n\nType the command above to get started!`;
+    const answer = typeof faq.answer === "function" ? faq.answer() : faq.answer;
+    return `💡 *${faq.question}*\n\n${answer}\n\nType the command above to get started!`;
   }
 
   // Then try AI
@@ -271,11 +274,11 @@ function generateFallbackSupport(question: string, memberName: string): string {
   const lowerQuestion = question.toLowerCase();
 
   if (lowerQuestion.includes("save") || lowerQuestion.includes("saving")) {
-    return `Hi ${memberName}! To save money, reply with *save <amount>*.\n\nExample: *save 5000* saves ₦5,000 to your wallet.`;
+    return `Hi ${memberName}! To save money, reply with *save <amount>*.\n\nExample: *save 5000* saves ${formatBalance(500000)} to your wallet.`;
   }
 
   if (lowerQuestion.includes("loan") || lowerQuestion.includes("borrow")) {
-    return `Hi ${memberName}! To apply for a loan, reply with *loan <amount> <months>*.\n\nExample: *loan 50000 3* applies for ₦50,000 over 3 months.`;
+    return `Hi ${memberName}! To apply for a loan, reply with *loan <amount> <months>*.\n\nExample: *loan 50000 3* applies for ${formatBalance(5000000)} over 3 months.`;
   }
 
   if (lowerQuestion.includes("withdraw")) {

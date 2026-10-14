@@ -358,26 +358,30 @@ export function staticBanks(): Bank[] {
 }
 
 const BANK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-let bankCache: { at: number; banks: Bank[] } | null = null;
+const bankCache = new Map<string, { at: number; banks: Bank[] }>();
 
 /** Drop the in-process bank-list cache (used by tests and diagnostics). */
 export function clearBankCache(): void {
-  bankCache = null;
+  bankCache.clear();
 }
 
 /**
  * The bank list for the guided account-entry flow: the provider's live list
- * (cached for 24h), falling back to the static `BANK_CODES` map when the
- * provider call fails or returns nothing. The cache is only populated on a
- * successful provider response so a transient outage is not sticky.
+ * (cached per currency for 24h), falling back to the static `BANK_CODES` map
+ * when the provider call fails or returns nothing. The cache is only populated
+ * on a successful provider response so a transient outage is not sticky, and is
+ * keyed by currency so a multi-currency deployment never serves one country's
+ * bank codes to another.
  */
 export async function listBanks(provider?: ProviderAdapter, currency?: string): Promise<Bank[]> {
-  if (bankCache && Date.now() - bankCache.at < BANK_CACHE_TTL_MS) return bankCache.banks;
+  const key = currency ?? "default";
+  const cached = bankCache.get(key);
+  if (cached && Date.now() - cached.at < BANK_CACHE_TTL_MS) return cached.banks;
   try {
     const p = provider ?? (await resolveProvider(undefined, currency));
     const banks = await p.listBanks?.(currency);
     if (banks && banks.length) {
-      bankCache = { at: Date.now(), banks };
+      bankCache.set(key, { at: Date.now(), banks });
       return banks;
     }
   } catch {

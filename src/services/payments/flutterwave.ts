@@ -15,6 +15,7 @@ import type {
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
 import { forProvider } from "../../lib/money.js";
+import { countryForCurrency } from "../../lib/currency.js";
 
 const API_BASE = "https://api.flutterwave.com/v3";
 
@@ -248,9 +249,13 @@ export const flutterwaveAdapter: ProviderAdapter = {
     }
   },
 
-  async listBanks(_currency?: string): Promise<Bank[]> {
+  async listBanks(currency?: string): Promise<Bank[]> {
     try {
-      const res = await api<{ data: Array<{ code: string; name: string }> }>("GET", "/banks/NG");
+      const country = countryForCurrency(currency ?? "NGN");
+      const res = await api<{ data: Array<{ code: string; name: string }> }>(
+        "GET",
+        `/banks/${country}`,
+      );
       if (!Array.isArray(res.data)) return [];
       return res.data
         .map((b) => ({ code: String(b.code ?? ""), name: String(b.name ?? "") }))
