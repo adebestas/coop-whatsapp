@@ -2,6 +2,7 @@ import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { sendText, sendLongText, notifyMember } from "../lib/messaging.js";
 import { cacheDel } from "../lib/cache.js";
 import { invalidateCoopMeta } from "../lib/tenant-context.js";
+import { COUNTRY_CURRENCY, currencyForCountry } from "../lib/currency.js";
 import { LOCALES } from "./conversation.js";
 import { normalizeTitle, displayTitle } from "./posts.js";
 import {
@@ -3152,6 +3153,28 @@ export async function handleAdminCommand(
             detail: `language = ${want}`,
           });
           await sendText({ to: phone, text: `✅ Default language set to *${want}*.` });
+          return true;
+        }
+        if (key === "country") {
+          const iso = value.toUpperCase();
+          if (!Object.prototype.hasOwnProperty.call(COUNTRY_CURRENCY, iso)) {
+            await sendText({ to: phone, text: `Unsupported country *${value}*. Supported: ${Object.keys(COUNTRY_CURRENCY).join(", ")}.` });
+            return true;
+          }
+          const moved = await prisma.wallet.count({
+            where: { member: { cooperativeId: coopId }, balance: { gt: 0 } },
+          });
+          if (moved > 0) {
+            await sendText({ to: phone, text: "Country can't be changed after money has moved in this cooperative." });
+            return true;
+          }
+          await prisma.cooperative.update({
+            where: { id: coopId },
+            data: { country: iso, currency: currencyForCountry(iso) },
+          });
+          invalidateCoopMeta(coopId);
+          await audit({ cooperativeId: coopId, actorPhone: phone, actorId: admin.id, actorRole: "superadmin", action: "config.set", detail: `country = ${iso}` });
+          await sendText({ to: phone, text: `✅ Country set to *${iso}* (currency *${currencyForCountry(iso)}*).` });
           return true;
         }
         const validKeys = new Set([

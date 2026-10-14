@@ -5,6 +5,7 @@ import { LIMITS, formatBalance } from "../lib/money.js";
 import { getCoopConfig } from "./coop-config.js";
 import { recordReferral, qualifyReferral } from "./referrals.js";
 import { getRedis } from "../lib/cache.js";
+import { countryFromPhone, currencyForCountry } from "../lib/currency.js";
 
 export { formatBalance } from "../lib/money.js";
 
@@ -374,11 +375,24 @@ export async function createCooperative(data: {
   adminPhone?: string;
   state?: string;
   registrationNumber?: string;
+  country?: string;
 }) {
   if (!data.registrationNumber) {
     console.warn(
       `[compliance] Cooperative "${data.name}" created without a registration number. Registration number is required under CAMA for legal recognition.`,
     );
   }
-  return prisma.cooperative.create({ data });
+  const country =
+    data.country ?? (data.adminPhone ? countryFromPhone(data.adminPhone) : null) ?? "NG";
+  const currency = currencyForCountry(country);
+  return prisma.cooperative.create({
+    data: {
+      name: data.name,
+      code: data.code,
+      adminPhone: data.adminPhone,
+      state: data.state,
+      country,
+      currency,
+    },
+  });
 }

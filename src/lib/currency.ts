@@ -48,3 +48,32 @@ export function formatMoney(kobo: number, code: string): string {
   });
   return `${meta.symbol}${grouped}`;
 }
+
+export const COUNTRY_CURRENCY: Record<string, string> = {
+  NG: "NGN", GH: "GHS", KE: "KES", ZA: "ZAR", US: "USD",
+  UG: "UGX", TZ: "TZS", RW: "RWF", SN: "XOF", ZM: "ZMW", MW: "MWK",
+};
+
+export function currencyForCountry(country: string): string {
+  return COUNTRY_CURRENCY[country?.toUpperCase()] ?? DEFAULT_CURRENCY;
+}
+
+export function countryForCurrency(currency: string): string {
+  const code = currency?.toUpperCase();
+  const found = Object.entries(COUNTRY_CURRENCY).find(([, c]) => c === code);
+  return found?.[0] ?? "NG";
+}
+
+const CALLING_CODE_COUNTRY: Array<[string, string]> = [
+  ["+234", "NG"], ["+233", "GH"], ["+254", "KE"], ["+27", "ZA"], ["+1", "US"],
+  ["+256", "UG"], ["+255", "TZ"], ["+250", "RW"], ["+221", "SN"], ["+260", "ZM"], ["+265", "MW"],
+];
+
+export function countryFromPhone(phone: string): string | null {
+  const p = phone?.trim();
+  if (!p || !p.startsWith("+")) return null;
+  const match = CALLING_CODE_COUNTRY
+    .filter(([cc]) => p.startsWith(cc))
+    .sort((a, b) => b[0].length - a[0].length)[0];
+  return match?.[1] ?? null;
+}
