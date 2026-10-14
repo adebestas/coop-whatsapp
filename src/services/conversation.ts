@@ -614,6 +614,7 @@ async function handleMessageInner(
       return;
     }
     await prisma.member.update({ where: { id: member.id }, data: { locale: want } });
+    invalidateMemberCache(phone, member.cooperativeId);
     await sendText({ to: phone, text: `✅ Language set to *${want}*.` });
     return;
   }
