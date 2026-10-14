@@ -8,7 +8,8 @@ import { roundMoney } from "../money.js";
 import { formatBalance } from "../cooperative.js";
 import { flagTransaction } from "../aml.js";
 import { qualifyReferral } from "../referrals.js";
-import { resolveCoopByVirtualAccount, withCoopContext, forEachCoop } from "../../lib/tenant-context.js";
+import { resolveCoopByVirtualAccount, withCoopContext, forEachCoop, getCoopMeta } from "../../lib/tenant-context.js";
+import { getCurrency } from "../../lib/runtime-context.js";
 import { maskId } from "../../lib/security.js";
 
 /**
@@ -42,11 +43,12 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
     };
   }
 
+  const { currency } = await getCoopMeta(member.cooperativeId);
   const params = {
     phone: kycPhone,
     name: member.name,
     reference: `MEM-${member.id}`,
-    currency: "NGN",
+    currency,
   };
 
   // Virtual account expiry: 90 days from now
@@ -108,12 +110,6 @@ function otherThan(name?: string): string[] {
  */
 export async function handlePaymentNotification(n: PaymentNotification): Promise<void> {
   if (n.status !== "successful") return;
-  if (n.currency !== "NGN") {
-    console.warn(
-      `[topup] rejected notification with currency ${n.currency} (expected NGN), txId=${n.transactionId}`,
-    );
-    return;
-  }
 
   // Resolve the cooperative from the virtual account number (SECURITY DEFINER
   // resolver bypasses RLS so we can find the tenant before setting the GUC).
@@ -125,6 +121,13 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
 
   // Run the whole credit flow inside the cooperative's RLS context.
   await withCoopContext(coopId, async () => {
+    if (n.currency !== getCurrency()) {
+      console.warn(
+        `[topup] rejected notification currency ${n.currency} (coop expects ${getCurrency()}), txId=${n.transactionId}`,
+      );
+      return;
+    }
+
     // Find the member by their virtual account number.
     const member = await prisma.member.findFirst({
       where: { virtualAccountNumber: n.accountNumber },
