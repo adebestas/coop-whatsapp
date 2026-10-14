@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 export interface CubeCoverConfig {
   apiKey: string;
@@ -47,6 +47,9 @@ export interface CubeCoverEvent {
   data: Record<string, unknown>;
 }
 
+/** Hard cap on any single CubeCover API call so a hung upstream cannot hang us. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
 export class CubeCoverClient {
   private config: CubeCoverConfig;
 
@@ -58,37 +61,48 @@ export class CubeCoverClient {
     const url = `${this.config.baseUrl}${path}`;
     const response = await fetch(url, {
       ...options,
+      signal: options.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       headers: {
-        'Authorization': `Bearer ${this.config.apiKey}`,
-        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this.config.apiKey}`,
+        "Content-Type": "application/json",
         ...(options.headers as Record<string, string> | undefined),
       },
     });
     if (!response.ok) {
       const errorBody = await response.text();
-      throw new Error(`CubeCover API error: ${response.status} ${response.statusText} - ${errorBody}`);
+      throw new Error(
+        `CubeCover API error: ${response.status} ${response.statusText} - ${errorBody}`,
+      );
     }
     return (await response.json()) as T;
   }
 
   async getProducts(): Promise<Product[]> {
-    return this.request<Product[]>('/v1/products');
+    return this.request<Product[]>("/v1/products");
   }
 
   async getProduct(code: string): Promise<Product> {
     return this.request<Product>(`/v1/products/${code}`);
   }
 
-  async createQuote(params: { productCode: string; planCode: string; memberId: string }): Promise<{ quoteId: string; premiumKobo: number }> {
-    return this.request<{ quoteId: string; premiumKobo: number }>('/v1/quotes', {
-      method: 'POST',
+  async createQuote(params: {
+    productCode: string;
+    planCode: string;
+    memberId: string;
+  }): Promise<{ quoteId: string; premiumKobo: number }> {
+    return this.request<{ quoteId: string; premiumKobo: number }>("/v1/quotes", {
+      method: "POST",
       body: JSON.stringify(params),
     });
   }
 
-  async purchasePolicy(params: { quoteId: string; memberId: string; paymentRef: string }): Promise<Policy> {
-    return this.request<Policy>('/v1/policies', {
-      method: 'POST',
+  async purchasePolicy(params: {
+    quoteId: string;
+    memberId: string;
+    paymentRef: string;
+  }): Promise<Policy> {
+    return this.request<Policy>("/v1/policies", {
+      method: "POST",
       body: JSON.stringify(params),
     });
   }
@@ -98,16 +112,22 @@ export class CubeCoverClient {
   }
 
   async cancelPolicy(id: string): Promise<void> {
-    await this.request<unknown>(`/v1/policies/${id}/cancel`, { method: 'POST' });
+    await this.request<unknown>(`/v1/policies/${id}/cancel`, { method: "POST" });
   }
 
   async renewPolicy(id: string): Promise<Policy> {
-    return this.request<Policy>(`/v1/policies/${id}/renew`, { method: 'POST' });
+    return this.request<Policy>(`/v1/policies/${id}/renew`, { method: "POST" });
   }
 
-  async submitClaim(params: { policyId: string; claimType: string; amountKobo: number; description?: string; documents?: string[] }): Promise<Claim> {
-    return this.request<Claim>('/v1/claims', {
-      method: 'POST',
+  async submitClaim(params: {
+    policyId: string;
+    claimType: string;
+    amountKobo: number;
+    description?: string;
+    documents?: string[];
+  }): Promise<Claim> {
+    return this.request<Claim>("/v1/claims", {
+      method: "POST",
       body: JSON.stringify(params),
     });
   }
@@ -121,17 +141,19 @@ export class CubeCoverClient {
   }
 
   verifyWebhook(rawBody: string, signature: string | undefined): boolean {
-    const secret = this.config.webhookSecret ?? process.env.CUBECOVER_WEBHOOK_SECRET ?? '';
-    const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
-    const a = Buffer.from(expected, 'utf8');
-    const b = Buffer.from(String(signature ?? ''), 'utf8');
+    const secret = this.config.webhookSecret ?? process.env.CUBECOVER_WEBHOOK_SECRET ?? "";
+    // Fail closed: with no configured secret, no signature can be trusted.
+    if (!secret) return false;
+    const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+    const a = Buffer.from(expected, "utf8");
+    const b = Buffer.from(String(signature ?? ""), "utf8");
     // Length-unequal inputs would make timingSafeEqual throw; fail closed.
     if (a.length !== b.length || a.length === 0) return false;
     return timingSafeEqual(a, b);
   }
 
   parseNotification(body: unknown): CubeCoverEvent | null {
-    if (typeof body === 'object' && body !== null && 'event' in body) {
+    if (typeof body === "object" && body !== null && "event" in body) {
       return body as CubeCoverEvent;
     }
     return null;

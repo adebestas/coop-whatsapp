@@ -181,7 +181,10 @@ async function handleCubeCoverWebhook(
   const signature = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
   if (!client.verifyWebhook(rawBody, signature)) {
     incCounter("webhook_signature_failures_total", { provider: "cubecover", endpoint: "credit" });
-    log.error("webhook signature verification failed", { provider: "cubecover", endpoint: "credit" });
+    log.error("webhook signature verification failed", {
+      provider: "cubecover",
+      endpoint: "credit",
+    });
     return { httpStatus: 401, body: { error: "invalid signature" } };
   }
 
@@ -197,10 +200,9 @@ async function handleCubeCoverWebhook(
     return { httpStatus: 200, body: { status: "ignored" } };
   }
 
-  const insuranceService = new InsuranceService({ prisma: prisma as any, cubecover: client });
-  await insuranceService.handleWebhook(notification.event, notification.data);
-
   const eventId = `cubecover:${notification.event}:${JSON.stringify(notification.data)}`;
+  // Record the delivery BEFORE processing so a duplicate delivery is rejected by
+  // the unique constraint instead of re-applying the update.
   try {
     await prisma.webhookEvent.create({
       data: {
@@ -212,9 +214,20 @@ async function handleCubeCoverWebhook(
       },
     });
   } catch (err: any) {
-    if (err?.code !== "P2002") {
-      console.error(`[webhook] failed to record insurance delivery`, err);
+    if (err?.code === "P2002") {
+      return { httpStatus: 200, body: { status: "duplicate", event: eventId } };
     }
+    console.error(`[webhook] failed to record insurance delivery`, err);
+    return { httpStatus: 500, body: { error: "failed to record delivery" } };
+  }
+
+  const insuranceService = new InsuranceService({ prisma: prisma as any, cubecover: client });
+  try {
+    await insuranceService.handleWebhook(notification.event, notification.data);
+  } catch (err) {
+    // Roll back the dedupe marker so the provider's retry is processed.
+    await prisma.webhookEvent.delete({ where: { id: eventId } }).catch(() => {});
+    throw err;
   }
   return { httpStatus: 200, body: { status: "ok", event: eventId } };
 }
