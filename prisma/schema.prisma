@@ -20,6 +20,7 @@ model Cooperative {
   state              String? // Nigerian state (or country for global scope)
   country            String              @default("NG")
   currency           String              @default("NGN")
+  locale             String              @default("en") // default member language
   adminPhone         String? // WhatsApp number of the coop super admin
   status             String              @default("active") // active | suspended
   loanInterestRate   Float               @default(2) // fallback monthly % charged on loans (percentage)
@@ -192,6 +193,7 @@ model Member {
   supervisoryFrozenAt     DateTime? // when the Supervisory Committee froze the member (money-out blocked); only the committee/super admin can lift
   altChannelId            String? // linked second chat identity (other platform) — alerts only
   preferredChannel        String? // whatsapp | telegram — most-used platform, auto-learned
+  locale                  String? // member language preference (null = inherit coop default)
   lastStatementSentAt     DateTime? // month marker for monthly statements
   lastBirthdayGreetedYear Int? // year marker so birthdays only fire once a year
   lastAnniversaryGreetedYear Int? // year marker so anniversary greetings only fire once a year
