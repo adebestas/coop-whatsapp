@@ -7,14 +7,17 @@
  *
  * This module provides:
  *   - `detectLocale(text)` — keyword heuristics to guess the language.
- *   - `t(locale, key, params?)` — deterministic string lookups with English
- *     fallback, used by the offline command/handler strings.
+ *   - `t(key, params?, locale?)` — deterministic string lookups with English
+ *     fallback, used by the offline command/handler strings. Reads the runtime
+ *     locale from context when no explicit locale is passed.
  *   - `languageInstruction(locale)` — a prompt suffix that tells the LLM which
  *     language to answer in (the LLM does the actual translation at runtime).
  *
  * Deterministic strings remain English unless translated here; the LLM path
  * localizes dynamically, which is the right split for a conversational AI.
  */
+
+import { getLocale } from "./runtime-context.js";
 
 export type Locale = "en" | "pidgin" | "hausa" | "yoruba" | "igbo";
 
@@ -76,10 +79,36 @@ const DICTIONARY: Record<string, Record<Locale, string>> = {
     yoruba: "AI ko si lọwọlọwọ.",
     igbo: "AI adịghị adị ugbu a.",
   },
+  "money.balance": {
+    en: "💰 Your Balance",
+    pidgin: "💰 Your money wey you get",
+    hausa: "💰 Kudin ka",
+    yoruba: "💰 Owo re",
+    igbo: "💰 Ego gi",
+  },
+  "cmd.language.set": {
+    en: "✅ Language set to *{lang}*.",
+    pidgin: "✅ Language don change to *{lang}*.",
+    hausa: "✅ An saita harshe zuwa *{lang}*.",
+    yoruba: "✅ Ede ti yipada si *{lang}*.",
+    igbo: "✅ Asụsụ agbanweela gaa *{lang}*.",
+  },
+  "error.unsupportedLanguage": {
+    en: "Unsupported language. Choose: {list}.",
+    pidgin: "We no sabi that language. Pick: {list}.",
+    hausa: "Ba a goyi bayan wannan harshe. Zaɓi: {list}.",
+    yoruba: "A ko ni ede yii. Yan: {list}.",
+    igbo: "Anaghị akwado asụsụ a. Họrọ: {list}.",
+  },
 };
 
-export function t(locale: Locale, key: string, _params?: Params): string {
+export function t(key: string, params?: Params, locale?: Locale): string {
   const entry = DICTIONARY[key];
   if (!entry) return key;
-  return entry[locale] ?? entry.en;
+  const loc = locale ?? getLocale();
+  let out = entry[loc] ?? entry.en;
+  if (params) {
+    for (const [k, v] of Object.entries(params)) out = out.replaceAll(`{${k}}`, String(v));
+  }
+  return out;
 }

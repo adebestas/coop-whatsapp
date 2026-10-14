@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { detectLocale, languageInstruction, t, type Locale } from "../src/lib/i18n.js";
+import { runWithLocale } from "../src/lib/runtime-context.js";
 
 describe("language detection", () => {
   it("detects pidgin", () => {
@@ -21,11 +22,22 @@ describe("language detection", () => {
 
 describe("translations", () => {
   it("returns localized strings with english fallback", () => {
-    expect(t("pidgin", "member.balance")).toContain("money");
-    expect(t("hausa", "member.balance")).toBe("💰 Kudin ka");
-    expect(t("en", "member.balance")).toBe("💰 Your Balance");
+    expect(t("member.balance", undefined, "pidgin")).toContain("money");
+    expect(t("member.balance", undefined, "hausa")).toBe("💰 Kudin ka");
+    expect(t("member.balance", undefined, "en")).toBe("💰 Your Balance");
     // Unknown key passes through untouched (never throws).
-    expect(t("pidgin", "nonexistent.key")).toBe("nonexistent.key");
+    expect(t("nonexistent.key", undefined, "pidgin")).toBe("nonexistent.key");
+  });
+});
+
+describe("t() reads the runtime locale", () => {
+  it("uses the context locale", () => {
+    runWithLocale("yoruba", () => {
+      expect(t("money.balance")).toBe("💰 Owo re");
+    });
+  });
+  it("falls back to English for an unknown key", () => {
+    expect(t("does.not.exist")).toBe("does.not.exist");
   });
 });
 
