@@ -106,9 +106,9 @@ export const paystackAdapter: ProviderAdapter = {
     }
   },
 
-  async listBanks(): Promise<Bank[]> {
+  async listBanks(currency?: string): Promise<Bank[]> {
     try {
-      const res = await api<any>("/bank?currency=NGN", "GET");
+      const res = await api<any>(`/bank?currency=${currency ?? "NGN"}`, "GET");
       if (!Array.isArray(res.data)) return [];
       return res.data
         .map((b: any) => ({ code: String(b.code ?? ""), name: String(b.name ?? "") }))
@@ -124,14 +124,14 @@ export const paystackAdapter: ProviderAdapter = {
       let recipientCode: string | undefined;
       try {
         const listRes = await api<any>(
-          `/transferrecipient?account_number=${encodeURIComponent(params.bankAccountNumber)}&bank_code=${encodeURIComponent(params.bankCode)}&currency=NGN`,
+          `/transferrecipient?account_number=${encodeURIComponent(params.bankAccountNumber)}&bank_code=${encodeURIComponent(params.bankCode)}&currency=${params.currency ?? "NGN"}`,
           "GET",
         );
         const existing = listRes.data?.find(
           (r: any) =>
             r.account_number === params.bankAccountNumber &&
             r.bank_code === params.bankCode &&
-            r.currency === "NGN" &&
+            r.currency === (params.currency ?? "NGN") &&
             r.active,
         );
         if (existing?.recipient_code) {
@@ -148,7 +148,7 @@ export const paystackAdapter: ProviderAdapter = {
           name: params.recipientName || "Coop Member",
           account_number: params.bankAccountNumber,
           bank_code: params.bankCode,
-          currency: "NGN",
+          currency: params.currency ?? "NGN",
         });
         recipientCode = recipientRes.data?.recipient_code;
       }
@@ -352,7 +352,7 @@ export const paystackAdapter: ProviderAdapter = {
       }
       const res = await api<any>("/transaction/partial_debit", "POST", {
         authorization_code: params.providerMandateId,
-        currency: "NGN",
+        currency: params.currency ?? "NGN",
         amount: forProvider(params.amount, "paystack"),
         email: params.memberEmail ?? "member@coop.local",
         // Our deterministic debit reference doubles as the idempotency key and

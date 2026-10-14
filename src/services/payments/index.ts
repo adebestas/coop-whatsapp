@@ -126,6 +126,7 @@ export interface DebitMandateParams {
   reference: string;
   narration?: string;
   memberEmail?: string;
+  currency?: string;
 }
 
 export interface DebitResult {
@@ -237,6 +238,7 @@ import { paystackAdapter } from "./paystack.js";
 import { flutterwaveAdapter } from "./flutterwave.js";
 import { RedisCircuitBreaker } from "../../lib/redis-mutex.js";
 import { BANK_CODES } from "../../lib/banks.js";
+import { providersForCurrency } from "../../lib/currency.js";
 
 /** Constant-time string comparison for signature checks (anti-timing-attack). */
 export function signaturesMatch(expected: string, received: string): boolean {
@@ -283,16 +285,18 @@ function adapterFor(name: string): ProviderAdapter | null {
 const ALL_PROVIDERS = ["monnify", "paystack", "flutterwave"];
 
 /** Preferred provider first (env or explicit), then any healthy fallback. */
-export async function resolveProvider(preferred?: string): Promise<ProviderAdapter> {
+export async function resolveProvider(preferred?: string, currency?: string): Promise<ProviderAdapter> {
+  const supported = currency ? providersForCurrency(currency) : ALL_PROVIDERS;
   const configured = (preferred ?? process.env.PAYMENT_PROVIDER ?? "monnify").toLowerCase();
-  const order = [configured, ...ALL_PROVIDERS.filter((p) => p !== configured)];
+  const first = supported.includes(configured) ? configured : supported[0];
+  const order = [first, ...supported.filter((p) => p !== first)];
   for (const name of order) {
     const adapter = adapterFor(name);
     if (adapter && (await isProviderAvailable(name))) return adapter;
   }
   // Everything is marked down — fall back to the configured one and let the
   // caller surface the error.
-  return adapterFor(configured) ?? monnifyAdapter;
+  return adapterFor(first) ?? monnifyAdapter;
 }
 
 // ===== Bank list (guided account entry) =====
