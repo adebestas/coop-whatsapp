@@ -22,6 +22,7 @@ import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js
 import { requestPhoneChange } from "./phone-change.js";
 import { detectLocale, type Locale } from "../lib/i18n.js";
 import { runWithLocale, getLocale } from "../lib/runtime-context.js";
+import { translateToEnglish } from "../lib/translate.js";
 
 export const LOCALES: Locale[] = ["en", "pidgin", "hausa", "yoruba", "igbo"];
 
@@ -415,10 +416,14 @@ export async function handleMessage(
   if (coops.length <= 1) {
     const coopId = coops[0]?.id ?? null;
     if (coopId) {
+      const detected = detectLocale(text);
+      const commandText = detected === "en" ? text : await translateToEnglish(text, detected);
       return withCoopContext(coopId, async () => {
         const member = await getMemberByPhone(phone, coopId);
         const locale = resolveMemberLocale(member, getLocale(), text);
-        return runWithLocale(locale, () => handleMessageInner(phone, text, meta, coopId, member));
+        return runWithLocale(locale, () =>
+          handleMessageInner(phone, commandText, meta, coopId, member),
+        );
       });
     }
     // No cooperative yet — a join flow may be in progress. Resolve the
@@ -428,9 +433,7 @@ export async function handleMessage(
     if (joinCode) {
       const joinCoopId = await resolveCoopByCode(joinCode);
       if (joinCoopId) {
-        return withCoopContext(joinCoopId, () =>
-          handleMessageInner(phone, text, meta, joinCoopId),
-        );
+        return withCoopContext(joinCoopId, () => handleMessageInner(phone, text, meta, joinCoopId));
       }
     }
     return handleMessageInner(phone, text, meta);
@@ -441,10 +444,14 @@ export async function handleMessage(
   const session = await prisma.session.findUnique({ where: { phone } });
   const selected = session?.selectedCoopId ?? null;
   if (selected && coops.some((c) => c.id === selected)) {
+    const detected = detectLocale(text);
+    const commandText = detected === "en" ? text : await translateToEnglish(text, detected);
     return withCoopContext(selected, async () => {
       const member = await getMemberByPhone(phone, selected);
       const locale = resolveMemberLocale(member, getLocale(), text);
-      return runWithLocale(locale, () => handleMessageInner(phone, text, meta, selected, member));
+      return runWithLocale(locale, () =>
+        handleMessageInner(phone, commandText, meta, selected, member),
+      );
     });
   }
 
@@ -1120,7 +1127,12 @@ async function handleMessageInner(
         });
         break;
       }
-      const voteRes = await castMotionVote(member.cooperativeId, motionRef, member.id, motionChoice);
+      const voteRes = await castMotionVote(
+        member.cooperativeId,
+        motionRef,
+        member.id,
+        motionChoice,
+      );
       await sendText({ to: phone, text: voteRes.message });
       break;
     }
@@ -1270,12 +1282,7 @@ async function handleMessageInner(
         });
         break;
       }
-      const contributed = await contributeToGroup(
-        member.cooperativeId,
-        groupId,
-        member.id,
-        amount,
-      );
+      const contributed = await contributeToGroup(member.cooperativeId, groupId, member.id, amount);
       await sendText({ to: phone, text: contributed.message });
       break;
     }
