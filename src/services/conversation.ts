@@ -20,6 +20,22 @@ import { listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js"
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
 import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js";
 import { requestPhoneChange } from "./phone-change.js";
+import { detectLocale, type Locale } from "../lib/i18n.js";
+import { runWithLocale, getLocale } from "../lib/runtime-context.js";
+
+export const LOCALES: Locale[] = ["en", "pidgin", "hausa", "yoruba", "igbo"];
+
+export function resolveMemberLocale(
+  member: { locale?: string | null } | null,
+  coopDefault: string,
+  text: string,
+): Locale {
+  const pref = member?.locale as Locale | undefined;
+  if (pref && LOCALES.includes(pref)) return pref;
+  const coop = coopDefault as Locale;
+  if (LOCALES.includes(coop) && coop !== "en") return coop;
+  return detectLocale(text);
+}
 
 /** Session TTL — how long an awaiting state stays alive before reset. */
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -399,7 +415,11 @@ export async function handleMessage(
   if (coops.length <= 1) {
     const coopId = coops[0]?.id ?? null;
     if (coopId) {
-      return withCoopContext(coopId, () => handleMessageInner(phone, text, meta, coopId));
+      return withCoopContext(coopId, async () => {
+        const member = await getMemberByPhone(phone, coopId);
+        const locale = resolveMemberLocale(member, getLocale(), text);
+        return runWithLocale(locale, () => handleMessageInner(phone, text, meta, coopId, member));
+      });
     }
     // No cooperative yet — a join flow may be in progress. Resolve the
     // cooperative from the session's join code so the flow runs in context.
@@ -421,7 +441,11 @@ export async function handleMessage(
   const session = await prisma.session.findUnique({ where: { phone } });
   const selected = session?.selectedCoopId ?? null;
   if (selected && coops.some((c) => c.id === selected)) {
-    return withCoopContext(selected, () => handleMessageInner(phone, text, meta, selected));
+    return withCoopContext(selected, async () => {
+      const member = await getMemberByPhone(phone, selected);
+      const locale = resolveMemberLocale(member, getLocale(), text);
+      return runWithLocale(locale, () => handleMessageInner(phone, text, meta, selected, member));
+    });
   }
 
   const choice = text.trim();
@@ -456,6 +480,7 @@ async function handleMessageInner(
   text: string,
   meta: MessageMeta = {},
   coopId?: string,
+  preloadedMember?: Awaited<ReturnType<typeof getMemberByPhone>>,
 ): Promise<void> {
   messageCounter++;
   const shouldUpdateTimestamp = messageCounter % SESSION_UPDATE_EVERY === 0;
@@ -498,7 +523,7 @@ async function handleMessageInner(
     return;
   }
 
-  const member = await getMemberByPhone(phone, coopId);
+  const member = preloadedMember ?? (await getMemberByPhone(phone, coopId));
 
   const { cmd: preCmd } = parseCommand(text);
 
@@ -573,6 +598,24 @@ async function handleMessageInner(
       where: { id: member.id },
       data: { preferredChannel: platformOf(phone) },
     });
+  }
+
+  if (member && /^language$/i.test(text.trim())) {
+    await sendText({
+      to: phone,
+      text: `🌐 Your language: *${resolveMemberLocale(member, getLocale(), text)}*\n\nReply *language <en|pidgin|hausa|yoruba|igbo>* to change it.`,
+    });
+    return;
+  }
+  if (member && /^language\s+/i.test(text.trim())) {
+    const want = text.trim().split(/\s+/)[1]?.toLowerCase() as Locale;
+    if (!LOCALES.includes(want)) {
+      await sendText({ to: phone, text: `Unsupported language. Choose: ${LOCALES.join(", ")}.` });
+      return;
+    }
+    await prisma.member.update({ where: { id: member.id }, data: { locale: want } });
+    await sendText({ to: phone, text: `✅ Language set to *${want}*.` });
+    return;
   }
 
   const { cmd, args } = parseCommand(text);
