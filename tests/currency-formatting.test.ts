@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { formatBalance } from "../src/lib/money.js";
 import { runWithCurrency } from "../src/lib/runtime-context.js";
+import { formatFallbackResponse } from "../src/lib/ai-query.js";
 
 describe("formatBalance", () => {
   it("defaults to NGN outside a context", () => {
@@ -16,6 +17,18 @@ describe("formatBalance", () => {
   it("lets an explicit currency override the context", () => {
     runWithCurrency("GHS", () => {
       expect(formatBalance(100050, "KES")).toBe("KSh1,000.50");
+    });
+  });
+});
+
+describe("AI fallback currency", () => {
+  it("AI fallback uses the context currency", () => {
+    runWithCurrency("GHS", () => {
+      const out = formatFallbackResponse("member_balance", {
+        member: { walletBalance: 100050, totalSaved: 100050, activeLoan: null },
+      });
+      expect(out).toContain("₵");
+      expect(out).not.toContain("₦");
     });
   });
 });

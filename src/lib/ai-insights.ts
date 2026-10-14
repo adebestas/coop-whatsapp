@@ -14,6 +14,7 @@
 import { prisma } from "./prisma.js";
 import { getCoopSnapshot, getSavingsTrend, getLoanPerformance } from "./ai-data.js";
 import { groqFetch, groqAvailable, groqModel, GROQ_TIMEOUT_MS } from "./groq.js";
+import { formatBalance } from "./money.js";
 
 /**
  * Generate AI-powered financial insights.
@@ -86,7 +87,7 @@ async function generateFallbackInsights(cooperativeId: string): Promise<string> 
     getLoanPerformance(cooperativeId),
   ]);
 
-  const fmt = (n: number) => `₦${(n / 100).toLocaleString()}`;
+  const fmt = (n: number) => formatBalance(n);
 
   let insights = `📊 *Cooperative Financial Insights*\n\n`;
 
@@ -147,7 +148,7 @@ export async function generateLoanRiskAssessment(
     }),
   ]);
 
-  const fmt = (n: number) => `₦${(n / 100).toLocaleString()}`;
+  const fmt = (n: number) => formatBalance(n);
 
   let assessment = `⚠️ *Loan Risk Assessment*\n\n`;
 

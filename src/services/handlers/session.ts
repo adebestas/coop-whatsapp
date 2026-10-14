@@ -1871,7 +1871,7 @@ export async function handleAwaitingInput(
       const plansText = product.plans
         .map(
           (p) =>
-            `• *${p.code}* — ₦${(p.premiumKobo / 100).toFixed(0)}/month, cover ₦${(p.coverageKobo / 100).toFixed(0)}`,
+            `• *${p.code}* — ${formatBalance(p.premiumKobo)}/month, cover ${formatBalance(p.coverageKobo)}`,
         )
         .join("\n");
       const nextData = { insuranceProduct: product.code };
@@ -1936,7 +1936,7 @@ export async function handleAwaitingInput(
       });
       await sendText({
         to: phone,
-        text: `Confirm *${product.name}* — *${plan.name}* at ₦${(plan.premiumKobo / 100).toFixed(0)}/month (cover ₦${(plan.coverageKobo / 100).toFixed(0)})?\n\nReply *yes* to confirm or *no* to cancel.`,
+        text: `Confirm *${product.name}* — *${plan.name}* at ${formatBalance(plan.premiumKobo)}/month (cover ${formatBalance(plan.coverageKobo)})?\n\nReply *yes* to confirm or *no* to cancel.`,
       });
       break;
     }

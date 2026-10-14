@@ -253,7 +253,7 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
   if (tx.direction === "out") {
     const agg = await checkAggregateThreshold(tx.memberId, tx.cooperativeId, reportingThreshold);
     if (agg.exceeds) {
-      const aggReason = `Aggregate outflow ₦${(agg.total / 100).toLocaleString()} in 24h exceeds ₦${(reportingThreshold / 100).toLocaleString()} CBN threshold`;
+      const aggReason = `Aggregate outflow ${formatBalance(agg.total)} in 24h exceeds ₦${(reportingThreshold / 100).toLocaleString()} CBN threshold`;
       reasons.push(aggReason);
       await autoFileSTR(tx, aggReason, agg.total);
     }

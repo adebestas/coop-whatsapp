@@ -11,6 +11,7 @@
 
 import { prisma } from "./prisma.js";
 import { groqAvailable, groqModel, GROQ_TIMEOUT_MS, groqFetch } from "./groq.js";
+import { formatBalance } from "./money.js";
 
 const KNOWN_COMMANDS = [
   "save",
@@ -326,7 +327,7 @@ export async function generateContextualHelp(memberId: string): Promise<string> 
     help += `• *loan <amount> <months>* — apply for a loan\n`;
   } else {
     const loan = member.loans[0];
-    help += `• *repay <amount>* — repay your loan (₦${(loan.balance / 100).toLocaleString()} remaining)\n`;
+    help += `• *repay <amount>* — repay your loan (${formatBalance(loan.balance)} remaining)\n`;
   }
 
   if (member.wallet?.balance && member.wallet.balance > 0) {

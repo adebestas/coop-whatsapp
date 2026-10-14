@@ -25,6 +25,7 @@ import {
 } from "./groq.js";
 import { KNOWN_COMMANDS } from "./ai.js";
 import { languageInstruction } from "./i18n.js";
+import { formatBalance } from "./money.js";
 import { getLocale } from "./runtime-context.js";
 
 export type AIQueryType =
@@ -193,8 +194,11 @@ ${languageInstruction(getLocale())}`;
 /**
  * Format a deterministic fallback response when AI is unavailable.
  */
-function formatFallbackResponse(intent: AIQueryType, data: Record<string, unknown>): string {
-  const fmt = (n: number) => `₦${(n / 100).toLocaleString()}`;
+export function formatFallbackResponse(
+  intent: AIQueryType,
+  data: Record<string, unknown>,
+): string {
+  const fmt = (n: number) => formatBalance(n);
 
   switch (intent) {
     case "member_balance": {

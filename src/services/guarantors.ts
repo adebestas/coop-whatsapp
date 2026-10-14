@@ -164,7 +164,7 @@ export async function addGuarantor(
   // Tell the guarantor they've been requested and how to accept.
   const requestText =
     `🔔 *Guarantor request*\n\n` +
-    `*${loan.member.name}* has listed you as a guarantor for a loan of *₦${loan.amount.toLocaleString()}*.\n\n` +
+    `*${loan.member.name}* has listed you as a guarantor for a loan of *${formatBalance(loan.amount)}*.\n\n` +
     `To accept, reply with:\n*confirm ${code}*\n\n` +
     `Only accept if you trust this member — you're vouching for them.`;
   void notifyMember(guarantor, requestText).catch((err) =>
