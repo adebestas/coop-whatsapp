@@ -4376,6 +4376,10 @@ export async function handleAdminCommand(
       }
 
       case "federation": {
+        if (!isSuper) {
+          await sendText({ to: phone, text: "Only the *super admin* can manage federations." });
+          return true;
+        }
         const sub = (args[0] ?? "").toLowerCase();
         if (sub === "create") {
           const [name, baseCurrency] = [args[1], (args[2] ?? "NGN").toUpperCase()];

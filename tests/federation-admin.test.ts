@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
 import { handleAdminCommand } from "../src/services/admin.js";
+import { sendText } from "../src/lib/messaging.js";
 
 beforeEach(async () => {
   vi.clearAllMocks();
@@ -41,5 +42,22 @@ describe("federation admin commands", () => {
     });
     expect(rate).toBeTruthy();
     expect(rate?.rate).toBeCloseTo(0.008);
+  });
+
+  it("refuses a non-super admin from creating a federation", async () => {
+    const coop = await createTestCoop("FEDC3");
+    const admin = await createTestMember(coop.id, { phone: "2348000090021", role: "admin" });
+
+    await handleAdminCommand(admin.phone, "federation", ["create", "X", "NGN"]);
+
+    const fed = await prisma.federation.findFirst({ where: { name: "X" } });
+    expect(fed).toBeNull();
+
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(texts).toMatch(/super admin/i);
+    expect(texts).toMatch(/federation/i);
   });
 });
