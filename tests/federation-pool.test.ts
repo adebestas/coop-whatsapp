@@ -30,4 +30,11 @@ describe("federation pool", () => {
     const after = await prisma.federationLoan.findUnique({ where: { id: loan.id } });
     expect(after?.status).toBe("repaid");
   });
+
+  it("rejects a non-positive contribution and leaves the fund unchanged", async () => {
+    const { fed, coop } = await setup();
+    await expect(contribute(fed.id, coop.id, -1)).rejects.toThrow("INVALID_AMOUNT");
+    const after = await prisma.cooperative.findUnique({ where: { id: coop.id } });
+    expect(after?.federationFundBalance).toBe(10_000_000);
+  });
 });

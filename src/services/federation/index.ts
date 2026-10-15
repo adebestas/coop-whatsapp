@@ -50,6 +50,7 @@ import { postFederationJournal } from "./ledger.js";
 import { getRate } from "./fx.js";
 
 export async function contribute(federationId: string, cooperativeId: string, amountKobo: number): Promise<void> {
+  if (!(amountKobo > 0)) throw new Error("INVALID_AMOUNT");
   const { currency } = await getCoopMeta(cooperativeId);
   const fed = await prisma.federation.findUniqueOrThrow({ where: { id: federationId } });
   const rate = await getRate(federationId, currency, fed.baseCurrency);
@@ -86,6 +87,7 @@ export async function contribute(federationId: string, cooperativeId: string, am
 }
 
 export async function borrow(federationId: string, cooperativeId: string, amountKobo: number, termMonths: number, lenderCooperativeId?: string) {
+  if (!(amountKobo > 0)) throw new Error("INVALID_AMOUNT");
   const { currency } = await getCoopMeta(cooperativeId);
   const fed = await prisma.federation.findUniqueOrThrow({ where: { id: federationId } });
   const rate = await getRate(federationId, currency, fed.baseCurrency);
@@ -125,6 +127,7 @@ export async function borrow(federationId: string, cooperativeId: string, amount
 }
 
 export async function repay(loanId: string, amountKobo: number): Promise<void> {
+  if (!(amountKobo > 0)) throw new Error("INVALID_AMOUNT");
   const loan = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loanId } });
   const cooperativeId = loan.borrowerCooperativeId;
   const fed = await prisma.federation.findUniqueOrThrow({ where: { id: loan.federationId } });
@@ -155,14 +158,15 @@ export async function repay(loanId: string, amountKobo: number): Promise<void> {
         { account: `coop:${cooperativeId}:receivable`, direction: "CREDIT", amount: baseAmount, cooperativeId },
       ],
     });
-  });
-  const repaid = loan.repaidKobo + amountKobo;
-  await prisma.federationLoan.update({
-    where: { id: loanId },
-    data: { repaidKobo: repaid, status: repaid >= loan.principalKobo ? "repaid" : "active" },
-  });
-  await prisma.federationLoanRepayment.create({
-    data: { loanId, amountKobo, currency: loan.currency, fxRateToBase: loan.fxRateToBase },
+    const fresh = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loanId } });
+    const repaid = fresh.repaidKobo + amountKobo;
+    await prisma.federationLoan.update({
+      where: { id: loanId },
+      data: { repaidKobo: repaid, status: repaid >= fresh.principalKobo ? "repaid" : "active" },
+    });
+    await prisma.federationLoanRepayment.create({
+      data: { loanId, amountKobo, currency: loan.currency, fxRateToBase: loan.fxRateToBase },
+    });
   });
   await audit({ cooperativeId, actorPhone: "system", action: "federation.repay", targetType: "federation_loan", targetId: loanId, amount: amountKobo, detail: `repaid ${amountKobo} ${loan.currency}` });
 }
