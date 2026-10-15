@@ -25,6 +25,9 @@ import { forProvider } from "../../lib/money.js";
 
 const API_BASE = "https://api.paystack.co";
 
+/** Hard cap on any single Paystack HTTP call so a hung socket cannot hold a connection. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
 /** Shape contract for a charge.success webhook payload (amounts stay in kobo). */
 const PaystackChargeSchema = z
   .object({
@@ -77,6 +80,7 @@ async function api<T>(
       Authorization: `Bearer ${getSecret()}`,
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const json = (await res.json()) as any;
   if (!res.ok || json.status !== true) {

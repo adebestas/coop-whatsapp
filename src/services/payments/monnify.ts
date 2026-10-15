@@ -43,6 +43,9 @@ const BASE_URL =
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
+/** Hard cap on any single Monnify HTTP call so a hung socket cannot hold a connection. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
 /** Shape contract for a successful-transaction webhook (amounts arrive in NAIRA). */
 const MonnifyTxSchema = z
   .object({
@@ -104,6 +107,7 @@ async function accessToken(): Promise<string> {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Basic ${basic}` },
     body: "{}",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`Monnify auth failed (${res.status})`);
   const json = (await res.json()) as { responseBody: { accessToken: string; expiresIn: number } };
@@ -121,6 +125,7 @@ async function api<T>(method: "GET" | "POST" | "PUT", path: string, body?: unkno
     method,
     headers,
     body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const json = (await res.json()) as T;
   return json;

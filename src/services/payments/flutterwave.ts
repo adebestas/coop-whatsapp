@@ -19,6 +19,9 @@ import { countryForCurrency } from "../../lib/currency.js";
 
 const API_BASE = "https://api.flutterwave.com/v3";
 
+/** Hard cap on any single Flutterwave HTTP call so a hung socket cannot hold a connection. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
 /** Shape contract for a charge.completed webhook payload (amounts in kobo). */
 const FlutterwaveChargeSchema = z
   .object({
@@ -123,6 +126,7 @@ async function api<T>(
       Authorization: `Bearer ${getSecret()}`,
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const json = (await res.json()) as any;
   if (!res.ok || json.status !== "success") {
