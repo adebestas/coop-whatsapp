@@ -640,11 +640,17 @@ async function handleMessageInner(
     const parts = text.trim().split(/\s+/);
     const sub = (parts[1] ?? "").toLowerCase();
     const feds = await listFederationsForCoop(member.cooperativeId);
-    if (!feds.length) { await sendText({ to: phone, text: "Your cooperative is not in a federation." }); return; }
+    if (!feds.length) {
+      await sendText({ to: phone, text: "Your cooperative is not in a federation." });
+      return;
+    }
     const fed = feds[0];
     if (sub === "position") {
       const pos = await getPosition(fed.id, member.cooperativeId);
-      await sendText({ to: phone, text: `*${fed.name}* position\n\nPool stake: *${formatBalance(pos.stakeKobo)}*\nOwed to federation: *${formatBalance(pos.owedKobo)}*` });
+      await sendText({
+        to: phone,
+        text: `*${fed.name}* position\n\nPool stake: *${formatBalance(pos.stakeKobo)}*\nOwed to federation: *${formatBalance(pos.owedKobo)}*`,
+      });
       return;
     }
     if (member.role !== "admin" && member.role !== "superadmin") {
@@ -653,24 +659,55 @@ async function handleMessageInner(
     }
     if (sub === "contribute") {
       const amount = toKobo(Number(parts[2]));
-      if (!(amount > 0)) { await sendText({ to: phone, text: "Usage: *federation contribute <amount>*" }); return; }
+      if (!(amount > 0)) {
+        await sendText({ to: phone, text: "Usage: *federation contribute <amount>*" });
+        return;
+      }
       try {
         await contribute(fed.id, member.cooperativeId, amount);
-        await sendText({ to: phone, text: `✅ Contributed *${formatBalance(amount)}* to *${fed.name}*.` });
+        await sendText({
+          to: phone,
+          text: `✅ Contributed *${formatBalance(amount)}* to *${fed.name}*.`,
+        });
       } catch (err: any) {
-        await sendText({ to: phone, text: err?.message === "INSUFFICIENT_BALANCE" ? "Insufficient wallet balance." : "Could not contribute right now." });
+        await sendText({
+          to: phone,
+          text:
+            err?.message === "INSUFFICIENT_BALANCE"
+              ? "Insufficient wallet balance."
+              : "Could not contribute right now.",
+        });
       }
       return;
     }
     if (sub === "borrow") {
       const amount = toKobo(Number(parts[2]));
       const months = Number(parts[3]);
-      if (!(amount > 0) || !(months > 0)) { await sendText({ to: phone, text: "Usage: *federation borrow <amount> <months>*" }); return; }
-      const loan = await borrow(fed.id, member.cooperativeId, amount, months);
-      await sendText({ to: phone, text: `✅ Borrowed *${formatBalance(amount)}* for ${months} months. Loan *${loan.id.slice(0, 8)}*.` });
+      if (!(amount > 0) || !(months > 0)) {
+        await sendText({ to: phone, text: "Usage: *federation borrow <amount> <months>*" });
+        return;
+      }
+      try {
+        const loan = await borrow(fed.id, member.cooperativeId, amount, months);
+        await sendText({
+          to: phone,
+          text: `✅ Loan request *${loan.id.slice(0, 8)}* for *${formatBalance(amount)}* over ${months} months is pending federation approval.`,
+        });
+      } catch (err: any) {
+        const msg =
+          err?.message === "INSUFFICIENT_POOL_LIQUIDITY"
+            ? "The federation pool does not have enough liquidity."
+            : err?.message === "INSUFFICIENT_LENDER_STAKE"
+              ? "The chosen lender does not have enough available stake."
+              : "Could not request the loan right now.";
+        await sendText({ to: phone, text: msg });
+      }
       return;
     }
-    await sendText({ to: phone, text: "Usage: *federation position|contribute <amount>|borrow <amount> <months>*" });
+    await sendText({
+      to: phone,
+      text: "Usage: *federation position|contribute <amount>|borrow <amount> <months>*",
+    });
     return;
   }
 
