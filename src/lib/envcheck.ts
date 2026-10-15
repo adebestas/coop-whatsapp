@@ -12,6 +12,11 @@ interface EnvSpec {
 
 const REQUIRED_FATAL: EnvSpec[] = [
   { key: "WHATSAPP_TOKEN", fatal: true, hint: "Meta WhatsApp Cloud API access token" },
+  {
+    key: "WHATSAPP_APP_SECRET",
+    fatal: true,
+    hint: "Meta App Secret (verifies inbound webhook signatures)",
+  },
   { key: "WHATSAPP_PHONE_NUMBER_ID", fatal: true, hint: "Meta WhatsApp phone number id" },
   {
     key: "ADMIN_JWT_SECRET",

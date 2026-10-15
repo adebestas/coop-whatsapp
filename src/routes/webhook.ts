@@ -22,13 +22,26 @@ async function withUserMutex<T>(phone: string, fn: () => Promise<T>): Promise<T>
 /**
  * Verify WhatsApp webhook signature (X-Hub-Signature-256).
  * Prevents attackers from injecting fake messages.
+ *
+ * Meta signs deliveries with the App Secret (Meta App Dashboard → Settings →
+ * Basic → App Secret), NOT the Cloud API access token. Fail-closed in
+ * production; in non-production a missing App Secret skips verification so the
+ * bot can be exercised locally before the secret is provisioned.
  */
-function verifyWhatsAppSignature(rawBody: string, signature: string | undefined): boolean {
-  if (!signature || !process.env.WHATSAPP_TOKEN) return false;
+export function verifyWhatsAppSignature(rawBody: string, signature: string | undefined): boolean {
+  const secret = config.whatsapp.appSecret;
+  if (!secret) {
+    if (process.env.NODE_ENV === "production") return false;
+    console.warn(
+      "[webhook] WHATSAPP_APP_SECRET not set — skipping signature verification (non-production only)",
+    );
+    return true;
+  }
+  if (!signature) return false;
   // Meta sends "sha256=<hex>"; strip the scheme prefix before comparing the
   // raw hex digest (otherwise timingSafeEqual throws on a length mismatch).
   const hex = signature.startsWith("sha256=") ? signature.slice("sha256=".length) : signature;
-  const expected = createHmac("sha256", process.env.WHATSAPP_TOKEN).update(rawBody).digest("hex");
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
   try {
     return timingSafeEqual(Buffer.from(expected), Buffer.from(hex));
   } catch {

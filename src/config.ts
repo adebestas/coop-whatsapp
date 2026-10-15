@@ -11,6 +11,9 @@ export const config = {
   host: process.env.HOST ?? "0.0.0.0",
   whatsapp: {
     token: process.env.WHATSAPP_TOKEN ?? "",
+    // Meta signs inbound webhook deliveries with the App Secret (NOT the access
+    // token). Used to verify X-Hub-Signature-256.
+    appSecret: process.env.WHATSAPP_APP_SECRET ?? "",
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID ?? "",
     verifyToken: process.env.WHATSAPP_VERIFY_TOKEN ?? "",
     // Published WhatsApp Flow used for hidden PIN/OTP entry (see flows/pin-flow.json).
@@ -46,6 +49,11 @@ export const config = {
 export function validateConfig() {
   if (!config.whatsapp.token && process.env.NODE_ENV === "production") {
     throw new Error("WHATSAPP_TOKEN is required in production");
+  }
+  if (!config.whatsapp.appSecret && process.env.NODE_ENV === "production") {
+    throw new Error(
+      "WHATSAPP_APP_SECRET is required in production (Meta signs webhooks with the App Secret, not the access token)",
+    );
   }
   if (!config.telegram.token && process.env.NODE_ENV === "production") {
     console.warn("[config] TELEGRAM_BOT_TOKEN not set — Telegram bot disabled in production");
