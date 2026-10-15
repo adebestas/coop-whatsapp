@@ -105,6 +105,13 @@ import {
   type PeriodType,
 } from "./regulator-reporting.js";
 import { setReferralConfig, setReferralEnabled, referralReport } from "./referrals.js";
+import {
+  addMember,
+  approveLoan as approveFederationLoan,
+  createFederation,
+  markDefaulted,
+} from "./federation/index.js";
+import { setRate } from "./federation/fx.js";
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
 
@@ -4365,6 +4372,104 @@ export async function handleAdminCommand(
           );
         }
         await sendText({ to: phone, text: plines.join("\n") });
+        return true;
+      }
+
+      case "federation": {
+        const sub = (args[0] ?? "").toLowerCase();
+        if (sub === "create") {
+          const [name, baseCurrency] = [args[1], (args[2] ?? "NGN").toUpperCase()];
+          if (!name) {
+            await sendText({
+              to: phone,
+              text: "Usage: *federation create <name> <baseCurrency>*",
+            });
+            return true;
+          }
+          const fed = await createFederation(name, `FED${Date.now()}`, baseCurrency);
+          await sendText({
+            to: phone,
+            text: `✅ Federation *${fed.name}* created (${fed.baseCurrency}).`,
+          });
+          return true;
+        }
+        if (sub === "addcoop") {
+          const code = args[1];
+          const coop = code ? await prisma.cooperative.findUnique({ where: { code } }) : null;
+          if (!coop) {
+            await sendText({ to: phone, text: "Usage: *federation addcoop <coop code>*" });
+            return true;
+          }
+          const fed = await prisma.federation.findFirst({ orderBy: { createdAt: "desc" } });
+          if (!fed) {
+            await sendText({ to: phone, text: "No federation exists yet." });
+            return true;
+          }
+          await addMember(fed.id, coop.id);
+          await sendText({ to: phone, text: `✅ *${coop.name}* added to *${fed.name}*.` });
+          return true;
+        }
+        if (sub === "rate") {
+          const [from, to, rateStr] = [args[1]?.toUpperCase(), args[2]?.toUpperCase(), args[3]];
+          const rate = Number(rateStr);
+          if (!from || !to || !Number.isFinite(rate) || rate <= 0) {
+            await sendText({ to: phone, text: "Usage: *federation rate <from> <to> <rate>*" });
+            return true;
+          }
+          const fed = await prisma.federation.findFirst({ orderBy: { createdAt: "desc" } });
+          if (!fed) {
+            await sendText({ to: phone, text: "No federation exists yet." });
+            return true;
+          }
+          await setRate(fed.id, from, to, rate, phone);
+          await sendText({ to: phone, text: `✅ Rate set: 1 ${from} = ${rate} ${to}.` });
+          return true;
+        }
+        if (sub === "loans") {
+          const fed = await prisma.federation.findFirst({ orderBy: { createdAt: "desc" } });
+          const loans = fed
+            ? await prisma.federationLoan.findMany({
+                where: { federationId: fed.id },
+                orderBy: { createdAt: "desc" },
+                take: 20,
+              })
+            : [];
+          const lines = loans.map(
+            (l) =>
+              `• *${l.id.slice(0, 8)}* — ${formatBalance(l.principalKobo, l.currency)} ${l.status}`,
+          );
+          await sendText({
+            to: phone,
+            text: lines.length
+              ? `*Federation loans*\n\n${lines.join("\n")}`
+              : "No federation loans.",
+          });
+          return true;
+        }
+        if (sub === "approveloan") {
+          const id = args[1];
+          if (!id) {
+            await sendText({ to: phone, text: "Usage: *federation approveloan <id>*" });
+            return true;
+          }
+          await approveFederationLoan(id);
+          await sendText({ to: phone, text: `✅ Loan *${id}* approved.` });
+          return true;
+        }
+        if (sub === "default") {
+          const id = args[1];
+          if (!id) {
+            await sendText({ to: phone, text: "Usage: *federation default <id>*" });
+            return true;
+          }
+          await markDefaulted(id);
+          await sendText({ to: phone, text: `Loan *${id}* marked defaulted.` });
+          return true;
+        }
+        await sendText({
+          to: phone,
+          text: "Usage: *federation create|addcoop|rate|loans|approveloan|default*",
+        });
         return true;
       }
 
