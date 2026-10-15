@@ -2,7 +2,7 @@ import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { sendText, sendLongText, notifyMember } from "../lib/messaging.js";
 import { cacheDel } from "../lib/cache.js";
 import { invalidateCoopMeta } from "../lib/tenant-context.js";
-import { getCurrency } from "../lib/runtime-context.js";
+import { getCurrency, getCoopId } from "../lib/runtime-context.js";
 import { COUNTRY_CURRENCY, currencyForCountry } from "../lib/currency.js";
 import { LOCALES, t } from "../lib/i18n.js";
 import { normalizeTitle, displayTitle } from "./posts.js";
@@ -190,7 +190,12 @@ async function adminContext(phone: string): Promise<AdminContext | null> {
   // ALWAYS re-check live role + status from the DB per command, so a
   // suspended/demoted/deceased admin loses chat admin powers immediately.
   const admin = await prisma.member.findFirst({
-    where: { phone, role: { in: ["admin", "superadmin"] }, status: "active" },
+    where: {
+      phone,
+      role: { in: ["admin", "superadmin"] },
+      status: "active",
+      ...(getCoopId() ? { cooperativeId: getCoopId() } : {}),
+    },
     include: { cooperative: true },
   });
   if (!admin) return null;
@@ -230,7 +235,11 @@ async function handleCommitteeCommand(
   ctx: AdminContext | null,
 ): Promise<boolean> {
   const member = await prisma.member.findFirst({
-    where: { phone, status: { not: "deceased" } },
+    where: {
+      phone,
+      status: { not: "deceased" },
+      ...(getCoopId() ? { cooperativeId: getCoopId() } : {}),
+    },
   });
   if (!member) return false;
   const coopId = member.cooperativeId;

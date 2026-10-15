@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { prisma } from "./prisma.js";
 import { sendText } from "./messaging.js";
 import { audit } from "../services/audit.js";
+import { getCoopId } from "./runtime-context.js";
 
 // ---- Device Binding & Session Anomaly Detection ----
 // Detects SIM swap / session hijack by tracking device fingerprints.
@@ -56,7 +57,7 @@ export async function validateDeviceSession(params: {
       if (timeDiff < ANOMALY_WINDOW_MS) {
         // Rapid platform/IP switch = suspicious
         const member = await prisma.member.findFirst({
-          where: { phone: memberPhone },
+          where: { phone: memberPhone, ...(getCoopId() ? { cooperativeId: getCoopId() } : {}) },
           select: { id: true, name: true, cooperativeId: true, phone: true },
         });
         if (member) {

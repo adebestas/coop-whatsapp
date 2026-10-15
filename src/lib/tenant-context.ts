@@ -73,7 +73,7 @@ export async function withCoopContext<T>(
     withTx(async (tx) => {
       await setCoopContext(tx as never, cooperativeId);
       const meta = await getCoopMeta(cooperativeId, tx as unknown as typeof prisma);
-      return runWithContext({ currency: meta.currency, locale: meta.locale }, () =>
+      return runWithContext({ currency: meta.currency, locale: meta.locale, cooperativeId }, () =>
         fn(tx as unknown as typeof prisma),
       );
     }),

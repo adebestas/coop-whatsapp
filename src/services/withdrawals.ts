@@ -10,11 +10,29 @@ import { recordLedger } from "./ledger.js";
 import { checkTenureLimit } from "../lib/security-hardening.js";
 import { flagTransaction } from "./aml.js";
 import { assertNotRevoked } from "./revocation.js";
+import { getCoopId } from "../lib/runtime-context.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
 /** Minimum gap between two withdrawals (6 months). */
 export const WITHDRAW_COOLDOWN_MS = 180 * 24 * 60 * 60 * 1000;
+
+/**
+ * Resolve a member by phone WITHIN the active cooperative. A phone can belong
+ * to more than one cooperative, so a bare-phone lookup can pick the wrong
+ * tenant's member/wallet/books. Inside a coop context we key on
+ * (cooperativeId, phone); outside one we fall back to phone-only.
+ */
+async function memberByPhone(phone: string, client: typeof prisma = prisma) {
+  const coopId = getCoopId();
+  if (coopId) {
+    return client.member.findUnique({
+      where: { cooperativeId_phone: { cooperativeId: coopId, phone } },
+      include: { wallet: true },
+    });
+  }
+  return client.member.findFirst({ where: { phone }, include: { wallet: true } });
+}
 
 export interface WithdrawResult {
   ok: boolean;
@@ -49,10 +67,7 @@ async function resolveRequestId(
 export async function withdrawLimit(
   phone: string,
 ): Promise<{ balance: number; max: number } | null> {
-  const member = await prisma.member.findFirst({
-    where: { phone },
-    include: { wallet: true },
-  });
+  const member = await memberByPhone(phone);
   if (!member || !member.wallet) return null;
   const balance = member.wallet.balance ?? 0;
   return { balance, max: Math.floor(balance * WITHDRAW_LIMIT_RATIO) };
@@ -62,7 +77,7 @@ export async function withdrawLimit(
 export async function canWithdraw(
   phone: string,
 ): Promise<{ ok: boolean; message: string; member: any }> {
-  const member = await prisma.member.findFirst({ where: { phone }, include: { wallet: true } });
+  const member = await memberByPhone(phone);
   if (!member || !member.wallet) {
     return {
       ok: false,
@@ -110,7 +125,7 @@ export async function requestWithdrawal(
     return { ok: false, message: "Enter a valid amount, e.g. *withdraw 5000*." };
   }
   // Get the member first to access cooperative config
-  const memberForConfig = await prisma.member.findFirst({ where: { phone } });
+  const memberForConfig = await memberByPhone(phone);
   if (memberForConfig) {
     const coopConfig = await getCoopConfig(memberForConfig.cooperativeId);
     if (amount < coopConfig.minWithdrawal) {
@@ -144,10 +159,7 @@ export async function requestWithdrawal(
   // Atomic eligibility check + request creation inside a transaction.
   // SELECT ... FOR UPDATE locks the member row so concurrent requests queue.
   const result = await withTx(async (tx) => {
-    const member = await tx.member.findFirst({
-      where: { phone },
-      include: { wallet: true },
-    });
+    const member = await memberByPhone(phone, tx as unknown as typeof prisma);
     if (!member || !member.wallet) {
       return {
         ok: false,

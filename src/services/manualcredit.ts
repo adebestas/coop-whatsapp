@@ -4,6 +4,7 @@ import { formatBalance } from "./cooperative.js";
 import { recordLedger } from "./ledger.js";
 import { audit } from "./audit.js";
 import { verifyMemberPin } from "./pin.js";
+import { getCoopId } from "../lib/runtime-context.js";
 
 /**
  * Maker-Checker manual credits.
@@ -35,7 +36,9 @@ export async function requestManualCredit(
   amountNaira: number,
   narration: string,
 ): Promise<ManualCreditResult> {
-  const actor = await prisma.member.findFirst({ where: { phone: actorPhone } });
+  const actor = await prisma.member.findFirst({
+    where: { phone: actorPhone, ...(getCoopId() ? { cooperativeId: getCoopId() } : {}) },
+  });
   if (!actor) return { ok: false, message: "You need to be an admin of a cooperative first." };
   if (!isSuperAdmin(actor.role)) {
     return { ok: false, message: "Only a super admin can initiate a manual credit." };
@@ -121,7 +124,9 @@ export async function approveManualCredit(
   shortId: string,
   pin: string,
 ): Promise<ManualCreditResult> {
-  const actor = await prisma.member.findFirst({ where: { phone: actorPhone } });
+  const actor = await prisma.member.findFirst({
+    where: { phone: actorPhone, ...(getCoopId() ? { cooperativeId: getCoopId() } : {}) },
+  });
   if (!actor) return { ok: false, message: "You need to be an admin of a cooperative first." };
   if (!isSuperAdmin(actor.role)) {
     return { ok: false, message: "Only a super admin can approve a manual credit." };
@@ -241,7 +246,9 @@ export async function rejectManualCredit(
   shortId: string,
   reason?: string,
 ): Promise<ManualCreditResult> {
-  const actor = await prisma.member.findFirst({ where: { phone: actorPhone } });
+  const actor = await prisma.member.findFirst({
+    where: { phone: actorPhone, ...(getCoopId() ? { cooperativeId: getCoopId() } : {}) },
+  });
   if (!actor) return { ok: false, message: "You need to be an admin of a cooperative first." };
   if (!isSuperAdmin(actor.role)) {
     return { ok: false, message: "Only a super admin can reject a manual credit." };
