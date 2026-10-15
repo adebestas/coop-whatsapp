@@ -210,6 +210,33 @@ npm run dev                    # tsx watch src/index.ts
 
 ---
 
+## RLS Enforcement (required before production)
+
+Tenant isolation is enforced by PostgreSQL Row-Level Security, but **only when the
+app connects as a non-owner role**. The table owner bypasses every policy, so if
+`DATABASE_URL` is the owner connection, `withCoopContext` is a no-op for
+isolation. The app now **refuses to boot in production** when RLS is not enforced.
+
+One-time setup (run as the owner/superuser against the production database):
+
+```bash
+# 1. Provision the non-owner role (edit the password first; never commit it).
+psql "$DATABASE_OWNER_URL" -f prisma/rls/provision_app_role.sql
+
+# 2. Point the app at the non-owner role and keep the owner for migrations/backup:
+#    DATABASE_URL       = postgresql://coop_app:<password>@<host>/<db>
+#    DATABASE_OWNER_URL = postgresql://<owner>:<password>@<host>/<db>
+```
+
+Then redeploy. On boot the app logs `RLS enforced for the current role`; if it
+logs the "NOT enforced" error it exits — fix the URLs/role and redeploy.
+
+> The `Federation*` tables are deliberately platform-level (no RLS) — the
+> federation is a cross-tenant entity by design. Every other `cooperativeId`
+> table has a policy (asserted by `tests/rls-isolation.test.ts`).
+
+---
+
 ## Rollback Procedure (Production)
 
 If a bad deploy reaches production:

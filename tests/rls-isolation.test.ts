@@ -140,10 +140,14 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: cross-cooperative isolation at
   });
 
   it("isolates Wallet reads (reached via the Member parent)", async () => {
-    const a = await asCoop(coopA.id, (tx) => tx.wallet.findMany({ where: { memberId: memberA.id } }));
+    const a = await asCoop(coopA.id, (tx) =>
+      tx.wallet.findMany({ where: { memberId: memberA.id } }),
+    );
     expect(a.length).toBe(1);
 
-    const b = await asCoop(coopA.id, (tx) => tx.wallet.findMany({ where: { memberId: memberB.id } }));
+    const b = await asCoop(coopA.id, (tx) =>
+      tx.wallet.findMany({ where: { memberId: memberB.id } }),
+    );
     expect(b.length).toBe(0);
   });
 
@@ -171,11 +175,15 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: cross-cooperative isolation at
       },
     });
 
-    const a = await asCoop(coopA.id, (tx) => tx.loan.findMany({ where: { cooperativeId: coopA.id } }));
+    const a = await asCoop(coopA.id, (tx) =>
+      tx.loan.findMany({ where: { cooperativeId: coopA.id } }),
+    );
     expect(a.length).toBe(1);
     expect(a[0].memberId).toBe(memberA.id);
 
-    const b = await asCoop(coopA.id, (tx) => tx.loan.findMany({ where: { cooperativeId: coopB.id } }));
+    const b = await asCoop(coopA.id, (tx) =>
+      tx.loan.findMany({ where: { cooperativeId: coopB.id } }),
+    );
     expect(b.length).toBe(0);
 
     await owner.loan.deleteMany({ where: { cooperativeId: { in: [coopA.id, coopB.id] } } });
@@ -446,5 +454,30 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: cross-cooperative isolation at
       SELECT app.resolve_coop_by_phone('0000000000') AS coop
     `;
     expect(unknown[0].coop).toBeNull();
+  });
+
+  it("every cooperativeId-bearing table has an RLS policy", async () => {
+    // The Federation* tables are deliberately platform-level (no RLS).
+    const PLATFORM_LEVEL = ["FederationMembership", "FederationPosting", "FederationLoan"];
+    const tables = await owner.$queryRaw<{ table_name: string }[]>`
+      SELECT c.table_name
+      FROM information_schema.columns c
+      JOIN information_schema.tables t
+        ON t.table_name = c.table_name AND t.table_schema = c.table_schema
+      WHERE c.table_schema = 'public'
+        AND c.column_name = 'cooperativeId'
+        AND t.table_type = 'BASE TABLE'
+      ORDER BY c.table_name
+    `;
+    const missing: string[] = [];
+    for (const { table_name } of tables) {
+      if (PLATFORM_LEVEL.includes(table_name)) continue;
+      const rows = await owner.$queryRaw<{ n: bigint }[]>`
+        SELECT count(*) AS n FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = ${table_name}
+      `;
+      if (Number(rows[0]?.n ?? 0) === 0) missing.push(table_name);
+    }
+    expect(missing).toEqual([]);
   });
 });

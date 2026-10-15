@@ -97,23 +97,31 @@ async function main() {
     log.warn("Redis not configured — running without cache");
   }
 
-  // RLS canary: make a half-finished cutover visible instead of assumed.
+  // RLS canary: a half-finished cutover must be visible, not assumed. In
+  // production, refuse to boot without tenant isolation.
   try {
     const rls = await rlsEnforcementStatus();
-    if (rls.postgres) {
-      if (rls.enforced) {
-        log.info("RLS enforced for the current role", { policies: rls.policies });
-      } else {
-        log.warn(
-          "RLS policies present but NOT enforced for the current role (table-owner bypass) — tenant isolation is not active",
+    if (rls.postgres && !rls.enforced) {
+      const msg =
+        "RLS policies present but NOT enforced for the current role (table-owner bypass) — tenant isolation is not active";
+      if (process.env.NODE_ENV === "production") {
+        log.error(
+          `${msg}; refusing to boot. Provision the coop_app role and set DATABASE_URL (non-owner) + DATABASE_OWNER_URL (see DEPLOY.md).`,
           { policies: rls.policies },
         );
+        process.exit(1);
       }
+      log.warn(msg, { policies: rls.policies });
+    } else if (rls.postgres) {
+      log.info("RLS enforced for the current role", { policies: rls.policies });
     }
   } catch (err) {
-    log.warn("RLS enforcement check failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
+    const detail = err instanceof Error ? err.message : String(err);
+    if (process.env.NODE_ENV === "production") {
+      log.error("RLS enforcement check failed — refusing to boot", { error: detail });
+      process.exit(1);
+    }
+    log.warn("RLS enforcement check failed", { error: detail });
   }
 
   try {
