@@ -1,12 +1,44 @@
--- AlterTable
-ALTER TABLE "Member" DROP COLUMN "tier";
+-- A14: Do NOT destroy populated columns. The production database was created
+-- with `prisma db push`, so "Member"."tier" and "LedgerEntry"."status" can hold
+-- real data the first time this migration runs. Archive the values first, then
+-- only DROP a column that is empty; otherwise quarantine it (rename) so no data
+-- is lost. See docs/EXPERT-REVIEW-2026-10-15.md (A14).
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'Member' AND column_name = 'tier'
+  ) THEN
+    EXECUTE 'CREATE TABLE IF NOT EXISTS "_backup_Member_tier" AS SELECT "id", "tier", now() AS "archivedAt" FROM "Member"';
+    IF EXISTS (SELECT 1 FROM "Member" WHERE "tier" IS NOT NULL) THEN
+      EXECUTE 'ALTER TABLE "Member" RENAME COLUMN "tier" TO "tier_deprecated"';
+      RAISE NOTICE 'Member.tier had data: archived to _backup_Member_tier and renamed to tier_deprecated (A14).';
+    ELSE
+      EXECUTE 'ALTER TABLE "Member" DROP COLUMN "tier"';
+    END IF;
+  END IF;
+END $$;
 
 -- AlterTable
 ALTER TABLE "Loan" ADD COLUMN     "accountOfficerApprovedAt" TIMESTAMP(3),
 ADD COLUMN     "accountOfficerApprovedById" TEXT;
 
--- AlterTable
-ALTER TABLE "LedgerEntry" DROP COLUMN "status";
+-- A14: same protection for "LedgerEntry"."status" (populated by the db-push era).
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'LedgerEntry' AND column_name = 'status'
+  ) THEN
+    EXECUTE 'CREATE TABLE IF NOT EXISTS "_backup_LedgerEntry_status" AS SELECT "id", "status", now() AS "archivedAt" FROM "LedgerEntry"';
+    IF EXISTS (SELECT 1 FROM "LedgerEntry" WHERE "status" IS NOT NULL) THEN
+      EXECUTE 'ALTER TABLE "LedgerEntry" RENAME COLUMN "status" TO "status_deprecated"';
+      RAISE NOTICE 'LedgerEntry.status had data: archived to _backup_LedgerEntry_status and renamed to status_deprecated (A14).';
+    ELSE
+      EXECUTE 'ALTER TABLE "LedgerEntry" DROP COLUMN "status"';
+    END IF;
+  END IF;
+END $$;
 
 -- CreateTable
 CREATE TABLE "AccountOfficer" (
