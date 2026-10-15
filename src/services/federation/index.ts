@@ -171,6 +171,19 @@ export async function repay(loanId: string, amountKobo: number): Promise<void> {
   await audit({ cooperativeId, actorPhone: "system", action: "federation.repay", targetType: "federation_loan", targetId: loanId, amount: amountKobo, detail: `repaid ${amountKobo} ${loan.currency}` });
 }
 
+export async function approveLoan(loanId: string): Promise<void> {
+  const loan = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loanId } });
+  if (loan.status !== "pending") return;
+  await prisma.federationLoan.update({ where: { id: loanId }, data: { status: "active", disbursedAt: new Date() } });
+  await audit({ cooperativeId: loan.borrowerCooperativeId, actorPhone: "system", action: "federation.loan.approve", targetType: "federation_loan", targetId: loanId, detail: "loan approved" });
+}
+
+export async function markDefaulted(loanId: string): Promise<void> {
+  const loan = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loanId } });
+  await prisma.federationLoan.update({ where: { id: loanId }, data: { status: "defaulted" } });
+  await audit({ cooperativeId: loan.borrowerCooperativeId, actorPhone: "system", action: "federation.loan.default", targetType: "federation_loan", targetId: loanId, detail: "loan marked defaulted (manual remedy)" });
+}
+
 export async function getPosition(federationId: string, cooperativeId: string) {
   const entries = await prisma.federationPosting.findMany({
     where: { cooperativeId, entry: { federationId } },
