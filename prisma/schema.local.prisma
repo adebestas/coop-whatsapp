@@ -28,6 +28,7 @@ model Cooperative {
   dailyPayoutLimit   Int                 @default(100000000) // fraud guard: max total money-out per day in kobo (₦1M)
   reserveFundBalance Int                 @default(0) // statutory reserve fund balance in kobo
   protectionFundBalance Int              @default(0) // self-insured loan-protection fund balance in kobo
+  federationFundBalance Int @default(0) // coop's own funds committed to a federation pool, in kobo
   loanLossProvisionBalance Int            @default(0) // accumulated loan-loss provision reserve in kobo
   memberSeq          Int                 @default(0) // atomic per-coop member sequence used for file numbers (COOP/YYY/seq)
   createdAt          DateTime            @default(now())
@@ -1968,5 +1969,99 @@ model InsuranceClaim {
   @@index([cooperativeId, memberId])
   @@index([cooperativeId, status])
   @@index([policyId])
+}
+
+model Federation {
+  id           String   @id @default(cuid())
+  name         String
+  code         String   @unique
+  baseCurrency String   @default("NGN")
+  status       String   @default("active") // active | suspended
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  memberships  FederationMembership[]
+  loans        FederationLoan[]
+  ledger       FederationLedgerEntry[]
+  rates        FxRate[]
+}
+
+model FederationMembership {
+  id             String   @id @default(cuid())
+  federationId   String
+  federation     Federation @relation(fields: [federationId], references: [id], onDelete: Cascade)
+  cooperativeId  String
+  status         String   @default("active") // active | suspended
+  joinedAt       DateTime @default(now())
+  @@unique([federationId, cooperativeId])
+  @@index([cooperativeId])
+}
+
+model FederationLedgerEntry {
+  id           String   @id @default(cuid())
+  federationId String
+  federation   Federation @relation(fields: [federationId], references: [id], onDelete: Cascade)
+  txRef        String   @unique
+  description  String
+  currency     String   // baseCurrency
+  createdAt    DateTime @default(now())
+  postings     FederationPosting[]
+  @@index([federationId])
+}
+
+model FederationPosting {
+  id         String   @id @default(cuid())
+  entryId    String
+  entry      FederationLedgerEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  account    String   // e.g. "coop:<coopId>:payable", "assets:bank", "pool:liquidity"
+  direction  String   // DEBIT | CREDIT
+  amount     Int      // minor units, in the entry's currency
+  cooperativeId String? // the counterparty coop, when applicable
+  @@index([entryId])
+}
+
+model FederationLoan {
+  id                   String   @id @default(cuid())
+  federationId         String
+  federation           Federation @relation(fields: [federationId], references: [id], onDelete: Cascade)
+  lenderCooperativeId  String?  // null = pool-funded
+  borrowerCooperativeId String
+  principalKobo        Int      // in `currency`
+  currency             String
+  fxRateToBase         Float    // captured at disbursement
+  interestRate         Float    // annual, e.g. 0.12
+  termMonths           Int
+  status               String   @default("pending") // pending | active | repaid | defaulted
+  disbursedAt          DateTime?
+  dueAt                DateTime?
+  repaidKobo           Int      @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  repayments           FederationLoanRepayment[]
+  @@index([federationId, status])
+  @@index([borrowerCooperativeId])
+  @@index([lenderCooperativeId])
+}
+
+model FederationLoanRepayment {
+  id           String   @id @default(cuid())
+  loanId       String
+  loan         FederationLoan @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  amountKobo   Int
+  currency     String
+  fxRateToBase Float
+  paidAt       DateTime @default(now())
+  @@index([loanId])
+}
+
+model FxRate {
+  id            String   @id @default(cuid())
+  federationId  String
+  federation    Federation @relation(fields: [federationId], references: [id], onDelete: Cascade)
+  baseCurrency  String
+  quoteCurrency String
+  rate          Float    // 1 base = rate quote
+  effectiveAt   DateTime @default(now())
+  setBy         String
+  @@index([federationId, baseCurrency, quoteCurrency, effectiveAt])
 }
 
