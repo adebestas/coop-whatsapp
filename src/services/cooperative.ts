@@ -4,6 +4,7 @@ import { audit } from "./audit.js";
 import { LIMITS, formatBalance } from "../lib/money.js";
 import { getCoopConfig } from "./coop-config.js";
 import { recordReferral, qualifyReferral } from "./referrals.js";
+import { screenAndRecord } from "./screening.js";
 import { getRedis } from "../lib/cache.js";
 import { countryFromPhone, currencyForCountry } from "../lib/currency.js";
 
@@ -132,6 +133,32 @@ export async function findOrCreateMember(
   // bad/unknown code break onboarding — the referral is simply not recorded.
   if (referrerCode) {
     await recordReferral(coop.id, referrerCode, member.id).catch(() => {});
+  }
+
+  // CFT: screen the member (and their next-of-kin) against sanctions/PEP lists.
+  // Never blocks onboarding by itself — the result is recorded and supers are
+  // alerted; the payout gate blocks money-out to a matched name.
+  try {
+    const outcome = await screenAndRecord(name, {
+      cooperativeId: coop.id,
+      subjectType: "member",
+      subjectId: member.id,
+      subjectName: name,
+    });
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { screeningStatus: outcome.status, screeningAt: new Date() },
+    });
+    if (nextOfKin?.name) {
+      await screenAndRecord(nextOfKin.name, {
+        cooperativeId: coop.id,
+        subjectType: "nok",
+        subjectId: member.id,
+        subjectName: nextOfKin.name,
+      });
+    }
+  } catch (err) {
+    console.error("[cooperative] member screening failed", err);
   }
 
   return {

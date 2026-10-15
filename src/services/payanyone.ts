@@ -11,6 +11,7 @@ import { approvalCooldownMs, checkDailyPayoutLimit, checkVelocity } from "./frau
 import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
 import { LIMITS } from "../lib/money.js";
 import { flagTransaction } from "./aml.js";
+import { screenAndRecord, isBlocking } from "./screening.js";
 
 export interface PayAnyoneResult {
   ok: boolean;
@@ -339,6 +340,37 @@ async function payExternal(
     return {
       ok: false,
       message: `⛔ Payout held (fail-closed): ${reason}. No money moved — verify the bank details and retry the final approval.`,
+    };
+  }
+
+  // CFT: screen the beneficiary (the confirmed account-holder name when
+  // available, else the entered name) before initiating the transfer.
+  const subjectName = confirm.name ?? payment.beneficiaryName;
+  const screening = await screenAndRecord(subjectName, {
+    cooperativeId: payment.cooperativeId,
+    subjectType: "payout",
+    subjectId: payment.id,
+    subjectName,
+  }).catch((err) => {
+    console.error("[payanyone] screening failed", err);
+    return null;
+  });
+  if (screening && isBlocking(screening.status)) {
+    await prisma.externalPayment.updateMany({
+      where: { id: payment.id, status: "processing" },
+      data: {
+        status: "approved2",
+        payoutReference: `held: screening ${screening.status}`.slice(0, 200),
+      },
+    });
+    await alertSupers(
+      payment.cooperativeId,
+      `🛑 Pay-anyone *${payment.id.slice(-6)}* held — beneficiary "${subjectName}" failed compliance screening (${screening.status}). Money NOT sent.`,
+      AlertSeverity.CRITICAL,
+    ).catch(() => {});
+    return {
+      ok: false,
+      message: `⛔ Payout held: the beneficiary failed a compliance screening check. No money moved — an admin must review.`,
     };
   }
 

@@ -13,10 +13,11 @@ import { maskId } from "../lib/security.js";
 import { recordLedger } from "./ledger.js";
 import { postJournal } from "./journal.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
+import { screenAndRecord, isBlocking } from "./screening.js";
 
 export interface DisbursementResult {
   ok: boolean;
-  status: "successful" | "failed" | "name_mismatch" | "unsure";
+  status: "successful" | "failed" | "name_mismatch" | "unsure" | "screening_blocked";
   message: string;
   /** Provider-resolved account-holder name, when the transfer succeeded. */
   verifiedName?: string;
@@ -189,6 +190,26 @@ async function payOut(
       status: "failed",
       message: `Duplicate payout blocked: reference ${reference.slice(-10)} was already processed (${existing.status}).`,
     };
+  }
+
+  // CFT: screen the recipient name (the provider-resolved account holder when
+  // available, else the registered name) before initiating any transfer. A
+  // strong or weak watchlist match blocks the payout.
+  const screenName = verifiedName ?? member.name;
+  const screening = await screenAndRecord(screenName, {
+    cooperativeId: member.cooperativeId,
+    subjectType: "payout",
+    subjectId: member.id,
+    subjectName: screenName,
+  }).catch((err) => {
+    console.error("[disbursements] screening failed", err);
+    return null;
+  });
+  if (screening && isBlocking(screening.status)) {
+    const msg = `🛑 Payout NOT sent: the recipient name ("${screenName}") failed compliance screening (${screening.status}). A supervisor has been alerted to review.`;
+    await opts.onFailure?.("screening_blocked", `screening ${screening.status}`);
+    await notify(member, msg);
+    return { ok: false, status: "screening_blocked", message: msg };
   }
 
   // Tracks whether the payment provider has accepted/submitted this transfer.

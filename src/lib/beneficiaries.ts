@@ -1,5 +1,6 @@
 import { prisma } from "./prisma.js";
 import { resolveBankCode } from "./banks.js";
+import { screenAndRecord, isBlocking } from "../services/screening.js";
 
 export type PayeeResult =
   | {
@@ -68,6 +69,27 @@ export async function savePayee(
       ok: false,
       message: `You already have a saved payee called *${cleanName}*. Delete it first, or use a different name.`,
     };
+  }
+
+  // CFT: screen the payee name before saving it (mirrors the payout-time gate).
+  const owner = await prisma.member.findUnique({
+    where: { id: memberId },
+    select: { cooperativeId: true },
+  });
+  if (owner) {
+    const outcome = await screenAndRecord(cleanName, {
+      cooperativeId: owner.cooperativeId,
+      subjectType: "payee",
+      subjectId: memberId,
+      subjectName: cleanName,
+    });
+    if (isBlocking(outcome.status)) {
+      return {
+        ok: false,
+        message:
+          "That payee name failed a compliance screening check. Please contact your cooperative admin.",
+      };
+    }
   }
 
   const payee = await prisma.favoritePayee.create({

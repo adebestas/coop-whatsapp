@@ -214,6 +214,8 @@ model Member {
   progress                MemberProgress?
   consentAt               DateTime?           // when the member opted in to messages
   aiConsentAt             DateTime?           // when the member consented to AI processing (voice transcription / translation via Groq)
+  screeningStatus         String              @default("unset") // unset | clear | review | matched — sanctions/PEP screening of the member name
+  screeningAt             DateTime?           // when the member name was last screened
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
   wallet                  Wallet?
@@ -1276,6 +1278,41 @@ model DataConsent {
   createdAt     DateTime @default(now())
 
   @@index([memberId])
+}
+
+// ---- Sanctions / PEP screening (CFT control) ----
+// Platform-level watchlist (no tenant scope). Ops populate it from a provider
+// export or manually; the screener also supports an external provider via env.
+model SanctionsEntry {
+  id        String   @id @default(cuid())
+  name      String
+  aliases   String   @default("[]") // JSON array of alternative spellings/names
+  listType  String   @default("sanction") // sanction | pep | adverse_media
+  country   String?
+  source    String? // e.g. OFAC_SDN, EU_CONSOLIDATED, manual
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([name])
+  @@index([isActive])
+}
+
+// Immutable audit of every screening decision (member, NOK, payee, payout).
+model ScreeningResult {
+  id            String   @id @default(cuid())
+  cooperativeId String // tenant scope; RLS policy in migration 20261053000000
+  subjectType   String // member | nok | guarantor | payee | payout
+  subjectId     String?
+  subjectName   String
+  status        String // clear | review | matched | error
+  score         Float?
+  provider      String
+  matches       String   @default("[]") // JSON array of { name, score, listType, source }
+  createdAt     DateTime @default(now())
+
+  @@index([cooperativeId])
+  @@index([subjectName])
 }
 
 // ---- PAYE (Pay As You Earn) records for state IRS remittance ----
