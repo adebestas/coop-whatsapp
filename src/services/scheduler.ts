@@ -115,6 +115,17 @@ function csvSet(value: string | null | undefined): Set<string> {
 /** One day, in milliseconds — the retry cadence ("at most once per day"). */
 const RETRY_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
+/** A mandate debit collected in phase 1, to be dispatched (provider call) in phase 2. */
+interface MandateDispatch {
+  mandate: { provider: string; providerMandateId: string | null };
+  amount: number;
+  providerRef: string;
+  narration: string;
+  debitId: string;
+  /** Captured in phase 1 (the runtime context is transaction-scoped). */
+  currency: string;
+}
+
 /**
  * Create due savings debits for members with an active direct-debit mandate.
  *
@@ -129,7 +140,12 @@ const RETRY_INTERVAL_MS = 24 * 60 * 60 * 1000;
  * of debits created.
  */
 export async function runMandateDebits(now = new Date()): Promise<number> {
-  let created = 0;
+  // Phase 1 (inside the per-coop transaction): create the `pending` debit rows
+  // and advance schedules. Phase 2 (OUTSIDE any transaction): call the provider.
+  // The provider call must never run inside the transaction — if the tx aborted
+  // after the provider accepted, the `providerRef` row would roll back and the
+  // next tick would charge the member again.
+  const dispatches: MandateDispatch[] = [];
   await forEachCoop(async (coopId) => {
     const config = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
     if (!config?.directDebitEnabled) return;
@@ -183,7 +199,6 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
               providerRef,
             });
             if (debitId) {
-              created++;
               // Advance the schedule so this obligation is not re-created next tick.
               const next = new Date(member.autoSaveNextDue);
               next.setDate(next.getDate() + (member.autoSaveInterval === "weekly" ? 7 : 30));
@@ -191,14 +206,14 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
                 where: { id: member.id },
                 data: { autoSaveNextDue: next },
               });
-              await dispatchMandateDebit(
+              dispatches.push({
                 mandate,
                 amount,
                 providerRef,
-                `Savings contribution — ${formatBalance(amount)}`,
+                narration: `Savings contribution — ${formatBalance(amount)}`,
                 debitId,
-                now,
-              );
+                currency: getCurrency(),
+              });
             }
           }
         }
@@ -245,15 +260,14 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
               providerRef,
             });
             if (!debitId) continue; // already created by an overlapping tick
-            created++;
-            await dispatchMandateDebit(
+            dispatches.push({
               mandate,
-              totalDue,
+              amount: totalDue,
               providerRef,
-              `Loan repayment — ${formatBalance(totalDue)}`,
+              narration: `Loan repayment — ${formatBalance(totalDue)}`,
               debitId,
-              now,
-            );
+              currency: getCurrency(),
+            });
           }
         }
 
@@ -307,15 +321,14 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
               providerRef,
             });
             if (!debitId) continue; // already created by an overlapping tick
-            created++;
-            await dispatchMandateDebit(
+            dispatches.push({
               mandate,
               amount,
               providerRef,
-              `Group contribution — ${formatBalance(amount)} (${group.name})`,
+              narration: `Group contribution — ${formatBalance(amount)} (${group.name})`,
               debitId,
-              now,
-            );
+              currency: getCurrency(),
+            });
           }
         }
       } catch (err) {
@@ -328,7 +341,20 @@ export async function runMandateDebits(now = new Date()): Promise<number> {
       }
     }
   });
-  return created;
+
+  // Phase 2: dispatch the provider debits OUTSIDE the transaction.
+  for (const d of dispatches) {
+    await dispatchMandateDebit(
+      d.mandate,
+      d.amount,
+      d.providerRef,
+      d.narration,
+      d.debitId,
+      now,
+      d.currency,
+    );
+  }
+  return dispatches.length;
 }
 
 /**
@@ -367,6 +393,7 @@ async function dispatchMandateDebit(
   narration: string,
   debitId: string,
   now: Date,
+  currency: string,
 ): Promise<void> {
   // Fail-closed: a Paystack mandate has no authorization code until its
   // activation webhook lands, and a partial debit keyed on an empty code is
@@ -385,13 +412,13 @@ async function dispatchMandateDebit(
 
   let result: { ok: boolean; error?: string } | undefined;
   try {
-    const provider = await resolveProvider(mandate.provider, getCurrency());
+    const provider = await resolveProvider(mandate.provider, currency);
     result = await provider.debitMandate?.({
       providerMandateId: mandate.providerMandateId ?? "",
       amount,
       reference: providerRef,
       narration,
-      currency: getCurrency(),
+      currency,
     });
   } catch (err) {
     result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
@@ -417,7 +444,11 @@ async function dispatchMandateDebit(
  * settlement webhook can credit the wallet. Returns the number retried.
  */
 export async function runMandateRetries(now = new Date()): Promise<number> {
-  let retried = 0;
+  // Phase 1 (inside the per-coop transaction): claim the failed debits. Phase 2
+  // (OUTSIDE any transaction): call the provider. The provider call must never
+  // run inside the transaction (a rollback after the provider accepted would
+  // lose the claim and re-charge on the next tick).
+  const retries: MandateDispatch[] = [];
   await forEachCoop(async (coopId) => {
     const failed = await prisma.mandateDebit.findMany({
       where: {
@@ -444,46 +475,61 @@ export async function runMandateRetries(now = new Date()): Promise<number> {
         data: { nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS) },
       });
       if (claim.count === 0) continue;
-      retried++;
 
-      const narration = `Direct debit retry — ${debit.purpose} (${formatBalance(debit.amount)})`;
-      let result: { ok: boolean; error?: string } | undefined;
-      try {
-        const provider = await resolveProvider(debit.mandate.provider, getCurrency());
-        result = await provider.debitMandate?.({
-          providerMandateId: debit.mandate.providerMandateId ?? "",
-          amount: debit.amount,
-          reference: debit.providerRef,
-          narration,
-          currency: getCurrency(),
-        });
-      } catch (err) {
-        result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
-      }
-
-      if (result?.ok) {
-        await prisma.mandateDebit.update({
-          where: { id: debit.id },
-          data: {
-            status: "pending",
-            attempts: { increment: 1 },
-            nextRetryAt: null,
-            failureReason: null,
-          },
-        });
-      } else {
-        await prisma.mandateDebit.update({
-          where: { id: debit.id },
-          data: {
-            attempts: { increment: 1 },
-            failureReason: result?.error ?? "retry failed",
-            nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS),
-          },
-        });
-      }
+      retries.push({
+        mandate: debit.mandate,
+        amount: debit.amount,
+        providerRef: debit.providerRef,
+        narration: `Direct debit retry — ${debit.purpose} (${formatBalance(debit.amount)})`,
+        debitId: debit.id,
+        currency: getCurrency(),
+      });
     }
   });
-  return retried;
+
+  // Phase 2: dispatch the provider retries OUTSIDE the transaction.
+  for (const d of retries) {
+    await dispatchMandateRetry(d, now);
+  }
+  return retries.length;
+}
+
+/** Retry a claimed mandate debit against the provider (outside any transaction). */
+async function dispatchMandateRetry(d: MandateDispatch, now: Date): Promise<void> {
+  let result: { ok: boolean; error?: string } | undefined;
+  try {
+    const provider = await resolveProvider(d.mandate.provider, d.currency);
+    result = await provider.debitMandate?.({
+      providerMandateId: d.mandate.providerMandateId ?? "",
+      amount: d.amount,
+      reference: d.providerRef,
+      narration: d.narration,
+      currency: d.currency,
+    });
+  } catch (err) {
+    result = { ok: false, error: err instanceof Error ? err.message : "provider error" };
+  }
+
+  if (result?.ok) {
+    await prisma.mandateDebit.update({
+      where: { id: d.debitId },
+      data: {
+        status: "pending",
+        attempts: { increment: 1 },
+        nextRetryAt: null,
+        failureReason: null,
+      },
+    });
+  } else {
+    await prisma.mandateDebit.update({
+      where: { id: d.debitId },
+      data: {
+        attempts: { increment: 1 },
+        failureReason: result?.error ?? "retry failed",
+        nextRetryAt: new Date(now.getTime() + RETRY_INTERVAL_MS),
+      },
+    });
+  }
 }
 
 /** A `pending` debit older than this is presumed to have lost its webhook. */

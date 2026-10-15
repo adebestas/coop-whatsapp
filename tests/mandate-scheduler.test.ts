@@ -15,6 +15,7 @@ import {
 } from "../src/services/scheduler.js";
 import { resolveProvider } from "../src/services/payments/index.js";
 import { notifyMember } from "../src/lib/messaging.js";
+import { txStorage } from "../src/lib/prisma.js";
 
 /** A fake provider adapter exposing only what the scheduler calls. */
 function fakeAdapter(overrides: Record<string, unknown> = {}) {
@@ -101,6 +102,29 @@ describe("mandate scheduler debits", () => {
     };
     expect(call.amount).toBe(100_000);
     expect(call.narration).toMatch(/savings/i);
+  });
+
+  it("calls the provider OUTSIDE any transaction", async () => {
+    const coop = await createTestCoop("MSCHTX1");
+    const m = await createTestMember(coop.id, { phone: "2348000300077" });
+    await enableDirectDebit(coop.id);
+    await setAutoSave(m.id, 50_000, new Date(Date.now() - 1000));
+    await seedMandate(coop.id, m.id);
+
+    let sawTx: boolean | undefined;
+    const adapter = fakeAdapter({
+      debitMandate: vi.fn(async () => {
+        sawTx = txStorage.getStore() !== undefined;
+        return { ok: true, providerRef: "TRX-1", status: "SUCCESSFUL" };
+      }),
+    });
+    vi.mocked(resolveProvider).mockResolvedValue(adapter);
+
+    await runMandateDebits(new Date());
+
+    // The provider call must not run inside the per-coop transaction: a rollback
+    // after the provider accepted would lose the pending row and re-charge.
+    expect(sawTx).toBe(false);
   });
 
   it("fail-closes a Paystack debit when the mandate has no authorization code yet", async () => {
