@@ -60,4 +60,34 @@ describe("federation admin commands", () => {
     expect(texts).toMatch(/super admin/i);
     expect(texts).toMatch(/federation/i);
   });
+
+  it("targets an explicit federation via the `federation <code> <sub>` form", async () => {
+    const adminCoop = await createTestCoop("FEDC4");
+    const admin = await createTestMember(adminCoop.id, {
+      phone: "2348000090031",
+      role: "superadmin",
+    });
+    const target = await createTestCoop("FEDC5");
+
+    const older = await prisma.federation.create({
+      data: { name: "FedOne", code: `CODE-${Date.now()}-A`, baseCurrency: "NGN" },
+    });
+    await prisma.federation.create({
+      data: { name: "FedTwo", code: `CODE-${Date.now()}-B`, baseCurrency: "NGN" },
+    });
+
+    // Prefixing the (older) federation's code must target it, not the
+    // most-recently created FedTwo.
+    await handleAdminCommand(admin.phone, "federation", [older.code, "addcoop", target.code]);
+
+    const inOlder = await prisma.federationMembership.findFirst({
+      where: { federationId: older.id, cooperativeId: target.id },
+    });
+    expect(inOlder).toBeTruthy();
+    const fedTwo = await prisma.federation.findFirst({ where: { name: "FedTwo" } });
+    const inNewer = await prisma.federationMembership.findFirst({
+      where: { federationId: fedTwo!.id, cooperativeId: target.id },
+    });
+    expect(inNewer).toBeNull();
+  });
 });

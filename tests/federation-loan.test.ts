@@ -72,4 +72,17 @@ describe("bilateral federation loan", () => {
       "INSUFFICIENT_LENDER_STAKE",
     );
   });
+
+  it("prevents one lender's stake from backing two loans that exceed it", async () => {
+    const { fed, lender, borrower } = await setup();
+    await contribute(fed.id, lender.id, 1_000_000);
+    const first = await borrow(fed.id, borrower.id, 600_000, 3, lender.id);
+    expect(first.status).toBe("pending");
+    // The pending loan earmarks 600,000 of the lender's 1,000,000 stake, leaving
+    // only 400,000 available — so a second 600,000 loan must be rejected (the
+    // pool still holds 1,000,000, so this is the lender-stake guard firing).
+    await expect(borrow(fed.id, borrower.id, 600_000, 3, lender.id)).rejects.toThrow(
+      "INSUFFICIENT_LENDER_STAKE",
+    );
+  });
 });

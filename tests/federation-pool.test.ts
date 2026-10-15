@@ -46,7 +46,11 @@ describe("federation pool", () => {
     expect(after?.reserveFundBalance).toBe(4_500_000);
     expect(after?.federationFundBalance).toBe(10_500_000);
     const posting = await prisma.posting.findFirst({
-      where: { account: "federation:fund", direction: "DEBIT", entry: { cooperativeId: coop.id } },
+      where: {
+        account: "coop:federation_fund",
+        direction: "DEBIT",
+        entry: { cooperativeId: coop.id },
+      },
     });
     expect(posting?.amount).toBe(500_000);
   });
@@ -66,7 +70,7 @@ describe("federation pool", () => {
     await approveLoan(loan.id);
     const active = await prisma.federationLoan.findUnique({ where: { id: loan.id } });
     expect(active?.status).toBe("active");
-    await repay(loan.id, 500_000);
+    await repay(loan.id, 500_000, coop.id);
     const after = await prisma.federationLoan.findUnique({ where: { id: loan.id } });
     expect(after?.status).toBe("repaid");
   });

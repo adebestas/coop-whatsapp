@@ -50,12 +50,23 @@ describe("federation cross-currency", () => {
     await approveLoan(loan.id);
 
     // Full principal repayment → simple interest 2,000,000 × 12% × 3/12 = 60,000.
-    await repay(loan.id, 2_000_000);
+    await repay(loan.id, 2_000_000, coop.id);
 
     const after = await prisma.cooperative.findUniqueOrThrow({ where: { id: coop.id } });
     // 10,000,000 funded − 5,000,000 contributed + 2,000,000 borrowed
     //   − 2,000,000 principal − 60,000 interest = 4,940,000 (GHS-minor).
     expect(after.federationFundBalance).toBe(4_940_000);
+
+    // The coop's federation-fund ledger must net exactly to the denormalized
+    // `federationFundBalance` column (one economic account, one account name).
+    const fundPostings = await prisma.posting.findMany({
+      where: { account: "coop:federation_fund", entry: { cooperativeId: coop.id } },
+    });
+    const fundNet = fundPostings.reduce(
+      (sum, p) => sum + (p.direction === "DEBIT" ? p.amount : -p.amount),
+      0,
+    );
+    expect(fundNet).toBe(after.federationFundBalance);
 
     // Federation pool (base NGN-minor): +500,000,000 contributed
     //   − 200,000,000 disbursed + 200,000,000 principal repaid + 6,000,000 interest.

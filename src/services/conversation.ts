@@ -693,11 +693,32 @@ async function handleMessageInner(
       const amount = toKobo(Number(parts[2]));
       const months = Number(parts[3]);
       if (!(amount > 0) || !(months > 0)) {
-        await sendText({ to: phone, text: "Usage: *federation borrow <amount> <months>*" });
+        await sendText({
+          to: phone,
+          text: "Usage: *federation borrow <amount> <months> [lender code]*",
+        });
         return;
       }
+      // An optional 5th token names a lending coop (by code) for a bilateral
+      // inter-coop loan; omit it to borrow from the shared pool.
+      let lenderCooperativeId: string | undefined;
+      const lenderCode = parts[4];
+      if (lenderCode) {
+        const lender = await prisma.cooperative.findUnique({ where: { code: lenderCode } });
+        if (!lender) {
+          await sendText({ to: phone, text: `No cooperative found with code *${lenderCode}*.` });
+          return;
+        }
+        lenderCooperativeId = lender.id;
+      }
       try {
-        const loan = await borrow(fed.id, member.cooperativeId, amount, months);
+        const loan = await borrow(
+          fed.id,
+          member.cooperativeId,
+          amount,
+          months,
+          lenderCooperativeId,
+        );
         await sendText({
           to: phone,
           text: `✅ Loan request *${loan.id.slice(0, 8)}* for *${formatBalance(amount)}* over ${months} months is pending federation approval.`,
@@ -744,25 +765,27 @@ async function handleMessageInner(
         return;
       }
       try {
-        await repay(loanId, amount);
+        await repay(loanId, amount, member.cooperativeId);
         await sendText({
           to: phone,
           text: `✅ Repaid *${formatBalance(amount)}* to *${fed.name}*.`,
         });
       } catch (err: any) {
-        await sendText({
-          to: phone,
-          text:
-            err?.message === "INSUFFICIENT_BALANCE"
-              ? "Insufficient federation fund balance to repay."
-              : "Could not repay the federation loan right now.",
-        });
+        const msg =
+          err?.message === "INSUFFICIENT_BALANCE"
+            ? "Insufficient federation fund balance to repay."
+            : err?.message === "NOT_YOUR_LOAN"
+              ? "That loan does not belong to your cooperative."
+              : err?.message === "LOAN_NOT_REPAYABLE"
+                ? "That loan is not open for repayment."
+                : "Could not repay the federation loan right now.";
+        await sendText({ to: phone, text: msg });
       }
       return;
     }
     await sendText({
       to: phone,
-      text: "Usage: *federation position|fund <amount>|contribute <amount>|borrow <amount> <months>|repay <loanId> <amount>*",
+      text: "Usage: *federation position|fund <amount>|contribute <amount>|borrow <amount> <months> [lender code]|repay <loanId> <amount>*",
     });
     return;
   }

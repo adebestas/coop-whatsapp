@@ -110,7 +110,7 @@ export async function fundFederation(cooperativeId: string, amountKobo: number):
         txRef: ref,
         description: "Federation fund",
         postings: [
-          { account: "federation:fund", direction: "DEBIT", amount: amountKobo },
+          { account: "coop:federation_fund", direction: "DEBIT", amount: amountKobo },
           { account: "reserve:fund", direction: "CREDIT", amount: amountKobo },
         ],
       }),
@@ -205,9 +205,6 @@ export async function borrow(
   const rate = await getRate(federationId, currency, fed.baseCurrency);
   const baseAmount = Math.round(amountKobo * rate);
 
-  const poolBalance = await getPoolBalance(federationId);
-  if (baseAmount > poolBalance) throw new Error("INSUFFICIENT_POOL_LIQUIDITY");
-
   if (lenderCooperativeId) {
     // The lender's stake is denominated in the federation's BASE currency
     // (`getPosition` reads base-currency postings), so convert the requested
@@ -218,8 +215,12 @@ export async function borrow(
   }
 
   const dueAt = new Date(Date.now() + termMonths * 30 * 24 * 60 * 60 * 1000);
-  const loan = await withCoopContext(cooperativeId, () =>
-    prisma.federationLoan.create({
+  const loan = await withCoopContext(cooperativeId, async () => {
+    // The pool-liquidity guard is read from INSIDE the transaction so a
+    // concurrent approval cannot over-disburse the same cash.
+    const poolBalance = await getPoolBalance(federationId);
+    if (baseAmount > poolBalance) throw new Error("INSUFFICIENT_POOL_LIQUIDITY");
+    return prisma.federationLoan.create({
       data: {
         federationId,
         lenderCooperativeId: lenderCooperativeId ?? null,
@@ -232,8 +233,8 @@ export async function borrow(
         status: "pending",
         dueAt,
       },
-    }),
-  );
+    });
+  });
 
   if (lenderCooperativeId) {
     const ref = `FED-EARMARK-${loan.id}-${randomUUID()}`;
@@ -277,11 +278,13 @@ export async function approveLoan(loanId: string): Promise<void> {
   const fed = await prisma.federation.findUniqueOrThrow({ where: { id: loan.federationId } });
   const baseAmount = Math.round(loan.principalKobo * loan.fxRateToBase);
 
-  const poolBalance = await getPoolBalance(loan.federationId);
-  if (baseAmount > poolBalance) throw new Error("INSUFFICIENT_POOL_LIQUIDITY");
-
   const ref = `FED-LOAN-${loan.id}-${randomUUID()}`;
   await withCoopContext(cooperativeId, async () => {
+    // Read pool liquidity from WITHIN the transaction (and before the
+    // disbursement) so two concurrent approvals cannot each pass the guard and
+    // over-disburse the same cash.
+    const poolBalance = await getPoolBalance(loan.federationId);
+    if (baseAmount > poolBalance) throw new Error("INSUFFICIENT_POOL_LIQUIDITY");
     await prisma.cooperative.update({
       where: { id: cooperativeId },
       data: { federationFundBalance: { increment: loan.principalKobo } },
@@ -329,9 +332,20 @@ export async function approveLoan(loanId: string): Promise<void> {
   });
 }
 
-export async function repay(loanId: string, amountKobo: number): Promise<void> {
+export async function repay(
+  loanId: string,
+  amountKobo: number,
+  callerCooperativeId: string,
+): Promise<void> {
   if (!(amountKobo > 0)) throw new Error("INVALID_AMOUNT");
   const loan = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loanId } });
+  // Only the borrowing cooperative may repay its own loan — otherwise any coop
+  // admin could pass another coop's loanId and drain that coop's fund balance.
+  if (loan.borrowerCooperativeId !== callerCooperativeId) throw new Error("NOT_YOUR_LOAN");
+  // Only an `active` loan is repayable. Without this, a `repaid` loan (whose
+  // repaidKobo >= principal already) could be re-repaid, flipped back to
+  // `active`, and the fund debited again — repeatably.
+  if (loan.status !== "active") throw new Error("LOAN_NOT_REPAYABLE");
   const cooperativeId = loan.borrowerCooperativeId;
   const fed = await prisma.federation.findUniqueOrThrow({ where: { id: loan.federationId } });
   const baseAmount = Math.round(amountKobo * loan.fxRateToBase);
@@ -384,7 +398,7 @@ export async function repay(loanId: string, amountKobo: number): Promise<void> {
     if (fullyRepaid) {
       const interest = computeInterest(fresh.principalKobo, fresh.interestRate, fresh.termMonths);
       if (interest > 0) {
-        // The interest journal credits `federation:fund` on the coop side, so the
+        // The interest journal credits `coop:federation_fund` on the coop side, so the
         // denormalized `federationFundBalance` column must fall by the same
         // amount — guarded (like the principal) so the fund can never go negative
         // and column never drifts from the journal.
@@ -402,7 +416,7 @@ export async function repay(loanId: string, amountKobo: number): Promise<void> {
             description: `Federation loan interest`,
             postings: [
               { account: "federation:payable", direction: "DEBIT", amount: interest },
-              { account: "federation:fund", direction: "CREDIT", amount: interest },
+              { account: "coop:federation_fund", direction: "CREDIT", amount: interest },
             ],
           }),
         );
@@ -461,5 +475,22 @@ export async function getPosition(federationId: string, cooperativeId: string) {
     if (p.account.endsWith(":payable")) stakeKobo -= signed;
     if (p.account.endsWith(":receivable")) owedKobo += signed;
   }
-  return { stakeKobo, owedKobo };
+  // A bilateral lender's stake is earmarked when it backs a loan, but the
+  // earmark is posted on the LENDER's own coop journal (`federation:loan_receivable`),
+  // which the federation ledger cannot see. Subtract the outstanding base-currency
+  // principal of this coop's pending/active loans so the same stake cannot back
+  // unlimited loans (i.e. `stakeKobo` is the AVAILABLE, un-earmarked stake).
+  const earmarked = await prisma.federationLoan.findMany({
+    where: {
+      federationId,
+      lenderCooperativeId: cooperativeId,
+      status: { in: ["pending", "active"] },
+    },
+    select: { principalKobo: true, fxRateToBase: true },
+  });
+  const earmarkedBase = earmarked.reduce(
+    (sum, l) => sum + Math.round(l.principalKobo * l.fxRateToBase),
+    0,
+  );
+  return { stakeKobo: roundMoney(stakeKobo - earmarkedBase), owedKobo };
 }

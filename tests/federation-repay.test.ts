@@ -31,7 +31,7 @@ describe("federation loan repayment", () => {
     const { fed, coop } = await setup();
     await contribute(fed.id, coop.id, 1_000_000);
     const loan = await activeLoan(fed.id, coop.id, 500_000, 3);
-    await repay(loan.id, 200_000);
+    await repay(loan.id, 200_000, coop.id);
     const after = await prisma.federationLoan.findUnique({ where: { id: loan.id } });
     expect(after?.status).toBe("active");
     expect(after?.repaidKobo).toBe(200_000);
@@ -50,7 +50,7 @@ describe("federation loan repayment", () => {
     const { fed, coop } = await setup();
     await contribute(fed.id, coop.id, 1_000_000);
     const loan = await activeLoan(fed.id, coop.id, 500_000, 3);
-    await repay(loan.id, 500_000);
+    await repay(loan.id, 500_000, coop.id);
     const after = await prisma.federationLoan.findUnique({ where: { id: loan.id } });
     expect(after?.status).toBe("repaid");
     expect(after?.repaidKobo).toBe(500_000);
@@ -64,8 +64,8 @@ describe("federation loan repayment", () => {
     const { fed, coop } = await setup();
     await contribute(fed.id, coop.id, 1_000_000);
     const loan = await activeLoan(fed.id, coop.id, 500_000, 3);
-    await repay(loan.id, 200_000);
-    await repay(loan.id, 300_000);
+    await repay(loan.id, 200_000, coop.id);
+    await repay(loan.id, 300_000, coop.id);
     const expected = computeInterest(500_000, 0.12, 3);
     expect(expected).toBe(15_000);
     const interest = await prisma.federationPosting.findFirst({
@@ -73,7 +73,11 @@ describe("federation loan repayment", () => {
     });
     expect(interest?.amount).toBe(expected);
     const coopInterest = await prisma.posting.findFirst({
-      where: { account: "federation:fund", direction: "CREDIT", entry: { cooperativeId: coop.id } },
+      where: {
+        account: "coop:federation_fund",
+        direction: "CREDIT",
+        entry: { cooperativeId: coop.id, description: "Federation loan interest" },
+      },
     });
     expect(coopInterest?.amount).toBe(expected);
   });
@@ -83,7 +87,7 @@ describe("federation loan repayment", () => {
     await contribute(fed.id, coop.id, 1_000_000);
     const loan = await activeLoan(fed.id, coop.id, 500_000, 3);
     const before = await prisma.cooperative.findUnique({ where: { id: coop.id } });
-    await expect(repay(loan.id, -1)).rejects.toThrow("INVALID_AMOUNT");
+    await expect(repay(loan.id, -1, coop.id)).rejects.toThrow("INVALID_AMOUNT");
     const after = await prisma.cooperative.findUnique({ where: { id: coop.id } });
     expect(after?.federationFundBalance).toBe(before?.federationFundBalance);
     const loanAfter = await prisma.federationLoan.findUnique({ where: { id: loan.id } });
@@ -94,5 +98,52 @@ describe("federation loan repayment", () => {
   it("rejects a non-positive borrow", async () => {
     const { fed, coop } = await setup();
     await expect(borrow(fed.id, coop.id, 0, 3)).rejects.toThrow("INVALID_AMOUNT");
+  });
+
+  it("rejects a repayment of another coop's loan and leaves the victim's fund unchanged", async () => {
+    const { fed, coop } = await setup();
+    await contribute(fed.id, coop.id, 1_000_000);
+    const loan = await activeLoan(fed.id, coop.id, 500_000, 3);
+    const attacker = await prisma.cooperative.create({
+      data: {
+        name: "Attacker",
+        code: `A-${randomUUID()}`,
+        currency: "NGN",
+        federationFundBalance: 5_000_000,
+      },
+    });
+    await addMember(fed.id, attacker.id);
+    const victimBefore = await prisma.cooperative.findUniqueOrThrow({ where: { id: coop.id } });
+    const attackerBefore = await prisma.cooperative.findUniqueOrThrow({
+      where: { id: attacker.id },
+    });
+
+    await expect(repay(loan.id, 100_000, attacker.id)).rejects.toThrow("NOT_YOUR_LOAN");
+
+    const victimAfter = await prisma.cooperative.findUniqueOrThrow({ where: { id: coop.id } });
+    const attackerAfter = await prisma.cooperative.findUniqueOrThrow({
+      where: { id: attacker.id },
+    });
+    expect(victimAfter.federationFundBalance).toBe(victimBefore.federationFundBalance);
+    expect(attackerAfter.federationFundBalance).toBe(attackerBefore.federationFundBalance);
+    const loanAfter = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loan.id } });
+    expect(loanAfter.status).toBe("active");
+    expect(loanAfter.repaidKobo).toBe(0);
+  });
+
+  it("rejects a repayment of an already-repaid loan (no double debit)", async () => {
+    const { fed, coop } = await setup();
+    await contribute(fed.id, coop.id, 1_000_000);
+    const loan = await activeLoan(fed.id, coop.id, 500_000, 3);
+    await repay(loan.id, 500_000, coop.id);
+    const repaid = await prisma.cooperative.findUniqueOrThrow({ where: { id: coop.id } });
+
+    await expect(repay(loan.id, 500_000, coop.id)).rejects.toThrow("LOAN_NOT_REPAYABLE");
+
+    const after = await prisma.cooperative.findUniqueOrThrow({ where: { id: coop.id } });
+    expect(after.federationFundBalance).toBe(repaid.federationFundBalance);
+    const loanAfter = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loan.id } });
+    expect(loanAfter.status).toBe("repaid");
+    expect(loanAfter.repaidKobo).toBe(500_000);
   });
 });
