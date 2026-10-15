@@ -8,11 +8,7 @@ import { LIMITS } from "../lib/money.js";
 import { flagTransaction } from "./aml.js";
 import { getCoopConfig } from "./coop-config.js";
 import { sendText } from "../lib/messaging.js";
-import {
-  hasActiveCommittee,
-  isCommitteeMember,
-  recordCommitteeVote,
-} from "./committees.js";
+import { hasActiveCommittee, isCommitteeMember, recordCommitteeVote } from "./committees.js";
 
 /** After a loan leaves the queue, renumber positions for remaining pending loans. */
 async function renumberQueue(cooperativeId: string): Promise<void> {
@@ -257,7 +253,9 @@ export async function applyForLoan(
       `Interest: *${annualRateFor(tenureMonths)}% APR* declining balance → repay *${formatBalance(Math.round(total))}*\n` +
       `Monthly installment: *${formatBalance(Math.round(monthly))}*\n` +
       `Admin charge: *${formatBalance(LOAN_ADMIN_CHARGE)}* (you'll receive ${formatBalance(amount - LOAN_ADMIN_CHARGE)})\n` +
-      (boost > 0 ? `🎓 Certified-member boost applied: cap raised to *${loanMultiplier}x your savings*.\n` : "") +
+      (boost > 0
+        ? `🎓 Certified-member boost applied: cap raised to *${loanMultiplier}x your savings*.\n`
+        : "") +
       `\nYou still need to add *${needed} guarantor${needed > 1 ? "s" : ""}* before the loan can be approved.`,
   };
 }
@@ -716,7 +714,6 @@ async function finalizeLoanApproval(
   }
 
   const monthly = calculateMonthlyPayment(loan.amount, loan.tenureMonths);
-  const total = totalRepayable(loan.amount, loan.tenureMonths);
   const due = new Date();
   due.setMonth(due.getMonth() + 1);
 
@@ -726,7 +723,11 @@ async function finalizeLoanApproval(
     data: {
       status: "approved",
       monthlyPayment: monthly,
-      balance: total,
+      // `balance` is the OUTSTANDING PRINCIPAL (declining balance). Interest is
+      // charged per installment on the remaining principal, so the opening
+      // balance must be the principal — not principal + all interest (which
+      // made the loan never close and overcharged the member).
+      balance: loan.amount,
       superApproved2ById: actorId,
       approvedAt: new Date(),
       dueDate: due,
@@ -848,7 +849,9 @@ export async function repayLoan(
   // NOTE: Interest is declining balance (reducing balance) per CBN guidance.
   // P&L: the interest slice of this installment is cooperative income; fines too.
   const interestPortion = calculateInterestPortion(loan.balance, loan.tenureMonths);
-  const principalPortion = Math.max(0, amount - interestPortion);
+  // Never repay more principal than is outstanding (the final installment can
+  // overshoot by a few kobo due to rounding).
+  const principalPortion = Math.min(Math.max(0, amount - interestPortion), loan.balance);
 
   // Atomic: debit the wallet and update the loan/repayment/fines inside ONE
   // transaction so a mid-way failure rolls everything back — money can never
