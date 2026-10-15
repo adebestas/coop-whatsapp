@@ -4,7 +4,12 @@ import { deleteTelegramMessage } from "../../lib/telegram.js";
 import { randomBytes, randomInt } from "node:crypto";
 import { hashOtp, verifyOtp } from "../../lib/security.js";
 import { normalizePhone } from "../../lib/phones.js";
-import { MESSAGE_CONSENT_REASK } from "../../lib/consent.js";
+import {
+  MESSAGE_CONSENT_REASK,
+  AI_CONSENT_GRANTED,
+  AI_CONSENT_DECLINED,
+  AI_CONSENT_REASK,
+} from "../../lib/consent.js";
 import {
   findOrCreateMember,
   formatBalance,
@@ -2219,6 +2224,49 @@ export async function handleAwaitingInput(
         // Anything else (including the founder re-sending "menu") is not an answer.
         // Re-ask instead of silently recording a NO the member never gave.
         await sendText({ to: phone, text: MESSAGE_CONSENT_REASK });
+      }
+      break;
+    }
+
+    case "awaiting_ai_consent": {
+      const answer = text.trim().toLowerCase();
+      const memberId = data.memberId as string | undefined;
+      if (!memberId) {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle", data: "{}" },
+          update: { state: "idle", data: "{}" },
+        });
+        break;
+      }
+      if (answer === "yes" || answer === "y") {
+        await prisma.member.update({
+          where: { id: memberId },
+          data: { aiConsentAt: new Date() },
+        });
+        invalidateMemberCache(phone);
+        await prisma.dataConsent.create({
+          data: { memberId, consentType: "ai_processing", granted: true },
+        });
+        await sendText({ to: phone, text: AI_CONSENT_GRANTED });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle", data: "{}" },
+          update: { state: "idle", data: "{}" },
+        });
+      } else if (answer === "no" || answer === "n") {
+        await prisma.dataConsent.create({
+          data: { memberId, consentType: "ai_processing", granted: false },
+        });
+        await sendText({ to: phone, text: AI_CONSENT_DECLINED });
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle", data: "{}" },
+          update: { state: "idle", data: "{}" },
+        });
+      } else {
+        // Anything else is not an answer — re-ask (session stays in this state).
+        await sendText({ to: phone, text: AI_CONSENT_REASK });
       }
       break;
     }

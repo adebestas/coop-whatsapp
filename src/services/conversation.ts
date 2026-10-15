@@ -1,7 +1,14 @@
 import { prisma } from "../lib/prisma.js";
 import { resolveCoopsByPhone, resolveCoopByCode, withCoopContext } from "../lib/tenant-context.js";
 import { sendText, platformOf } from "../lib/messaging.js";
-import { MESSAGE_CONSENT_PROMPT } from "../lib/consent.js";
+import {
+  MESSAGE_CONSENT_PROMPT,
+  AI_CONSENT_PROMPT,
+  AI_CONSENT_GRANTED,
+  AI_CONSENT_DECLINED,
+} from "../lib/consent.js";
+import { getAiConsentState } from "../lib/ai-consent.js";
+import { transcribeAudioMessage, transcriptionEnabled } from "../lib/transcribe.js";
 import { getMemberByPhone, invalidateMemberCache } from "./cooperative.js";
 import { handleAdminCommand, handleOmbudsmanCommand } from "./admin.js";
 import { isOmbudsman } from "./ombudsman.js";
@@ -261,6 +268,7 @@ export type BotState =
   | "awaiting_consent"
   | "awaiting_delete_account_pin"
   | "awaiting_optin"
+  | "awaiting_ai_consent"
   | "awaiting_literacy_optin"
   | "literacy_quiz"
   | "awaiting_onboard_name"
@@ -379,6 +387,8 @@ export interface MessageMeta {
   ip?: string;
   /** Whisper-detected language code from a voice note (e.g. "yo"). */
   languageHint?: string;
+  /** WhatsApp media id of a voice note — transcribed downstream, after consent. */
+  audioMediaId?: string;
 }
 
 function isAwaitingState(state: BotState): boolean {
@@ -406,6 +416,90 @@ function parseJoinCode(data: string | null | undefined): string | null {
 }
 
 /**
+ * Resolve the text the command parser should see, applying the AI-processing
+ * gate (NDPR). A voice note is transcribed and a non-English message is
+ * translated ONLY when the member has consented to AI processing; otherwise the
+ * content is never sent to the LLM (Groq). Returns `{ ok: false }` when a
+ * consent prompt was sent or the voice note could not be read (message already
+ * answered).
+ */
+async function resolveAiText(
+  phone: string,
+  member: MemberRow,
+  rawText: string,
+  meta: MessageMeta,
+): Promise<{ ok: true; text: string } | { ok: false }> {
+  const wantsAudio = !!meta.audioMediaId;
+  const hint = localeFromLanguageCode(meta.languageHint);
+  const detected = hint && hint !== "en" ? hint : detectLocale(rawText);
+  const needsTranslation = detected !== "en" && rawText.trim().length > 0;
+  if (!wantsAudio && !needsTranslation) return { ok: true, text: rawText };
+
+  const unreadable = () =>
+    sendText({
+      to: phone,
+      text: "I couldn't read that voice note. Please type your message instead.",
+    });
+
+  // No registered member (e.g. a join flow): nobody can consent, so never send
+  // the content to the LLM — pass plain text through untouched, drop audio.
+  if (!member) {
+    if (wantsAudio) {
+      await unreadable();
+      return { ok: false };
+    }
+    return { ok: true, text: rawText };
+  }
+
+  const state = await getAiConsentState(member);
+  if (state !== "granted") {
+    if (state === "declined") {
+      // Already refused — do not re-ask. Keep the content on-device.
+      await sendText({
+        to: phone,
+        text: wantsAudio
+          ? "AI processing is off, so I can't read voice notes. Please type your message in English. Reply *aioptin* to enable it."
+          : AI_CONSENT_DECLINED,
+      });
+      return { ok: false };
+    }
+    // Never asked — prompt for consent and remember the answer.
+    await prisma.session.upsert({
+      where: { phone },
+      create: {
+        phone,
+        state: "awaiting_ai_consent",
+        data: JSON.stringify({ memberId: member.id }),
+      },
+      update: { state: "awaiting_ai_consent", data: JSON.stringify({ memberId: member.id }) },
+    });
+    await sendText({ to: phone, text: AI_CONSENT_PROMPT });
+    return { ok: false };
+  }
+
+  let text = rawText;
+  if (wantsAudio) {
+    if (!transcriptionEnabled()) {
+      await unreadable();
+      return { ok: false };
+    }
+    const transcript = await transcribeAudioMessage(meta.audioMediaId!);
+    if (!transcript) {
+      await unreadable();
+      return { ok: false };
+    }
+    meta.languageHint = transcript.language ?? undefined;
+    text = transcript.text;
+  }
+  const hint2 = localeFromLanguageCode(meta.languageHint);
+  const detected2 = hint2 && hint2 !== "en" ? hint2 : detectLocale(text);
+  if (detected2 !== "en" && text.trim()) {
+    text = await translateToEnglish(text, detected2);
+  }
+  return { ok: true, text };
+}
+
+/**
  * Entry point for an inbound chat message.
  *
  * Resolves the sender's cooperative BEFORE any RLS-protected read (via the
@@ -426,14 +520,16 @@ export async function handleMessage(
   if (coops.length <= 1) {
     const coopId = coops[0]?.id ?? null;
     if (coopId) {
-      const hinted = localeFromLanguageCode(meta.languageHint);
-      const detected = hinted && hinted !== "en" ? hinted : detectLocale(text);
-      const commandText = detected === "en" ? text : await translateToEnglish(text, detected);
       return withCoopContext(coopId, async () => {
         const member = await getMemberByPhone(phone, coopId);
+        // AI-first text handling (transcribe/translate) runs only after the
+        // member + AI consent are resolved — never before, and never for a
+        // non-consenting member.
+        const ai = await resolveAiText(phone, member, text, meta);
+        if (!ai.ok) return;
         const locale = resolveMemberLocale(member, getLocale(), text);
         return runWithLocale(locale, () =>
-          handleMessageInner(phone, commandText, meta, coopId, member),
+          handleMessageInner(phone, ai.text, meta, coopId, member),
         );
       });
     }
@@ -455,14 +551,13 @@ export async function handleMessage(
   const session = await prisma.session.findUnique({ where: { phone } });
   const selected = session?.selectedCoopId ?? null;
   if (selected && coops.some((c) => c.id === selected)) {
-    const hinted = localeFromLanguageCode(meta.languageHint);
-    const detected = hinted && hinted !== "en" ? hinted : detectLocale(text);
-    const commandText = detected === "en" ? text : await translateToEnglish(text, detected);
     return withCoopContext(selected, async () => {
       const member = await getMemberByPhone(phone, selected);
+      const ai = await resolveAiText(phone, member, text, meta);
+      if (!ai.ok) return;
       const locale = resolveMemberLocale(member, getLocale(), text);
       return runWithLocale(locale, () =>
-        handleMessageInner(phone, commandText, meta, selected, member),
+        handleMessageInner(phone, ai.text, meta, selected, member),
       );
     });
   }
@@ -551,7 +646,14 @@ async function handleMessageInner(
   // Ask now instead of silently ignoring them: put the session into the same
   // `awaiting_optin` state the join flow uses, so their next YES/NO is recorded.
   // Members who already answered NO (optedOut=true, consentAt=null) are not re-asked.
-  if (member && member.consentAt === null && !member.optedOut && preCmd !== "optin") {
+  if (
+    member &&
+    member.consentAt === null &&
+    !member.optedOut &&
+    preCmd !== "optin" &&
+    preCmd !== "aioptin" &&
+    preCmd !== "aioptout"
+  ) {
     await prisma.session.upsert({
       where: { phone },
       create: { phone, state: "awaiting_optin", data: JSON.stringify({ memberId: member.id }) },
@@ -592,6 +694,31 @@ async function handleMessageInner(
         text: "You are not a registered member. Reply *join* to get started.",
       });
     }
+    return;
+  }
+  // AI-processing consent is separate from message consent (NDPR purpose
+  // limitation): voice notes / non-English text are only sent to the LLM when
+  // this is on.
+  if (preCmd === "aioptin" || preCmd === "aioptout") {
+    if (!member) {
+      await sendText({ to: phone, text: "You are not a registered member." });
+      return;
+    }
+    const granted = preCmd === "aioptin";
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { aiConsentAt: granted ? new Date() : null },
+    });
+    invalidateMemberCache(phone, member.cooperativeId);
+    await prisma.dataConsent.create({
+      data: { memberId: member.id, consentType: "ai_processing", granted },
+    });
+    await sendText({
+      to: phone,
+      text: granted
+        ? AI_CONSENT_GRANTED
+        : "AI processing turned off. I won't send voice notes or non-English messages to the AI. Reply *aioptin* to re-enable.",
+    });
     return;
   }
 

@@ -59,6 +59,9 @@ async function makeCoopAndMember() {
       pin: hashPin("1234"),
       wallet: { create: {} },
       consentAt: new Date(),
+      // AI-processing consent (voice/translation) — these tests exercise the AI
+      // suggestion flow with pidgin text, which is gated on AI consent (A15).
+      aiConsentAt: new Date(),
     },
   });
 }

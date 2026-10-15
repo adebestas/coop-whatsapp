@@ -213,6 +213,7 @@ model Member {
   cooperative             Cooperative         @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
   progress                MemberProgress?
   consentAt               DateTime?           // when the member opted in to messages
+  aiConsentAt             DateTime?           // when the member consented to AI processing (voice transcription / translation via Groq)
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
   wallet                  Wallet?
@@ -1269,7 +1270,7 @@ model DataConsent {
   id            String   @id @default(cuid())
   memberId      String
   member        Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
-  consentType   String   // registration | delete_account | data_export
+  consentType   String   // registration | delete_account | data_export | ai_processing
   granted       Boolean
   ipAddress     String?
   createdAt     DateTime @default(now())

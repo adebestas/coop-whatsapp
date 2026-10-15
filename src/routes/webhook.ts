@@ -4,7 +4,6 @@ import { config, isAllowed } from "../config.js";
 import { handleMessage } from "../services/conversation.js";
 import { extractWhatsAppMessages } from "../lib/inbound.js";
 import { sendText } from "../lib/messaging.js";
-import { transcribeAudioMessage, transcriptionEnabled } from "../lib/transcribe.js";
 import { downloadMedia, extFromMime } from "../lib/whatsapp-media.js";
 import { handleDeductionUpload } from "../services/deduction-ingest.js";
 import { RedisMutex } from "../lib/redis-mutex.js";
@@ -99,29 +98,6 @@ export async function webhookRoutes(app: FastifyInstance) {
         for (const inbound of extractWhatsAppMessages(change?.value)) {
           if (!isAllowed(inbound.from)) continue;
 
-          let languageHint: string | null = null;
-
-          // Voice notes are transcribed first (fail-closed: if transcription
-          // is unavailable, the audio is dropped rather than crashing ingest).
-          if (inbound.audio) {
-            if (!transcriptionEnabled()) continue;
-            const transcript = await transcribeAudioMessage(inbound.audio.mediaId);
-            if (!transcript) {
-              sendText({
-                to: inbound.from,
-                text: "I couldn't read that voice note. Please type your message instead.",
-              }).catch((err) => {
-                app.log.error(
-                  { err, from: inbound.from },
-                  "Failed to send transcription failure message",
-                );
-              });
-              continue;
-            }
-            inbound.text = transcript.text;
-            languageHint = transcript.language;
-          }
-
           // Documents / photos: an admin uploading an employer deduction file.
           if (inbound.document || inbound.image) {
             const media = inbound.document ?? inbound.image!;
@@ -147,7 +123,7 @@ export async function webhookRoutes(app: FastifyInstance) {
             handleMessage(inbound.from, inbound.text, {
               flowToken: inbound.flowToken,
               ip: req.ip,
-              languageHint: languageHint ?? undefined,
+              audioMediaId: inbound.audio?.mediaId,
             }),
           ).catch((err) => {
             app.log.error({ err, from: inbound.from }, "handleMessage failed");
