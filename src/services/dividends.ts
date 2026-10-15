@@ -2,7 +2,11 @@ import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { computePnl } from "./ledger.js";
 import { postJournal, getBankAccountBalance } from "./journal.js";
-import { setCoopContext, resolveCoopByPayoutReference, withCoopContext } from "../lib/tenant-context.js";
+import {
+  setCoopContext,
+  resolveCoopByPayoutReference,
+  withCoopContext,
+} from "../lib/tenant-context.js";
 import { sendToBank } from "./disbursements.js";
 import { roundMoney } from "./money.js";
 import { updateCoopConfig } from "./coop-config.js";
@@ -107,7 +111,10 @@ interface DividendBase {
  */
 async function computeDividendBase(cooperativeId: string): Promise<DividendBase> {
   const periodStart = currentPeriodStart();
-  const pnl = await computePnl(cooperativeId);
+  // Only THIS period's profit is distributable. Using all-time P&L let a new
+  // period re-declare the same profit (a distribution out of capital), because
+  // the statutory/pool subtractions below are period-scoped.
+  const pnl = await computePnl(cooperativeId, periodStart);
   const [reserve, education, development, priorDividends] = await Promise.all([
     prisma.reserveAllocation.aggregate({
       where: { cooperativeId, source: "dividend_declaration", createdAt: { gte: periodStart } },
@@ -810,48 +817,48 @@ export async function applyDividendPayoutUpdate(
   if (!coopId) return { handled: false };
 
   return withCoopContext(coopId, async () => {
-  const payout = await prisma.payout.findUnique({
-    where: { idempotencyKey: update.reference },
-    include: { dividendEntry: true },
-  });
-  if (!payout || !payout.dividendEntry) return { handled: false };
+    const payout = await prisma.payout.findUnique({
+      where: { idempotencyKey: update.reference },
+      include: { dividendEntry: true },
+    });
+    if (!payout || !payout.dividendEntry) return { handled: false };
 
-  const entry = payout.dividendEntry;
+    const entry = payout.dividendEntry;
 
-  if (update.status === "successful") {
-    if (entry.status !== "settled") {
-      await withTxBatch([
-        prisma.dividendEntry.update({
-          where: { id: entry.id },
-          data: { status: "settled", paidAt: new Date() },
-        }),
-        prisma.payout.update({
-          where: { id: payout.id },
-          data: { status: "successful", providerRef: update.providerRef ?? payout.providerRef },
-        }),
-      ]);
+    if (update.status === "successful") {
+      if (entry.status !== "settled") {
+        await withTxBatch([
+          prisma.dividendEntry.update({
+            where: { id: entry.id },
+            data: { status: "settled", paidAt: new Date() },
+          }),
+          prisma.payout.update({
+            where: { id: payout.id },
+            data: { status: "successful", providerRef: update.providerRef ?? payout.providerRef },
+          }),
+        ]);
+      }
+      return { handled: true, action: "settled" };
     }
-    return { handled: true, action: "settled" };
-  }
 
-  // status === "failed" — only reverse if not already finalised.
-  if (entry.status === "failed" || entry.status === "reversed") {
-    return { handled: true, action: "noop" };
-  }
-  await reverseDividendJournal(
-    payout.cooperativeId,
-    entry.dividendId,
-    entry.memberId,
-    entry.amount,
-  );
-  await withTxBatch([
-    prisma.dividendEntry.update({
-      where: { id: entry.id },
-      data: { status: "failed", failureReason: "Provider reported transfer.failed" },
-    }),
-    prisma.payout.update({ where: { id: payout.id }, data: { status: "failed" } }),
-  ]);
-  return { handled: true, action: "reversed" };
+    // status === "failed" — only reverse if not already finalised.
+    if (entry.status === "failed" || entry.status === "reversed") {
+      return { handled: true, action: "noop" };
+    }
+    await reverseDividendJournal(
+      payout.cooperativeId,
+      entry.dividendId,
+      entry.memberId,
+      entry.amount,
+    );
+    await withTxBatch([
+      prisma.dividendEntry.update({
+        where: { id: entry.id },
+        data: { status: "failed", failureReason: "Provider reported transfer.failed" },
+      }),
+      prisma.payout.update({ where: { id: payout.id }, data: { status: "failed" } }),
+    ]);
+    return { handled: true, action: "reversed" };
   });
 }
 
