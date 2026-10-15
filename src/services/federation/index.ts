@@ -273,16 +273,24 @@ export async function borrow(
  */
 export async function approveLoan(loanId: string): Promise<void> {
   const loan = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loanId } });
-  if (loan.status !== "pending") return;
   const cooperativeId = loan.borrowerCooperativeId;
   const fed = await prisma.federation.findUniqueOrThrow({ where: { id: loan.federationId } });
   const baseAmount = Math.round(loan.principalKobo * loan.fxRateToBase);
 
   const ref = `FED-LOAN-${loan.id}-${randomUUID()}`;
-  await withCoopContext(cooperativeId, async () => {
+  const approved = await withCoopContext(cooperativeId, async () => {
+    // ATOMIC CLAIM FIRST: only ONE concurrent approval can move the loan from
+    // `pending` to `active`. Every other racer sees `count === 0` and no-ops, so
+    // the same loan can never be double-disbursed (which fresh per-call txRefs
+    // would otherwise allow).
+    const claimed = await prisma.federationLoan.updateMany({
+      where: { id: loanId, status: "pending" },
+      data: { status: "active", disbursedAt: new Date() },
+    });
+    if (claimed.count === 0) return false;
     // Read pool liquidity from WITHIN the transaction (and before the
-    // disbursement) so two concurrent approvals cannot each pass the guard and
-    // over-disburse the same cash.
+    // disbursement) so a claim that can't be funded rolls the transition back —
+    // the loan stays `pending` and remains approvable.
     const poolBalance = await getPoolBalance(loan.federationId);
     if (baseAmount > poolBalance) throw new Error("INSUFFICIENT_POOL_LIQUIDITY");
     await prisma.cooperative.update({
@@ -317,11 +325,9 @@ export async function approveLoan(loanId: string): Promise<void> {
         ],
       }),
     );
-    await prisma.federationLoan.update({
-      where: { id: loanId },
-      data: { status: "active", disbursedAt: new Date() },
-    });
+    return true;
   });
+  if (!approved) return;
   await audit({
     cooperativeId,
     actorPhone: "system",
@@ -342,15 +348,17 @@ export async function repay(
   // Only the borrowing cooperative may repay its own loan — otherwise any coop
   // admin could pass another coop's loanId and drain that coop's fund balance.
   if (loan.borrowerCooperativeId !== callerCooperativeId) throw new Error("NOT_YOUR_LOAN");
-  // Only an `active` loan is repayable. Without this, a `repaid` loan (whose
-  // repaidKobo >= principal already) could be re-repaid, flipped back to
-  // `active`, and the fund debited again — repeatably.
-  if (loan.status !== "active") throw new Error("LOAN_NOT_REPAYABLE");
   const cooperativeId = loan.borrowerCooperativeId;
   const fed = await prisma.federation.findUniqueOrThrow({ where: { id: loan.federationId } });
   const baseAmount = Math.round(amountKobo * loan.fxRateToBase);
   const ref = `FED-REPAY-${loanId}-${randomUUID()}`;
   await withCoopContext(cooperativeId, async () => {
+    // Only an `active` loan is repayable, checked against the freshly-read row
+    // INSIDE the transaction. Without this, a `repaid` loan (whose repaidKobo
+    // >= principal already) could be re-repaid, flipped back to `active`, and
+    // the fund debited again — repeatably.
+    const current = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loanId } });
+    if (current.status !== "active") throw new Error("LOAN_NOT_REPAYABLE");
     const claimed = await prisma.cooperative.updateMany({
       where: { id: cooperativeId, federationFundBalance: { gte: amountKobo } },
       data: { federationFundBalance: { decrement: amountKobo } },
@@ -384,19 +392,29 @@ export async function repay(
         ],
       }),
     );
-    const fresh = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loanId } });
-    const repaid = fresh.repaidKobo + amountKobo;
-    const fullyRepaid = fresh.status === "active" && repaid >= fresh.principalKobo;
-    await prisma.federationLoan.update({
+    // Atomic increment — concurrent partial repays accumulate instead of losing
+    // an update (which a re-read + absolute write would).
+    const updated = await prisma.federationLoan.update({
       where: { id: loanId },
-      data: { repaidKobo: repaid, status: fullyRepaid ? "repaid" : "active" },
+      data: { repaidKobo: { increment: amountKobo } },
+    });
+    const fullyRepaid = updated.repaidKobo >= updated.principalKobo;
+    // Guarded transition: exactly ONE final repayment flips active -> repaid, so
+    // interest is charged once even if two repays close the loan concurrently.
+    const moved = await prisma.federationLoan.updateMany({
+      where: { id: loanId, status: "active" },
+      data: { status: fullyRepaid ? "repaid" : "active" },
     });
     await prisma.federationLoanRepayment.create({
       data: { loanId, amountKobo, currency: loan.currency, fxRateToBase: loan.fxRateToBase },
     });
 
-    if (fullyRepaid) {
-      const interest = computeInterest(fresh.principalKobo, fresh.interestRate, fresh.termMonths);
+    if (fullyRepaid && moved.count > 0) {
+      const interest = computeInterest(
+        updated.principalKobo,
+        updated.interestRate,
+        updated.termMonths,
+      );
       if (interest > 0) {
         // The interest journal credits `coop:federation_fund` on the coop side, so the
         // denormalized `federationFundBalance` column must fall by the same
@@ -478,13 +496,15 @@ export async function getPosition(federationId: string, cooperativeId: string) {
   // A bilateral lender's stake is earmarked when it backs a loan, but the
   // earmark is posted on the LENDER's own coop journal (`federation:loan_receivable`),
   // which the federation ledger cannot see. Subtract the outstanding base-currency
-  // principal of this coop's pending/active loans so the same stake cannot back
-  // unlimited loans (i.e. `stakeKobo` is the AVAILABLE, un-earmarked stake).
+  // principal of this coop's pending/active/defaulted loans so the same stake
+  // cannot back unlimited loans (i.e. `stakeKobo` is the AVAILABLE, un-earmarked
+  // stake). A `defaulted` loan keeps its earmark until the federation admin
+  // writes it off — otherwise a default would silently free the lender's capital.
   const earmarked = await prisma.federationLoan.findMany({
     where: {
       federationId,
       lenderCooperativeId: cooperativeId,
-      status: { in: ["pending", "active"] },
+      status: { in: ["pending", "active", "defaulted"] },
     },
     select: { principalKobo: true, fxRateToBase: true },
   });

@@ -102,6 +102,26 @@ describe("federation pool", () => {
     expect(again?.federationFundBalance).toBe(after?.federationFundBalance);
   });
 
+  it("disburses only once when two approvals race on the same pending loan", async () => {
+    const { fed, coop } = await setup();
+    await contribute(fed.id, coop.id, 1_000_000);
+    const loan = await borrow(fed.id, coop.id, 500_000, 3);
+    const before = await prisma.cooperative.findUniqueOrThrow({ where: { id: coop.id } });
+
+    await Promise.all([approveLoan(loan.id), approveLoan(loan.id)]);
+
+    const after = await prisma.cooperative.findUniqueOrThrow({ where: { id: coop.id } });
+    expect(after.federationFundBalance).toBe((before.federationFundBalance ?? 0) + 500_000);
+    const active = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loan.id } });
+    expect(active.status).toBe("active");
+    expect(await getPoolBalance(fed.id)).toBe(500_000);
+    // Exactly one disbursement posting — the loser of the race never disbursed.
+    const disbursements = await prisma.posting.findMany({
+      where: { account: "federation:payable", entry: { cooperativeId: coop.id } },
+    });
+    expect(disbursements).toHaveLength(1);
+  });
+
   it("rejects a non-positive contribution and leaves the fund unchanged", async () => {
     const { fed, coop } = await setup();
     await expect(contribute(fed.id, coop.id, -1)).rejects.toThrow("INVALID_AMOUNT");
