@@ -636,7 +636,7 @@ async function handleMessageInner(
     return;
   }
 
-  if (member && /^federation\b/i.test(text.trim())) {
+  if (member && /^federation\s+(position|contribute|borrow)\b/i.test(text.trim())) {
     const parts = text.trim().split(/\s+/);
     const sub = (parts[1] ?? "").toLowerCase();
     const feds = await listFederationsForCoop(member.cooperativeId);

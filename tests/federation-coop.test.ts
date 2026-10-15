@@ -82,4 +82,18 @@ describe("coop federation commands", () => {
     });
     expect(position).toBeGreaterThan(0);
   });
+
+  it("does not shadow the super-admin federation commands", async () => {
+    const fed = await createFederation("Coop Fed", `FED${Date.now()}`, "NGN");
+    const coop = await makeCoop(`FC${Date.now()}`, 10_000_000);
+    await addMember(fed.id, coop.id);
+    const superPhone = "2348012345699";
+    await makeMember(superPhone, coop.id, "superadmin");
+
+    await handleMessage(superPhone, "federation create shadowfed NGN");
+
+    const created = await prisma.federation.findFirst({ where: { name: "shadowfed" } });
+    expect(created).toBeTruthy();
+    expect(created?.baseCurrency).toBe("NGN");
+  });
 });
