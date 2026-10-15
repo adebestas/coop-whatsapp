@@ -6,6 +6,7 @@ import { totpAt } from "../src/lib/totp.js";
 import { assertMoneyAuthorized, enable2fa } from "../src/services/auth2fa.js";
 import { ensureBeneficiaryAllowed } from "../src/services/beneficiaries.js";
 import { runTransferPolling } from "../src/services/statuspoller.js";
+import { prisma as appPrisma } from "../src/lib/prisma.js";
 import { runDailyDigest } from "../src/services/scheduler.js";
 import {
   checkDailyPayoutLimit,
@@ -301,6 +302,161 @@ describe("transfer status polling", () => {
     const after = await prisma.externalPayment.findUnique({ where: { id: payment.id } });
     expect(after!.status).toBe("processing");
     expect(await prisma.payout.count()).toBe(0);
+  });
+
+  it("does not double-book a withdrawal another path already settled (count-gate)", async () => {
+    const coop = await makeCoop();
+    const member = await makeMember("2348010000501", coop.id, { balance: 0 }); // already debited
+    const request = await prisma.withdrawalRequest.create({
+      data: {
+        amount: 2500,
+        status: "processing",
+        bankAccountNumber: "0123456789",
+        bankCode: "058",
+        memberId: member.id,
+        cooperativeId: coop.id,
+        createdAt: new Date(Date.now() - 40 * 60 * 1000),
+      },
+    });
+
+    // Simulate a concurrent webhook/poller settling the row in the window
+    // between the poller's read and its guarded update. `appPrisma` routes to
+    // the poller's own transaction (same async context), so this is a
+    // deterministic, lock-free race injection.
+    fakeProvider.getTransferStatus.mockImplementation(async () => {
+      await appPrisma.withdrawalRequest.update({
+        where: { id: request.id },
+        data: { status: "paid" },
+      });
+      return { status: "successful" };
+    });
+
+    const actions = await runTransferPolling(new Date());
+
+    expect(actions.join("\n")).not.toContain("confirmed by provider");
+    expect(
+      await prisma.ledgerEntry.count({
+        where: { cooperativeId: coop.id, reference: request.id, category: "withdrawal" },
+      }),
+    ).toBe(0);
+    expect(
+      await prisma.auditLog.count({
+        where: { cooperativeId: coop.id, action: "withdrawal.poller_confirmed" },
+      }),
+    ).toBe(0);
+    expect((await prisma.withdrawalRequest.findUnique({ where: { id: request.id } }))!.status).toBe(
+      "paid",
+    );
+  });
+
+  it("does not throw or duplicate when a pay-anyone payout already exists", async () => {
+    const coop = await makeCoop();
+    const initiator = await makeMember("2348090000502", coop.id, { role: "admin" });
+    const payment = await prisma.externalPayment.create({
+      data: {
+        cooperativeId: coop.id,
+        beneficiaryName: "Vendor Two",
+        bankAccountNumber: "0123456789",
+        bankCode: "058",
+        amount: 5000,
+        initiatedById: initiator.id,
+        status: "processing",
+        createdAt: new Date(Date.now() - 30 * 60 * 1000),
+        updatedAt: new Date(Date.now() - 30 * 60 * 1000),
+      },
+    });
+    const ref = `PAYANY-${payment.id.slice(-8)}`;
+    // A partial state: the payout row exists but the external payment is still
+    // "processing" — the old code would raise P2002 out of forEachCoop.
+    await prisma.payout.create({
+      data: {
+        amount: 5000,
+        reference: ref,
+        idempotencyKey: ref,
+        status: "successful",
+        provider: "monnify",
+        memberId: initiator.id,
+        cooperativeId: coop.id,
+      },
+    });
+
+    fakeProvider.getTransferStatus.mockImplementation(async () => ({
+      status: "successful",
+      providerRef: "pr-x",
+    }));
+
+    const actions = await runTransferPolling(new Date()); // must not reject
+
+    expect((await prisma.externalPayment.findUnique({ where: { id: payment.id } }))!.status).toBe(
+      "paid",
+    );
+    expect(await prisma.payout.count()).toBe(1); // no duplicate
+    expect(
+      await prisma.ledgerEntry.count({
+        where: { cooperativeId: coop.id, reference: payment.id, category: "external_payment" },
+      }),
+    ).toBe(1);
+    expect(actions.join("\n")).toContain("confirmed by provider");
+  });
+
+  it("keeps polling other cooperatives when one row fails", async () => {
+    // Coop A holds a pay-anyone row whose payout already exists (the row that
+    // used to throw P2002 and abort the whole run).
+    const coopA = await makeCoop("Poll Coop A");
+    const aAdmin = await makeMember("2348090000503", coopA.id, { role: "admin" });
+    const bad = await prisma.externalPayment.create({
+      data: {
+        cooperativeId: coopA.id,
+        beneficiaryName: "Bad Vendor",
+        bankAccountNumber: "0123456789",
+        bankCode: "058",
+        amount: 1000,
+        initiatedById: aAdmin.id,
+        status: "processing",
+        createdAt: new Date(Date.now() - 30 * 60 * 1000),
+        updatedAt: new Date(Date.now() - 30 * 60 * 1000),
+      },
+    });
+    const badRef = `PAYANY-${bad.id.slice(-8)}`;
+    await prisma.payout.create({
+      data: {
+        amount: 1000,
+        reference: badRef,
+        idempotencyKey: badRef,
+        status: "successful",
+        provider: "monnify",
+        memberId: aAdmin.id,
+        cooperativeId: coopA.id,
+      },
+    });
+
+    // Coop B holds a plain stuck withdrawal that should still settle.
+    const coopB = await makeCoop("Poll Coop B");
+    const bMember = await makeMember("2348010000504", coopB.id, { balance: 0 });
+    const withdrawal = await prisma.withdrawalRequest.create({
+      data: {
+        amount: 1500,
+        status: "processing",
+        bankAccountNumber: "0123456789",
+        bankCode: "058",
+        memberId: bMember.id,
+        cooperativeId: coopB.id,
+        createdAt: new Date(Date.now() - 40 * 60 * 1000),
+      },
+    });
+
+    fakeProvider.getTransferStatus.mockImplementation(async () => ({ status: "successful" }));
+
+    await runTransferPolling(new Date()); // must not reject
+
+    expect(
+      (await prisma.withdrawalRequest.findUnique({ where: { id: withdrawal.id } }))!.status,
+    ).toBe("paid");
+    expect(
+      await prisma.ledgerEntry.count({
+        where: { cooperativeId: coopB.id, reference: withdrawal.id, category: "withdrawal" },
+      }),
+    ).toBe(1);
   });
 });
 
