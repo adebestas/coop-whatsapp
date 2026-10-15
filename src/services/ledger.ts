@@ -34,6 +34,13 @@ export async function recordLedger(input: {
   txRef?: string;
   /** Fund segregation: member (trust), operational, or reserve. */
   fundType?: string;
+  /**
+   * The account the money actually moved to/from. Defaults to `assets:bank`
+   * (real bank cash). Pass the true leg when it is NOT bank cash — e.g.
+   * `member_wallet:<id>` for wallet-funded interest/fines, or
+   * `assets:loan_portfolio` for fees withheld from a loan disbursement.
+   */
+  counterAccount?: string;
   /** Optional transaction client for atomic operations. */
   tx?: Pick<typeof prisma, "ledgerEntry" | "journalEntry">;
 }) {
@@ -51,33 +58,36 @@ export async function recordLedger(input: {
   const fundType = input.fundType ?? "operational";
   const client = input.tx ?? prisma;
 
-  // Double-entry mapping: money in/out of the cooperative bank account.
+  // Double-entry mapping. `counter` is the account the money actually moved
+  // to/from — `assets:bank` for real bank cash, or the caller-supplied leg
+  // (member wallet, loan portfolio, ...) when no bank cash moved.
+  const counter = input.counterAccount ?? "assets:bank";
   const postings =
     input.type === "income"
       ? [
-          { account: "assets:bank", direction: "DEBIT" as const, amount },
+          { account: counter, direction: "DEBIT" as const, amount },
           { account: `income:${input.category}`, direction: "CREDIT" as const, amount },
         ]
       : input.type === "expense"
         ? [
             { account: `expense:${input.category}`, direction: "DEBIT" as const, amount },
-            { account: "assets:bank", direction: "CREDIT" as const, amount },
+            { account: counter, direction: "CREDIT" as const, amount },
           ]
         : input.type === "balance_sheet"
           ? [
               // Balance sheet movement: tracks asset/liability changes without
               // affecting P&L. The caller specifies the account via `category`.
               { account: input.category, direction: "DEBIT" as const, amount },
-              { account: "assets:bank", direction: "CREDIT" as const, amount },
+              { account: counter, direction: "CREDIT" as const, amount },
             ]
           : [
               // Appropriation: debits a liability account (dividend payable) and
-              // credits the bank account, representing a distribution of profits.
+              // credits the counter account, representing a distribution of profits.
               // Using liabilities:dividend_payable instead of equity:retained_earnings
               // ensures the cooperative's obligation to pay is tracked until wallets
               // are actually credited.
               { account: "liabilities:dividend_payable", direction: "DEBIT" as const, amount },
-              { account: "assets:bank", direction: "CREDIT" as const, amount },
+              { account: counter, direction: "CREDIT" as const, amount },
             ];
 
   if (input.tx) {

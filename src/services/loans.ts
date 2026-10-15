@@ -898,6 +898,7 @@ export async function repayLoan(
         note: `Loan repayment by ${member.name}: interest ${formatBalance(interestPortion)} on loan ${loan.id.slice(-6)}`,
         reference: loan.id,
         fundType: "operational",
+        counterAccount: `member_wallet:${walletId}`,
         tx,
       });
       // Principal repayment is a return of capital, NOT income. It reduces the
@@ -912,6 +913,7 @@ export async function repayLoan(
           note: `Loan repayment by ${member.name}: principal ${formatBalance(principalPortion)} on loan ${loan.id.slice(-6)}`,
           reference: loan.id,
           fundType: "member",
+          counterAccount: `member_wallet:${walletId}`,
           tx,
         });
       }
@@ -924,6 +926,7 @@ export async function repayLoan(
           note: `Late fine on loan ${loan.id.slice(-6)}`,
           reference: loan.id,
           fundType: "operational",
+          counterAccount: `member_wallet:${walletId}`,
           tx,
         });
       }

@@ -431,7 +431,8 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
         console.error(`[loan] disbursement succeeded but loan ${loan.id} was already finalized`);
         return false;
       }
-      // P&L: the admin charge is cooperative income.
+      // P&L: the admin charge is cooperative income. It is withheld from the
+      // loan (no bank cash moved), so its counter-leg is the loan portfolio.
       await recordLedger({
         cooperativeId: loan.cooperativeId,
         type: "income",
@@ -440,6 +441,7 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
         note: `Admin charge on loan ${loan.id.slice(-6)}`,
         reference: loan.id,
         fundType: "operational",
+        counterAccount: "assets:loan_portfolio",
         tx: tx as never,
       });
       // Balance sheet: loan portfolio increases, bank decreases.

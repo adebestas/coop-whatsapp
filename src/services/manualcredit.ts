@@ -204,6 +204,7 @@ export async function approveManualCredit(
         note: `Manual credit to ${target.name} — ${credit.narration}`,
         reference: `MC-${credit.id.slice(-8)}`,
         txRef: `mc_${credit.id}`,
+        counterAccount: `member_wallet:${wallet.id}`,
         tx,
       });
 

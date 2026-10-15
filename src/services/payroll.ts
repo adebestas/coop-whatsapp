@@ -217,7 +217,9 @@ export async function runPayroll(
       fundType: "operational",
     });
 
-    // Record PAYE as a tax liability (to be remitted to state IRS)
+    // Record PAYE as a tax liability (to be remitted to state IRS). The money
+    // was withheld from salary, not paid from the bank, so the counter-leg is
+    // the PAYE liability, not assets:bank.
     if (paye > 0) {
       await recordLedger({
         cooperativeId,
@@ -227,6 +229,7 @@ export async function runPayroll(
         note: `PAYE deduction for ${r.name} — ${narration.trim()} (remittance liability)`,
         reference: `PAYE-${r.id}-${period}`,
         fundType: "operational",
+        counterAccount: "liabilities:paye_payable",
       });
 
       // Create PAYERecord for SIRS remittance tracking

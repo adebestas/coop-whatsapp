@@ -226,6 +226,7 @@ export async function runTransferPolling(now = new Date()): Promise<string[]> {
           note: `Admin charge on loan ${loan.id.slice(-6)} (confirmed by poller)`,
           reference: loan.id,
           fundType: "operational",
+          counterAccount: "assets:loan_portfolio",
         });
         await audit({
           cooperativeId: loan.cooperativeId,
