@@ -575,24 +575,29 @@ export async function approveBatch(
         const loan = await prisma.loan.findUnique({ where: { id: item.loanId } });
         if (loan && loan.status === "disbursed" && loan.balance > 0) {
           const applied = Math.min(item.amount, loan.balance);
-          const newBalance = Math.max(0, Math.round((loan.balance - applied) * 100) / 100);
-          await prisma.loan.update({
-            where: { id: loan.id },
-            data: {
-              balance: newBalance,
-              ...(newBalance === 0 ? { status: "paid" } : {}),
-            },
+          // Guarded atomic decrement — a concurrent repayLoan (which also
+          // decrements the balance) must not be overwritten by an absolute write.
+          const updated = await prisma.loan.updateMany({
+            where: { id: loan.id, status: "disbursed", balance: { gte: applied } },
+            data: { balance: { decrement: applied } },
           });
-          await prisma.loanRepayment.create({ data: { amount: applied, loanId: loan.id } });
-          notifications.push({
-            member,
-            text:
-              newBalance === 0
-                ? `🎉 Loan repayment of ${formatBalance(applied)} received — your loan is now *fully repaid*.`
-                : `📄 Loan repayment of ${formatBalance(applied)} received. Remaining balance: ${formatBalance(newBalance)}.`,
-          });
-          repaidCount += 1;
-          totalRepaid += applied;
+          if (updated.count > 0) {
+            const fresh = await prisma.loan.findUnique({ where: { id: loan.id } });
+            const newBalance = fresh?.balance ?? 0;
+            if (newBalance <= 0) {
+              await prisma.loan.update({ where: { id: loan.id }, data: { status: "paid" } });
+            }
+            await prisma.loanRepayment.create({ data: { amount: applied, loanId: loan.id } });
+            notifications.push({
+              member,
+              text:
+                newBalance <= 0
+                  ? `🎉 Loan repayment of ${formatBalance(applied)} received — your loan is now *fully repaid*.`
+                  : `📄 Loan repayment of ${formatBalance(applied)} received. Remaining balance: ${formatBalance(newBalance)}.`,
+            });
+            repaidCount += 1;
+            totalRepaid += applied;
+          }
         }
       }
       await prisma.deductionItem.update({

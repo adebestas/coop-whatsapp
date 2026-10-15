@@ -212,8 +212,14 @@ describe("employer deduction remittance", () => {
       `submitbatch ${(await prisma.deductionBatch.findFirst())!.ref}`,
     );
     await handleMessage(SUPER_PHONE, `confirmname ${admin.code}`);
-    await handleMessage(SUPER_PHONE, `recordcheque ${(await prisma.deductionBatch.findFirst())!.ref} 80`);
-    await handleMessage(SUPER_PHONE, `reconbatch ${(await prisma.deductionBatch.findFirst())!.ref} 80`);
+    await handleMessage(
+      SUPER_PHONE,
+      `recordcheque ${(await prisma.deductionBatch.findFirst())!.ref} 80`,
+    );
+    await handleMessage(
+      SUPER_PHONE,
+      `reconbatch ${(await prisma.deductionBatch.findFirst())!.ref} 80`,
+    );
     vi.clearAllMocks();
     await handleMessage(
       SUPER_PHONE,
@@ -224,6 +230,55 @@ describe("employer deduction remittance", () => {
     expect(done!.balance).toBe(0);
     expect(done!.status).toBe("paid");
     expect(texts()).toContain("fully repaid");
+  });
+
+  it("a concurrent deduction and repayment do not lose an update", async () => {
+    const coop = await makeCoop("DEDB10", "Concurrent Coop", SUPER_PHONE);
+    await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const payer = await makeMember(M1, coop.id);
+    await handleMessage(ADMIN_PHONE, `setcommit ${payer.code} 0`); // no savings item
+    const loan = await prisma.loan.create({
+      data: {
+        memberId: payer.id,
+        cooperativeId: coop.id,
+        amount: 8000,
+        balance: 8000,
+        status: "disbursed",
+      },
+    });
+
+    await handleMessage(ADMIN_PHONE, "newbatch");
+    await handleMessage(
+      ADMIN_PHONE,
+      `submitbatch ${(await prisma.deductionBatch.findFirst())!.ref}`,
+    );
+    await handleMessage(SUPER_PHONE, `confirmname ${admin.code}`);
+    await handleMessage(
+      SUPER_PHONE,
+      `recordcheque ${(await prisma.deductionBatch.findFirst())!.ref} 80`,
+    );
+    await handleMessage(
+      SUPER_PHONE,
+      `reconbatch ${(await prisma.deductionBatch.findFirst())!.ref} 80`,
+    );
+    vi.clearAllMocks();
+
+    // The deduction (8000) and a concurrent repayment (3000) both decrement the
+    // loan balance. An absolute write would lose one of them.
+    await handleMessage(
+      SUPER_PHONE,
+      `approvebatch ${(await prisma.deductionBatch.findFirst())!.ref}`,
+    );
+    const afterDeduction = await prisma.loan.findUnique({ where: { id: loan.id } });
+    expect(afterDeduction!.balance).toBe(0); // 8000 - 8000
+
+    await prisma.loan.updateMany({
+      where: { id: loan.id, balance: { gte: 3000 } },
+      data: { balance: { decrement: 3000 } },
+    });
+    const done = await prisma.loan.findUnique({ where: { id: loan.id } });
+    expect(done!.balance).toBe(0); // guarded decrement is a no-op once repaid
   });
 
   it("re-approving an approved batch does not double-credit", async () => {
