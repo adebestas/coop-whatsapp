@@ -20,6 +20,7 @@ import { listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js"
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
 import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js";
 import { requestPhoneChange } from "./phone-change.js";
+import { listFederationsForCoop, getPosition, contribute, borrow } from "./federation/index.js";
 import { detectLocale, localeFromLanguageCode, t, LOCALES, type Locale } from "../lib/i18n.js";
 import { runWithLocale, getLocale } from "../lib/runtime-context.js";
 import { translateToEnglish } from "../lib/translate.js";
@@ -632,6 +633,44 @@ async function handleMessageInner(
     await prisma.member.update({ where: { id: member.id }, data: { locale: want } });
     invalidateMemberCache(phone, member.cooperativeId);
     await sendText({ to: phone, text: t("cmd.language.set", { lang: want }, want) });
+    return;
+  }
+
+  if (member && /^federation\b/i.test(text.trim())) {
+    const parts = text.trim().split(/\s+/);
+    const sub = (parts[1] ?? "").toLowerCase();
+    const feds = await listFederationsForCoop(member.cooperativeId);
+    if (!feds.length) { await sendText({ to: phone, text: "Your cooperative is not in a federation." }); return; }
+    const fed = feds[0];
+    if (sub === "position") {
+      const pos = await getPosition(fed.id, member.cooperativeId);
+      await sendText({ to: phone, text: `*${fed.name}* position\n\nPool stake: *${formatBalance(pos.stakeKobo)}*\nOwed to federation: *${formatBalance(pos.owedKobo)}*` });
+      return;
+    }
+    if (member.role !== "admin" && member.role !== "superadmin") {
+      await sendText({ to: phone, text: "Only a coop admin can manage federation funds." });
+      return;
+    }
+    if (sub === "contribute") {
+      const amount = toKobo(Number(parts[2]));
+      if (!(amount > 0)) { await sendText({ to: phone, text: "Usage: *federation contribute <amount>*" }); return; }
+      try {
+        await contribute(fed.id, member.cooperativeId, amount);
+        await sendText({ to: phone, text: `✅ Contributed *${formatBalance(amount)}* to *${fed.name}*.` });
+      } catch (err: any) {
+        await sendText({ to: phone, text: err?.message === "INSUFFICIENT_BALANCE" ? "Insufficient wallet balance." : "Could not contribute right now." });
+      }
+      return;
+    }
+    if (sub === "borrow") {
+      const amount = toKobo(Number(parts[2]));
+      const months = Number(parts[3]);
+      if (!(amount > 0) || !(months > 0)) { await sendText({ to: phone, text: "Usage: *federation borrow <amount> <months>*" }); return; }
+      const loan = await borrow(fed.id, member.cooperativeId, amount, months);
+      await sendText({ to: phone, text: `✅ Borrowed *${formatBalance(amount)}* for ${months} months. Loan *${loan.id.slice(0, 8)}*.` });
+      return;
+    }
+    await sendText({ to: phone, text: "Usage: *federation position|contribute <amount>|borrow <amount> <months>*" });
     return;
   }
 
