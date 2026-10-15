@@ -209,8 +209,12 @@ export async function borrow(
   if (baseAmount > poolBalance) throw new Error("INSUFFICIENT_POOL_LIQUIDITY");
 
   if (lenderCooperativeId) {
+    // The lender's stake is denominated in the federation's BASE currency
+    // (`getPosition` reads base-currency postings), so convert the requested
+    // amount into base before comparing — otherwise a cross-currency bilateral
+    // loan compares two different units.
     const { stakeKobo } = await getPosition(federationId, lenderCooperativeId);
-    if (stakeKobo < amountKobo) throw new Error("INSUFFICIENT_LENDER_STAKE");
+    if (stakeKobo < baseAmount) throw new Error("INSUFFICIENT_LENDER_STAKE");
   }
 
   const dueAt = new Date(Date.now() + termMonths * 30 * 24 * 60 * 60 * 1000);
@@ -380,6 +384,15 @@ export async function repay(loanId: string, amountKobo: number): Promise<void> {
     if (fullyRepaid) {
       const interest = computeInterest(fresh.principalKobo, fresh.interestRate, fresh.termMonths);
       if (interest > 0) {
+        // The interest journal credits `federation:fund` on the coop side, so the
+        // denormalized `federationFundBalance` column must fall by the same
+        // amount — guarded (like the principal) so the fund can never go negative
+        // and column never drifts from the journal.
+        const interestClaimed = await prisma.cooperative.updateMany({
+          where: { id: cooperativeId, federationFundBalance: { gte: interest } },
+          data: { federationFundBalance: { decrement: interest } },
+        });
+        if (interestClaimed.count === 0) throw new Error("INSUFFICIENT_BALANCE");
         const interestBase = Math.round(interest * loan.fxRateToBase);
         const interestRef = `FED-INTEREST-${loanId}-${randomUUID()}`;
         assertPosted(

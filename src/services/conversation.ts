@@ -20,7 +20,14 @@ import { listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js"
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
 import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js";
 import { requestPhoneChange } from "./phone-change.js";
-import { listFederationsForCoop, getPosition, contribute, borrow } from "./federation/index.js";
+import {
+  listFederationsForCoop,
+  getPosition,
+  contribute,
+  borrow,
+  fundFederation,
+  repay,
+} from "./federation/index.js";
 import { detectLocale, localeFromLanguageCode, t, LOCALES, type Locale } from "../lib/i18n.js";
 import { runWithLocale, getLocale } from "../lib/runtime-context.js";
 import { translateToEnglish } from "../lib/translate.js";
@@ -636,7 +643,7 @@ async function handleMessageInner(
     return;
   }
 
-  if (member && /^federation\s+(position|contribute|borrow)\b/i.test(text.trim())) {
+  if (member && /^federation\s+(position|fund|contribute|borrow|repay)\b/i.test(text.trim())) {
     const parts = text.trim().split(/\s+/);
     const sub = (parts[1] ?? "").toLowerCase();
     const feds = await listFederationsForCoop(member.cooperativeId);
@@ -647,9 +654,11 @@ async function handleMessageInner(
     const fed = feds[0];
     if (sub === "position") {
       const pos = await getPosition(fed.id, member.cooperativeId);
+      // Position balances are booked in the federation's BASE currency, so
+      // format with `fed.baseCurrency`, not the coop's.
       await sendText({
         to: phone,
-        text: `*${fed.name}* position\n\nPool stake: *${formatBalance(pos.stakeKobo)}*\nOwed to federation: *${formatBalance(pos.owedKobo)}*`,
+        text: `*${fed.name}* position\n\nPool stake: *${formatBalance(pos.stakeKobo, fed.baseCurrency)}*\nOwed to federation: *${formatBalance(pos.owedKobo, fed.baseCurrency)}*`,
       });
       return;
     }
@@ -704,9 +713,56 @@ async function handleMessageInner(
       }
       return;
     }
+    if (sub === "fund") {
+      const amount = toKobo(Number(parts[2]));
+      if (!(amount > 0)) {
+        await sendText({ to: phone, text: "Usage: *federation fund <amount>*" });
+        return;
+      }
+      try {
+        await fundFederation(member.cooperativeId, amount);
+        await sendText({
+          to: phone,
+          text: `✅ Funded *${fed.name}* with *${formatBalance(amount)}* from your reserve fund.`,
+        });
+      } catch (err: any) {
+        await sendText({
+          to: phone,
+          text:
+            err?.message === "INSUFFICIENT_RESERVE"
+              ? "Insufficient reserve fund to fund the federation."
+              : "Could not fund the federation right now.",
+        });
+      }
+      return;
+    }
+    if (sub === "repay") {
+      const loanId = parts[2];
+      const amount = toKobo(Number(parts[3]));
+      if (!loanId || !(amount > 0)) {
+        await sendText({ to: phone, text: "Usage: *federation repay <loanId> <amount>*" });
+        return;
+      }
+      try {
+        await repay(loanId, amount);
+        await sendText({
+          to: phone,
+          text: `✅ Repaid *${formatBalance(amount)}* to *${fed.name}*.`,
+        });
+      } catch (err: any) {
+        await sendText({
+          to: phone,
+          text:
+            err?.message === "INSUFFICIENT_BALANCE"
+              ? "Insufficient federation fund balance to repay."
+              : "Could not repay the federation loan right now.",
+        });
+      }
+      return;
+    }
     await sendText({
       to: phone,
-      text: "Usage: *federation position|contribute <amount>|borrow <amount> <months>*",
+      text: "Usage: *federation position|fund <amount>|contribute <amount>|borrow <amount> <months>|repay <loanId> <amount>*",
     });
     return;
   }

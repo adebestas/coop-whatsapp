@@ -110,8 +110,25 @@ import {
   approveLoan as approveFederationLoan,
   createFederation,
   markDefaulted,
+  removeMember as removeFederationMember,
 } from "./federation/index.js";
 import { setRate } from "./federation/fx.js";
+
+/**
+ * Resolve the federation a `federation <sub> ...` command targets: the one whose
+ * `code` matches `args[1]` when that token is a real federation code, otherwise
+ * the sole/most-recently created federation. Resolution is intentionally loose —
+ * existing commands pass their first positional arg in `args[1]`, and only a
+ * literal code match changes behaviour.
+ */
+async function resolveFederation(args: string[]) {
+  const code = args[1];
+  if (code) {
+    const byCode = await prisma.federation.findUnique({ where: { code } });
+    if (byCode) return byCode;
+  }
+  return prisma.federation.findFirst({ orderBy: { createdAt: "desc" } });
+}
 
 // TODO: Split into domain-specific handlers (loans, withdrawals, config, etc.)
 
@@ -4404,13 +4421,29 @@ export async function handleAdminCommand(
             await sendText({ to: phone, text: "Usage: *federation addcoop <coop code>*" });
             return true;
           }
-          const fed = await prisma.federation.findFirst({ orderBy: { createdAt: "desc" } });
+          const fed = await resolveFederation(args);
           if (!fed) {
             await sendText({ to: phone, text: "No federation exists yet." });
             return true;
           }
           await addMember(fed.id, coop.id);
           await sendText({ to: phone, text: `✅ *${coop.name}* added to *${fed.name}*.` });
+          return true;
+        }
+        if (sub === "removecoop") {
+          const code = args[1];
+          const coop = code ? await prisma.cooperative.findUnique({ where: { code } }) : null;
+          if (!coop) {
+            await sendText({ to: phone, text: "Usage: *federation removecoop <coop code>*" });
+            return true;
+          }
+          const fed = await resolveFederation(args);
+          if (!fed) {
+            await sendText({ to: phone, text: "No federation exists yet." });
+            return true;
+          }
+          await removeFederationMember(fed.id, coop.id);
+          await sendText({ to: phone, text: `✅ *${coop.name}* removed from *${fed.name}*.` });
           return true;
         }
         if (sub === "rate") {
@@ -4420,7 +4453,7 @@ export async function handleAdminCommand(
             await sendText({ to: phone, text: "Usage: *federation rate <from> <to> <rate>*" });
             return true;
           }
-          const fed = await prisma.federation.findFirst({ orderBy: { createdAt: "desc" } });
+          const fed = await resolveFederation(args);
           if (!fed) {
             await sendText({ to: phone, text: "No federation exists yet." });
             return true;
@@ -4430,7 +4463,7 @@ export async function handleAdminCommand(
           return true;
         }
         if (sub === "loans") {
-          const fed = await prisma.federation.findFirst({ orderBy: { createdAt: "desc" } });
+          const fed = await resolveFederation(args);
           const loans = fed
             ? await prisma.federationLoan.findMany({
                 where: { federationId: fed.id },
@@ -4472,7 +4505,7 @@ export async function handleAdminCommand(
         }
         await sendText({
           to: phone,
-          text: "Usage: *federation create|addcoop|rate|loans|approveloan|default*",
+          text: "Usage: *federation create|addcoop|removecoop|rate|loans|approveloan|default*",
         });
         return true;
       }
