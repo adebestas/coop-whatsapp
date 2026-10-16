@@ -1,6 +1,6 @@
 # Expert-Review Remediation — Progress & Resume
 
-**Branch:** `feat/world-class` · **HEAD:** `614e5c7` · **Base for this work:** `f52dda3`
+**Branch:** `feat/world-class` · **HEAD:** `feb43cc` · **Base for this work:** `f52dda3`
 **Full findings:** `docs/EXPERT-REVIEW-2026-10-15.md`
 **Method:** fix one finding at a time — verify the finding, ask the user about the fix + test, implement (TDD), run the focused tests + `tsc` + `eslint src/` + `prettier`, commit.
 
@@ -66,8 +66,11 @@ Deep-research hardening pass (Replit DB deletion, Lovable PII, Vercel env leakag
 | OPS-5 | Retention job was dead code (filtered the never-assigned status `"inactive"` → anonymized nobody); now anonymizes old `suspended`/`deceased` members. Account erasure also clears the member's `Session` (mid-flow PII) and writes an audit entry. | `cf8d32c` |
 | OPS-6 | Dashboard static root was hardcoded to container-only `/app/dashboard`; now resolved relative to the module (works in Docker, from source, and tests) with a `DASHBOARD_DIR` override. | `2ccb1b2` |
 | OPS-7 | Deploy gates were cosmetic (`autoDeploy: true` shipped every push); now `autoDeploy: false` and CI triggers the Render Deploy Hook only after all checks pass. | `614e5c7` |
+| OPS-8 | Consent recorded truthfully: erasure logged `delete_account` as granted (was falsely `false`); messaging opt-out now logged as a decline (was unrecorded); messaging consent relabelled from `"registration"` to `"messaging"`. | `feb43cc` |
 
-**All SEC-1…9 and PERF-1…4 done; OPS-1…7 done.** Next: OPS-8 (consent record semantics).
+**ALL SEC-1…9, PERF-1…4 and OPS-1…8 done — the expert-review backlog is complete.**
+
+Loose ends (not code): rotate the leaked Neon DB credential (Neon console); `gh` is unauthenticated so no PR was opened; `npm run format:check` fails on 22 pre-existing unrelated `src/*` files; `tests/prelaunch.test.ts` "startup environment validation" fails at baseline (pre-existing).
 
 > **Rotate the Neon credential** scrubbed from `.env` in SEC-6 — still live in Neon until rotated there.
 
@@ -78,9 +81,9 @@ AI prompt still says ₦ (`ai-query.ts:153`); translation trigger ignores the re
 
 ## Resume
 
-1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `614e5c7`).
+1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `feb43cc`).
 2. Read this file + `docs/EXPERT-REVIEW-2026-10-15.md` + `~/.config/opencode/memory.md`.
-3. All **Critical (A1–A17)**, the insurance + federation + topup Important items, **SEC-1…9**, **PERF-1…4** and **OPS-1…7** are done. Next: **OPS-8** (consent records) — same loop (verify → ask about fix+test → implement → test → commit).
+3. All **Critical (A1–A17)**, the insurance + federation + topup Important items, **SEC-1…9**, **PERF-1…4** and **OPS-1…8** are done — the backlog is complete. Remaining work is non-code (rotate the Neon credential; open a PR once `gh` is authenticated).
 
 > **A15 follow-up:** voice + translation are now consent-gated, but the natural-language
 > AI paths (`suggestCommand` in `lib/ai.ts`, `ai-query.ts`, `ai-insights.ts`) still send
