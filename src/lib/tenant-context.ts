@@ -1,4 +1,5 @@
 import { prisma, withTx } from "./prisma.js";
+import type { Prisma } from "@prisma/client";
 import { withDeferredSends } from "./deferred.js";
 import { runWithContext } from "./runtime-context.js";
 import { DEFAULT_CURRENCY } from "./currency.js";
@@ -56,6 +57,44 @@ export async function setCoopContext(
 }
 
 /**
+ * Run `fn` with the tenant GUC set to `cooperativeId` on `tx`, then RESTORE the
+ * previous value.
+ *
+ * The GUC is transaction-local and `withTx` REUSES an already-open transaction,
+ * so a nested `withCoopContext(otherCoop)` would otherwise overwrite the GUC and
+ * leave the OUTER context pointing at the wrong tenant for the rest of the
+ * transaction. Saving/restoring the previous value makes nesting safe.
+ *
+ * Postgres-only; a no-op on SQLite (no GUC support). A failure to restore (e.g.
+ * the transaction is already aborted) is swallowed so it can never mask the
+ * original error.
+ */
+export async function withCoopGuc<T>(
+  tx: Prisma.TransactionClient,
+  cooperativeId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) return fn();
+
+  const rows = await tx.$queryRaw<{ cur: string | null }[]>`
+    SELECT current_setting('app.current_cooperative_id', true) AS cur
+  `;
+  const previous = rows[0]?.cur ?? null;
+
+  await setCoopContext(tx as never, cooperativeId);
+  try {
+    return await fn();
+  } finally {
+    if (previous) {
+      await tx.$executeRaw`SELECT set_config('app.current_cooperative_id', ${previous}, true)`.catch(
+        () => {},
+      );
+    }
+  }
+}
+
+/**
  * Run `fn` inside a transaction scoped to a single cooperative's RLS context.
  * This is the reference integration point for the staged RLS activation: wire
  * tenant-scoped service work through this helper, then flip the policies on.
@@ -70,13 +109,14 @@ export async function withCoopContext<T>(
   // Sends are deferred until after the transaction commits, so the transaction
   // covers only DB work (never the WhatsApp/Telegram network calls or pacing).
   return withDeferredSends(() =>
-    withTx(async (tx) => {
-      await setCoopContext(tx as never, cooperativeId);
-      const meta = await getCoopMeta(cooperativeId, tx as unknown as typeof prisma);
-      return runWithContext({ currency: meta.currency, locale: meta.locale, cooperativeId }, () =>
-        fn(tx as unknown as typeof prisma),
-      );
-    }),
+    withTx(async (tx) =>
+      withCoopGuc(tx, cooperativeId, async () => {
+        const meta = await getCoopMeta(cooperativeId, tx as unknown as typeof prisma);
+        return runWithContext({ currency: meta.currency, locale: meta.locale, cooperativeId }, () =>
+          fn(tx as unknown as typeof prisma),
+        );
+      }),
+    ),
   );
 }
 

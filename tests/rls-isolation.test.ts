@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PrismaClient, type Prisma } from "@prisma/client";
 import { hashPin, generateMemberCode } from "../src/lib/security.js";
+import { withCoopGuc } from "../src/lib/tenant-context.js";
 
 /**
  * RLS (Row-Level Security) cross-cooperative isolation tests.
@@ -137,6 +138,24 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: cross-cooperative isolation at
       tx.member.findMany({ where: { cooperativeId: coopB.id } }),
     );
     expect(b.length).toBe(0);
+  });
+
+  it("restores the tenant GUC after a nested context (no cross-tenant leak)", async () => {
+    await app.$transaction(async (tx) => {
+      await withCoopGuc(tx, coopA.id, async () => {
+        expect((await tx.member.findMany()).map((m) => m.id)).toEqual([memberA.id]);
+
+        // A nested context for a DIFFERENT tenant (what a nested
+        // withCoopContext(B) does on the shared transaction).
+        await withCoopGuc(tx, coopB.id, async () => {
+          expect((await tx.member.findMany()).map((m) => m.id)).toEqual([memberB.id]);
+        });
+
+        // Back in A: without the restore this would still be scoped to B and
+        // return memberB — the leak SEC-2 fixes.
+        expect((await tx.member.findMany()).map((m) => m.id)).toEqual([memberA.id]);
+      });
+    });
   });
 
   it("isolates Wallet reads (reached via the Member parent)", async () => {
