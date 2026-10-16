@@ -78,14 +78,24 @@ export async function getPoolBalance(federationId: string): Promise<number> {
   return roundMoney(debits - credits);
 }
 
-/** Simple interest over the term, in the loan's (minor-unit) currency. */
+/**
+ * Simple interest accrued over the period the principal was actually
+ * outstanding, in the loan's (minor-unit) currency. `elapsedMonths` defaults to
+ * the full `termMonths` (fixed-term charge) and is always capped at the term, so
+ * an early repayment costs less but a late one never costs more.
+ */
 export function computeInterest(
   principalKobo: number,
   interestRate: number,
   termMonths: number,
+  elapsedMonths: number = termMonths,
 ): number {
-  return Math.round((principalKobo * interestRate * termMonths) / 12);
+  const months = Math.min(Math.max(elapsedMonths, 0), termMonths);
+  return Math.round((principalKobo * interestRate * months) / 12);
 }
+
+/** Milliseconds per (30-day) month, used to prorate interest by elapsed time. */
+const MS_PER_MONTH = 30 * 24 * 60 * 60 * 1000;
 
 /**
  * Coop admin commits its own reserve capital into the federation fund. This is
@@ -352,6 +362,7 @@ export async function repay(
   const fed = await prisma.federation.findUniqueOrThrow({ where: { id: loan.federationId } });
   const baseAmount = Math.round(amountKobo * loan.fxRateToBase);
   const ref = `FED-REPAY-${loanId}-${randomUUID()}`;
+  let interestShortfallKobo = 0;
   await withCoopContext(cooperativeId, async () => {
     // Only an `active` loan is repayable, checked against the freshly-read row
     // INSIDE the transaction. Without this, a `repaid` loan (whose repaidKobo
@@ -410,51 +421,67 @@ export async function repay(
     });
 
     if (fullyRepaid && moved.count > 0) {
+      // Interest accrues over the period the principal was actually outstanding
+      // (capped at the term), so an early repayment costs less.
+      const elapsedMonths = loan.disbursedAt
+        ? (Date.now() - loan.disbursedAt.getTime()) / MS_PER_MONTH
+        : updated.termMonths;
       const interest = computeInterest(
         updated.principalKobo,
         updated.interestRate,
         updated.termMonths,
+        elapsedMonths,
       );
       if (interest > 0) {
-        // The interest journal credits `coop:federation_fund` on the coop side, so the
-        // denormalized `federationFundBalance` column must fall by the same
-        // amount — guarded (like the principal) so the fund can never go negative
-        // and column never drifts from the journal.
-        const interestClaimed = await prisma.cooperative.updateMany({
-          where: { id: cooperativeId, federationFundBalance: { gte: interest } },
-          data: { federationFundBalance: { decrement: interest } },
-        });
-        if (interestClaimed.count === 0) throw new Error("INSUFFICIENT_BALANCE");
-        const interestBase = Math.round(interest * loan.fxRateToBase);
-        const interestRef = `FED-INTEREST-${loanId}-${randomUUID()}`;
-        assertPosted(
-          await postJournal({
-            cooperativeId,
-            txRef: interestRef,
-            description: `Federation loan interest`,
-            postings: [
-              { account: "federation:payable", direction: "DEBIT", amount: interest },
-              { account: "coop:federation_fund", direction: "CREDIT", amount: interest },
-            ],
-          }),
-        );
-        assertPosted(
-          await postFederationJournal({
-            federationId: loan.federationId,
-            txRef: interestRef,
-            description: `Interest on loan ${loanId}`,
-            currency: fed.baseCurrency,
-            postings: [
-              { account: "assets:bank", direction: "DEBIT", amount: interestBase },
-              {
-                account: loan.lenderCooperativeId ? "federation:interest_income" : "pool:liquidity",
-                direction: "CREDIT",
-                amount: interestBase,
-                cooperativeId: loan.lenderCooperativeId ?? null,
-              },
-            ],
-          }),
-        );
+        // Non-reverting: a full principal repayment must never roll back just
+        // because the coop's fund can't cover the interest. Charge at most the
+        // available fund; any shortfall is recorded as still owed.
+        const coop = await prisma.cooperative.findUniqueOrThrow({ where: { id: cooperativeId } });
+        const available = Math.max(0, coop.federationFundBalance);
+        const chargeable = Math.min(interest, available);
+        let charged = 0;
+        if (chargeable > 0) {
+          const interestClaimed = await prisma.cooperative.updateMany({
+            where: { id: cooperativeId, federationFundBalance: { gte: chargeable } },
+            data: { federationFundBalance: { decrement: chargeable } },
+          });
+          if (interestClaimed.count > 0) charged = chargeable;
+        }
+        if (charged > 0) {
+          const interestBase = Math.round(charged * loan.fxRateToBase);
+          const interestRef = `FED-INTEREST-${loanId}-${randomUUID()}`;
+          assertPosted(
+            await postJournal({
+              cooperativeId,
+              txRef: interestRef,
+              description: `Federation loan interest`,
+              postings: [
+                { account: "federation:payable", direction: "DEBIT", amount: charged },
+                { account: "coop:federation_fund", direction: "CREDIT", amount: charged },
+              ],
+            }),
+          );
+          assertPosted(
+            await postFederationJournal({
+              federationId: loan.federationId,
+              txRef: interestRef,
+              description: `Interest on loan ${loanId}`,
+              currency: fed.baseCurrency,
+              postings: [
+                { account: "assets:bank", direction: "DEBIT", amount: interestBase },
+                {
+                  account: loan.lenderCooperativeId
+                    ? "federation:interest_income"
+                    : "pool:liquidity",
+                  direction: "CREDIT",
+                  amount: interestBase,
+                  cooperativeId: loan.lenderCooperativeId ?? null,
+                },
+              ],
+            }),
+          );
+        }
+        interestShortfallKobo = interest - charged;
       }
     }
   });
@@ -467,6 +494,17 @@ export async function repay(
     amount: amountKobo,
     detail: `repaid ${amountKobo} ${loan.currency}`,
   });
+  if (interestShortfallKobo > 0) {
+    await audit({
+      cooperativeId,
+      actorPhone: "system",
+      action: "federation.interest.shortfall",
+      targetType: "federation_loan",
+      targetId: loanId,
+      amount: interestShortfallKobo,
+      detail: `interest shortfall ${interestShortfallKobo} ${loan.currency} left unpaid after full repayment`,
+    });
+  }
 }
 
 export async function markDefaulted(loanId: string): Promise<void> {

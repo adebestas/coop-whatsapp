@@ -64,6 +64,11 @@ describe("federation loan repayment", () => {
     const { fed, coop } = await setup();
     await contribute(fed.id, coop.id, 1_000_000);
     const loan = await activeLoan(fed.id, coop.id, 500_000, 3);
+    // Disbursed the full term ago → full-term interest.
+    await prisma.federationLoan.update({
+      where: { id: loan.id },
+      data: { disbursedAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
+    });
     await repay(loan.id, 200_000, coop.id);
     await repay(loan.id, 300_000, coop.id);
     const expected = computeInterest(500_000, 0.12, 3);
@@ -80,6 +85,85 @@ describe("federation loan repayment", () => {
       },
     });
     expect(coopInterest?.amount).toBe(expected);
+  });
+
+  it("prorates interest over the actual outstanding period (early repayment costs less)", async () => {
+    const { fed, coop } = await setup();
+    await contribute(fed.id, coop.id, 1_000_000);
+    const loan = await activeLoan(fed.id, coop.id, 500_000, 3);
+    // Only 1 month outstanding → a third of the full-term interest.
+    await prisma.federationLoan.update({
+      where: { id: loan.id },
+      data: { disbursedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+    });
+    await repay(loan.id, 500_000, coop.id);
+    const expected = computeInterest(500_000, 0.12, 3, 1);
+    expect(expected).toBe(5_000);
+    const interest = await prisma.federationPosting.findFirst({
+      where: { account: "pool:liquidity", direction: "CREDIT", entry: { federationId: fed.id } },
+    });
+    expect(interest?.amount).toBe(expected);
+  });
+
+  it("caps interest at the full term for a late repayment", async () => {
+    const { fed, coop } = await setup();
+    await contribute(fed.id, coop.id, 1_000_000);
+    const loan = await activeLoan(fed.id, coop.id, 500_000, 3);
+    await prisma.federationLoan.update({
+      where: { id: loan.id },
+      data: { disbursedAt: new Date(Date.now() - 720 * 24 * 60 * 60 * 1000) }, // 24 months
+    });
+    await repay(loan.id, 500_000, coop.id);
+    const interest = await prisma.federationPosting.findFirst({
+      where: { account: "pool:liquidity", direction: "CREDIT", entry: { federationId: fed.id } },
+    });
+    expect(interest?.amount).toBe(15_000);
+  });
+
+  it("never rolls back a full repayment when the fund cannot cover the interest", async () => {
+    const fed = await createFederation("Fed", `FED-${randomUUID()}`, "NGN");
+    const lender = await prisma.cooperative.create({
+      data: {
+        name: "Lender",
+        code: `L-${randomUUID()}`,
+        currency: "NGN",
+        federationFundBalance: 10_000_000,
+      },
+    });
+    await addMember(fed.id, lender.id);
+    await contribute(fed.id, lender.id, 1_000_000);
+
+    // Borrower starts with no float: after the disbursement it holds exactly the
+    // principal, so there is nothing left for the interest once it repays.
+    const borrower = await prisma.cooperative.create({
+      data: {
+        name: "Borrower",
+        code: `B-${randomUUID()}`,
+        currency: "NGN",
+        federationFundBalance: 0,
+      },
+    });
+    await addMember(fed.id, borrower.id);
+    const loan = await borrow(fed.id, borrower.id, 500_000, 3);
+    await approveLoan(loan.id);
+    await prisma.federationLoan.update({
+      where: { id: loan.id },
+      data: { disbursedAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
+    });
+
+    // Must NOT throw — the principal repayment stands.
+    await repay(loan.id, 500_000, borrower.id);
+
+    const after = await prisma.federationLoan.findUniqueOrThrow({ where: { id: loan.id } });
+    expect(after.status).toBe("repaid");
+    expect(
+      (await prisma.cooperative.findUniqueOrThrow({ where: { id: borrower.id } }))
+        .federationFundBalance,
+    ).toBe(0);
+    const shortfall = await prisma.auditLog.findFirst({
+      where: { cooperativeId: borrower.id, action: "federation.interest.shortfall" },
+    });
+    expect(shortfall?.amount).toBe(15_000);
   });
 
   it("rejects a non-positive repayment before touching the fund or the loan", async () => {
