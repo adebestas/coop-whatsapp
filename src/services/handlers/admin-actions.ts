@@ -8,7 +8,11 @@ import { createTicket, listTickets, resolveTicket } from "../support.js";
 import { listPosts } from "../posts.js";
 import { myDeduction, requestMonthWaiver } from "../deductions.js";
 import { validateClaim, confirmFamily } from "../deathclaims.js";
-import { approveInsuranceClaim, rejectInsuranceClaim, listMemberInsuranceClaims } from "../insurance/index.js";
+import {
+  approveInsuranceClaim,
+  rejectInsuranceClaim,
+  listMemberInsuranceClaims,
+} from "../insurance/index.js";
 import { generateContextualHelp } from "../../lib/ai-support.js";
 import { verifyMemberPin } from "../pin.js";
 import { issueSecretChallenge } from "./session.js";
@@ -508,6 +512,9 @@ export async function handleDeleteAccountPin(
       bankCode: null,
       bankName: null,
       bvn: null,
+      nin: null,
+      kycStatus: "unset",
+      kycVerifiedAt: null,
       email: null,
       nextOfKinName: null,
       nextOfKinPhone: null,
@@ -563,7 +570,8 @@ export async function handleMyData(phone: string, cooperativeId?: string): Promi
     `*Email:* ${member.email ?? "not set"}`,
     `*Bank Account:* ${member.bankAccountNumber ?? "not set"}`,
     `*Bank:* ${member.bankName ?? "not set"}`,
-    `*BVN:* ${member.bvn ? "***" + member.bvn.slice(-4) : "not set"}`,
+    `*NIN:* ${member.nin ? "*******" + member.nin.slice(-4) : "not set"}`,
+    `*KYC status:* ${member.kycStatus}`,
     `*Next of Kin:* ${member.nextOfKinName ?? "not set"}`,
     "",
     `*Financial Summary*`,

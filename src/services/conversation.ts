@@ -38,6 +38,7 @@ import {
 import { detectLocale, localeFromLanguageCode, t, LOCALES, type Locale } from "../lib/i18n.js";
 import { runWithLocale, getLocale } from "../lib/runtime-context.js";
 import { translateToEnglish } from "../lib/translate.js";
+import { submitNin, isValidNin } from "./kyc.js";
 
 export { LOCALES } from "../lib/i18n.js";
 
@@ -69,18 +70,22 @@ const TIER_LIMITS = {
 async function checkTierLimit(
   phone: string,
   amount: number,
-  memberId: string,
+  member: { id: string; kycStatus?: string | null },
 ): Promise<string | null> {
-  const tier = "tier1"; // Default tier — upgrade via BVN verification
+  // The tier is derived from KYC: a verified NIN unlocks tier 2. Everything
+  // else (unset/pending/failed) stays on the low tier-1 ceiling.
+  const tier: keyof typeof TIER_LIMITS = member.kycStatus === "verified" ? "tier2" : "tier1";
   const limits = TIER_LIMITS[tier];
   if (amount > limits.maxSingle) {
-    return `Your tier (${tier}) limits single transactions to ${formatBalance(limits.maxSingle)}. Complete BVN verification to upgrade to tier 2.`;
+    return tier === "tier1"
+      ? `Your account is *Tier 1*: single transactions are capped at ${formatBalance(limits.maxSingle)}. Verify your *NIN* to upgrade to Tier 2 — reply *verify <your 11-digit NIN>*.`
+      : `Your account is *Tier 2*: single transactions are capped at ${formatBalance(limits.maxSingle)}.`;
   }
   // Check daily limit
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const dailyTotal = await prisma.contribution.aggregate({
-    where: { memberId, createdAt: { gte: startOfDay }, status: "confirmed" },
+    where: { memberId: member.id, createdAt: { gte: startOfDay }, status: "confirmed" },
     _sum: { amount: true },
   });
   const total = (dailyTotal._sum.amount ?? 0) + amount;
@@ -126,7 +131,7 @@ async function moneyFlowAllowed(
     return false;
   }
   if (cmd !== "buyshares" && cmd !== "mandate" && amountKobo !== null && member) {
-    const tierError = await checkTierLimit(phone, amountKobo, member.id);
+    const tierError = await checkTierLimit(phone, amountKobo, member);
     if (tierError) {
       await sendText({ to: phone, text: `⛔ ${tierError}` });
       return false;
@@ -1464,6 +1469,32 @@ async function handleMessageInner(
     case "mydata":
       await handleMyData(phone);
       break;
+
+    case "verify": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+        });
+        break;
+      }
+      const nin = (args[0] ?? "").trim();
+      if (!isValidNin(nin)) {
+        await sendText({
+          to: phone,
+          text:
+            "Please send your 11-digit *NIN* like this: *verify 12345678901*.\n\n" +
+            "Your NIN is the National Identification Number on your NIMC slip — it is never shared with anyone outside the cooperative.",
+        });
+        break;
+      }
+      const result = await submitNin(
+        { id: member.id, name: member.name, phone, cooperativeId: member.cooperativeId },
+        nin,
+      );
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
 
     case "grievance": {
       const grievanceMsg = args.join(" ").trim();

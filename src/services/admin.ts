@@ -3032,6 +3032,43 @@ export async function handleAdminCommand(
         return true;
       }
 
+      case "confirmkyc": {
+        if (!isSuper) {
+          await sendText({ to: phone, text: "Only the *super admin* can confirm a member's KYC." });
+          return true;
+        }
+        const code = args[0]?.toUpperCase();
+        if (!code) {
+          await sendText({ to: phone, text: "Usage: *confirmkyc <member code>*" });
+          return true;
+        }
+        const target = await prisma.member.findFirst({ where: { code, cooperativeId: coopId } });
+        if (!target) {
+          await sendText({ to: phone, text: `No member found with code ${code}.` });
+          return true;
+        }
+        await prisma.member.update({
+          where: { id: target.id },
+          data: { kycStatus: "verified", kycVerifiedAt: new Date() },
+        });
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: phone,
+          actorId: admin.id,
+          actorRole: "superadmin",
+          action: "member.kyc.confirm",
+          targetType: "member",
+          targetId: target.id,
+          detail: target.name,
+        });
+        await notifyMember(
+          target,
+          "✅ Your identity (NIN) has been verified. Your account is now *Tier 2*.",
+        ).catch(() => {});
+        await sendText({ to: phone, text: `✅ ${target.name}'s KYC is now verified.` });
+        return true;
+      }
+
       case "approvephone":
       case "rejectphone": {
         if (!isSuper) {

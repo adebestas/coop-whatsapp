@@ -172,7 +172,10 @@ model Member {
   phoneVerified           Boolean             @default(false) // OTP-verified real phone number
   nameVerified            Boolean             @default(false) // name confirmed by a super admin (maker-checker gate)
   name                    String
-  bvn                     String?
+  bvn                     String? // NOTE: BVN is deliberately NOT collected (avoids FI classification)
+  nin                     String? // 11-digit National Identification Number (KYC)
+  kycStatus               String              @default("unset") // unset | pending | verified | failed
+  kycVerifiedAt           DateTime?
   role                    String              @default("member") // member | admin | superadmin
   state                   String? // member's home state/LGA grouping
   lga                     String?
