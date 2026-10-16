@@ -368,6 +368,7 @@ export async function approveWithdrawal(
 export async function finalizeWithdrawal(
   requestId: string,
   actor: { id: string; role: string; phone: string; cooperativeId: string },
+  opts: { overrideAml?: boolean } = {},
 ): Promise<WithdrawResult> {
   const fullId = await resolveRequestId(requestId, actor.cooperativeId);
   if ("error" in fullId) return { ok: false, message: fullId.error };
@@ -382,6 +383,13 @@ export async function finalizeWithdrawal(
     return {
       ok: false,
       message: "This withdrawal is being processed right now — wait for it to settle.",
+    };
+  }
+  // Held for AML review (OPS-4): releasing requires an explicit override.
+  if (request.status === "aml_review" && !opts.overrideAml) {
+    return {
+      ok: false,
+      message: `🛑 This withdrawal is held for *AML review*. Review the flagged activity, then release it with *finalize ${request.id.slice(-6)} override* — or *reject ${request.id.slice(-6)}*.`,
     };
   }
 
@@ -411,8 +419,11 @@ export async function finalizeWithdrawal(
   }
 
   // STEP 1 — atomic claim.
+  const claimable = opts.overrideAml
+    ? ["pending", "admin_approved", "aml_review"]
+    : ["pending", "admin_approved"];
   const claimed = await prisma.withdrawalRequest.updateMany({
-    where: { id: request.id, status: { in: ["pending", "admin_approved"] } },
+    where: { id: request.id, status: { in: claimable } },
     data: { status: "processing", finalizedById: actor.id },
   });
   if (claimed.count === 0) {
@@ -430,6 +441,43 @@ export async function finalizeWithdrawal(
   let paid = false;
 
   try {
+    // AML gate (OPS-4): a suspicious PATTERN must be reviewed by a human BEFORE
+    // money leaves the bank — not merely flagged after payout. Threshold
+    // crossings (CTR) are reported but do not block; only suspicious patterns
+    // (STR) hold. Fail OPEN on an AML error so a detector bug can't deadlock
+    // every payout; a positive STR hit always holds unless explicitly overridden.
+    if (!opts.overrideAml) {
+      let reportType = "CTR";
+      try {
+        const aml = await flagTransaction({
+          memberId: member.id,
+          cooperativeId: request.cooperativeId,
+          amount: request.amount,
+          type: "withdrawal",
+          direction: "out",
+          createdAt: request.createdAt,
+        });
+        reportType = aml.reportType;
+      } catch (err) {
+        console.error("[withdrawal] AML pre-payout check failed:", err);
+      }
+      if (reportType === "STR") {
+        await prisma.withdrawalRequest.updateMany({
+          where: { id: request.id, status: "processing" },
+          data: { status: "aml_review" },
+        });
+        await notifySuperAdmins(
+          request.cooperativeId,
+          `🛑 Withdrawal *${request.id.slice(-6)}* for ${member.name} (${formatBalance(request.amount)}) was *held for AML review* — a suspicious pattern was detected. ` +
+            `Reply *finalize ${request.id.slice(-6)} override* to release it after review, or *reject ${request.id.slice(-6)}*.`,
+        );
+        return {
+          ok: false,
+          message: `🛑 Held for *AML review* — a suspicious pattern was detected. A super admin must release it with *finalize ${request.id.slice(-6)} override*, or reject it.`,
+        };
+      }
+    }
+
     // STEP 2 — debit BEFORE paying. If the balance can't cover it the whole
     // thing stops here; no money ever leaves the cooperative's bank.
     if (!wallet || wallet.balance < request.amount) {
@@ -523,20 +571,6 @@ export async function finalizeWithdrawal(
     ]);
     // Money HAS left the bank from here on — the outer catch must not refund.
     paid = true;
-
-    // AML/CFT: flag + auto-file STR for large/suspicious withdrawals.
-    try {
-      await flagTransaction({
-        memberId: member.id,
-        cooperativeId: request.cooperativeId,
-        amount: request.amount,
-        type: "withdrawal",
-        direction: "out",
-        createdAt: request.createdAt,
-      });
-    } catch (err) {
-      console.error("[withdrawal] AML flag failed:", err);
-    }
 
     // Post-success bookkeeping is best-effort — a failure here must NOT roll
     // back the debit/refund (the bank transfer already happened).

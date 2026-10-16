@@ -776,9 +776,13 @@ export async function handleAdminCommand(
         }
         const id = args[0];
         if (!id) {
-          await sendText({ to: phone, text: "Usage: *finalize <request id>*" });
+          await sendText({
+            to: phone,
+            text: "Usage: *finalize <request id>* — add *override* to release a withdrawal held for AML review.",
+          });
           return true;
         }
+        const override = args[1]?.toLowerCase() === "override";
         // Look up the amount so large payouts require a fresh PIN too. Scoped to
         // the caller's cooperative so a foreign request can't trigger anything here.
         const req = await prisma.withdrawalRequest.findFirst({
@@ -791,12 +795,16 @@ export async function handleAdminCommand(
           const pinCheck = await assertFreshPin(phone, req.amount);
           if (!pinCheck.ok) return guardFailed(phone, pinCheck.message);
         }
-        const result = await finalizeWithdrawal(id, {
-          id: admin.id,
-          role: admin.role,
-          phone,
-          cooperativeId: coopId,
-        });
+        const result = await finalizeWithdrawal(
+          id,
+          {
+            id: admin.id,
+            role: admin.role,
+            phone,
+            cooperativeId: coopId,
+          },
+          { overrideAml: override },
+        );
         await sendText({ to: phone, text: result.message });
         await audit({
           cooperativeId: coopId,
@@ -806,7 +814,7 @@ export async function handleAdminCommand(
           action: "withdraw.finalize",
           targetType: "withdrawal",
           targetId: id,
-          detail: result.message,
+          detail: override ? `[AML override] ${result.message}` : result.message,
         });
         return true;
       }
@@ -1060,7 +1068,9 @@ export async function handleAdminCommand(
               `   ${
                 r.status === "pending"
                   ? `Admin approves: *approvewdraw ${r.id.slice(-6)}*`
-                  : `Awaiting super admin: *finalize ${r.id.slice(-6)}*`
+                  : r.status === "aml_review"
+                    ? `🛑 AML review: *finalize ${r.id.slice(-6)} override* to release`
+                    : `Awaiting super admin: *finalize ${r.id.slice(-6)}*`
               }`,
           )
           .join("\n");
@@ -1527,7 +1537,10 @@ export async function handleAdminCommand(
             _count: true,
           }),
           prisma.withdrawalRequest.count({
-            where: { cooperativeId: coopId, status: { in: ["pending", "admin_approved"] } },
+            where: {
+              cooperativeId: coopId,
+              status: { in: ["pending", "admin_approved", "aml_review"] },
+            },
           }),
           recentAudit(coopId, 50),
           prisma.wallet.aggregate({

@@ -553,7 +553,7 @@ model Posting {
 model WithdrawalRequest {
   id                String      @id @default(cuid())
   amount            Int // stored in kobo
-  status            String      @default("pending") // pending | admin_approved | paid | rejected
+  status            String      @default("pending") // pending | admin_approved | aml_review | processing | paid | rejected
   bankAccountNumber String
   bankCode          String
   bankName          String?
