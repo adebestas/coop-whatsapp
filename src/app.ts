@@ -5,6 +5,7 @@ import fastifyStatic from "@fastify/static";
 import rateLimit from "@fastify/rate-limit";
 import path from "node:path";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { webhookRoutes } from "./routes/webhook.js";
 import { paymentWebhookRoutes } from "./routes/payments.js";
 import { adminApiRoutes } from "./routes/admin.js";
@@ -20,6 +21,21 @@ declare module "fastify" {
     adminCoopId?: string;
     adminRole?: string;
   }
+}
+
+/**
+ * Directory holding the admin dashboard static files.
+ *
+ * Previously hardcoded to `/app/dashboard`, which only exists inside the Docker
+ * image — every non-container deploy (and the test suite) silently served no
+ * dashboard. Resolve relative to this module (`<root>/dashboard` when built to
+ * `dist/app.js`, `<root>/dashboard` from source) so it works everywhere, with
+ * `DASHBOARD_DIR` as an explicit override.
+ */
+export function resolveDashboardDir(): string {
+  if (process.env.DASHBOARD_DIR) return path.resolve(process.env.DASHBOARD_DIR);
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(here, "..", "dashboard");
 }
 
 export function buildApp() {
@@ -151,7 +167,7 @@ export function buildApp() {
   void app.register(certificateRoutes);
 
   // Serve static files — admin dashboard
-  const dashboardDir = path.resolve("/app/dashboard");
+  const dashboardDir = resolveDashboardDir();
   if (!fs.existsSync(dashboardDir)) {
     console.warn(`[app] Dashboard directory not found at ${dashboardDir} — static files disabled`);
   } else {
