@@ -1279,7 +1279,7 @@ model DataConsent {
   id            String   @id @default(cuid())
   memberId      String
   member        Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
-  consentType   String   // registration | delete_account | data_export | ai_processing
+  consentType   String   // registration | messaging | delete_account | data_export | ai_processing
   granted       Boolean
   ipAddress     String?
   createdAt     DateTime @default(now())

@@ -540,12 +540,14 @@ export async function handleDeleteAccountPin(
   // (e.g. a name being captured) and is keyed by the member's old phone number.
   await prisma.session.deleteMany({ where: { phone } });
 
-  // Log the deletion in DataConsent table
+  // Record the member's consent for erasure. `granted: true` — the member
+  // requested (consented to) deletion and we performed it; a `false` here would
+  // read as "the member declined", the opposite of what happened.
   await prisma.dataConsent.create({
     data: {
       memberId: member.id,
       consentType: "delete_account",
-      granted: false,
+      granted: true,
     },
   });
 

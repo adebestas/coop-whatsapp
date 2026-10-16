@@ -2192,7 +2192,7 @@ export async function handleAwaitingInput(
         await prisma.dataConsent.create({
           data: {
             memberId,
-            consentType: "registration",
+            consentType: "messaging",
             granted: true,
           },
         });
@@ -2211,6 +2211,11 @@ export async function handleAwaitingInput(
           data: { optedOut: true },
         });
         invalidateMemberCache(phone);
+        // Record the explicit decline too — a consent decision must be logged
+        // either way, not only when granted (mirrors the AI-consent flow).
+        await prisma.dataConsent.create({
+          data: { memberId, consentType: "messaging", granted: false },
+        });
         await sendText({
           to: phone,
           text: "You've been opted out of messages. You can still use *balance*, *statement* and the rest of the menu — reply *optin* any time to receive messages again.",

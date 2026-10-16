@@ -135,6 +135,13 @@ describe("self-service account erasure", () => {
     expect(audits).toHaveLength(1);
     expect(audits[0].targetId).toBe(member.id);
     expect(audits[0].cooperativeId).toBe(coop.id);
+
+    // The deletion consent is recorded as GRANTED (the member asked for it),
+    // not falsely as a decline.
+    const consent = await prisma.dataConsent.findFirst({
+      where: { memberId: member.id, consentType: "delete_account" },
+    });
+    expect(consent?.granted).toBe(true);
   });
 
   it("refuses to erase when the PIN is wrong", async () => {

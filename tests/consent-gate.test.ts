@@ -20,7 +20,15 @@ async function makeUnconsentedMember(role: "member" | "superadmin" = "member") {
   while (await prisma.member.findUnique({ where: { code } })) code = generateMemberCode();
   // Mirrors how registerCooperative (superadmin) and bulk import create members: no consentAt.
   return prisma.member.create({
-    data: { code, phone: PHONE, name: "Ghost Member", cooperativeId: coop.id, role, pin: hashPin("1234"), wallet: { create: {} } },
+    data: {
+      code,
+      phone: PHONE,
+      name: "Ghost Member",
+      cooperativeId: coop.id,
+      role,
+      pin: hashPin("1234"),
+      wallet: { create: {} },
+    },
   });
 }
 
@@ -53,6 +61,13 @@ describe("consent gate: members created without consentAt", () => {
     expect(after?.consentAt).not.toBeNull();
     expect(after?.optedOut).toBe(false);
 
+    // The grant is recorded as a messaging consent (not conflated with registration).
+    const consents = await prisma.dataConsent.findMany({
+      where: { memberId: m.id, consentType: "messaging" },
+    });
+    expect(consents).toHaveLength(1);
+    expect(consents[0].granted).toBe(true);
+
     vi.mocked(sendText).mockClear();
     await handleMessage(PHONE, "balance");
     expect(replies().join("\n")).toContain("your savings balance is");
@@ -66,6 +81,13 @@ describe("consent gate: members created without consentAt", () => {
     const after = await prisma.member.findUnique({ where: { id: m.id } });
     expect(after?.optedOut).toBe(true);
     expect(after?.consentAt).toBeNull();
+
+    // The decline is recorded too — otherwise the opt-out leaves no consent trail.
+    const consents = await prisma.dataConsent.findMany({
+      where: { memberId: m.id, consentType: "messaging" },
+    });
+    expect(consents).toHaveLength(1);
+    expect(consents[0].granted).toBe(false);
 
     vi.mocked(sendText).mockClear();
     await handleMessage(PHONE, "balance");
