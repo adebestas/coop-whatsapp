@@ -55,7 +55,10 @@ export async function runExport(
         ? await transactionsData(requester.cooperativeId)
         : await pnlData(requester.cooperativeId);
 
-  const base = `${kind}-${token.slice(0, 8)}`;
+  // Coop-scoped filename: the download route requires the leading segment to
+  // equal the caller's cooperativeId, so an export can never be fetched by
+  // another cooperative's admin (SEC-4).
+  const base = `${requester.cooperativeId}-${kind}-${token.slice(0, 8)}`;
   const xlsxName = `${base}.xlsx`;
   const pdfName = `${base}.pdf`;
 

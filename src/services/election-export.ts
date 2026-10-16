@@ -71,7 +71,9 @@ export async function exportElectionPdf(
 
   await mkdir(EXPORT_DIR, { recursive: true });
   const token = randomBytes(16).toString("hex");
-  const pdfName = `election-results-${token.slice(0, 8)}.pdf`;
+  // Coop-scoped filename (SEC-4): the download route requires the leading
+  // segment to equal the caller's cooperativeId.
+  const pdfName = `${cooperativeId}-election-results-${token.slice(0, 8)}.pdf`;
   const path = join(EXPORT_DIR, pdfName);
 
   await writeElectionPdf(path, vote, unitName, tally, totalVotes, winner, voters, channelCount);

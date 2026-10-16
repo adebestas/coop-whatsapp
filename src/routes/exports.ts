@@ -71,7 +71,9 @@ export const serveExportFile = (app: FastifyInstance): void => {
     // carry no coop id and are allowed for backward compatibility.
     const { filename } = req.params as { filename: string };
     const coopPrefix = filename.split("-")[0];
-    if (coopPrefix.length >= 20 && coopPrefix !== payload.cooperativeId) {
+    // Exact match: every generated filename leads with the cooperative id, so a
+    // legacy (unscoped) name is rejected rather than allowed (SEC-4).
+    if (coopPrefix !== payload.cooperativeId) {
       return reply.code(403).send({ error: "Export file does not belong to your cooperative." });
     }
 

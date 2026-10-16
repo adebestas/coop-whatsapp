@@ -114,7 +114,9 @@ export async function runComplianceExport(
 
   const sheet = kind === "str" ? await strData(cooperativeId) : await payeData(cooperativeId);
 
-  const base = `${kind}-compliance-${token.slice(0, 8)}`;
+  // Coop-scoped filename (SEC-4): the download route requires the leading
+  // segment to equal the caller's cooperativeId.
+  const base = `${cooperativeId}-${kind}-compliance-${token.slice(0, 8)}`;
   const xlsxName = `${base}.xlsx`;
   const pdfName = `${base}.pdf`;
 
