@@ -1,6 +1,6 @@
 # Expert-Review Remediation — Progress & Resume
 
-**Branch:** `feat/world-class` · **HEAD:** `ed364ce` · **Base for this work:** `f52dda3`
+**Branch:** `feat/world-class` · **HEAD:** `73489df` · **Base for this work:** `f52dda3`
 **Full findings:** `docs/EXPERT-REVIEW-2026-10-15.md`
 **Method:** fix one finding at a time — verify the finding, ask the user about the fix + test, implement (TDD), run the focused tests + `tsc` + `eslint src/` + `prettier`, commit.
 
@@ -56,9 +56,10 @@ Deep-research hardening pass (Replit DB deletion, Lovable PII, Vercel env leakag
 | SEC-8 | Device binding: `validateDeviceSession` is advisory-only (IP dropped) | `a0c0b4d` |
 | SEC-9 | `RedisMutex` single-processing: unique owner token + atomic compare-and-delete release + TTL heartbeat | `8189bc8` |
 | PERF-1 | DB connection budget: every pool bounded (app `DB_CONNECTION_LIMIT`, owner `DB_OWNER_CONNECTION_LIMIT`) + configurable | `5385656` |
-| PERF-2 | Backups: complete (PK pagination, no silent 50k truncation), fail closed in prod without off-instance storage (`BACKUP_ALLOW_LOCAL=1` opt-out), and `verifyBackupFile()` actually validates the artifact. Also repaired 5 scheduler jobs that passed a fn as `logAndAlert`'s error → never ran (`runBackupJob`/reconcile/poller/digest/`executeDueDeductions`). | `ed364ce` |
+| PERF-2 | Backups: complete (PK pagination, no silent 50k truncation) + fail-closed in prod without off-instance storage (`BACKUP_ALLOW_LOCAL=1`) + `verifyBackupFile()` validates the artifact. Also repaired 5 scheduler jobs that passed a fn as `logAndAlert`'s error → never ran. | `ed364ce` |
+| PERF-3 | Hot-path indexes: `Member.virtualAccountNumber` (top-up webhook/resolver), `Payout.(memberId, createdAt)` (statements/AML), `Posting.entryId` (journal reads). Migration `20261055000000_hot_path_indexes`. | `73489df` |
 
-**All SEC-1…9 done.** Next: **PERF-3** (hot-path queries/indexes), PERF-4 (AI cost).
+**All SEC-1…9 done.** Next: **PERF-4** (AI cost), then the OPS items.
 
 > **Rotate the Neon credential** scrubbed from `.env` in SEC-6 — still live in Neon until rotated there.
 
@@ -69,9 +70,9 @@ AI prompt still says ₦ (`ai-query.ts:153`); translation trigger ignores the re
 
 ## Resume
 
-1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `ed364ce`).
+1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `73489df`).
 2. Read this file + `docs/EXPERT-REVIEW-2026-10-15.md` + `~/.config/opencode/memory.md`.
-3. All **Critical (A1–A17)** and the insurance + federation + topup Important items are fixed, the whole **SEC-1…9** group is done, and **PERF-1** + **PERF-2** are done. Next: **PERF-3** (hot-path queries/indexes), then PERF-4 (AI cost) — same loop (verify → ask about fix+test → implement → test → commit).
+3. All **Critical (A1–A17)** and the insurance + federation + topup Important items are fixed, the **SEC-1…9** group is done, and **PERF-1/2/3** are done. Next: **PERF-4** (AI cost) — same loop (verify → ask about fix+test → implement → test → commit).
 
 > **A15 follow-up:** voice + translation are now consent-gated, but the natural-language
 > AI paths (`suggestCommand` in `lib/ai.ts`, `ai-query.ts`, `ai-insights.ts`) still send
