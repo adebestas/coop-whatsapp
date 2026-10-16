@@ -505,6 +505,34 @@ async function resolveAiText(
 }
 
 /**
+ * Gate an NL→AI (Groq) path on AI-processing consent (SEC-3). Returns true only
+ * when the member has granted it. When unset it sends the consent prompt and
+ * parks the session; when declined it tells the member the feature is off. The
+ * member's text is never sent to the LLM unless this returns true.
+ */
+async function requireAiConsent(
+  phone: string,
+  member: { id: string; aiConsentAt?: Date | null },
+): Promise<boolean> {
+  const state = await getAiConsentState(member);
+  if (state === "granted") return true;
+  if (state === "declined") {
+    await sendText({
+      to: phone,
+      text: "AI features are off. Reply *aioptin* to enable them, or use *menu* to see your options.",
+    });
+    return false;
+  }
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_ai_consent", data: JSON.stringify({ memberId: member.id }) },
+    update: { state: "awaiting_ai_consent", data: JSON.stringify({ memberId: member.id }) },
+  });
+  await sendText({ to: phone, text: AI_CONSENT_PROMPT });
+  return false;
+}
+
+/**
  * Entry point for an inbound chat message.
  *
  * Resolves the sender's cooperative BEFORE any RLS-protected read (via the
@@ -1696,7 +1724,7 @@ async function handleMessageInner(
         text.trim().length >= 4 &&
         !/^[\d\s.,]+$/.test(text)
       ) {
-        if (await checkAIRateLimit(member.id)) {
+        if ((await requireAiConsent(phone, member)) && (await checkAIRateLimit(member.id))) {
           const intent = await extractLoanRequest(text);
           if (intent) {
             const amountKobo = intent.amountNaira !== null ? toKobo(intent.amountNaira) : null;
@@ -1715,6 +1743,7 @@ async function handleMessageInner(
             });
             break;
           }
+          if (!(await requireAiConsent(phone, member))) break;
           if (!(await checkAIRateLimit(member.id))) {
             await sendText({
               to: phone,
@@ -1750,7 +1779,11 @@ async function handleMessageInner(
           }
         }
 
-        if (member && (await checkAIRateLimit(member.id))) {
+        if (
+          member &&
+          (await requireAiConsent(phone, member)) &&
+          (await checkAIRateLimit(member.id))
+        ) {
           const suggestion = await suggestCommand(text);
           if (suggestion) {
             await prisma.session.upsert({
@@ -1783,6 +1816,7 @@ async function handleMessageInner(
           });
           return;
         }
+        if (!(await requireAiConsent(phone, member))) return;
         if (!(await checkAIRateLimit(member.id))) {
           await sendText({
             to: phone,

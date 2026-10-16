@@ -8,8 +8,14 @@
 
 import { GROQ_URL, groqAvailable, groqModel, groqHeaders, GROQ_TIMEOUT_MS } from "./groq.js";
 
-/** Every command the bot understands (admin + member). Keep in sync. */
-export const KNOWN_COMMANDS = [
+/**
+ * Commands a member may be nudged toward by the AI. The AI suggestion is NEVER
+ * executed directly — the member must confirm — and it flows through the normal
+ * PIN / 2FA / approval gates. Kept to member-safe commands only: the model must
+ * never be able to *propose* a privileged/admin command (prompt-injection
+ * hardening — SEC-3).
+ */
+export const MEMBER_COMMANDS = [
   // member basics
   "menu",
   "help",
@@ -46,12 +52,22 @@ export const KNOWN_COMMANDS = [
   "payees",
   "addpayee",
   "delpayee",
-  "analytics",
   "votediv",
-  "votedivstatus",
-  "startvotediv",
-  "closedivid",
-  // admin
+  "enable2fa",
+  "disable2fa",
+  "verifypin",
+  // ai-powered (read-only)
+  "insights",
+  "risk",
+  "anomalies",
+] as const;
+
+/**
+ * Privileged commands that the AI must NEVER suggest. Kept as an explicit list
+ * (not just "everything else") so the two sets together still enumerate every
+ * command the bot understands.
+ */
+export const ADMIN_COMMANDS = [
   "pending",
   "approve",
   "reject",
@@ -70,7 +86,6 @@ export const KNOWN_COMMANDS = [
   "confirmclaim",
   "claimbank",
   "resolve",
-  "tickets",
   "startvote",
   "candidate",
   "closevote",
@@ -106,9 +121,6 @@ export const KNOWN_COMMANDS = [
   "pnl",
   "fundstatus",
   "export",
-  "enable2fa",
-  "disable2fa",
-  "verifypin",
   "setplanfor",
   "internalaudit",
   // SaaS config
@@ -117,11 +129,16 @@ export const KNOWN_COMMANDS = [
   "setbranding",
   "billing",
   "onboard",
-  // ai-powered
-  "insights",
-  "risk",
-  "anomalies",
+  // governance admin
+  "votedivstatus",
+  "startvotediv",
+  "closedivid",
+  // member/admin shared name that is admin-scoped in context
+  "analytics",
 ] as const;
+
+/** Every command the bot understands (admin + member). Keep in sync. */
+export const KNOWN_COMMANDS: readonly string[] = [...MEMBER_COMMANDS, ...ADMIN_COMMANDS];
 
 export interface Suggestion {
   command: string;
@@ -130,7 +147,7 @@ export interface Suggestion {
 
 const SYSTEM_PROMPT = `You translate Nigerian cooperative members' WhatsApp messages (English or Pidgin) into ONE bot command.
 Reply with STRICT JSON only, either {"command":"<cmd>","args":["<a1>","<a2>"]} or {"command":null,"args":[]} when unsure.
-Never invent commands. Use only this list:\n${KNOWN_COMMANDS.join(", ")}
+Never invent commands. Use only this list:\n${MEMBER_COMMANDS.join(", ")}
 Rules: amounts are plain numbers without currency symbols or commas. Member codes look like ABC123-XYZ89.
 If the person asks a question the commands cannot answer, reply {"command":null,"args":[]}.`;
 
@@ -172,7 +189,7 @@ export async function suggestCommand(text: string): Promise<Suggestion | null> {
     }
     if (typeof parsed.command !== "string") return null;
     const command = parsed.command.trim().toLowerCase();
-    if (!/^[a-z0-9]+$/.test(command) || !(KNOWN_COMMANDS as readonly string[]).includes(command)) {
+    if (!/^[a-z0-9]+$/.test(command) || !(MEMBER_COMMANDS as readonly string[]).includes(command)) {
       return null;
     }
     const rawArgs = Array.isArray(parsed.args) ? (parsed.args as unknown[]) : [];

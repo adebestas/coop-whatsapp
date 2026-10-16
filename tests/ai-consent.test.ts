@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "../tests/setup.js";
 import { createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import { handleMessage } from "../src/services/conversation.js";
+import { suggestCommand } from "../src/lib/ai.js";
 import { sendText } from "../src/lib/messaging.js";
 import { invalidateMemberCache } from "../src/services/cooperative.js";
 
@@ -180,5 +181,60 @@ describe("AI processing consent", () => {
       where: { memberId: m.id, consentType: "ai_processing" },
     });
     expect(consent?.granted).toBe(true);
+  });
+
+  it("does not send an English AI query to Groq without consent — it prompts", async () => {
+    const coop = await createTestCoop("AIC8");
+    const m = await createTestMember(coop.id, { phone: "2348000700008" });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await handleMessage(m.phone, "how much have i saved this month");
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await stateOf(m.phone)).toBe("awaiting_ai_consent");
+    expect(textsSent()).toMatch(/AI processing/i);
+  });
+
+  it("runs the AI query once the member has consented", async () => {
+    const coop = await createTestCoop("AIC9");
+    const m = await createTestMember(coop.id, { phone: "2348000700009" });
+    await prisma.member.update({ where: { id: m.id }, data: { aiConsentAt: new Date() } });
+    invalidateMemberCache(m.phone);
+
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "You have saved a lot." } }] }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await handleMessage(m.phone, "how much have i saved this month");
+
+    expect(fetchUrls(fetchSpy)).toContain(GROQ_CHAT);
+  });
+
+  it("never lets the AI propose an admin command", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: '{"command":"approve","args":[]}' } }],
+        }),
+      }),
+    );
+    expect(await suggestCommand("please approve the withdrawal")).toBeNull();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: '{"command":"balance","args":[]}' } }],
+        }),
+      }),
+    );
+    expect(await suggestCommand("show my balance")).toEqual({ command: "balance", args: [] });
   });
 });
