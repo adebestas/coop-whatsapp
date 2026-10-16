@@ -1,4 +1,4 @@
-import { Queue, Worker, Job } from "bullmq";
+import { Queue, Worker, Job, type JobsOptions, type KeepJobs } from "bullmq";
 import { getRedis } from "./cache.js";
 
 /**
@@ -6,6 +6,23 @@ import { getRedis } from "./cache.js";
  * Handles async tasks like sending notifications, processing payments, etc.
  * Gracefully degrades to synchronous when Redis is unavailable.
  */
+
+// ===== Retry policy =====
+// Retries are JOB options (`attempts`/`backoff` on BaseJobOptions), not Worker
+// options. The previous `maxStartedAttempts` key was not a BullMQ option at all,
+// so it was silently ignored and every failed job died on its first attempt
+// (default `attempts: 1` = no retry). This is the single source of truth for
+// retry + eviction, applied to jobs this module enqueues and kept as the
+// Worker-level keep defaults.
+export const DEFAULT_JOB_OPTIONS: Pick<JobsOptions, "attempts" | "backoff"> & {
+  removeOnComplete: KeepJobs;
+  removeOnFail: KeepJobs;
+} = {
+  attempts: 3,
+  backoff: { type: "exponential", delay: 5_000 },
+  removeOnComplete: { age: 3600, count: 1000 },
+  removeOnFail: { age: 86400, count: 5000 },
+};
 
 // ===== Queue Names =====
 
@@ -62,11 +79,10 @@ export function processQueue<T>(queueName: string, handler: (job: Job<T>) => Pro
     {
       connection: redis,
       concurrency: 5,
-      // Retry configuration: max 3 attempts
-      maxStartedAttempts: 3,
-      // Remove completed jobs after 1 hour, failed after 24 hours
-      removeOnComplete: { age: 3600, count: 1000 },
-      removeOnFail: { age: 86400, count: 5000 },
+      // Worker-level keep/eviction defaults. Retry counts are NOT settable here —
+      // they are per-job via DEFAULT_JOB_OPTIONS.attempts.
+      removeOnComplete: DEFAULT_JOB_OPTIONS.removeOnComplete,
+      removeOnFail: DEFAULT_JOB_OPTIONS.removeOnFail,
     },
   );
 
@@ -159,7 +175,15 @@ export async function scheduleSchedulerJobs(): Promise<void> {
         {
           name: j.name,
           data: { job: j.name },
-          opts: { removeOnComplete: true, removeOnFail: 100 },
+          // Retry a failed scheduled run (e.g. a transient DB/Redis blip) with
+          // exponential backoff instead of losing the tick. Completed repeats are
+          // ephemeral; keep a few failures for inspection.
+          opts: {
+            attempts: DEFAULT_JOB_OPTIONS.attempts,
+            backoff: DEFAULT_JOB_OPTIONS.backoff,
+            removeOnComplete: true,
+            removeOnFail: 100,
+          },
         },
       );
     }
