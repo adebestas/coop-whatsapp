@@ -191,11 +191,7 @@ const inMemoryOnce = new Map<string, number>();
  * instances — used for scheduler "already ran this period" guards. Falls back to
  * an in-memory set when Redis is unavailable (single-instance only).
  */
-export async function claimOnce(
-  key: string,
-  period: string,
-  ttlSeconds: number,
-): Promise<boolean> {
+export async function claimOnce(key: string, period: string, ttlSeconds: number): Promise<boolean> {
   const client = getRedis();
   const fullKey = `once:${key}:${period}`;
   if (client) {
@@ -284,9 +280,12 @@ export async function checkRateLimit(
   if (key.startsWith("login:")) {
     console.warn(`[RateLimit] Redis unavailable for login key, using in-memory fallback`);
   }
-  // In-memory fallback for non-critical limits
+  // In-memory fallback for non-critical limits. Log only the limit KIND, never
+  // the full key (which embeds a phone number / member id — PII). SEC-6.
   if (!failClosedAllowed || process.env.NODE_ENV !== "test") {
-    console.warn(`[RateLimit] Redis unavailable, using in-memory fallback for key: ${key}`);
+    console.warn(
+      `[RateLimit] Redis unavailable, using in-memory fallback for ${key.split(":")[0]} limits`,
+    );
   }
   const isMoneyOperation = key.includes("money");
   if (isMoneyOperation && failClosedAllowed) {

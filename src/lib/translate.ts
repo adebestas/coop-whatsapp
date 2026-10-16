@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { groqAvailable, groqModel, groqFetch, GROQ_TIMEOUT_MS } from "./groq.js";
 import type { Locale } from "./i18n.js";
 
@@ -11,7 +12,9 @@ const MAX_CACHE = 500;
  */
 export async function translateToEnglish(text: string, locale: Locale): Promise<string> {
   if (locale === "en" || !text.trim() || !groqAvailable()) return text;
-  const key = `${locale}:${text}`;
+  // Hash the key so the raw member text (possible PII) is never held as a cache
+  // key (and can never appear in a heap dump / log keyed by it). SEC-6.
+  const key = createHash("sha256").update(`${locale}\n${text}`).digest("hex");
   const hit = cache.get(key);
   if (hit !== undefined) return hit;
   try {
