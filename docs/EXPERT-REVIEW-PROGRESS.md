@@ -1,6 +1,6 @@
 # Expert-Review Remediation — Progress & Resume
 
-**Branch:** `feat/world-class` · **HEAD:** `b73ccd2` · **Base for this work:** `f52dda3`
+**Branch:** `feat/world-class` · **HEAD:** `c5fc230` · **Base for this work:** `f52dda3`
 **Full findings:** `docs/EXPERT-REVIEW-2026-10-15.md`
 **Method:** fix one finding at a time — verify the finding, ask the user about the fix + test, implement (TDD), run the focused tests + `tsc` + `eslint src/` + `prettier`, commit.
 
@@ -61,8 +61,9 @@ Deep-research hardening pass (Replit DB deletion, Lovable PII, Vercel env leakag
 | PERF-4 | AI spend capped: voice-transcription + translation paths now enforce the per-member AI budget before calling Groq; `checkAIRateLimit` Redis TTL now set only on first increment (window actually closes); limit/window configurable (`AI_MAX_PER_HOUR`, `AI_WINDOW_SECONDS`). | `ddb1911` |
 | OPS-1 | Crash/shutdown reliability: new `createShutdown` (`src/lib/shutdown.ts`) runs each close step, continues past failures (exit 1), idempotent, 15s watchdog force-exit; `uncaughtException` now fatal; in-process scheduler loops stop on shutdown; Fastify `forceCloseConnections: true`. | `3a9898b` |
 | OPS-2 | Queue retries: removed invalid Worker option `maxStartedAttempts` (not a BullMQ option → jobs never retried); added `DEFAULT_JOB_OPTIONS` (`attempts: 3` + exponential backoff) applied to scheduler jobs. | `b73ccd2` |
+| OPS-3 | AML reports labelled correctly: new `STR.reportType` ("STR"/"CTR") + migration `20261056000000_str_report_type`; pattern hits → STR, threshold crossings → CTR; CBN payload/notifications now carry the true `reportedAmount` (aggregate total), not the single-tx amount; type surfaced in admin listing, compliance export and regulator report. | `c5fc230` |
 
-**All SEC-1…9 and PERF-1…4 done; OPS-1…2 done.** Next: the remaining OPS items (AML labels/blocking, retention/erasure, dashboard route, CI deploy gate).
+**All SEC-1…9 and PERF-1…4 done; OPS-1…3 done.** Next: the remaining OPS items (AML blocking, retention/erasure, dashboard route, CI deploy gate).
 
 > **Rotate the Neon credential** scrubbed from `.env` in SEC-6 — still live in Neon until rotated there.
 
@@ -73,9 +74,9 @@ AI prompt still says ₦ (`ai-query.ts:153`); translation trigger ignores the re
 
 ## Resume
 
-1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `b73ccd2`).
+1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `c5fc230`).
 2. Read this file + `docs/EXPERT-REVIEW-2026-10-15.md` + `~/.config/opencode/memory.md`.
-3. All **Critical (A1–A17)**, the insurance + federation + topup Important items, **SEC-1…9**, **PERF-1…4** and **OPS-1…2** are done. Next: the remaining **OPS items** — same loop (verify → ask about fix+test → implement → test → commit).
+3. All **Critical (A1–A17)**, the insurance + federation + topup Important items, **SEC-1…9**, **PERF-1…4** and **OPS-1…3** are done. Next: the remaining **OPS items** — same loop (verify → ask about fix+test → implement → test → commit).
 
 > **A15 follow-up:** voice + translation are now consent-gated, but the natural-language
 > AI paths (`suggestCommand` in `lib/ai.ts`, `ai-query.ts`, `ai-insights.ts`) still send
