@@ -235,8 +235,16 @@ export const paystackAdapter: ProviderAdapter = {
     if (d.status !== "success" && d.status !== "successful") return null;
 
     const amountKobo = Number(d.amount ?? 0);
+    // Idempotency needs a STABLE provider id: never fabricate one (a Date.now()
+    // fallback makes every replay a distinct event → duplicate credit). Use the
+    // charge id, else the merchant reference; drop the event (fail-closed) if
+    // neither is present.
+    const providerTxId = d.id ?? d.transaction_id ?? d.reference;
+    if (providerTxId === undefined || providerTxId === null || providerTxId === "") {
+      return null;
+    }
     return {
-      transactionId: String(d.id ?? d.transaction_id ?? Date.now()),
+      transactionId: String(providerTxId),
       reference: d.reference,
       accountNumber: String(d.account?.number ?? ""),
       amount: amountKobo, // Keep in kobo — wallet stores kobo

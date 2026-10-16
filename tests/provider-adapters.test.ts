@@ -371,3 +371,28 @@ describe("flutterwave adapter", () => {
     expect(bodyOf(call)).toEqual({ account_number: "0123456789", account_bank: "058" });
   });
 });
+
+describe("paystack.parseNotification idempotency", () => {
+  function charge(data: Record<string, unknown>) {
+    return {
+      event: "charge.success",
+      data: { amount: 50_000, status: "success", currency: "NGN", ...data },
+    };
+  }
+
+  it("uses the stable charge id", () => {
+    const n = paystackAdapter.parseNotification(charge({ id: 987654, reference: "ref-1" }));
+    expect(n?.transactionId).toBe("987654");
+  });
+
+  it("falls back to the merchant reference and is deterministic across replays", () => {
+    const a = paystackAdapter.parseNotification(charge({ reference: "ref-2" }));
+    const b = paystackAdapter.parseNotification(charge({ reference: "ref-2" }));
+    expect(a?.transactionId).toBe("ref-2");
+    expect(a?.transactionId).toBe(b?.transactionId);
+  });
+
+  it("drops a charge with no stable id (never fabricates Date.now())", () => {
+    expect(paystackAdapter.parseNotification(charge({}))).toBeNull();
+  });
+});

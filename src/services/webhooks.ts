@@ -321,6 +321,14 @@ export async function processPaymentWebhook(
     return { httpStatus: 200, body: { status: "ignored" } };
   }
 
+  // A credit with no stable provider id cannot be deduped — an empty id would
+  // also collide every such event into a single `${provider}:` key. Drop it
+  // (fail-closed) and let the provider retry with a well-formed payload.
+  if (!notification.transactionId) {
+    console.warn(`[webhooks] ${providerName} credit without a transaction id — ignored`);
+    return { httpStatus: 200, body: { status: "ignored" } };
+  }
+
   const eventId = `${providerName}:${notification.transactionId}`;
 
   // 3. INSERT-first idempotency gate.
