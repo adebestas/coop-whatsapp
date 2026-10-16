@@ -1,9 +1,6 @@
-import { prisma, withTxBatch } from "../lib/prisma.js";
+import { prisma } from "../lib/prisma.js";
 import { hashPin } from "../lib/security.js";
-import { audit } from "./audit.js";
-import { LIMITS, formatBalance } from "../lib/money.js";
-import { getCoopConfig } from "./coop-config.js";
-import { recordReferral, qualifyReferral } from "./referrals.js";
+import { recordReferral } from "./referrals.js";
 import { screenAndRecord } from "./screening.js";
 import { getRedis } from "../lib/cache.js";
 import { countryFromPhone, currencyForCountry } from "../lib/currency.js";
@@ -312,88 +309,6 @@ export async function getMemberByPhone(phone: string, cooperativeId?: string) {
   const member = candidates[0] ?? null;
   if (member) await writeMemberCache(cacheKey, member);
   return member;
-}
-
-/**
- * TEST-ONLY helper — DO NOT call from any production/flux path.
- *
- * This fabricates a wallet credit with NO real payment (no Monnify/Paystack).
- * The only legitimate money-in path is topup.ts handlePaymentNotification via a
- * provider webhook. Kept only so tests can pre-fund wallets when setting up
- * unrelated scenarios. Any production code that wants to credit a wallet must
- * go through a verified payment — never through this function.
- */
-export async function createContribution(
-  phone: string,
-  amount: number,
-): Promise<{ ok: boolean; message: string }> {
-  const member = await getMemberByPhone(phone);
-  if (!member) {
-    return {
-      ok: false,
-      message: "You need to join a cooperative first. Reply *join <code>* to get started.",
-    };
-  }
-  if (!member.wallet) {
-    return { ok: false, message: "No wallet found. Please contact your cooperative admin." };
-  }
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { ok: false, message: "Please enter a valid amount, e.g. *save 2000*." };
-  }
-  const coopConfig = await getCoopConfig(member.cooperativeId);
-  if (amount < coopConfig.minContribution) {
-    return {
-      ok: false,
-      message: `Minimum save amount is *${formatBalance(coopConfig.minContribution)}*.`,
-    };
-  }
-  if (amount > LIMITS.MAX_SAVE) {
-    return { ok: false, message: `Maximum save amount is *${formatBalance(LIMITS.MAX_SAVE)}*.` };
-  }
-
-  const reference = `CON-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-
-  // ✅ Wrapped in transaction — both succeed or both fail (prevents money loss)
-  await withTxBatch([
-    prisma.contribution.create({
-      data: {
-        amount,
-        reference,
-        status: "confirmed",
-        paidAt: new Date(),
-        memberId: member.id,
-        cooperativeId: member.cooperativeId,
-      },
-    }),
-    prisma.wallet.update({
-      where: { id: member.wallet.id },
-      data: {
-        balance: { increment: amount },
-        totalSaved: { increment: amount },
-      },
-    }),
-  ]);
-
-  const balanceBefore = member.wallet.balance ?? 0;
-  const balance = balanceBefore + amount;
-  await audit({
-    cooperativeId: member.cooperativeId,
-    actorPhone: phone,
-    actorId: member.id,
-    actorRole: member.role,
-    action: "contribution.create",
-    targetType: "contribution",
-    amount,
-    balanceBefore,
-    balanceAfter: balance,
-    detail: formatBalance(amount),
-  });
-  // A member's first contribution qualifies any pending referral for them.
-  await qualifyReferral(member.cooperativeId, member.id).catch(() => {});
-  return {
-    ok: true,
-    message: `✅ Saved ${formatBalance(amount)}.\nYour new balance is *${formatBalance(balance)}*.\n\nReply *balance* anytime to check.`,
-  };
 }
 
 export async function createCooperative(data: {

@@ -6,7 +6,7 @@ import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { createUnit, joinUnit, setUnitAdmin, broadcastToScope } from "../src/services/units.js";
 import { computeDividendPreview, distributeDividend } from "../src/services/dividends.js";
 import { recordLedger } from "../src/services/ledger.js";
-import { createContribution } from "../src/services/cooperative.js";
+import { createContribution } from "./test-money.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 import {
   runAutoSaveReminders,

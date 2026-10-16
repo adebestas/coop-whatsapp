@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { prisma, cleanupDatabase } from "../tests/setup.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { runBackup } from "../src/services/backup.js";
-import { createContribution } from "../src/services/cooperative.js";
+import { createContribution } from "./test-money.js";
 
 const EXPECTED_TABLES = [
   "cooperatives",
