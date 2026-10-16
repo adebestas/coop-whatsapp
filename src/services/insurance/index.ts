@@ -29,6 +29,11 @@ export class InsuranceService {
    * Charge a premium from the member's wallet. Guarded atomic decrement so the
    * balance can never go negative, plus a balanced journal entry. Throws
    * INSUFFICIENT_BALANCE / NO_WALLET when the member cannot pay.
+   *
+   * The coop is only CubeCover's agent, so the premium is NOT coop income: the
+   * credit lands in `liabilities:insurance_payable` (funds held for the insurer).
+   * Idempotent on the deterministic `ref` — a retry with the same ref is a no-op
+   * (the existing journal entry short-circuits before any debit).
    */
   private async chargePremium(
     cooperativeId: string,
@@ -43,6 +48,10 @@ export class InsuranceService {
 
     await withTx(async (tx) => {
       await setCoopContext(tx as never, cooperativeId);
+      const txRef = `insurance_premium_${ref}`;
+      // Idempotency gate: if this business event already posted, do not debit.
+      const already = await tx.journalEntry.findFirst({ where: { txRef } });
+      if (already) return;
       const claimed = await tx.wallet.updateMany({
         where: { id: wallet.id, balance: { gte: amount } },
         data: { balance: { decrement: amount } },
@@ -51,11 +60,11 @@ export class InsuranceService {
       const posted = await postJournal(
         {
           cooperativeId,
-          txRef: `insurance_premium_${ref}`,
+          txRef,
           description,
           postings: [
             { account: `member_wallet:${wallet.id}`, direction: "DEBIT", amount, memberId },
-            { account: "income:insurance_premium", direction: "CREDIT", amount, memberId },
+            { account: "liabilities:insurance_payable", direction: "CREDIT", amount, memberId },
           ],
         },
         tx as never,
@@ -85,7 +94,7 @@ export class InsuranceService {
           txRef: `insurance_premium_refund_${ref}`,
           description: `Insurance premium refund ${formatBalance(amount)}`,
           postings: [
-            { account: "income:insurance_premium", direction: "DEBIT", amount, memberId },
+            { account: "liabilities:insurance_payable", direction: "DEBIT", amount, memberId },
             { account: `member_wallet:${wallet.id}`, direction: "CREDIT", amount, memberId },
           ],
         },
@@ -108,7 +117,12 @@ export class InsuranceService {
 
     const quote = await this.cubecover.createQuote({ productCode, planCode, memberId });
     const premium = quote.premiumKobo;
-    const paymentRef = `insurance_${cooperativeId}_${memberId}_${productCode}_${planCode}`;
+    // Idempotency key: stable across retries of THIS attempt, but a fresh value
+    // for a re-purchase after a cancel (the prior policy bumps the attempt).
+    const attempt = await this.prisma.insurancePolicy.count({
+      where: { cooperativeId, memberId, productCode, planCode },
+    });
+    const paymentRef = `insurance_${cooperativeId}_${memberId}_${productCode}_${planCode}_${attempt}`;
 
     // Debit FIRST so a policy can never be created without payment.
     await this.chargePremium(
@@ -132,19 +146,27 @@ export class InsuranceService {
       throw err;
     }
 
-    const newPolicy = await this.prisma.insurancePolicy.create({
-      data: {
-        cooperativeId,
-        memberId,
-        productCode,
-        planCode,
-        premiumKobo: premium,
-        coverageKobo: policy.coverageKobo || 0,
-        cubecoverPolicyId: policy.id,
-        startDate: new Date(policy.startDate),
-        endDate: policy.endDate ? new Date(policy.endDate) : undefined,
-      },
-    });
+    // The provider was paid; if persisting the policy fails, refund the premium
+    // so a post-charge DB failure cannot silently leak the member's money.
+    let newPolicy;
+    try {
+      newPolicy = await this.prisma.insurancePolicy.create({
+        data: {
+          cooperativeId,
+          memberId,
+          productCode,
+          planCode,
+          premiumKobo: premium,
+          coverageKobo: policy.coverageKobo || 0,
+          cubecoverPolicyId: policy.id,
+          startDate: new Date(policy.startDate),
+          endDate: policy.endDate ? new Date(policy.endDate) : undefined,
+        },
+      });
+    } catch (err) {
+      await this.refundPremium(cooperativeId, memberId, premium, paymentRef);
+      throw err;
+    }
 
     const member = await this.prisma.member.findUnique({
       where: { id: memberId },
@@ -353,12 +375,18 @@ export async function payoutInsuranceClaim(
   const claim = await prisma.insuranceClaim.findFirst({ where: { cubecoverClaimId } });
   if (!claim) return { ok: false, message: `No claim for provider id *${cubecoverClaimId}*.` };
   if (claim.status === "paid") return { ok: true, message: `Claim *${claim.id}* already paid.` };
+  if (claim.status === "rejected") {
+    return { ok: false, message: `Claim *${claim.id}* was rejected — not paying.` };
+  }
 
   // A webhook runs OUTSIDE any coop context, so establish the coop's currency
   // before formatting any amount (journal description, audit, reply).
   const { currency } = await getCoopMeta(claim.cooperativeId);
   return runWithContext({ currency }, async () => {
-    const payout = claim.payoutKobo ?? claim.amountKobo;
+    // Never credit more than the member's submitted, coverage-checked amount.
+    // The provider's approved payout may only be smaller (a partial approval).
+    const payout = Math.min(claim.payoutKobo ?? claim.amountKobo, claim.amountKobo);
+    if (payout <= 0) return { ok: false, message: `Claim *${claim.id}* has no payable amount.` };
     const wallet = await prisma.wallet.findUnique({ where: { memberId: claim.memberId } });
     if (!wallet) return { ok: false, message: `No wallet for member *${claim.memberId}*.` };
 
@@ -375,7 +403,7 @@ export async function payoutInsuranceClaim(
           description: `Insurance claim payout ${formatBalance(payout)}`,
           postings: [
             {
-              account: "expense:insurance_claim",
+              account: "liabilities:insurance_payable",
               direction: "DEBIT",
               amount: payout,
               memberId: claim.memberId,
@@ -414,11 +442,15 @@ export async function payoutInsuranceClaim(
 
 // ===== Admin claim actions (used by admin-actions.ts WhatsApp commands) =====
 
-/** Approve a claim and pay it out to the member's wallet. */
-export async function approveInsuranceClaim(claimId: string): Promise<{ message: string }> {
-  const claim = await prisma.insuranceClaim.findUnique({ where: { id: claimId } });
+/** Approve a claim and pay it out to the member's wallet (tenant-scoped). */
+export async function approveInsuranceClaim(
+  claimId: string,
+  cooperativeId: string,
+): Promise<{ message: string }> {
+  const claim = await prisma.insuranceClaim.findFirst({ where: { id: claimId, cooperativeId } });
   if (!claim) return { message: `No insurance claim found with id *${claimId}*.` };
   if (claim.status === "paid") return { message: `Claim *${claimId}* is already paid.` };
+  if (claim.status === "rejected") return { message: `Claim *${claimId}* was rejected.` };
   if (!claim.cubecoverClaimId) {
     return { message: `Claim *${claimId}* has no provider id — cannot pay out.` };
   }
@@ -426,29 +458,35 @@ export async function approveInsuranceClaim(claimId: string): Promise<{ message:
   return { message: result.message };
 }
 
-/** Reject a claim. */
-export async function rejectInsuranceClaim(claimId: string): Promise<{ message: string }> {
-  const claim = await prisma.insuranceClaim.findUnique({ where: { id: claimId } });
+/** Reject a claim (tenant-scoped). */
+export async function rejectInsuranceClaim(
+  claimId: string,
+  cooperativeId: string,
+): Promise<{ message: string }> {
+  const claim = await prisma.insuranceClaim.findFirst({ where: { id: claimId, cooperativeId } });
   if (!claim) return { message: `No insurance claim found with id *${claimId}*.` };
   if (claim.status === "rejected") {
     return { message: `Claim *${claimId}* is already rejected.` };
   }
   await prisma.insuranceClaim.update({
-    where: { id: claimId },
+    where: { id: claim.id },
     data: { status: "rejected", processedAt: new Date() },
   });
   return { message: `Claim *${claimId}* rejected.` };
 }
 
-/** List the most recent insurance claims for a member (by member code). */
-export async function listMemberInsuranceClaims(memberCode: string): Promise<{ message: string }> {
+/** List the most recent insurance claims for a member (by member code), tenant-scoped. */
+export async function listMemberInsuranceClaims(
+  memberCode: string,
+  cooperativeId: string,
+): Promise<{ message: string }> {
   const member = await prisma.member.findFirst({
-    where: { code: memberCode },
+    where: { code: memberCode, cooperativeId },
     select: { id: true, name: true },
   });
   if (!member) return { message: `No member found with code *${memberCode}*.` };
   const claims = await prisma.insuranceClaim.findMany({
-    where: { memberId: member.id },
+    where: { memberId: member.id, cooperativeId },
     orderBy: { createdAt: "desc" },
     take: 20,
   });

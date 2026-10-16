@@ -57,7 +57,11 @@ export async function handleConfirm(phone: string, args: string[]): Promise<void
   await sendText({ to: phone, text: result.message });
 }
 
-export async function handleApproveInsuranceClaim(phone: string, args: string[]): Promise<void> {
+export async function handleApproveInsuranceClaim(
+  phone: string,
+  args: string[],
+  cooperativeId: string,
+): Promise<void> {
   const claimId = args[0];
   if (!claimId) {
     await sendText({
@@ -66,11 +70,15 @@ export async function handleApproveInsuranceClaim(phone: string, args: string[])
     });
     return;
   }
-  const result = await approveInsuranceClaim(claimId);
+  const result = await approveInsuranceClaim(claimId, cooperativeId);
   await sendText({ to: phone, text: result.message });
 }
 
-export async function handleRejectInsuranceClaim(phone: string, args: string[]): Promise<void> {
+export async function handleRejectInsuranceClaim(
+  phone: string,
+  args: string[],
+  cooperativeId: string,
+): Promise<void> {
   const claimId = args[0];
   if (!claimId) {
     await sendText({
@@ -79,11 +87,15 @@ export async function handleRejectInsuranceClaim(phone: string, args: string[]):
     });
     return;
   }
-  const result = await rejectInsuranceClaim(claimId);
+  const result = await rejectInsuranceClaim(claimId, cooperativeId);
   await sendText({ to: phone, text: result.message });
 }
 
-export async function handleListInsuranceClaims(phone: string, args: string[]): Promise<void> {
+export async function handleListInsuranceClaims(
+  phone: string,
+  args: string[],
+  cooperativeId: string,
+): Promise<void> {
   const memberCode = args[0];
   if (!memberCode) {
     await sendText({
@@ -92,7 +104,7 @@ export async function handleListInsuranceClaims(phone: string, args: string[]): 
     });
     return;
   }
-  const result = await listMemberInsuranceClaims(memberCode);
+  const result = await listMemberInsuranceClaims(memberCode, cooperativeId);
   await sendText({ to: phone, text: result.message });
 }
 
