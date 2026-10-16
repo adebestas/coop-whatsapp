@@ -1,6 +1,6 @@
 # Expert-Review Remediation — Progress & Resume
 
-**Branch:** `feat/world-class` · **HEAD:** `9c384a1` · **Base for this work:** `f52dda3`
+**Branch:** `feat/world-class` · **HEAD:** `cf8d32c` · **Base for this work:** `f52dda3`
 **Full findings:** `docs/EXPERT-REVIEW-2026-10-15.md`
 **Method:** fix one finding at a time — verify the finding, ask the user about the fix + test, implement (TDD), run the focused tests + `tsc` + `eslint src/` + `prettier`, commit.
 
@@ -63,8 +63,9 @@ Deep-research hardening pass (Replit DB deletion, Lovable PII, Vercel env leakag
 | OPS-2 | Queue retries: removed invalid Worker option `maxStartedAttempts` (not a BullMQ option → jobs never retried); added `DEFAULT_JOB_OPTIONS` (`attempts: 3` + exponential backoff) applied to scheduler jobs. | `b73ccd2` |
 | OPS-3 | AML reports labelled correctly: new `STR.reportType` ("STR"/"CTR") + migration `20261056000000_str_report_type`; pattern hits → STR, threshold crossings → CTR; CBN payload/notifications now carry the true `reportedAmount` (aggregate total), not the single-tx amount; type surfaced in admin listing, compliance export and regulator report. | `c5fc230` |
 | OPS-4 | AML blocks: `finalizeWithdrawal` checks AML *before* debit/payout; a suspicious pattern (STR) sets the request to `aml_review` and moves no money, requiring `finalize <id> override` (audited) to release. CTR-only large withdrawals are reported but still pay. | `9c384a1` |
+| OPS-5 | Retention job was dead code (filtered the never-assigned status `"inactive"` → anonymized nobody); now anonymizes old `suspended`/`deceased` members. Account erasure also clears the member's `Session` (mid-flow PII) and writes an audit entry. | `cf8d32c` |
 
-**All SEC-1…9 and PERF-1…4 done; OPS-1…4 done.** Next: the remaining OPS items (retention/erasure, dashboard route, CI deploy gate).
+**All SEC-1…9 and PERF-1…4 done; OPS-1…5 done.** Next: the remaining OPS items (dashboard route, CI deploy gate).
 
 > **Rotate the Neon credential** scrubbed from `.env` in SEC-6 — still live in Neon until rotated there.
 
@@ -75,9 +76,9 @@ AI prompt still says ₦ (`ai-query.ts:153`); translation trigger ignores the re
 
 ## Resume
 
-1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `9c384a1`).
+1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `cf8d32c`).
 2. Read this file + `docs/EXPERT-REVIEW-2026-10-15.md` + `~/.config/opencode/memory.md`.
-3. All **Critical (A1–A17)**, the insurance + federation + topup Important items, **SEC-1…9**, **PERF-1…4** and **OPS-1…4** are done. Next: the remaining **OPS items** — same loop (verify → ask about fix+test → implement → test → commit).
+3. All **Critical (A1–A17)**, the insurance + federation + topup Important items, **SEC-1…9**, **PERF-1…4** and **OPS-1…5** are done. Next: the remaining **OPS items** — same loop (verify → ask about fix+test → implement → test → commit).
 
 > **A15 follow-up:** voice + translation are now consent-gated, but the natural-language
 > AI paths (`suggestCommand` in `lib/ai.ts`, `ai-query.ts`, `ai-insights.ts`) still send
