@@ -196,27 +196,44 @@ jobs:
         run: npm run build
 
   # ---------- Staging Deploy Gate ----------
-  # This job only runs on the `staging` branch (not PRs).
-  # It passes through if all previous jobs succeeded.
-  # Render handles the actual deploy via autoDeploy.
+  # Runs only on the `staging` branch (not PRs), and only after every check job
+  # above has succeeded. Render's auto-deploy is OFF (see render.yaml), so this
+  # job is what actually ships: it POSTs the Render Deploy Hook.
   staging-deploy-gate:
     name: Staging Deploy Gate
     runs-on: ubuntu-latest
-    needs: [typecheck-and-lint, unit-tests, security-tests, dependency-audit, build]
+    needs:
+      [typecheck-and-lint, unit-tests, security-tests, postgres-migrations, dependency-audit, build]
     if: github.ref == 'refs/heads/staging'
     steps:
-      - name: Staging deploy gate passed
-        run: echo "All checks passed. Render will auto-deploy staging."
+      - name: Trigger staging deploy
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_STAGING }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK_STAGING is not configured — skipping deploy trigger."
+            exit 0
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
+          echo "Staging deploy triggered."
 
   # ---------- Production Deploy Gate ----------
-  # This job only runs on the `main` branch (not PRs).
-  # It passes through if all previous jobs succeeded.
-  # Render handles the actual deploy via autoDeploy.
+  # Runs only on the `main` branch (not PRs), after all checks pass. Render's
+  # auto-deploy is OFF (see render.yaml); this job triggers the deploy itself.
   production-deploy-gate:
     name: Production Deploy Gate
     runs-on: ubuntu-latest
-    needs: [typecheck-and-lint, unit-tests, security-tests, dependency-audit, build]
+    needs:
+      [typecheck-and-lint, unit-tests, security-tests, postgres-migrations, dependency-audit, build]
     if: github.ref == 'refs/heads/main'
     steps:
-      - name: Production deploy gate passed
-        run: echo "All checks passed. Render will auto-deploy production."
+      - name: Trigger production deploy
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_PRODUCTION }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK_PRODUCTION is not configured — skipping deploy trigger."
+            exit 0
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
+          echo "Production deploy triggered."
