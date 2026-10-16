@@ -124,37 +124,50 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
     return;
   }
 
-  // Run the whole credit flow inside the cooperative's RLS context.
-  await withCoopContext(coopId, async () => {
-    if (n.currency !== getCurrency()) {
-      console.warn(
-        `[topup] rejected notification currency ${n.currency} (coop expects ${getCurrency()}), txId=${n.transactionId}`,
-      );
-      return;
-    }
+  // Run the whole credit flow inside the cooperative's RLS context. A true
+  // concurrent duplicate can still trip the JournalEntry.txRef unique constraint
+  // (which aborts the Postgres tx); that losing delivery is a safe no-op — the
+  // winner already credited and this transaction rolled back in full.
+  try {
+    await withCoopContext(coopId, async () => {
+      if (n.currency !== getCurrency()) {
+        console.warn(
+          `[topup] rejected notification currency ${n.currency} (coop expects ${getCurrency()}), txId=${n.transactionId}`,
+        );
+        return;
+      }
 
-    // Find the member by their virtual account number.
-    const member = await prisma.member.findFirst({
-      where: { virtualAccountNumber: n.accountNumber },
-      include: { wallet: true },
-    });
-    if (!member || !member.wallet) {
-      console.warn(`[topup] credit for unknown account ${maskId(n.accountNumber)}, ignoring`);
-      return;
-    }
+      // Find the member by their virtual account number.
+      const member = await prisma.member.findFirst({
+        where: { virtualAccountNumber: n.accountNumber },
+        include: { wallet: true },
+      });
+      if (!member || !member.wallet) {
+        console.warn(`[topup] credit for unknown account ${maskId(n.accountNumber)}, ignoring`);
+        return;
+      }
 
-    const amount = roundMoney(n.amount);
-    if (amount <= 0) return;
-    const reference = `${n.provider}-${n.transactionId}`;
+      const amount = roundMoney(n.amount);
+      if (amount <= 0) return;
+      const reference = `${n.provider}-${n.transactionId}`;
+      const txRef = `TOPUP-${reference}`;
 
-    const credited = await withTx(async (tx) => {
-      // Idempotency gate FIRST: duplicate delivery throws P2002 here, which
-      // rolls back everything � the wallet is never credited twice.
-      try {
-        await postJournal(
+      const credited = await withTx(async (tx) => {
+        // Idempotency gate: READ the entry first — a replayed delivery then
+        // no-ops without triggering a unique-constraint violation (which would
+        // abort the whole Postgres transaction).
+        const existing = await tx.journalEntry.findFirst({
+          where: { txRef },
+          select: { id: true },
+        });
+        if (existing) {
+          console.log(`[topup] duplicate credit blocked: ${reference}`);
+          return false; // no-op success
+        }
+        const posted = await postJournal(
           {
             cooperativeId: member.cooperativeId,
-            txRef: `TOPUP-${reference}`,
+            txRef,
             description: `Wallet top-up of ${formatBalance(amount)} by ${member.name} via ${n.provider} (${n.transactionId})`,
             postings: [
               { account: "assets:bank", direction: "DEBIT" as const, amount },
@@ -165,92 +178,98 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
                 memberId: member.id,
               },
             ],
-            throwOnDuplicate: true,
           },
           tx as any,
         );
-      } catch (err: any) {
-        if (err?.code === "P2002") {
-          console.log(`[topup] duplicate credit blocked: ${reference}`);
-          return false; // treat like a no-op success
+        if (!posted.posted) {
+          console.log(`[topup] credit not posted (${posted.reason}): ${reference}`);
+          return false;
         }
-        throw err;
-      }
 
-      await tx.contribution.create({
-        data: {
-          amount,
-          type: "topup",
-          note: `Incoming transfer via ${n.provider}`,
-          reference,
-          status: "confirmed",
-          paidAt: new Date(),
-          memberId: member.id,
-          cooperativeId: member.cooperativeId,
-        },
+        await tx.contribution.create({
+          data: {
+            amount,
+            type: "topup",
+            note: `Incoming transfer via ${n.provider}`,
+            reference,
+            status: "confirmed",
+            paidAt: new Date(),
+            memberId: member.id,
+            cooperativeId: member.cooperativeId,
+          },
+        });
+        await tx.wallet.update({
+          where: { id: member.wallet!.id },
+          data: {
+            balance: { increment: amount },
+            totalSaved: { increment: amount },
+          },
+        });
+        return true;
       });
-      await tx.wallet.update({
-        where: { id: member.wallet!.id },
-        data: {
-          balance: { increment: amount },
-          totalSaved: { increment: amount },
-        },
-      });
-      return true;
-    });
 
-    // A successful real money-in contribution is a "first qualifying contribution":
-    // qualify any pending referral for this member. Idempotent, and never on the
-    // duplicate-delivery path above. A referral bug must never break crediting.
-    if (credited) {
+      // Duplicate delivery — nothing was credited; run no side effects.
+      if (!credited) return;
+
+      // A successful real money-in contribution is a "first qualifying contribution":
+      // qualify any pending referral for this member. Idempotent. A referral bug
+      // must never break crediting.
       await qualifyReferral(member.cooperativeId, member.id).catch((err) => {
         console.warn("[topup] referral qualification failed:", err);
       });
-    }
 
-    // AML/CFT: flag + auto-file STR for large/suspicious deposits (money-in).
-    try {
-      await flagTransaction({
-        memberId: member.id,
-        cooperativeId: member.cooperativeId,
-        amount,
-        type: "deposit",
-        direction: "in",
-        createdAt: new Date(),
+      // AML/CFT: flag + auto-file STR for large/suspicious deposits (money-in).
+      try {
+        await flagTransaction({
+          memberId: member.id,
+          cooperativeId: member.cooperativeId,
+          amount,
+          type: "deposit",
+          direction: "in",
+          createdAt: new Date(),
+        });
+      } catch (err) {
+        console.error("[topup] AML flag failed:", err);
+      }
+
+      console.log(
+        `[topup] credited ${maskId(member.phone)} with ${amount} ${n.currency} (${n.transactionId})`,
+      );
+
+      // Real-time credit alert: tell the member the moment their bank transfer lands.
+      const newBalance = (member.wallet?.balance ?? 0) + amount;
+      await notifyMember(
+        member,
+        `✅ *Wallet credited!*\n\n${formatBalance(amount)} just landed in your savings via ${n.provider} (Ref ${n.transactionId.slice(-8)}).\n\nNew balance: *${formatBalance(newBalance)}*.`,
+      ).catch((err) => {
+        console.error("[topup] Failed to notify member of credit:", err);
       });
-    } catch (err) {
-      console.error("[topup] AML flag failed:", err);
-    }
 
-    console.log(
-      `[topup] credited ${maskId(member.phone)} with ${amount} ${n.currency} (${n.transactionId})`,
-    );
-
-    // Real-time credit alert: tell the member the moment their bank transfer lands.
-    const newBalance = (member.wallet?.balance ?? 0) + amount;
-    await notifyMember(
-      member,
-      `✅ *Wallet credited!*\n\n${formatBalance(amount)} just landed in your savings via ${n.provider} (Ref ${n.transactionId.slice(-8)}).\n\nNew balance: *${formatBalance(newBalance)}*.`,
-    ).catch((err) => {
-      console.error("[topup] Failed to notify member of credit:", err);
+      // Append-only audit must never turn a successful credit into a 500: if the
+      // audit write fails, log it and keep the money path idempotently successful.
+      try {
+        await audit({
+          cooperativeId: member.cooperativeId,
+          actorPhone: member.phone,
+          actorId: member.id,
+          actorRole: member.role,
+          action: "topup.credit",
+          targetType: "contribution",
+          detail: `Wallet top-up of ${formatBalance(amount)} by ${member.name} via ${n.provider} (${n.transactionId})`,
+        });
+      } catch (err) {
+        console.error("[topup] credit audit failed:", err);
+      }
     });
-
-    // Append-only audit must never turn a successful credit into a 500: if the
-    // audit write fails, log it and keep the money path idempotently successful.
-    try {
-      await audit({
-        cooperativeId: member.cooperativeId,
-        actorPhone: member.phone,
-        actorId: member.id,
-        actorRole: member.role,
-        action: "topup.credit",
-        targetType: "contribution",
-        detail: `Wallet top-up of ${formatBalance(amount)} by ${member.name} via ${n.provider} (${n.transactionId})`,
-      });
-    } catch (err) {
-      console.error("[topup] credit audit failed:", err);
+  } catch (err: any) {
+    if (err?.code === "P2002") {
+      console.log(
+        `[topup] duplicate delivery (concurrent) blocked: ${n.provider}-${n.transactionId}`,
+      );
+      return;
     }
-  });
+    throw err;
+  }
 }
 
 /**
