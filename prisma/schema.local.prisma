@@ -301,6 +301,7 @@ model Member {
 
   @@unique([cooperativeId, phone])
   @@index([phone])
+  @@index([virtualAccountNumber])
   @@index([cooperativeId, role])
   @@index([status])
   @@index([cooperativeId, status, role])
@@ -500,6 +501,7 @@ model Payout {
 
   @@index([status, createdAt])
   @@index([cooperativeId, status, createdAt])
+  @@index([memberId, createdAt])
 }
 
 // ---- Provider webhook events (idempotency & duplicate protection) ----
@@ -541,6 +543,7 @@ model Posting {
   memberId  String?
 
   @@index([account])
+  @@index([entryId])
 }
 
 // ---- Withdrawal requests (money out of a member's wallet) ----
