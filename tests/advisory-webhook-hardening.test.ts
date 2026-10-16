@@ -189,4 +189,18 @@ describe("withdrawal flood (concurrent webhook deliveries)", () => {
     expect(wallet.balance).toBe(100_000);
     expect(await prisma.payout.count()).toBe(0);
   });
+
+  it("refuses a second withdrawal request while one is still open", async () => {
+    const coop = await makeCoop("WDR-OPEN");
+    const member = await makeMember(coop.id, { balance: 10_000_000 });
+
+    const first = await requestWithdrawal(member.phone, 1_000_000);
+    expect(first.ok).toBe(true);
+    expect(await prisma.withdrawalRequest.count()).toBe(1);
+
+    const second = await requestWithdrawal(member.phone, 1_000_000);
+    expect(second.ok).toBe(false);
+    expect(second.message).toMatch(/already have a withdrawal request/i);
+    expect(await prisma.withdrawalRequest.count()).toBe(1);
+  });
 });

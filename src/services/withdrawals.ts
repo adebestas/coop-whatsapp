@@ -157,7 +157,8 @@ export async function requestWithdrawal(
   }
 
   // Atomic eligibility check + request creation inside a transaction.
-  // SELECT ... FOR UPDATE locks the member row so concurrent requests queue.
+  // The member row is locked (SELECT ... FOR UPDATE on Postgres) so concurrent
+  // requests for the same member serialize instead of both passing the checks.
   const result = await withTx(async (tx) => {
     const member = await memberByPhone(phone, tx as unknown as typeof prisma);
     if (!member || !member.wallet) {
@@ -166,6 +167,31 @@ export async function requestWithdrawal(
         message: "You need to join a cooperative first. Reply *join <code>*.",
       } as const;
     }
+
+    // Lock the member row. Postgres supports FOR UPDATE; SQLite has none and
+    // serializes writes itself (treat it as already locked inside the tx).
+    if ((process.env.DATABASE_URL ?? "").startsWith("postgres")) {
+      await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "id" = ${member.id} FOR UPDATE`;
+    }
+
+    // One open withdrawal request per member. `lastWithdrawalAt` only moves on a
+    // successful payout, so without this a member could stack several pending
+    // requests and bypass the once-per-cooldown rule and the 45% balance cap.
+    // Enforced under the row lock so two concurrent requests cannot both pass.
+    const openRequest = await tx.withdrawalRequest.findFirst({
+      where: {
+        memberId: member.id,
+        status: { in: ["pending", "admin_approved", "processing"] },
+      },
+      select: { id: true },
+    });
+    if (openRequest) {
+      return {
+        ok: false,
+        message: `You already have a withdrawal request in progress (*${openRequest.id.slice(-6)}*). Wait for it to be decided — or ask an admin if it's stuck.`,
+      } as const;
+    }
+
     if (member.supervisoryFrozenAt) {
       return {
         ok: false,
