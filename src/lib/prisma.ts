@@ -7,26 +7,76 @@ const isTest = process.env.NODE_ENV === "test";
 /**
  * Prisma client with automatic connection pooling for production.
  *
- * PRODUCTION POOL SETTINGS (auto-appended if missing from DATABASE_URL):
- *   ?connection_limit=10&pool_timeout=10
+ * CONNECTION BUDGET — every long-lived pool is multiplied by the number of app
+ * instances, so an unbounded pool on any one instance can exhaust the database
+ * for all of them. We therefore bound EVERY pool we open:
  *
- * - connection_limit: Max connections in pool. Rule: (2 × CPU cores) + 1.
- *   For higher concurrency, use PgBouncer instead of raising this value.
+ *   app pool   (prisma)        connection_limit = DB_CONNECTION_LIMIT       (default 10)
+ *   owner pool (ownerPrisma)   connection_limit = DB_OWNER_CONNECTION_LIMIT (default 3)
+ *
+ * Budget rule: instances x (DB_CONNECTION_LIMIT + DB_OWNER_CONNECTION_LIMIT)
+ * must stay below the database's connection cap, leaving a reserve for
+ * migrations and human sessions. On Neon, prefer the *pooled* connection string
+ * (PgBouncer) and keep these limits small.
+ *
  * - pool_timeout: Seconds to wait for a connection before throwing.
  *
  * Graceful shutdown: pool connections are closed on process exit.
  */
-function resolveDatabaseUrl(): string {
-  const url = process.env.DATABASE_URL ?? "";
+const DEFAULT_APP_CONNECTION_LIMIT = 10;
+const DEFAULT_OWNER_CONNECTION_LIMIT = 3;
+const POOL_TIMEOUT_SECONDS = 10;
 
+/** Append pool params unless the URL already pins a connection limit. */
+export function applyPoolParams(
+  url: string,
+  limit: number,
+  timeout = POOL_TIMEOUT_SECONDS,
+): string {
+  if (!url || url.includes("connection_limit")) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}connection_limit=${limit}&pool_timeout=${timeout}`;
+}
+
+/** Parse a positive-integer env value, falling back when unset or invalid. */
+export function resolveConnectionLimit(raw: string | undefined, fallback: number): number {
+  const n = raw ? Number.parseInt(raw, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function resolveDatabaseUrl(): string {
   // For tests, use SQLite
   if (isTest) {
     return "file:./dev.db";
   }
 
-  if (!isProd || url.includes("connection_limit")) return url;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}connection_limit=10&pool_timeout=10`;
+  const url = process.env.DATABASE_URL ?? "";
+  if (!isProd) return url;
+  return applyPoolParams(
+    url,
+    resolveConnectionLimit(process.env.DB_CONNECTION_LIMIT, DEFAULT_APP_CONNECTION_LIMIT),
+  );
+}
+
+/**
+ * Owner-role URL for system-level operations (nightly backup, migrations).
+ * In production the app connects as the non-owner `coop_app` role, so these
+ * jobs use DATABASE_OWNER_URL. The owner pool is intentionally smaller — those
+ * jobs are low-concurrency — but still bounded so it cannot exhaust the DB.
+ */
+function resolveOwnerDatabaseUrl(): string {
+  // For tests, use SQLite
+  if (isTest) {
+    return "file:./dev.db";
+  }
+
+  const owner = process.env.DATABASE_OWNER_URL;
+  const url = owner && owner.length > 0 ? owner : (process.env.DATABASE_URL ?? "");
+  if (!isProd) return url;
+  return applyPoolParams(
+    url,
+    resolveConnectionLimit(process.env.DB_OWNER_CONNECTION_LIMIT, DEFAULT_OWNER_CONNECTION_LIMIT),
+  );
 }
 
 const base = new PrismaClient({
@@ -76,7 +126,7 @@ export const ownerPrisma = new PrismaClient({
   log: isProd ? ["error", "warn"] : ["error", "warn", "info"],
   datasources: {
     db: {
-      url: process.env.DATABASE_OWNER_URL ?? resolveDatabaseUrl(),
+      url: resolveOwnerDatabaseUrl(),
     },
   },
 });
