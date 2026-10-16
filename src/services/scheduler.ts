@@ -5,7 +5,7 @@ import { resolveProvider } from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
 import { showHistory } from "./statements.js";
 import { runAllAlerts } from "../lib/ai-alerts.js";
-import { alertSupers, AlertSeverity, logAndAlert } from "../lib/alerting.js";
+import { alertSupers, AlertSeverity, withMoneyPathAlert } from "../lib/alerting.js";
 import { getRedis, claimOnce } from "../lib/cache.js";
 import { forEachCoop, withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
 import { getCurrency } from "../lib/runtime-context.js";
@@ -1242,7 +1242,7 @@ export async function runSchedulerTick(): Promise<void> {
     .then(async (n) => {
       if (n > 0) {
         // Critical: guarantor default deductions move money — alert on failure.
-        await logAndAlert(
+        await withMoneyPathAlert(
           "system",
           "executeDueDeductions (guarantor default deductions)",
           async () => {
@@ -1281,49 +1281,30 @@ export async function runSchedulerTick(): Promise<void> {
 
 export async function runBackupJob(): Promise<void> {
   const { runBackup } = await import("./backup.js");
-  await logAndAlert(
-    "system",
-    "runBackup (daily backup)",
-    async () => {
-      await runBackup();
-    },
-    AlertSeverity.CRITICAL,
-  );
+  await withMoneyPathAlert("system", "runBackup (daily backup)", async () => {
+    const result = await runBackup();
+    if (!result.ok) throw new Error(result.message);
+  });
 }
 
 export async function runReconcileJob(): Promise<void> {
   const { runReconciliation } = await import("./reconcile.js");
-  await logAndAlert(
-    "system",
-    "runReconciliation (nightly reconciliation)",
-    async () => {
-      await runReconciliation();
-    },
-    AlertSeverity.CRITICAL,
-  );
+  await withMoneyPathAlert("system", "runReconciliation (nightly reconciliation)", async () => {
+    await runReconciliation();
+  });
 }
 
 export async function runPollerJob(): Promise<void> {
   const { runTransferPolling } = await import("./statuspoller.js");
-  await logAndAlert(
-    "system",
-    "runTransferPolling (payout status polling)",
-    async () => {
-      await runTransferPolling();
-    },
-    AlertSeverity.CRITICAL,
-  );
+  await withMoneyPathAlert("system", "runTransferPolling (payout status polling)", async () => {
+    await runTransferPolling();
+  });
 }
 
 export async function runDigestJob(): Promise<void> {
-  await logAndAlert(
-    "system",
-    "runDailyDigest (daily movement digest)",
-    async () => {
-      await runDailyDigest();
-    },
-    AlertSeverity.CRITICAL,
-  );
+  await withMoneyPathAlert("system", "runDailyDigest (daily movement digest)", async () => {
+    await runDailyDigest();
+  });
 }
 
 /** Dispatch a named scheduler job (used by the BullMQ worker). */

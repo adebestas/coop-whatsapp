@@ -68,7 +68,7 @@ describe("backup restore smoke test", () => {
     const raw = await readFile(join("backups", res.file!), "utf8");
     const snapshot = JSON.parse(raw) as { version: number; tables: Record<string, unknown[]> };
 
-    expect(snapshot.version).toBe(2);
+    expect(snapshot.version).toBe(3);
 
     // Every table must be present in the dump (no silent omissions).
     for (const table of EXPECTED_TABLES) {
