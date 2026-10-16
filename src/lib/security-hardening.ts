@@ -8,7 +8,6 @@ import { getCoopId } from "./runtime-context.js";
 // Detects SIM swap / session hijack by tracking device fingerprints.
 
 const DEVICE_FINGERPRINT_KEY = "session:device:";
-const ANOMALY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Record and validate a device fingerprint for a member session.
@@ -19,8 +18,8 @@ export async function validateDeviceSession(params: {
   memberPhone: string;
   platform: string;
   ip: string;
-}): Promise<{ ok: true } | { ok: false; reason: string }> {
-  const { memberPhone, platform, ip } = params;
+}): Promise<{ ok: true; warning?: string }> {
+  const { memberPhone, platform } = params;
   const cacheKey = `${DEVICE_FINGERPRINT_KEY}${memberPhone}`;
   const now = Date.now();
 
@@ -30,80 +29,56 @@ export async function validateDeviceSession(params: {
     if (!redis) return { ok: true }; // no Redis, allow (can't check)
 
     const existing = await redis.get(cacheKey);
+    const record = () => redis.setex(cacheKey, 600, JSON.stringify({ platform, recordedAt: now }));
     if (!existing) {
-      // First session — record it
-      await redis.setex(
-        cacheKey,
-        600,
-        JSON.stringify({
-          platform,
-          ip,
-          recordedAt: now,
-        }),
-      );
+      await record();
       return { ok: true };
     }
 
-    const prev = JSON.parse(existing) as { platform: string; ip: string; recordedAt: number };
-    const timeDiff = now - prev.recordedAt;
+    const prev = JSON.parse(existing) as { platform: string; recordedAt: number };
 
-    // If same session within window, no anomaly
-    if (timeDiff < ANOMALY_WINDOW_MS && prev.ip === ip && prev.platform === platform) {
-      return { ok: true };
-    }
-
-    // If platform changed (WhatsApp → Telegram) or IP changed rapidly, alert
-    if (prev.platform !== platform || prev.ip !== ip) {
-      if (timeDiff < ANOMALY_WINDOW_MS) {
-        // Rapid platform/IP switch = suspicious
-        const member = await prisma.member.findFirst({
-          where: { phone: memberPhone, ...(getCoopId() ? { cooperativeId: getCoopId() } : {}) },
-          select: { id: true, name: true, cooperativeId: true, phone: true },
+    // ADVISORY ONLY. A platform switch (WhatsApp <-> Telegram) is logged and the
+    // supers alerted, but it NEVER blocks the member: a lockout here is an
+    // availability/DoS bug with no self-service recovery. The webhook IP is
+    // intentionally NOT part of the fingerprint — `req.ip` is Meta's egress
+    // server, not the member's device, so it changes constantly (false positives).
+    if (prev.platform !== platform) {
+      const member = await prisma.member.findFirst({
+        where: { phone: memberPhone, ...(getCoopId() ? { cooperativeId: getCoopId() } : {}) },
+        select: { id: true, name: true, cooperativeId: true, phone: true },
+      });
+      if (member) {
+        await audit({
+          cooperativeId: member.cooperativeId,
+          actorPhone: memberPhone,
+          actorId: member.id,
+          actorRole: "member",
+          action: "security.session_anomaly",
+          targetType: "member",
+          targetId: member.id,
+          detail: `Platform change: ${prev.platform}→${platform}`,
         });
-        if (member) {
-          // Log anomaly
-          await audit({
-            cooperativeId: member.cooperativeId,
-            actorPhone: memberPhone,
-            actorId: member.id,
-            actorRole: "member",
-            action: "security.session_anomaly",
-            targetType: "member",
-            targetId: member.id,
-            detail: `Platform/IP change: ${prev.platform}→${platform}, ${prev.ip}→${ip} within ${Math.round(timeDiff / 1000)}s`,
-          });
 
-          // Alert superadmins
-          const superadmins = await prisma.member.findMany({
-            where: { cooperativeId: member.cooperativeId, role: "superadmin" },
-            select: { phone: true },
+        const superadmins = await prisma.member.findMany({
+          where: { cooperativeId: member.cooperativeId, role: "superadmin" },
+          select: { phone: true },
+        });
+        for (const sa of superadmins) {
+          await sendText({
+            to: sa.phone,
+            text: `🚨 Platform switch for ${member.name}: ${prev.platform} → ${platform}.\n\nIf this is unexpected, consider suspending the member and changing their PIN.`,
           });
-          for (const sa of superadmins) {
-            await sendText({
-              to: sa.phone,
-              text: `🚨 Session anomaly detected!\n\nMember: ${member.name}\nFrom: ${prev.platform} (${prev.ip})\nTo: ${platform} (${ip})\nTime: ${Math.round(timeDiff / 1000)}s\n\nIf this is unexpected, consider suspending the member and changing their PIN.`,
-            });
-          }
-
-          return {
-            ok: false,
-            reason: `Rapid session change detected (${Math.round(timeDiff / 1000)}s). Please try again.`,
-          };
         }
       }
+      await record();
+      return {
+        ok: true,
+        warning:
+          "We noticed a change in how you're reaching us. If this wasn't you, contact your cooperative admin.",
+      };
     }
 
-    // Update fingerprint
-    await redis.setex(
-      cacheKey,
-      600,
-      JSON.stringify({
-        platform,
-        ip,
-        recordedAt: now,
-      }),
-    );
-
+    await record();
     return { ok: true };
   } catch {
     return { ok: true }; // Redis unavailable, allow

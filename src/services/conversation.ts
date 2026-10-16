@@ -650,19 +650,17 @@ async function handleMessageInner(
     return;
   }
 
-  // Device binding: detect SIM swap / session hijack (playbook Attack 1, 6)
+  // Device/session anomaly: ADVISORY only — warn, but never block the message
+  // (a lockout here is an availability bug; the webhook IP is Meta's, not the
+  // member's). Supers are alerted inside validateDeviceSession. SEC-8.
   const platform = phone.startsWith("tg:") ? "telegram" : "whatsapp";
   const deviceCheck = await validateDeviceSession({
     memberPhone: phone,
     platform,
     ip: meta.ip ?? "unknown",
   });
-  if (!deviceCheck.ok) {
-    await sendText({
-      to: phone,
-      text: `⚠️ ${deviceCheck.reason}\n\nIf this was you, try again in a few minutes.`,
-    });
-    return;
+  if (deviceCheck.warning) {
+    await sendText({ to: phone, text: `ℹ️ ${deviceCheck.warning}` });
   }
 
   if (isAwaitingState(session.state as BotState)) {
