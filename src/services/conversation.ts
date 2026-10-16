@@ -482,6 +482,23 @@ async function resolveAiText(
     return { ok: false };
   }
 
+  // AI budget (PERF-4): voice transcription and translation both bill Groq
+  // tokens. Enforce the per-member limit BEFORE spending so a member cannot burn
+  // unbounded spend by looping voice notes. (The NL→query paths check this again
+  // before their own call — a non-English voice note legitimately costs two.)
+  if (!(await checkAIRateLimit(member.id))) {
+    if (wantsAudio) {
+      await sendText({
+        to: phone,
+        text: "You've reached the AI usage limit for now. Please type your message, and try again a little later.",
+      });
+      return { ok: false };
+    }
+    // Typed text: skip the (billed) translation and pass it through untranslated
+    // so the command still has a chance to parse.
+    return { ok: true, text: rawText };
+  }
+
   let text = rawText;
   if (wantsAudio) {
     if (!transcriptionEnabled()) {

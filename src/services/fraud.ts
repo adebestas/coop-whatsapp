@@ -192,8 +192,15 @@ export async function checkVelocity(memberId: string): Promise<boolean> {
 
 // ---- AI query rate limiting (per member, per hour) ----
 // Uses Redis when available; falls back to per-key in-memory tracking.
-const AI_QUERY_WINDOW_SECONDS = 60 * 60; // 1 hour
-const AI_QUERY_MAX_PER_HOUR = 10;
+function positiveIntEnv(name: string, fallback: number): number {
+  const n = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+// Per-member AI budget (Groq chat + voice + translation). Configurable so the
+// operator can tighten it without a deploy.
+const AI_QUERY_WINDOW_SECONDS = positiveIntEnv("AI_WINDOW_SECONDS", 60 * 60); // 1 hour
+const AI_QUERY_MAX_PER_HOUR = positiveIntEnv("AI_MAX_PER_HOUR", 10);
 const aiInMemory = new Map<string, { count: number; resetAt: number }>();
 
 setInterval(() => {
@@ -210,7 +217,11 @@ export async function checkAIRateLimit(memberId: string): Promise<boolean> {
     try {
       const redisKey = `rl:${key}`;
       const current = await client.incr(redisKey);
-      await client.expire(redisKey, AI_QUERY_WINDOW_SECONDS); // Always set — idempotent
+      // Set the TTL ONLY on the first call of the window — otherwise every
+      // request pushes the expiry out and the window never closes (a caller
+      // under the limit would never be reset to zero, and a caller over it
+      // would be blocked forever).
+      if (current === 1) await client.expire(redisKey, AI_QUERY_WINDOW_SECONDS);
       return current <= AI_QUERY_MAX_PER_HOUR;
     } catch {
       /* fall through */
