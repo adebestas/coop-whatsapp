@@ -29,6 +29,9 @@ export function buildApp() {
     trustProxy: true,
     bodyLimit: 256 * 1024, // 256 KB
     requestTimeout: 30_000,
+    // Force-close keep-alive sockets on app.close() so graceful shutdown can't
+    // hang waiting on idle client connections (OPS-1).
+    forceCloseConnections: true,
   });
 
   // Capture the RAW request body before JSON parsing — provider webhook

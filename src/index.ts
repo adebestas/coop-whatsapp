@@ -15,51 +15,44 @@ import { prisma } from "./lib/prisma.js";
 import { closeQueues, initQueueProcessors, scheduleSchedulerJobs } from "./lib/queue.js";
 import { initRedis, closeRedis, isRedisConnected, withDistributedLock } from "./lib/cache.js";
 import { log } from "./lib/logger.js";
+import { createShutdown } from "./lib/shutdown.js";
 import { rlsEnforcementStatus } from "./lib/tenant-context.js";
 
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
 const RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000; // nightly
 
+let app: ReturnType<typeof buildApp>;
+
 // ===== Graceful Shutdown =====
-let isShuttingDown = false;
+// Steps run in order; a failure is logged and the process still exits non-zero.
+// A watchdog forces exit if a close hangs, so shutdown always terminates even
+// though the in-process scheduler/Telegram timers keep the event loop alive.
+const { shutdown, isShuttingDown } = createShutdown(
+  [
+    { name: "HTTP server", close: () => app?.close() },
+    { name: "queue workers", close: () => closeQueues() },
+    { name: "Redis", close: () => closeRedis() },
+    { name: "database", close: () => prisma.$disconnect() },
+  ],
+  {
+    onStart: (signal) => log.info("shutdown started", { signal }),
+    onStep: (name) => log.info(`${name} closed`),
+    onError: (step, err) =>
+      log.error("shutdown error", {
+        step,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    exit: (code) => process.exit(code),
+  },
+);
 
-async function shutdown(signal: string) {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
-  log.info("shutdown started", { signal });
-
-  try {
-    // 1. Stop accepting new connections
-    await app.close();
-    log.info("HTTP server closed");
-
-    // 2. Close queue workers
-    await closeQueues();
-    log.info("queue workers closed");
-
-    // 3. Disconnect Redis
-    await closeRedis();
-    log.info("Redis disconnected");
-
-    // 4. Disconnect database
-    await prisma.$disconnect();
-    log.info("database disconnected");
-
-    log.info("graceful shutdown complete");
-    process.exitCode = 0;
-  } catch (err) {
-    log.error("shutdown error", { error: err instanceof Error ? err.message : String(err) });
-    process.exitCode = 1;
-  }
-}
-
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-
-// Surface crashes off-box: an unhandled rejection or uncaught exception in a
-// money path must not vanish into a container log nobody reads.
+// Surface crashes off-box: an unhandled rejection in a money path must not
+// vanish into a container log nobody reads. An uncaught exception leaves the
+// process in an undefined state, so it must terminate — log, then shut down.
 process.on("unhandledRejection", (reason) => {
   log.error("unhandledRejection", {
     error: reason instanceof Error ? reason.message : String(reason),
@@ -68,9 +61,8 @@ process.on("unhandledRejection", (reason) => {
 });
 process.on("uncaughtException", (err) => {
   log.error("uncaughtException", { error: err.message, stack: err.stack });
+  void shutdown("uncaughtException", 1);
 });
-
-let app: ReturnType<typeof buildApp>;
 
 async function main() {
   // Fail fast on missing configuration — never run a money bot half-configured.
@@ -155,8 +147,9 @@ function startInProcessScheduler(): void {
   // guarantor default notices/deductions.
   let schedulerRunning = false;
   async function runSchedulerLoop() {
-    while (true) {
+    while (!isShuttingDown()) {
       await new Promise((r) => setTimeout(r, SCHEDULER_INTERVAL_MS));
+      if (isShuttingDown()) return;
       if (schedulerRunning) {
         log.warn("[scheduler] previous iteration still running, skipping");
         continue;
@@ -177,8 +170,9 @@ function startInProcessScheduler(): void {
   // Data-loss protection: full backup every day, plus one at startup.
   void runBackup();
   async function runBackupLoop() {
-    while (true) {
+    while (!isShuttingDown()) {
       await new Promise((r) => setTimeout(r, BACKUP_INTERVAL_MS));
+      if (isShuttingDown()) return;
       await withDistributedLock("scheduler:backup", 60 * 60 * 1000, () => runBackupJob());
     }
   }
@@ -186,8 +180,9 @@ function startInProcessScheduler(): void {
 
   // Nightly reconciliation + anomaly alerts to super admins.
   async function runReconcileLoop() {
-    while (true) {
+    while (!isShuttingDown()) {
       await new Promise((r) => setTimeout(r, RECONCILE_INTERVAL_MS));
+      if (isShuttingDown()) return;
       await withDistributedLock("scheduler:reconcile", 60 * 60 * 1000, () => runReconcileJob());
     }
   }
@@ -197,8 +192,9 @@ function startInProcessScheduler(): void {
   const pollMs = transferPollIntervalMs();
   if (pollMs > 0) {
     async function runPollerLoop() {
-      while (true) {
+      while (!isShuttingDown()) {
         await new Promise((r) => setTimeout(r, pollMs));
+        if (isShuttingDown()) return;
         await withDistributedLock("scheduler:poller", pollMs, () => runPollerJob());
       }
     }
@@ -207,8 +203,9 @@ function startInProcessScheduler(): void {
 
   // Daily movement digest — every super sees every debit (default 8pm).
   async function runDigestLoop() {
-    while (true) {
+    while (!isShuttingDown()) {
       await new Promise((r) => setTimeout(r, SCHEDULER_INTERVAL_MS));
+      if (isShuttingDown()) return;
       await withDistributedLock("scheduler:digest", SCHEDULER_INTERVAL_MS, () => runDigestJob());
     }
   }
