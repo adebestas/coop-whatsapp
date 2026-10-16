@@ -33,6 +33,7 @@ async function strData(cooperativeId: string): Promise<{ name: string; rows: str
   const rows = [
     [
       "Filing Ref",
+      "Type",
       "Date",
       "Member Code",
       "Member Name",
@@ -44,6 +45,7 @@ async function strData(cooperativeId: string): Promise<{ name: string; rows: str
     ],
     ...strs.map((s) => [
       s.id,
+      s.reportType,
       s.createdAt.toISOString(),
       s.member.code,
       s.member.name,
@@ -55,7 +57,7 @@ async function strData(cooperativeId: string): Promise<{ name: string; rows: str
     ]),
   ];
 
-  return { name: "STR", rows };
+  return { name: "STR-CTR", rows };
 }
 
 async function payeData(cooperativeId: string): Promise<{ name: string; rows: string[][] }> {

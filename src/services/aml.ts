@@ -26,9 +26,13 @@ export const REPORTING_THRESHOLD = 500_000_000;
 
 // ===== Types =====
 
+export type AmlReportType = "STR" | "CTR";
+
 export interface FlagResult {
   flagged: boolean;
   reasons: string[];
+  /** STR for suspicious patterns; CTR for large-transaction threshold crossings. */
+  reportType: AmlReportType;
 }
 
 export interface TransactionDetail {
@@ -219,6 +223,10 @@ async function checkDepositStructuring(
  */
 export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult> {
   const reasons: string[] = [];
+  // A suspicious PATTERN makes this an STR (reported regardless of amount). A
+  // pure threshold crossing is a CTR — the CBN ₦5,000,000 limit is a CTR
+  // obligation, not evidence of suspicion (mislabelling it misreports to the CBN).
+  const patternReasons: string[] = [];
 
   const coopConfig = await getCoopConfig(tx.cooperativeId);
   const largeTxThreshold = coopConfig.largeTxThreshold;
@@ -228,15 +236,24 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
   if (large) reasons.push(large);
 
   const rapid = await checkRapidSequence(tx.memberId, tx.direction);
-  if (rapid) reasons.push(rapid);
+  if (rapid) {
+    reasons.push(rapid);
+    patternReasons.push(rapid);
+  }
 
   // Only check pattern rules for money-out transactions
   if (tx.direction === "out") {
     const round = await checkRoundNumberPattern(tx.memberId, tx.cooperativeId);
-    if (round) reasons.push(round);
+    if (round) {
+      reasons.push(round);
+      patternReasons.push(round);
+    }
 
     const structuring = await checkStructuring(tx.memberId, tx.cooperativeId, reportingThreshold);
-    if (structuring) reasons.push(structuring);
+    if (structuring) {
+      reasons.push(structuring);
+      patternReasons.push(structuring);
+    }
   }
 
   // Check deposit structuring for money-in transactions
@@ -246,27 +263,39 @@ export async function flagTransaction(tx: TransactionDetail): Promise<FlagResult
       tx.cooperativeId,
       reportingThreshold,
     );
-    if (depositStructuring) reasons.push(depositStructuring);
-  }
-
-  // CBN ₦5M threshold: check aggregate outflow within 24 hours
-  if (tx.direction === "out") {
-    const agg = await checkAggregateThreshold(tx.memberId, tx.cooperativeId, reportingThreshold);
-    if (agg.exceeds) {
-      const aggReason = `Aggregate outflow ${formatBalance(agg.total)} in 24h exceeds ₦${(reportingThreshold / 100).toLocaleString()} CBN threshold`;
-      reasons.push(aggReason);
-      await autoFileSTR(tx, aggReason, agg.total);
+    if (depositStructuring) {
+      reasons.push(depositStructuring);
+      patternReasons.push(depositStructuring);
     }
   }
 
-  // Auto-file STR for single large transactions at or above ₦5,000,000
-  if (tx.amount >= REPORTING_THRESHOLD) {
-    const singleReason = `Single transaction ${formatBalance(tx.amount)} meets CBN ₦${(REPORTING_THRESHOLD / 100).toLocaleString()} STR threshold`;
-    reasons.push(singleReason);
-    await autoFileSTR(tx, singleReason, tx.amount);
+  // CBN ₦5M threshold: check aggregate outflow within 24 hours => CTR.
+  if (tx.direction === "out") {
+    const agg = await checkAggregateThreshold(tx.memberId, tx.cooperativeId, reportingThreshold);
+    if (agg.exceeds) {
+      const aggReason = `Aggregate outflow ${formatBalance(agg.total)} in 24h meets the CBN ₦${(reportingThreshold / 100).toLocaleString()} CTR threshold`;
+      reasons.push(aggReason);
+      await autoFileReport(tx, aggReason, agg.total, "CTR");
+    }
   }
 
-  return { flagged: reasons.length > 0, reasons };
+  // Single transaction at or above ₦5,000,000 => CTR.
+  if (tx.amount >= REPORTING_THRESHOLD) {
+    const singleReason = `Single transaction ${formatBalance(tx.amount)} meets the CBN ₦${(REPORTING_THRESHOLD / 100).toLocaleString()} CTR threshold`;
+    reasons.push(singleReason);
+    await autoFileReport(tx, singleReason, tx.amount, "CTR");
+  }
+
+  // Suspicious patterns are STRs — filed regardless of amount.
+  if (patternReasons.length > 0) {
+    await autoFileReport(tx, patternReasons.join("; "), tx.amount, "STR");
+  }
+
+  return {
+    flagged: reasons.length > 0,
+    reasons,
+    reportType: patternReasons.length > 0 ? "STR" : "CTR",
+  };
 }
 
 /**
@@ -320,11 +349,13 @@ export async function generateSTR(
 
   // Check each transaction for flags
   const allReasons: string[] = [];
+  let suspicious = false;
   for (const tx of allTx) {
     const result = await flagTransaction(tx);
     if (result.flagged) {
       allReasons.push(...result.reasons);
     }
+    if (result.reportType === "STR") suspicious = true;
   }
 
   const uniqueReasons = [...new Set(allReasons)];
@@ -338,8 +369,11 @@ export async function generateSTR(
     .join("\n");
 
   const timestamp = new Date().toISOString();
+  const reportTitle = suspicious
+    ? "SUSPICIOUS TRANSACTION REPORT (STR)"
+    : "CURRENCY TRANSACTION REPORT (CTR)";
   const summary =
-    `=== SUSPICIOUS TRANSACTION REPORT ===\n` +
+    `=== ${reportTitle} ===\n` +
     `Date: ${timestamp}\n` +
     `Member: ${member.name} (${member.phone})\n` +
     `Cooperative: ${member.cooperative.name}\n` +
@@ -395,41 +429,44 @@ export async function handleSTR(
 }
 
 /**
- * Auto-file an STR with the CBN when a transaction meets or exceeds the
- * ₦5,000,000 threshold — single transaction or aggregate within 24 hours.
- * Creates a pending STR record and notifies the cooperative super admin.
+ * Auto-file an AML report with the CBN — an STR for suspicious activity or a
+ * CTR when a transaction meets/exceeds the ₦5,000,000 threshold (single or 24h
+ * aggregate). Creates a pending record and notifies the super admins.
  */
-export async function autoFileSTR(
+export async function autoFileReport(
   tx: TransactionDetail,
   reason: string,
   reportedAmount: number = tx.amount,
+  reportType: AmlReportType = "STR",
 ): Promise<{ filed: boolean; strId?: string }> {
   try {
-    // Prevent duplicate STR for the same member on the same day
+    // Prevent duplicate reports for the same member/type on the same day
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
     const existing = await prisma.sTR.findFirst({
       where: {
         memberId: tx.memberId,
         cooperativeId: tx.cooperativeId,
+        reportType,
         createdAt: { gte: todayStart },
       },
     });
     if (existing) return { filed: false };
 
-    // Attempt automated STR filing with the CBN via an optional webhook.
+    // Attempt automated filing with the CBN via an optional webhook.
     // CBN requires filing within 72 hours of detection. If CBN_STR_WEBHOOK is
     // not configured, the report is created as PENDING and super admins are
     // notified to file manually within the 72-hour deadline.
     //
     // `amount` stores the TRUE reported amount — the aggregate total when this
-    // STR was triggered by a 24h aggregate, or the single-tx amount otherwise.
+    // report was triggered by a 24h aggregate, or the single-tx amount otherwise.
     const str = await prisma.sTR.create({
       data: {
         cooperativeId: tx.cooperativeId,
         memberId: tx.memberId,
         amount: reportedAmount,
         reason,
+        reportType,
         status: "pending",
       },
     });
@@ -438,7 +475,8 @@ export async function autoFileSTR(
       strId: str.id,
       cooperativeId: tx.cooperativeId,
       memberId: tx.memberId,
-      amount: tx.amount,
+      reportType,
+      amount: reportedAmount,
       currency: "NGN",
       reason,
       detectedAt: new Date().toISOString(),
@@ -483,14 +521,14 @@ export async function autoFileSTR(
       await notifyMember(
         admin,
         autoFiled
-          ? `🚨 *STR Auto-Filed with CBN*\n\nMember: ${tx.memberId}\nAmount: ${formatBalance(tx.amount)}\nReason: ${reason}\nReference: ${str.id}`
-          : `🚨 *STR Created (Pending CBN Filing)*\n\nMember: ${tx.memberId}\nAmount: ${formatBalance(tx.amount)}\nReason: ${reason}\n\nSet \`CBN_STR_WEBHOOK\` to auto-file. Until then, this report must be *manually filed with the CBN within 72 hours*.`,
+          ? `🚨 *${reportType} Auto-Filed with CBN*\n\nMember: ${tx.memberId}\nAmount: ${formatBalance(reportedAmount)}\nReason: ${reason}\nReference: ${str.id}`
+          : `🚨 *${reportType} Created (Pending CBN Filing)*\n\nMember: ${tx.memberId}\nAmount: ${formatBalance(reportedAmount)}\nReason: ${reason}\n\nSet \`CBN_STR_WEBHOOK\` to auto-file. Until then, this report must be *manually filed with the CBN within 72 hours*.`,
       );
     }
 
     return { filed: true, strId: str.id };
   } catch (err) {
-    console.error("[aml] autoFileSTR failed:", err);
+    console.error("[aml] autoFileReport failed:", err);
     return { filed: false };
   }
 }

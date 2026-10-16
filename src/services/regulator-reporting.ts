@@ -142,7 +142,10 @@ export async function statutoryPack(coopId: string, period: string): Promise<Rep
       ["Savings accounts (liability)", formatBalance(savingsAccountsTotal)],
       ["Total liabilities", formatBalance(totalLiabilities)],
       ["Net capital", formatBalance(netAssets - totalLiabilities)],
-      ["Note", "PEARLS-derived summary — not a GAAP balance sheet; loan balances are current-state"],
+      [
+        "Note",
+        "PEARLS-derived summary — not a GAAP balance sheet; loan balances are current-state",
+      ],
     ],
   };
 
@@ -182,7 +185,11 @@ export async function statutoryPack(coopId: string, period: string): Promise<Rep
       ["Effective structure", "Savings to assets", pct(pearls.effectiveStructure.savingsToAssets)],
       ["Asset quality", "PAR ratio", pct(pearls.assetQuality.parRatio)],
       ["Asset quality", "Provision coverage", pct(pearls.assetQuality.provisionCoverage)],
-      ["Rates of return", "Interest income to assets", pct(pearls.ratesOfReturn.interestIncomeToAssets)],
+      [
+        "Rates of return",
+        "Interest income to assets",
+        pct(pearls.ratesOfReturn.interestIncomeToAssets),
+      ],
       ["Rates of return", "Cost of funds", pct(pearls.ratesOfReturn.costOfFunds)],
       ["Liquidity", "Liquid assets to savings", pct(pearls.liquidity.liquidAssetsToSavings)],
       ["Signs of growth", "Member growth", pct(pearls.signsOfGrowth.memberGrowth)],
@@ -240,7 +247,7 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
   const [strs, withdrawals, payouts, loans, deposits] = await Promise.all([
     prisma.sTR.findMany({
       where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
-      select: { status: true, amount: true },
+      select: { status: true, amount: true, reportType: true },
     }),
     prisma.withdrawalRequest.findMany({
       where: {
@@ -285,25 +292,26 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
     }),
   ]);
 
-  // STR/SAR counts + total amount, grouped by filing status.
+  // STR/CTR counts + total amount, grouped by report type then filing status.
   const byStatus = new Map<string, { count: number; total: number }>();
   for (const str of strs) {
-    const entry = byStatus.get(str.status) ?? { count: 0, total: 0 };
+    const key = `${str.reportType} / ${str.status}`;
+    const entry = byStatus.get(key) ?? { count: 0, total: 0 };
     entry.count += 1;
     entry.total += str.amount;
-    byStatus.set(str.status, entry);
+    byStatus.set(key, entry);
   }
-  const strRows: string[][] = [["Status", "Count", "Total amount"]];
-  for (const status of [...byStatus.keys()].sort()) {
-    const entry = byStatus.get(status)!;
-    strRows.push([status, String(entry.count), formatBalance(entry.total)]);
+  const strRows: string[][] = [["Type / Status", "Count", "Total amount"]];
+  for (const key of [...byStatus.keys()].sort()) {
+    const entry = byStatus.get(key)!;
+    strRows.push([key, String(entry.count), formatBalance(entry.total)]);
   }
   strRows.push([
     "Total",
     String(strs.length),
     formatBalance(strs.reduce((sum, s) => sum + s.amount, 0)),
   ]);
-  const strSheet: ReportSheet = { name: "STR-SAR Summary", rows: strRows };
+  const strSheet: ReportSheet = { name: "STR-CTR Summary", rows: strRows };
 
   // Large-transaction list (≥ ₦5M), all directions, oldest first.
   const large = [
@@ -438,11 +446,9 @@ export async function generateReport(
     const key = `exports/${coopId}/${basename(filePath)}`;
     if (await upload(filePath, key)) s3Keys.push(key);
   }
-  const storage =
-    s3Keys.length === 3 ? "S3" : s3Keys.length > 0 ? "S3 (partial)" : "local";
+  const storage = s3Keys.length === 3 ? "S3" : s3Keys.length > 0 ? "S3 (partial)" : "local";
 
-  const baseUrl =
-    process.env.APP_URL ?? `http://localhost:${process.env.PORT ?? "3000"}`;
+  const baseUrl = process.env.APP_URL ?? `http://localhost:${process.env.PORT ?? "3000"}`;
   const links = {
     xlsx: `${baseUrl}/api/export/${basename(files.xlsx)}`,
     pdf: `${baseUrl}/api/export/${basename(files.pdf)}`,
@@ -588,7 +594,9 @@ export async function setRegulatorProfile(
           ...(type ? { type } : {}),
           ...(input.contactEmail !== undefined ? { contactEmail: input.contactEmail || null } : {}),
           ...(input.monthlyDueDay !== undefined ? { monthlyDueDay: input.monthlyDueDay } : {}),
-          ...(input.quarterlyDueDay !== undefined ? { quarterlyDueDay: input.quarterlyDueDay } : {}),
+          ...(input.quarterlyDueDay !== undefined
+            ? { quarterlyDueDay: input.quarterlyDueDay }
+            : {}),
         },
       });
     }

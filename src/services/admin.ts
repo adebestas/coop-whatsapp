@@ -3955,10 +3955,10 @@ export async function handleAdminCommand(
           await sendText({ to: phone, text: "No STRs filed." });
           return true;
         }
-        const strLines = ["*📋 Suspicious Transaction Reports*", ""];
+        const strLines = ["*📋 AML Reports (STR / CTR)*", ""];
         for (const s of strs) {
           strLines.push(
-            `• ${s.member.name} — ${formatBalance(s.amount)} — ${s.status} — ${s.reason}`,
+            `• [${s.reportType}] ${s.member.name} — ${formatBalance(s.amount)} — ${s.status} — ${s.reason}`,
           );
         }
         await sendText({ to: phone, text: strLines.join("\n") });

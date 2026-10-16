@@ -1372,6 +1372,7 @@ model STR {
   member        Member      @relation(fields: [memberId], references: [id], onDelete: Restrict)
   amount        Int
   reason        String
+  reportType    String      @default("STR")
   status        String      @default("pending")
   filedAt       DateTime?
   // Last time the 72h filing-deadline escalation alerted super admins about
