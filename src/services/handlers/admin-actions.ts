@@ -15,6 +15,7 @@ import {
 } from "../insurance/index.js";
 import { generateContextualHelp } from "../../lib/ai-support.js";
 import { verifyMemberPin } from "../pin.js";
+import { audit } from "../audit.js";
 import { issueSecretChallenge } from "./session.js";
 
 export async function handleValidateClaim(phone: string, args: string[]): Promise<void> {
@@ -535,6 +536,10 @@ export async function handleDeleteAccountPin(
     },
   });
 
+  // Clear any in-flight session state: Session.data can hold mid-flow PII
+  // (e.g. a name being captured) and is keyed by the member's old phone number.
+  await prisma.session.deleteMany({ where: { phone } });
+
   // Log the deletion in DataConsent table
   await prisma.dataConsent.create({
     data: {
@@ -542,6 +547,18 @@ export async function handleDeleteAccountPin(
       consentType: "delete_account",
       granted: false,
     },
+  });
+
+  // Append an immutable audit entry so the erasure is traceable (a self-service
+  // deletion must not be invisible to the compliance trail).
+  await audit({
+    cooperativeId: member.cooperativeId,
+    actorPhone: phone,
+    actorId: member.id,
+    action: "member.data_erasure",
+    targetType: "member",
+    targetId: member.id,
+    detail: "Account deleted and personal data erased at member request",
   });
 
   await sendText({

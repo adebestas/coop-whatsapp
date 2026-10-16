@@ -702,8 +702,16 @@ export async function runDataRetention(
   // Anonymize member PII on records older than 7 years (keep amounts for audit)
   let anonymized = 0;
   await forEachCoop(async (coopId) => {
+    // Members whose account is no longer operational (frozen or closed) and
+    // whose record is older than the retention window. NOTE: the real statuses
+    // are "suspended" and "deceased" — "inactive" is never assigned anywhere,
+    // so filtering on it silently anonymized nobody (dead job).
     const staleMembers = await prisma.member.findMany({
-      where: { cooperativeId: coopId, createdAt: { lt: sevenYearsAgo }, status: "inactive" },
+      where: {
+        cooperativeId: coopId,
+        createdAt: { lt: sevenYearsAgo },
+        status: { in: ["suspended", "deceased"] },
+      },
       select: { id: true },
     });
     for (const m of staleMembers) {
