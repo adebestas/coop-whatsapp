@@ -1,6 +1,9 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { resolveProvider, markProviderDown } from "./payments/index.js";
+import { getCurrency } from "../lib/runtime-context.js";
+import { confirmAccountName } from "./disbursements.js";
+import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
@@ -8,6 +11,7 @@ import { approvalCooldownMs, checkDailyPayoutLimit, checkVelocity } from "./frau
 import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
 import { LIMITS } from "../lib/money.js";
 import { flagTransaction } from "./aml.js";
+import { screenAndRecord, isBlocking } from "./screening.js";
 
 export interface PayAnyoneResult {
   ok: boolean;
@@ -23,13 +27,26 @@ export interface PayAnyoneResult {
  */
 export async function requestExternalPayment(
   actor: { id: string; name: string; phone: string; role: string; cooperativeId: string },
-  input: { beneficiaryName: string; accountNumber: string; bankCode: string; bankName?: string; amount: number; purpose?: string },
+  input: {
+    beneficiaryName: string;
+    accountNumber: string;
+    bankCode: string;
+    bankName?: string;
+    amount: number;
+    purpose?: string;
+  },
 ): Promise<PayAnyoneResult> {
   if (!Number.isFinite(input.amount) || input.amount <= 0) {
-    return { ok: false, message: "Use *payanyone <amount> <account> <bank> <name>* — amount must be positive." };
+    return {
+      ok: false,
+      message: "Use *payanyone <amount> <account> <bank> <name>* — amount must be positive.",
+    };
   }
   if (input.amount > LIMITS.MAX_PAYANYONE) {
-    return { ok: false, message: `Maximum pay-anyone amount is *${formatBalance(LIMITS.MAX_PAYANYONE)}* per transaction.` };
+    return {
+      ok: false,
+      message: `Maximum pay-anyone amount is *${formatBalance(LIMITS.MAX_PAYANYONE)}* per transaction.`,
+    };
   }
 
   const limit = await checkDailyPayoutLimit(actor.cooperativeId, input.amount);
@@ -167,9 +184,15 @@ export async function approveExternalPayment(
     if (moved.count === 0) {
       return { ok: false, message: "Someone just recorded an approval — check *pendingpay*." };
     }
-    await notifySupers(actor.cooperativeId, superApprovalPrompt({ ...payment, status: "approved1" }));
+    await notifySupers(
+      actor.cooperativeId,
+      superApprovalPrompt({ ...payment, status: "approved1" }),
+    );
     await logApprove(actor, payment.id, "1/3");
-    return { ok: true, message: `Approval *1 of 3* recorded for ${payment.id.slice(-6)}. Two more supers needed.` };
+    return {
+      ok: true,
+      message: `Approval *1 of 3* recorded for ${payment.id.slice(-6)}. Two more supers needed.`,
+    };
   }
 
   if (payment.status === "approved1" && !payment.approved2ById) {
@@ -180,9 +203,15 @@ export async function approveExternalPayment(
     if (moved.count === 0) {
       return { ok: false, message: "Someone just recorded an approval — check *pendingpay*." };
     }
-    await notifySupers(actor.cooperativeId, superApprovalPrompt({ ...payment, status: "approved2" }));
+    await notifySupers(
+      actor.cooperativeId,
+      superApprovalPrompt({ ...payment, status: "approved2" }),
+    );
     await logApprove(actor, payment.id, "2/3");
-    return { ok: true, message: `Approval *2 of 3* recorded for ${payment.id.slice(-6)}. One more super needed.` };
+    return {
+      ok: true,
+      message: `Approval *2 of 3* recorded for ${payment.id.slice(-6)}. One more super needed.`,
+    };
   }
 
   // Third approval — atomic slot grab, then pay. Status stays "approved2"
@@ -230,7 +259,7 @@ async function payExternal(
   if (!payment) return { ok: false, message: "Request not found." };
 
   // Velocity check: max 5 money-out per 10 minutes.
-  if (!await checkVelocity(actor.id)) {
+  if (!(await checkVelocity(actor.id))) {
     // Revert only the third approval, NOT the whole chain: approved1/2 are still
     // valid, so the request stays at "2 of 3" and any super (or re-approval) can
     // retry once the window clears. Setting status back to "pending" while
@@ -241,7 +270,11 @@ async function payExternal(
       where: { id: payment.id, status: "approved2" },
       data: { approved3ById: null },
     });
-    return { ok: false, message: "🛑 Too many transactions in a short period. Please wait a few minutes and try again." };
+    return {
+      ok: false,
+      message:
+        "🛑 Too many transactions in a short period. Please wait a few minutes and try again.",
+    };
   }
 
   const limit = await checkDailyPayoutLimit(actor.cooperativeId, payment.amount);
@@ -260,10 +293,13 @@ async function payExternal(
     data: { status: "processing" },
   });
   if (claimed.count === 0) {
-    return { ok: false, message: "This request is already being paid out or was settled — check *pendingpay*." };
+    return {
+      ok: false,
+      message: "This request is already being paid out or was settled — check *pendingpay*.",
+    };
   }
 
-  const provider = await resolveProvider();
+  const provider = await resolveProvider(undefined, getCurrency());
   const reference = `PAYANY-${payment.id.slice(-8)}`;
 
   if (!provider.payout) {
@@ -274,6 +310,70 @@ async function payExternal(
     return { ok: false, message: "No payment provider configured — money not sent." };
   }
 
+  // Confirm the destination account's name BEFORE sending (fail-closed). If the
+  // provider cannot resolve it, or it doesn't match the beneficiary on record,
+  // the transfer is HELD — never sent blind.
+  const confirm = await confirmAccountName({
+    provider,
+    accountNumber: payment.bankAccountNumber,
+    bankCode: payment.bankCode,
+    expectedName: payment.beneficiaryName,
+  });
+  if (!confirm.ok) {
+    await prisma.externalPayment.updateMany({
+      where: { id: payment.id, status: "processing" },
+      data: {
+        status: "approved2",
+        approved3ById: null,
+        payoutReference: `held: ${confirm.status}`.slice(0, 200),
+      },
+    });
+    const reason =
+      confirm.status === "name_mismatch"
+        ? `the account name (*${confirm.name}*) does not match the beneficiary (*${payment.beneficiaryName}*)`
+        : `the account name could not be resolved (${confirm.error ?? "unknown error"})`;
+    await alertSupers(
+      payment.cooperativeId,
+      `🛑 Pay-anyone *${payment.id.slice(-6)}* held — ${reason}. Money NOT sent. Verify the bank details, then a super admin can retry the final approval.`,
+      AlertSeverity.CRITICAL,
+    ).catch(() => {});
+    return {
+      ok: false,
+      message: `⛔ Payout held (fail-closed): ${reason}. No money moved — verify the bank details and retry the final approval.`,
+    };
+  }
+
+  // CFT: screen the beneficiary (the confirmed account-holder name when
+  // available, else the entered name) before initiating the transfer.
+  const subjectName = confirm.name ?? payment.beneficiaryName;
+  const screening = await screenAndRecord(subjectName, {
+    cooperativeId: payment.cooperativeId,
+    subjectType: "payout",
+    subjectId: payment.id,
+    subjectName,
+  }).catch((err) => {
+    console.error("[payanyone] screening failed", err);
+    return null;
+  });
+  if (screening && isBlocking(screening.status)) {
+    await prisma.externalPayment.updateMany({
+      where: { id: payment.id, status: "processing" },
+      data: {
+        status: "approved2",
+        payoutReference: `held: screening ${screening.status}`.slice(0, 200),
+      },
+    });
+    await alertSupers(
+      payment.cooperativeId,
+      `🛑 Pay-anyone *${payment.id.slice(-6)}* held — beneficiary "${subjectName}" failed compliance screening (${screening.status}). Money NOT sent.`,
+      AlertSeverity.CRITICAL,
+    ).catch(() => {});
+    return {
+      ok: false,
+      message: `⛔ Payout held: the beneficiary failed a compliance screening check. No money moved — an admin must review.`,
+    };
+  }
+
   try {
     const result = await provider.payout({
       amount: payment.amount,
@@ -281,6 +381,7 @@ async function payExternal(
       bankCode: payment.bankCode,
       recipientName: payment.beneficiaryName,
       reference,
+      currency: getCurrency(),
     });
     if (!result.ok) {
       // Provider refused — nothing moved. Revert for a clean retry.
@@ -289,11 +390,14 @@ async function payExternal(
         where: { id: payment.id, status: "processing" },
         data: { status: "approved2", payoutReference: result.error ?? "payout failed" },
       });
-      return { ok: false, message: `Provider refused the transfer (${result.error ?? "unknown"}). No money moved — another super can retry the final approval.` };
+      return {
+        ok: false,
+        message: `Provider refused the transfer (${result.error ?? "unknown"}). No money moved — another super can retry the final approval.`,
+      };
     }
 
     try {
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.externalPayment.updateMany({
           where: { id: payment.id, status: "processing" },
           data: { status: "paid", payoutReference: reference },
@@ -306,7 +410,7 @@ async function payExternal(
             status: "successful",
             provider: provider.name,
             providerRef: result.providerRef,
-            note: `Pay-anyone → ${payment.beneficiaryName}${payment.purpose ? ` (${payment.purpose})` : ""}`,
+            note: `Pay-anyone → ${payment.beneficiaryName}${payment.purpose ? ` (${payment.purpose})` : ""} · confirmed: ${confirm.name}`,
             memberId: payment.initiatedById, // bookkeeping anchor
             cooperativeId: payment.cooperativeId,
           },
@@ -315,7 +419,10 @@ async function payExternal(
     } catch (err: any) {
       if (err?.code === "P2002") {
         console.error(`[payanyone] duplicate blocked: ${reference} already paid`);
-        return { ok: false, message: "Duplicate payout blocked — this exact transfer was already recorded." };
+        return {
+          ok: false,
+          message: "Duplicate payout blocked — this exact transfer was already recorded.",
+        };
       }
       throw err;
     }
@@ -368,7 +475,10 @@ async function payExternal(
       where: { id: payment.id, status: "processing" },
       data: { status: "approved2", payoutReference: String(err?.message ?? err).slice(0, 200) },
     });
-    return { ok: false, message: `Transfer failed (${err?.message ?? "provider error"}). No money confirmed moved — retry the final approval if unsure.` };
+    return {
+      ok: false,
+      message: `Transfer failed (${err?.message ?? "provider error"}). No money confirmed moved — retry the final approval if unsure.`,
+    };
   }
 }
 
@@ -387,7 +497,11 @@ export async function rejectExternalPayment(
     return { ok: false, message: "Too late — this request was already paid." };
   }
   if (payment.status === "processing") {
-    return { ok: false, message: "This transfer is mid-flight at the provider — wait for it to settle before rejecting." };
+    return {
+      ok: false,
+      message:
+        "This transfer is mid-flight at the provider — wait for it to settle before rejecting.",
+    };
   }
 
   // Atomic — a reject racing the third approval can't clobber a paid state.
@@ -396,7 +510,10 @@ export async function rejectExternalPayment(
     data: { status: "rejected" },
   });
   if (moved.count === 0) {
-    return { ok: false, message: `Request just changed state (now ${payment.status}) — not rejected.` };
+    return {
+      ok: false,
+      message: `Request just changed state (now ${payment.status}) — not rejected.`,
+    };
   }
   await audit({
     cooperativeId: actor.cooperativeId,

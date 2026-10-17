@@ -97,8 +97,11 @@ git push -u origin staging
 > `ADMIN_JWT_SECRET` and `SESSION_SECRET` are auto-generated.
 
 4. **Manual Deploy → Deploy latest commit** for each service.
-   Build passes, schema syncs via `prisma migrate deploy` (runs at container startup),
-   bot boots after env validation.
+   Build passes, then the **pre-deploy command** (`node scripts/db-migrate.mjs`,
+   configured as `preDeployCommand` in `render.yaml`) syncs the schema *before*
+   the new version receives traffic, and the bot boots after env validation.
+   A pre-deploy failure aborts the deploy, so a schema-changing release can
+   never boot against the old schema.
 
 ---
 
@@ -204,9 +207,39 @@ npm run dev                    # tsx watch src/index.ts
   promptly, or attach a Render persistent disk / S3 later.
 - **Scaling**: one instance only (in-memory rate-limit/dedupe maps assume it).
   See Tier 0 item #3 for horizontal scaling requirements.
-- **Migrations**: `prisma migrate deploy` runs at **container startup** (see `Dockerfile` CMD).
+- **Migrations**: `scripts/db-migrate.mjs` runs as the service's **pre-deploy
+  command** (`preDeployCommand` in `render.yaml`) — once per deploy, before the
+  new version gets traffic. It runs `prisma migrate deploy` with safe baselining
+  for the db-push-era production database. A failure aborts the deploy.
   Versioned migrations in `prisma/migrations/` give you a rollback path.
   `prisma db push` is **not used in production** — it bypasses migration history.
+
+---
+
+## RLS Enforcement (required before production)
+
+Tenant isolation is enforced by PostgreSQL Row-Level Security, but **only when the
+app connects as a non-owner role**. The table owner bypasses every policy, so if
+`DATABASE_URL` is the owner connection, `withCoopContext` is a no-op for
+isolation. The app now **refuses to boot in production** when RLS is not enforced.
+
+One-time setup (run as the owner/superuser against the production database):
+
+```bash
+# 1. Provision the non-owner role (edit the password first; never commit it).
+psql "$DATABASE_OWNER_URL" -f prisma/rls/provision_app_role.sql
+
+# 2. Point the app at the non-owner role and keep the owner for migrations/backup:
+#    DATABASE_URL       = postgresql://coop_app:<password>@<host>/<db>
+#    DATABASE_OWNER_URL = postgresql://<owner>:<password>@<host>/<db>
+```
+
+Then redeploy. On boot the app logs `RLS enforced for the current role`; if it
+logs the "NOT enforced" error it exits — fix the URLs/role and redeploy.
+
+> The `Federation*` tables are deliberately platform-level (no RLS) — the
+> federation is a cross-tenant entity by design. Every other `cooperativeId`
+> table has a policy (asserted by `tests/rls-isolation.test.ts`).
 
 ---
 

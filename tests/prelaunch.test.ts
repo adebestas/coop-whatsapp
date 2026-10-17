@@ -3,23 +3,17 @@ import { prisma } from "../tests/setup.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { totpAt } from "../src/lib/totp.js";
-import {
-  assertMoneyAuthorized,
-  enable2fa,
-} from "../src/services/auth2fa.js";
+import { assertMoneyAuthorized, enable2fa } from "../src/services/auth2fa.js";
 import { ensureBeneficiaryAllowed } from "../src/services/beneficiaries.js";
 import { runTransferPolling } from "../src/services/statuspoller.js";
+import { prisma as appPrisma } from "../src/lib/prisma.js";
 import { runDailyDigest } from "../src/services/scheduler.js";
-import { checkDailyPayoutLimit, checkMoneyRateLimit, resetMoneyRateLimit } from "../src/services/fraud.js";
+import {
+  checkDailyPayoutLimit,
+  checkMoneyRateLimit,
+  resetMoneyRateLimit,
+} from "../src/services/fraud.js";
 import { validateEnvironment } from "../src/lib/envcheck.js";
-import { resolveProvider } from "../src/services/payments/index.js";
-
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  notifyMember: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-}));
 
 // Configurable fake provider so poller tests can script transfer outcomes.
 const fakeProvider = {
@@ -88,6 +82,7 @@ async function makeMember(
     cooperativeId: coopId,
     role: opts.role ?? "member",
     pin: hashPin(opts.pin === false ? "" : "1234"),
+    consentAt: new Date(),
     wallet: { create: { balance: opts.balance ?? 0 } },
   };
   if (opts.bank) {
@@ -102,10 +97,14 @@ beforeEach(async () => {
   for (const m of [
     "posting",
     "journalEntry",
-    "coopPost",
-    "deductionItem",
-    "deductionWaiver",
-    "deductionBatch",
+    "coopPost",
+
+    "deductionItem",
+
+    "deductionWaiver",
+
+    "deductionBatch",
+
     "webhookEvent",
     "beneficiary",
     "pollBallot",
@@ -126,8 +125,8 @@ beforeEach(async () => {
     "loanRepayment",
     "guarantor",
     "loan",
-    "payout",
     "dividendEntry",
+    "payout",
     "dividend",
     "broadcast",
     "wallet",
@@ -239,7 +238,10 @@ describe("transfer status polling", () => {
       },
     });
 
-    fakeProvider.getTransferStatus.mockResolvedValueOnce({ status: "successful", providerRef: "pr-9" });
+    fakeProvider.getTransferStatus.mockResolvedValueOnce({
+      status: "successful",
+      providerRef: "pr-9",
+    });
     const actions = await runTransferPolling(new Date(Date.now() + 60 * 60 * 1000));
 
     const settled = await prisma.externalPayment.findUnique({ where: { id: payment.id } });
@@ -266,7 +268,10 @@ describe("transfer status polling", () => {
       },
     });
 
-    fakeProvider.getTransferStatus.mockResolvedValueOnce({ status: "failed", error: "insufficient funds at bank" });
+    fakeProvider.getTransferStatus.mockResolvedValueOnce({
+      status: "failed",
+      error: "insufficient funds at bank",
+    });
     const actions = await runTransferPolling(new Date());
 
     const after = await prisma.withdrawalRequest.findUnique({ where: { id: request.id } });
@@ -298,6 +303,161 @@ describe("transfer status polling", () => {
     expect(after!.status).toBe("processing");
     expect(await prisma.payout.count()).toBe(0);
   });
+
+  it("does not double-book a withdrawal another path already settled (count-gate)", async () => {
+    const coop = await makeCoop();
+    const member = await makeMember("2348010000501", coop.id, { balance: 0 }); // already debited
+    const request = await prisma.withdrawalRequest.create({
+      data: {
+        amount: 2500,
+        status: "processing",
+        bankAccountNumber: "0123456789",
+        bankCode: "058",
+        memberId: member.id,
+        cooperativeId: coop.id,
+        createdAt: new Date(Date.now() - 40 * 60 * 1000),
+      },
+    });
+
+    // Simulate a concurrent webhook/poller settling the row in the window
+    // between the poller's read and its guarded update. `appPrisma` routes to
+    // the poller's own transaction (same async context), so this is a
+    // deterministic, lock-free race injection.
+    fakeProvider.getTransferStatus.mockImplementation(async () => {
+      await appPrisma.withdrawalRequest.update({
+        where: { id: request.id },
+        data: { status: "paid" },
+      });
+      return { status: "successful" };
+    });
+
+    const actions = await runTransferPolling(new Date());
+
+    expect(actions.join("\n")).not.toContain("confirmed by provider");
+    expect(
+      await prisma.ledgerEntry.count({
+        where: { cooperativeId: coop.id, reference: request.id, category: "withdrawal" },
+      }),
+    ).toBe(0);
+    expect(
+      await prisma.auditLog.count({
+        where: { cooperativeId: coop.id, action: "withdrawal.poller_confirmed" },
+      }),
+    ).toBe(0);
+    expect((await prisma.withdrawalRequest.findUnique({ where: { id: request.id } }))!.status).toBe(
+      "paid",
+    );
+  });
+
+  it("does not throw or duplicate when a pay-anyone payout already exists", async () => {
+    const coop = await makeCoop();
+    const initiator = await makeMember("2348090000502", coop.id, { role: "admin" });
+    const payment = await prisma.externalPayment.create({
+      data: {
+        cooperativeId: coop.id,
+        beneficiaryName: "Vendor Two",
+        bankAccountNumber: "0123456789",
+        bankCode: "058",
+        amount: 5000,
+        initiatedById: initiator.id,
+        status: "processing",
+        createdAt: new Date(Date.now() - 30 * 60 * 1000),
+        updatedAt: new Date(Date.now() - 30 * 60 * 1000),
+      },
+    });
+    const ref = `PAYANY-${payment.id.slice(-8)}`;
+    // A partial state: the payout row exists but the external payment is still
+    // "processing" — the old code would raise P2002 out of forEachCoop.
+    await prisma.payout.create({
+      data: {
+        amount: 5000,
+        reference: ref,
+        idempotencyKey: ref,
+        status: "successful",
+        provider: "monnify",
+        memberId: initiator.id,
+        cooperativeId: coop.id,
+      },
+    });
+
+    fakeProvider.getTransferStatus.mockImplementation(async () => ({
+      status: "successful",
+      providerRef: "pr-x",
+    }));
+
+    const actions = await runTransferPolling(new Date()); // must not reject
+
+    expect((await prisma.externalPayment.findUnique({ where: { id: payment.id } }))!.status).toBe(
+      "paid",
+    );
+    expect(await prisma.payout.count()).toBe(1); // no duplicate
+    expect(
+      await prisma.ledgerEntry.count({
+        where: { cooperativeId: coop.id, reference: payment.id, category: "external_payment" },
+      }),
+    ).toBe(1);
+    expect(actions.join("\n")).toContain("confirmed by provider");
+  });
+
+  it("keeps polling other cooperatives when one row fails", async () => {
+    // Coop A holds a pay-anyone row whose payout already exists (the row that
+    // used to throw P2002 and abort the whole run).
+    const coopA = await makeCoop("Poll Coop A");
+    const aAdmin = await makeMember("2348090000503", coopA.id, { role: "admin" });
+    const bad = await prisma.externalPayment.create({
+      data: {
+        cooperativeId: coopA.id,
+        beneficiaryName: "Bad Vendor",
+        bankAccountNumber: "0123456789",
+        bankCode: "058",
+        amount: 1000,
+        initiatedById: aAdmin.id,
+        status: "processing",
+        createdAt: new Date(Date.now() - 30 * 60 * 1000),
+        updatedAt: new Date(Date.now() - 30 * 60 * 1000),
+      },
+    });
+    const badRef = `PAYANY-${bad.id.slice(-8)}`;
+    await prisma.payout.create({
+      data: {
+        amount: 1000,
+        reference: badRef,
+        idempotencyKey: badRef,
+        status: "successful",
+        provider: "monnify",
+        memberId: aAdmin.id,
+        cooperativeId: coopA.id,
+      },
+    });
+
+    // Coop B holds a plain stuck withdrawal that should still settle.
+    const coopB = await makeCoop("Poll Coop B");
+    const bMember = await makeMember("2348010000504", coopB.id, { balance: 0 });
+    const withdrawal = await prisma.withdrawalRequest.create({
+      data: {
+        amount: 1500,
+        status: "processing",
+        bankAccountNumber: "0123456789",
+        bankCode: "058",
+        memberId: bMember.id,
+        cooperativeId: coopB.id,
+        createdAt: new Date(Date.now() - 40 * 60 * 1000),
+      },
+    });
+
+    fakeProvider.getTransferStatus.mockImplementation(async () => ({ status: "successful" }));
+
+    await runTransferPolling(new Date()); // must not reject
+
+    expect(
+      (await prisma.withdrawalRequest.findUnique({ where: { id: withdrawal.id } }))!.status,
+    ).toBe("paid");
+    expect(
+      await prisma.ledgerEntry.count({
+        where: { cooperativeId: coopB.id, reference: withdrawal.id, category: "withdrawal" },
+      }),
+    ).toBe(1);
+  });
 });
 
 describe("daily movement digest", () => {
@@ -308,7 +468,7 @@ describe("daily movement digest", () => {
 
     await prisma.payout.create({
       data: {
-        amount: 3000,
+        amount: 300000,
         reference: "TFR-WDR-digest1",
         status: "successful",
         provider: "monnify",
@@ -320,7 +480,10 @@ describe("daily movement digest", () => {
     });
 
     const now = new Date();
-    now.setHours(20, 5, 0, 0); // default digest hour
+    // The digest fires on the configured hour in Africa/Lagos (WAT = UTC+1, no
+    // DST), not the runner's local time. Anchor to that instant so the test is
+    // timezone-independent (CI runs UTC).
+    now.setUTCHours(19, 5, 0, 0); // 20:05 Africa/Lagos
     const sent = await runDailyDigest(now);
     expect(sent).toBe(1);
 
@@ -333,7 +496,7 @@ describe("daily movement digest", () => {
     ];
     const digest = texts.find((t) => t.to === superA.phone && t.text.includes("Daily summary"));
     expect(digest).toBeTruthy();
-    expect(digest!.text).toContain("NGN 3,000");
+    expect(digest!.text).toContain("₦3,000");
     expect(digest!.text).toContain("Member withdrawal");
   });
 
@@ -341,7 +504,7 @@ describe("daily movement digest", () => {
     const coop = await makeCoop();
     await makeMember("2348090000208", coop.id, { role: "superadmin" });
     const now = new Date();
-    now.setHours(20, 0, 0, 0);
+    now.setUTCHours(19, 0, 0, 0); // 20:00 Africa/Lagos
     expect(await runDailyDigest(now)).toBe(1);
     expect(await runDailyDigest(now)).toBe(0);
   });
@@ -412,7 +575,11 @@ describe("startup environment validation", () => {
       const report = validateEnvironment({
         WHATSAPP_TOKEN: "x",
         WHATSAPP_PHONE_NUMBER_ID: "y",
+        // Required to verify inbound webhook signatures (FATAL if missing).
+        WHATSAPP_APP_SECRET: "z",
         ADMIN_JWT_SECRET: "a-real-secret-key-that-is-not-a-placeholder-1234567890ab",
+        // FATAL in production since the PostgreSQL migration.
+        DATABASE_URL: "postgresql://user:pass@localhost:5432/coop",
       } as any);
       expect(report.ok).toBe(true);
       expect(report.problems.some((p) => p.includes("No payment provider"))).toBe(true);

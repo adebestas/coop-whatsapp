@@ -4,6 +4,9 @@
  * This prevents floating-point rounding errors.
  */
 
+import { formatMoney } from "./currency.js";
+import { getCurrency } from "./runtime-context.js";
+
 // ===== Conversion Helpers =====
 
 /**
@@ -21,21 +24,25 @@ export function toNaira(kobo: number): number {
 }
 
 /**
- * Format balance for display (e.g., 100050 → "₦1,000.50")
+ * Format a balance for display in the current cooperative's currency.
+ * `currency` overrides the runtime context (default NGN).
  */
-export function formatBalance(kobo: number): string {
-  const naira = toNaira(kobo);
-  return `₦${naira.toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+export function formatBalance(kobo: number, currency?: string): string {
+  return formatMoney(kobo, currency ?? getCurrency());
 }
 
 /**
- * Format amount for provider APIs (Paystack expects kobo, Monnify expects naira)
+ * Format amount for provider APIs (Paystack expects kobo, Monnify/Flutterwave expect naira)
  */
-export function forProvider(amount: number, provider: "paystack" | "monnify"): number {
+export function forProvider(
+  amount: number,
+  provider: "paystack" | "monnify" | "flutterwave",
+): number {
   switch (provider) {
     case "paystack":
       return amount; // Already in kobo
     case "monnify":
+    case "flutterwave":
       return toNaira(amount); // Convert to naira
   }
 }

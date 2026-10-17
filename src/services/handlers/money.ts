@@ -1,23 +1,47 @@
 import { prisma } from "../../lib/prisma.js";
 import { sendText } from "../../lib/messaging.js";
-import {
-  formatBalance,
-  getMemberByPhone,
-} from "../cooperative.js";
+import { formatBalance, getMemberByPhone } from "../cooperative.js";
 import { provisionVirtualAccount } from "../payments/topup.js";
 import { setAutoSave } from "../scheduler.js";
 import { joinUnit } from "../units.js";
 import { withdrawLimit, canWithdraw } from "../withdrawals.js";
 import { computeDividendPreview } from "../dividends.js";
 import { getQueuePosition } from "../loans.js";
+import { getShareAccount } from "../shares.js";
+import { applyGroupLoan } from "../groups.js";
+import {
+  listProducts,
+  openProduct,
+  depositToProduct,
+  withdrawFromProduct,
+  matureProduct,
+  listMemberProducts,
+  openJuniorAccount,
+} from "../savings-products.js";
+import { listMandates } from "../mandates.js";
+import { escalateCase, type EscalateInput } from "../ombudsman.js";
 import { issueSecretChallenge, parseNaira } from "./session.js";
+import { resolveProvider, listBanks, type Bank } from "../payments/index.js";
+import { getCurrency } from "../../lib/runtime-context.js";
+import { savePayee } from "../../lib/beneficiaries.js";
+import { accountMismatchWarning } from "../../lib/ai-notice.js";
+import { namesMatch } from "../disbursements.js";
+import type { FlowData } from "../conversation.js";
 
 export async function handleBalance(
   phone: string,
-  member: { id: string; name: string; cooperative: { name: string }; wallet: { balance: number } | null } | null,
+  member: {
+    id: string;
+    name: string;
+    cooperative: { name: string };
+    wallet: { balance: number } | null;
+  } | null,
 ): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   const balance = member.wallet?.balance ?? 0;
@@ -27,7 +51,10 @@ export async function handleBalance(
     orderBy: { createdAt: "desc" },
     take: 1,
   });
-  const loanText = loan && loan.balance > 0 ? `\n\n📚 Outstanding loan balance: *${formatBalance(loan.balance)}*.` : "";
+  const loanText =
+    loan && loan.balance > 0
+      ? `\n\n📚 Outstanding loan balance: *${formatBalance(loan.balance)}*.`
+      : "";
   await sendText({
     to: phone,
     text: `Hi *${member.name}*, your savings balance is *${formatBalance(balance)}*.\n\nReply *save <amount>* to contribute more.\nReply *menu* to see other options.${loanText}`,
@@ -37,7 +64,10 @@ export async function handleBalance(
 export async function handleSave(phone: string, args: string[]): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
 
@@ -72,7 +102,10 @@ export async function handleSave(phone: string, args: string[]): Promise<void> {
 export async function handleFund(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   const result = await provisionVirtualAccount(member.id);
@@ -95,7 +128,10 @@ export async function handleWithdraw(phone: string, args: string[]): Promise<voi
   }
   const limit = await withdrawLimit(phone);
   if (!limit) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
   const eligibility = await canWithdraw(phone);
@@ -120,15 +156,7 @@ export async function handleWithdraw(phone: string, args: string[]): Promise<voi
     );
     return;
   }
-  await prisma.session.upsert({
-    where: { phone },
-    create: { phone, state: "awaiting_withdraw_account", data: JSON.stringify({ withdrawAmount: amount }) },
-    update: { state: "awaiting_withdraw_account", data: JSON.stringify({ withdrawAmount: amount }) },
-  });
-  await sendText({
-    to: phone,
-    text: "Your savings will go to your bank account. What's your *bank account number*? (10 digits, e.g. *0123456789*)",
-  });
+  await startBankFlow(phone, "withdraw", { withdrawAmount: amount });
 }
 
 export async function handleLoan(phone: string, args: string[]): Promise<void> {
@@ -146,7 +174,11 @@ export async function handleLoan(phone: string, args: string[]): Promise<void> {
   if (!Number.isFinite(months) || months < 1 || months > 12) {
     await prisma.session.upsert({
       where: { phone },
-      create: { phone, state: "awaiting_loan_months", data: JSON.stringify({ loanAmount: amount }) },
+      create: {
+        phone,
+        state: "awaiting_loan_months",
+        data: JSON.stringify({ loanAmount: amount }),
+      },
       update: { state: "awaiting_loan_months", data: JSON.stringify({ loanAmount: amount }) },
     });
     await sendText({ to: phone, text: "For how many months? (1–12)" });
@@ -154,8 +186,15 @@ export async function handleLoan(phone: string, args: string[]): Promise<void> {
   }
   await prisma.session.upsert({
     where: { phone },
-    create: { phone, state: "awaiting_loan_bank_account", data: JSON.stringify({ loanAmount: amount, loanMonths: months }) },
-    update: { state: "awaiting_loan_bank_account", data: JSON.stringify({ loanAmount: amount, loanMonths: months }) },
+    create: {
+      phone,
+      state: "awaiting_loan_bank_account",
+      data: JSON.stringify({ loanAmount: amount, loanMonths: months }),
+    },
+    update: {
+      state: "awaiting_loan_bank_account",
+      data: JSON.stringify({ loanAmount: amount, loanMonths: months }),
+    },
   });
   await sendText({
     to: phone,
@@ -200,7 +239,10 @@ export async function handleDividend(phone: string, args: string[]): Promise<voi
   const raw = args[0] ? args[0].replace(/[,₦\s]/g, "") : "";
   const rate = /^\d+(\.\d{1,2})?$/.test(raw) ? Number(raw) : NaN;
   if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
-    await sendText({ to: phone, text: "Usage: *dividend <rate>*, e.g. *dividend 5* for a 5% dividend calculation." });
+    await sendText({
+      to: phone,
+      text: "Usage: *dividend <rate>*, e.g. *dividend 5* for a 5% dividend calculation.",
+    });
     return;
   }
   const result = await computeDividendPreview(phone, rate);
@@ -219,7 +261,10 @@ export async function handleJoinUnit(phone: string, args: string[]): Promise<voi
 export async function handleLoanQueue(phone: string): Promise<void> {
   const member = await getMemberByPhone(phone);
   if (!member) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
 
@@ -233,7 +278,10 @@ export async function handleLoanQueue(phone: string): Promise<void> {
   }
 
   const ahead = queue.position - 1;
-  const aheadText = ahead === 0 ? "No members ahead of you." : `${ahead} member${ahead > 1 ? "s" : ""} ahead of you.`;
+  const aheadText =
+    ahead === 0
+      ? "No members ahead of you."
+      : `${ahead} member${ahead > 1 ? "s" : ""} ahead of you.`;
 
   await sendText({
     to: phone,
@@ -247,11 +295,19 @@ export async function handleLoanQueue(phone: string): Promise<void> {
 
 export async function handleAnalytics(
   phone: string,
-  member: { id: string; name: string; cooperativeId: string; wallet: { balance: number; totalSaved: number } | null } | null,
+  member: {
+    id: string;
+    name: string;
+    cooperativeId: string;
+    wallet: { balance: number; totalSaved: number } | null;
+  } | null,
 ): Promise<void> {
   const m = member ?? (await getMemberByPhone(phone));
   if (!m) {
-    await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+    });
     return;
   }
 
@@ -266,7 +322,11 @@ export async function handleAnalytics(
       _sum: { amount: true },
     }),
     prisma.withdrawalRequest.count({
-      where: { memberId: m.id, status: { in: ["approved", "paid", "disbursed"] }, createdAt: { gte: yearStart } },
+      where: {
+        memberId: m.id,
+        status: { in: ["approved", "paid", "disbursed"] },
+        createdAt: { gte: yearStart },
+      },
     }),
     prisma.loan.aggregate({
       where: { memberId: m.id, status: { in: ["disbursed", "partial"] } },
@@ -301,4 +361,698 @@ export async function handleAnalytics(
   ];
 
   await sendText({ to: phone, text: lines.join("\n") });
+}
+
+export async function handleShares(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const account = await getShareAccount(member.id);
+  if (!account) {
+    await sendText({ to: phone, text: "We couldn't load your share account. Please try again." });
+    return;
+  }
+  await sendText({
+    to: phone,
+    text:
+      `📈 *Your shares*\n\n` +
+      `Shares held: *${account.shares}*\n` +
+      `Value: *${formatBalance(account.value)}* (at ${formatBalance(account.pricePerShare)}/share)\n` +
+      `Total paid: *${formatBalance(account.totalPaid)}*\n\n` +
+      `Reply *buyshares <count>* to buy more.`,
+  });
+}
+
+export async function handleBuyShares(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const count = args[0] ? parseInt(args[0], 10) : NaN;
+  if (!Number.isInteger(count) || count <= 0) {
+    await sendText({
+      to: phone,
+      text: "How many shares? Reply *buyshares <count>*, e.g. *buyshares 5*.",
+    });
+    return;
+  }
+  await issueSecretChallenge(
+    phone,
+    "awaiting_buyshares_pin",
+    { shareCount: count },
+    `Buy *${count}* share(s)? Enter your 4-digit PIN to confirm.`,
+  );
+}
+
+export async function handleGroupLoan(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const groupId = args[0];
+  const amount = parseNaira(args[1]);
+  const months = args[2] ? parseInt(args[2], 10) : NaN;
+  if (!groupId || amount === null || !Number.isInteger(months) || months < 1) {
+    await sendText({
+      to: phone,
+      text: "Usage: *grouploan <group id> <amount> <months>* — e.g. *grouploan abc123 50000 3*",
+    });
+    return;
+  }
+  const applied = await applyGroupLoan(member.cooperativeId, groupId, member.id, amount, months);
+  await sendText({ to: phone, text: applied.message });
+}
+
+/** Browse the cooperative's savings products. */
+export async function handleProducts(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const listed = await listProducts(member.cooperativeId);
+  const active = (listed.products ?? []).filter((p) => p.active);
+  if (active.length === 0) {
+    await sendText({
+      to: phone,
+      text: "No savings products yet. Ask your cooperative admin to create one.",
+    });
+    return;
+  }
+  const lines = ["*🏦 Savings Products*", ""];
+  for (const p of active) {
+    const meta = [
+      p.termMonths ? `${p.termMonths} months` : null,
+      p.interestRate ? `${p.interestRate}% at maturity` : null,
+      p.minAmount ? `${formatBalance(p.minAmount)} min` : null,
+    ]
+      .filter(Boolean)
+      .join(" — ");
+    lines.push(
+      `• *${p.name}* (${p.type.toUpperCase()})${meta ? ` — ${meta}` : ""}`,
+      `  Open with *openproduct ${p.id}${p.type === "goal" ? " <target>" : ""}*`,
+    );
+  }
+  await sendText({ to: phone, text: lines.join("\n") });
+}
+
+/** Open a savings account against a product, optionally with a goal target. */
+export async function handleOpenProduct(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const productId = args[0];
+  if (!productId) {
+    await sendText({
+      to: phone,
+      text: "Usage: *openproduct <product id> [target]* — browse products with *products*.",
+    });
+    return;
+  }
+  const target = args[1] ? parseNaira(args[1]) : null;
+  const opened = await openProduct(
+    member.cooperativeId,
+    productId,
+    member.id,
+    target === null ? undefined : target,
+  );
+  await sendText({ to: phone, text: opened.message });
+}
+
+/** Open a guardian-managed junior savings account for a minor. */
+export async function handleOpenJunior(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const productId = args[0];
+  const rest = args.slice(1);
+  // The optional trailing token is a phone number; everything before it is the
+  // minor's (possibly multi-word) name.
+  const last = rest[rest.length - 1] ?? "";
+  const hasPhone = rest.length > 1 && /^[+0-9][0-9]{6,}$/.test(last);
+  const minorName = (hasPhone ? rest.slice(0, -1) : rest).join(" ").trim();
+  const minorPhone = hasPhone ? last : undefined;
+  if (!productId || !minorName) {
+    await sendText({
+      to: phone,
+      text: "Usage: *openjunior <product id> <minor name> [minor phone]* — browse products with *products*.",
+    });
+    return;
+  }
+  const opened = await openJuniorAccount(
+    member.cooperativeId,
+    productId,
+    member.id,
+    minorName,
+    minorPhone,
+  );
+  await sendText({ to: phone, text: opened.message });
+}
+
+/** Deposit wallet funds into a savings account. */
+export async function handleSaveProduct(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const accountId = args[0];
+  const amount = parseNaira(args[1]);
+  if (!accountId || amount === null) {
+    await sendText({
+      to: phone,
+      text: "Usage: *saveproduct <account id> <amount>* — e.g. *saveproduct abc123 5000*.",
+    });
+    return;
+  }
+  const result = await depositToProduct(member.cooperativeId, accountId, member.id, amount);
+  await sendText({ to: phone, text: result.message });
+}
+
+/** Withdraw from a savings account back into the wallet. */
+export async function handleWithdrawProduct(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const accountId = args[0];
+  const amount = parseNaira(args[1]);
+  if (!accountId || amount === null) {
+    await sendText({
+      to: phone,
+      text: "Usage: *withdrawproduct <account id> <amount>* — e.g. *withdrawproduct abc123 5000*.",
+    });
+    return;
+  }
+  const result = await withdrawFromProduct(member.cooperativeId, accountId, member.id, amount);
+  await sendText({ to: phone, text: result.message });
+}
+
+/** List a member's product savings accounts. */
+export async function handleMyProducts(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const mine = await listMemberProducts(member.cooperativeId, member.id);
+  if (!mine.accounts || mine.accounts.length === 0) {
+    await sendText({
+      to: phone,
+      text: "You have no product savings yet. Browse *products* and open one with *openproduct <id>*.",
+    });
+    return;
+  }
+  const lines = ["*🏦 Your Savings Products*", ""];
+  for (const a of mine.accounts) {
+    const target = a.targetAmount
+      ? ` — ${formatBalance(a.balance)} of ${formatBalance(a.targetAmount)} (${a.progress.percent}%)`
+      : ` — ${formatBalance(a.balance)}`;
+    const maturity = a.maturesAt ? ` — matures ${a.maturesAt.toDateString()}` : "";
+    lines.push(
+      `• *${a.productName}* (${a.type.toUpperCase()})${target} — _${a.status}_${maturity}`,
+      `  ID: ${a.id}`,
+    );
+  }
+  await sendText({ to: phone, text: lines.join("\n") });
+}
+
+/** Mature a term deposit (or complete an open goal) and credit the wallet. */
+export async function handleMatureProduct(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const accountId = args[0];
+  if (!accountId) {
+    await sendText({ to: phone, text: "Usage: *matureproduct <account id>*." });
+    return;
+  }
+  const result = await matureProduct(member.cooperativeId, accountId, member.id);
+  await sendText({ to: phone, text: result.message });
+}
+
+/** Start a direct-debit mandate: PIN-confirmed, then returns the provider link. */
+export async function handleMandate(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const cap = parseNaira(args[0]);
+  if (cap === null) {
+    await sendText({
+      to: phone,
+      text: "How much should we be able to collect at most each time? Reply *mandate <amount>*, e.g. *mandate 5000*.",
+    });
+    return;
+  }
+  // Guided account entry: account number -> bank list -> name confirm -> PIN.
+  await startBankFlow(phone, "mandate", { mandateCap: cap });
+}
+
+/** List the member's direct-debit mandates. */
+export async function handleMandates(phone: string): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const listed = await listMandates(member.cooperativeId, member.id);
+  if (!listed.mandates || listed.mandates.length === 0) {
+    await sendText({
+      to: phone,
+      text: "You have no direct-debit mandates. Set one up with *mandate <cap>*, e.g. *mandate 5000*.",
+    });
+    return;
+  }
+  const lines = ["*🔁 Your Direct-Debit Mandates*", ""];
+  for (const m of listed.mandates) {
+    const paused = m.pausedPurposes ? ` — paused: ${m.pausedPurposes}` : "";
+    lines.push(
+      `• _${m.status}_ — up to *${formatBalance(m.amountCap)}*/debit`,
+      `  ${m.provider} • bank ****${m.bankAccountNumber.slice(-4)}${paused}`,
+      `  ID: ${m.id}`,
+    );
+  }
+  await sendText({ to: phone, text: lines.join("\n") });
+}
+
+/** Show one mandate's details. */
+export async function handleMandateStatus(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const idRef = args[0];
+  if (!idRef) {
+    await sendText({
+      to: phone,
+      text: "Usage: *mandatestatus <mandate id>* — list them with *mandates*.",
+    });
+    return;
+  }
+  const listed = await listMandates(member.cooperativeId, member.id);
+  const mandate = listed.mandates?.find(
+    (m) => m.id === idRef || m.id.startsWith(idRef) || m.id.endsWith(idRef),
+  );
+  if (!mandate) {
+    await sendText({ to: phone, text: "Mandate not found. Reply *mandates* to see your list." });
+    return;
+  }
+  const authorized = mandate.authorizedAt
+    ? mandate.authorizedAt.toDateString()
+    : "not authorized yet";
+  const cancelled = mandate.cancelledAt ? mandate.cancelledAt.toDateString() : "—";
+  const link = mandate.authorizationUrl ? `\n• Authorize: ${mandate.authorizationUrl}` : "";
+  const paused = mandate.pausedPurposes ? `\n• Paused purposes: *${mandate.pausedPurposes}*` : "";
+  await sendText({
+    to: phone,
+    text:
+      `*🔁 Mandate ${mandate.id}*\n\n` +
+      `• Status: *${mandate.status}*\n` +
+      `• Cap: *${formatBalance(mandate.amountCap)}*/debit\n` +
+      `• Provider: ${mandate.provider}\n` +
+      `• Bank: ${mandate.bankName ?? mandate.bankCode} ****${mandate.bankAccountNumber.slice(-4)}\n` +
+      `• Authorized: ${authorized}\n` +
+      `• Cancelled: ${cancelled}${link}${paused}\n\n` +
+      `Reply *cancelmandate ${mandate.id}* to stop it.`,
+  });
+}
+
+/** Cancel a mandate: PIN-confirmed. */
+export async function handleCancelMandate(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const mandateId = args[0];
+  if (!mandateId) {
+    await sendText({
+      to: phone,
+      text: "Usage: *cancelmandate <mandate id>* — list them with *mandates*.",
+    });
+    return;
+  }
+  await issueSecretChallenge(
+    phone,
+    "awaiting_cancelmandate_pin",
+    { mandateId },
+    `Cancel mandate *${mandateId}*? No further debits will be collected. Enter your 4-digit PIN to confirm.`,
+  );
+}
+
+// ===== Guided bank-account entry (used by the mandate, withdrawal and payee flows) =====
+
+/** Persist a session state + data payload. */
+async function setSession(phone: string, state: string, data: FlowData): Promise<void> {
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state, data: JSON.stringify(data) },
+    update: { state, data: JSON.stringify(data) },
+  });
+}
+
+function bankListText(banks: Bank[]): string {
+  const lines = banks.map((b, i) => `${i + 1}. ${b.name}`);
+  return (
+    "Which bank is this account with? Reply with the *number* or type the *bank name*.\n\n" +
+    lines.join("\n")
+  );
+}
+
+/** Match a reply (raw bank code, list number, or a name substring) against the list. */
+function matchBank(banks: Bank[], input: string): Bank | null {
+  const q = input.trim().toLowerCase();
+  if (!q) return null;
+  // An exact bank-code match wins over list-number interpretation, so typing a
+  // real code like "044" does not select the 44th bank.
+  const byCode = banks.find((b) => b.code.toLowerCase() === q);
+  if (byCode) return byCode;
+  if (/^\d+$/.test(q)) {
+    const idx = parseInt(q, 10);
+    if (idx >= 1 && idx <= banks.length) return banks[idx - 1];
+    return null;
+  }
+  return banks.find((b) => b.name.toLowerCase().includes(q)) ?? null;
+}
+
+/** Fetch the bank list (cached, static fallback) and ask the member to pick one. */
+async function showBankList(phone: string, data: FlowData): Promise<void> {
+  const provider = await resolveProvider(undefined, getCurrency());
+  const banks = await listBanks(provider, getCurrency());
+  await setSession(phone, "awaiting_bank_choice", { ...data, bankChoices: banks });
+  await sendText({ to: phone, text: bankListText(banks) });
+}
+
+/**
+ * Start the guided account-entry flow. When the account number is already known
+ * (e.g. `addpayee <name> <account>`) it jumps straight to the bank list.
+ */
+export async function startBankFlow(
+  phone: string,
+  intent: "mandate" | "withdraw" | "payee",
+  data: FlowData,
+  account?: string,
+): Promise<void> {
+  const base: FlowData = { ...data, bankIntent: intent };
+  if (account) {
+    await showBankList(phone, { ...base, bankAccount: account });
+    return;
+  }
+  await setSession(phone, "awaiting_bank_account", base);
+  await sendText({
+    to: phone,
+    text: "What's your *bank account number*? (10 digits, e.g. *0123456789*)",
+  });
+}
+
+/** Step 1: the member typed their account number; list banks and ask them to pick. */
+export async function handleBankAccountStep(
+  phone: string,
+  text: string,
+  data: FlowData,
+): Promise<void> {
+  const account = text.trim().replace(/[^0-9]/g, "");
+  if (!/^\d{10}$/.test(account)) {
+    await sendText({
+      to: phone,
+      text: "Account numbers are 10 digits. Please re-enter, e.g. *0123456789*.",
+    });
+    return;
+  }
+  await showBankList(phone, { ...data, bankAccount: account });
+}
+
+/** Step 2: the member picked a bank; resolve the account name and ask to confirm. */
+export async function handleBankChoiceStep(
+  phone: string,
+  text: string,
+  data: FlowData,
+): Promise<void> {
+  const banks = data.bankChoices ?? [];
+  const picked = matchBank(banks, text);
+  if (!picked) {
+    await sendText({ to: phone, text: `We didn't catch that.\n\n${bankListText(banks)}` });
+    return;
+  }
+  const account = data.bankAccount ?? "";
+  const provider = await resolveProvider(undefined, getCurrency());
+  const resolved = await provider.resolveAccount?.({
+    accountNumber: account,
+    bankCode: picked.code,
+  });
+  if (!resolved?.ok || !resolved.name) {
+    await sendText({
+      to: phone,
+      text:
+        `We couldn't confirm the account name for *${picked.name}*. Please check the bank and try again.\n\n` +
+        bankListText(banks),
+    });
+    return;
+  }
+  // The member's OWN account (withdraw / mandate) must match their registered
+  // name. Payees are other people's accounts — never warn there.
+  const member = await getMemberByPhone(phone);
+  const mismatch =
+    data.bankIntent !== "payee" && !!member && !namesMatch(resolved.name, member.name);
+  await setSession(phone, "awaiting_bank_confirm", {
+    ...data,
+    bankCode: picked.code,
+    bankName: picked.name,
+    bankAccountName: resolved.name,
+    bankNameMismatch: mismatch,
+  });
+  await sendText({
+    to: phone,
+    text:
+      `Bank: *${picked.name}*\n` +
+      `Account: ****${account.slice(-4)}\n` +
+      `Name on account: *${resolved.name}*\n\n` +
+      `Is this correct? Reply *yes* to continue or *cancel* to stop.`,
+  });
+  if (mismatch) {
+    await sendText({
+      to: phone,
+      text: await accountMismatchWarning(member!.name, resolved.name),
+    });
+  }
+}
+
+/** Step 3: the member confirmed the resolved name; continue the caller's flow. */
+export async function handleBankConfirmStep(
+  phone: string,
+  text: string,
+  data: FlowData,
+): Promise<void> {
+  const answer = text.trim().toLowerCase();
+  // Explicit escape words cancel; anything else that is not a "yes" re-prompts
+  // rather than silently abandoning the flow.
+  if (["cancel", "menu", "quit", "exit", "back"].includes(answer)) {
+    await setSession(phone, "idle", {});
+    await sendText({ to: phone, text: "Cancelled. Reply *menu* to see options." });
+    return;
+  }
+  if (answer !== "yes" && answer !== "y") {
+    await sendText({
+      to: phone,
+      text: `Please reply *yes* to confirm *${data.bankAccountName}* or *cancel* to stop.`,
+    });
+    return;
+  }
+
+  if (data.bankIntent === "payee") {
+    const member = await getMemberByPhone(phone);
+    if (!member) {
+      await setSession(phone, "idle", {});
+      await sendText({
+        to: phone,
+        text: "You need to join a cooperative first. Reply *join <code>*.",
+      });
+      return;
+    }
+    const result = await savePayee(
+      member.id,
+      data.payeeName ?? "",
+      data.bankAccount ?? "",
+      data.bankCode ?? "",
+      data.bankName ?? null,
+    );
+    await setSession(phone, "idle", {});
+    await sendText({
+      to: phone,
+      text: result.ok
+        ? `✅ Payee *${result.payee.name}* saved (${data.bankName} ****${(data.bankAccount ?? "").slice(-4)} — ${data.bankAccountName}). Reply *payees* to see your list.`
+        : result.message,
+    });
+    return;
+  }
+
+  if (data.bankIntent === "withdraw") {
+    await issueSecretChallenge(
+      phone,
+      "awaiting_withdraw_pin",
+      {
+        ...data,
+        withdrawAccount: data.bankAccount,
+        withdrawBankCode: data.bankCode,
+        withdrawBankName: data.bankName,
+      },
+      `Withdraw ${formatBalance(data.withdrawAmount ?? 0)} to ${data.bankName} ****${(data.bankAccount ?? "").slice(-4)}? Enter your 4-digit PIN to confirm.`,
+    );
+    return;
+  }
+
+  // Default: direct-debit mandate — keep the existing PIN step.
+  await issueSecretChallenge(
+    phone,
+    "awaiting_mandate_pin",
+    data,
+    `Authorize automatic debits of up to *${formatBalance(data.mandateCap ?? 0)}* per collection? Enter your 4-digit PIN to confirm.`,
+  );
+}
+
+/** Valid dispute forms (no Prisma enum — plain strings). */
+const DISPUTE_CATEGORIES = new Set(["loan_rejection", "dividend", "freeze", "suspension", "other"]);
+
+/**
+ * Escalate a cooperative matter to the independent, platform-level ombudsman.
+ * Two forms:
+ *   *escalate <grievance id> [reason]* — escalate an existing grievance.
+ *   *escalate dispute <loan_rejection|dividend|freeze|suspension|other> <reference> [reason]*
+ *     — escalate a dispute directly (no stored grievance required).
+ */
+export async function handleEscalate(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
+    return;
+  }
+
+  const first = (args[0] ?? "").trim().toLowerCase();
+  let input: EscalateInput;
+
+  if (first === "dispute") {
+    const category = (args[1] ?? "").trim().toLowerCase();
+    const ref = (args[2] ?? "").trim();
+    if (!DISPUTE_CATEGORIES.has(category) || !ref) {
+      await sendText({
+        to: phone,
+        text:
+          "Usage: *escalate dispute <loan_rejection|dividend|freeze|suspension|other> <reference> [reason]*.\n" +
+          "E.g. *escalate dispute freeze LOAN-123 wrongly frozen*.",
+      });
+      return;
+    }
+    const reason = args.slice(3).join(" ").trim();
+    input = {
+      sourceType: "dispute",
+      sourceId: ref,
+      category,
+      summary: reason || `Member dispute (${category})`,
+    };
+  } else {
+    const sourceId = args[0];
+    if (!sourceId) {
+      await sendText({
+        to: phone,
+        text:
+          "Usage: *escalate <grievance id> [reason]* — escalate an unresolved grievance to the independent ombudsman.\n" +
+          "Reply *grievances* to find your grievance id.",
+      });
+      return;
+    }
+    const reason = args.slice(1).join(" ").trim();
+    input = {
+      sourceType: "grievance",
+      sourceId,
+      category: "other",
+      summary: reason || "Member escalation of an unresolved grievance",
+    };
+  }
+
+  const result = await escalateCase(member.cooperativeId, member.id, input, {
+    id: member.id,
+    phone,
+  });
+  await sendText({ to: phone, text: result.message });
+}
+
+/** Save a favorite payee through the guided bank flow: account -> bank -> confirm. */
+export async function handleAddPayee(phone: string, args: string[]): Promise<void> {
+  const member = await getMemberByPhone(phone);
+  if (!member) {
+    await sendText({
+      to: phone,
+      text: "You need to join a cooperative first. Reply *join <code>*.",
+    });
+    return;
+  }
+  const name = args[0];
+  const account = (args[1] ?? "").replace(/[^0-9]/g, "");
+  if (!name || !/^\d{10}$/.test(account)) {
+    await sendText({
+      to: phone,
+      text: "Usage: *addpayee <name> <account>*, e.g. *addpayee mama-ngozi 0123456789*. We'll confirm the account name.",
+    });
+    return;
+  }
+  await startBankFlow(phone, "payee", { payeeName: name }, account);
 }

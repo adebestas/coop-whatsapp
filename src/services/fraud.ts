@@ -5,7 +5,8 @@ import { getRedis } from "../lib/cache.js";
 /** Minimum gap between consecutive approvals of the same money-out request. */
 export function approvalCooldownMs(): number {
   const raw = process.env.PAYMENT_COOLDOWN_MINUTES;
-  const minutes = raw !== undefined && raw !== "" ? Number(raw) : process.env.NODE_ENV === "test" ? 0 : 5;
+  const minutes =
+    raw !== undefined && raw !== "" ? Number(raw) : process.env.NODE_ENV === "test" ? 0 : 5;
   return Math.max(0, minutes) * 60_000;
 }
 
@@ -32,27 +33,39 @@ export async function checkDailyPayoutLimit(
   // as a payout succeeds, letting subsequent money-out exceed the configured
   // daily/monthly ceiling (a fraud-control bypass). The few extra reads are
   // cheap relative to the money-out write path this guards.
-  const [payouts, withdrawals, externals, monthPayouts] = await Promise.all([
-    prisma.payout.aggregate({
-      where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
-      _sum: { amount: true },
-    }),
-    prisma.withdrawalRequest.aggregate({
-      where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
-      _sum: { amount: true },
-    }),
-    prisma.externalPayment.aggregate({
-      where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
-      _sum: { amount: true },
-    }),
-    prisma.payout.aggregate({
-      where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
-      _sum: { amount: true },
-    }),
-  ]);
+  const [payouts, withdrawals, externals, monthPayouts, monthWithdrawals, monthExternals] =
+    await Promise.all([
+      prisma.payout.aggregate({
+        where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
+        _sum: { amount: true },
+      }),
+      prisma.withdrawalRequest.aggregate({
+        where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
+        _sum: { amount: true },
+      }),
+      prisma.externalPayment.aggregate({
+        where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
+        _sum: { amount: true },
+      }),
+      prisma.payout.aggregate({
+        where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
+        _sum: { amount: true },
+      }),
+      prisma.withdrawalRequest.aggregate({
+        where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfMonth } },
+        _sum: { amount: true },
+      }),
+      prisma.externalPayment.aggregate({
+        where: { cooperativeId, status: "paid", updatedAt: { gte: startOfMonth } },
+        _sum: { amount: true },
+      }),
+    ]);
   const spentToday =
     (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
-  const monthTotal = monthPayouts._sum.amount ?? 0;
+  const monthTotal =
+    (monthPayouts._sum.amount ?? 0) +
+    (monthWithdrawals._sum.amount ?? 0) +
+    (monthExternals._sum.amount ?? 0);
 
   if (spentToday + amount > limit) {
     return {
@@ -107,7 +120,9 @@ export async function checkMoneyRateLimit(phone: string): Promise<boolean> {
       const current = await client.incr(redisKey);
       await client.expire(redisKey, MONEY_WINDOW_SECONDS); // Always set — idempotent
       return current <= MONEY_MAX_PER_HOUR;
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
   }
   // In-memory fallback
   const now = Date.now();
@@ -154,7 +169,9 @@ export async function checkVelocity(memberId: string): Promise<boolean> {
       const current = await client.incr(redisKey);
       await client.expire(redisKey, VELOCITY_WINDOW_SECONDS); // Always set — idempotent
       return current <= VELOCITY_MAX;
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
   }
   const now = Date.now();
   const entry = velocityInMemory.get(key);
@@ -175,8 +192,15 @@ export async function checkVelocity(memberId: string): Promise<boolean> {
 
 // ---- AI query rate limiting (per member, per hour) ----
 // Uses Redis when available; falls back to per-key in-memory tracking.
-const AI_QUERY_WINDOW_SECONDS = 60 * 60; // 1 hour
-const AI_QUERY_MAX_PER_HOUR = 10;
+function positiveIntEnv(name: string, fallback: number): number {
+  const n = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+// Per-member AI budget (Groq chat + voice + translation). Configurable so the
+// operator can tighten it without a deploy.
+const AI_QUERY_WINDOW_SECONDS = positiveIntEnv("AI_WINDOW_SECONDS", 60 * 60); // 1 hour
+const AI_QUERY_MAX_PER_HOUR = positiveIntEnv("AI_MAX_PER_HOUR", 10);
 const aiInMemory = new Map<string, { count: number; resetAt: number }>();
 
 setInterval(() => {
@@ -193,9 +217,15 @@ export async function checkAIRateLimit(memberId: string): Promise<boolean> {
     try {
       const redisKey = `rl:${key}`;
       const current = await client.incr(redisKey);
-      await client.expire(redisKey, AI_QUERY_WINDOW_SECONDS); // Always set — idempotent
+      // Set the TTL ONLY on the first call of the window — otherwise every
+      // request pushes the expiry out and the window never closes (a caller
+      // under the limit would never be reset to zero, and a caller over it
+      // would be blocked forever).
+      if (current === 1) await client.expire(redisKey, AI_QUERY_WINDOW_SECONDS);
       return current <= AI_QUERY_MAX_PER_HOUR;
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
   }
   const now = Date.now();
   const entry = aiInMemory.get(key);
@@ -236,7 +266,9 @@ export async function checkVoteRateLimit(phone: string): Promise<boolean> {
       const current = await client.incr(redisKey);
       await client.expire(redisKey, VOTE_WINDOW_SECONDS); // Always set — idempotent
       return current <= VOTE_MAX_PER_HOUR;
-    } catch { /* fall through */ }
+    } catch {
+      /* fall through */
+    }
   }
   const now = Date.now();
   const entry = voteInMemory.get(key);

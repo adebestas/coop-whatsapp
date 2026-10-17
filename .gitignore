@@ -9,3 +9,9 @@ prisma/dev.db-journal
 web/dist/
 web/node_modules/
 exports/
+backups/
+test-*.txt
+debug-*
+check-db.cjs
+fix-imports.js
+baseline.sql

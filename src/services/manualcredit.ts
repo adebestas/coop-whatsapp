@@ -1,8 +1,10 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx } from "../lib/prisma.js";
 import { notifyMember } from "../lib/messaging.js";
 import { formatBalance } from "./cooperative.js";
 import { recordLedger } from "./ledger.js";
 import { audit } from "./audit.js";
+import { verifyMemberPin } from "./pin.js";
+import { getCoopId } from "../lib/runtime-context.js";
 
 /**
  * Maker-Checker manual credits.
@@ -21,29 +23,50 @@ export interface ManualCreditResult {
   creditId?: string;
 }
 
+function isSuperAdmin(role: string | undefined | null): boolean {
+  return role === "superadmin";
+}
+
+/** Thrown inside the approve transaction when another approver already claimed the credit. */
+class ManualCreditClaimError extends Error {}
+
 export async function requestManualCredit(
   actorPhone: string,
   memberCode: string,
   amountNaira: number,
   narration: string,
 ): Promise<ManualCreditResult> {
-  const actor = await prisma.member.findFirst({ where: { phone: actorPhone } });
+  const actor = await prisma.member.findFirst({
+    where: { phone: actorPhone, ...(getCoopId() ? { cooperativeId: getCoopId() } : {}) },
+  });
   if (!actor) return { ok: false, message: "You need to be an admin of a cooperative first." };
+  if (!isSuperAdmin(actor.role)) {
+    return { ok: false, message: "Only a super admin can initiate a manual credit." };
+  }
 
   const amount = Math.round(amountNaira * 100);
   if (!Number.isFinite(amount) || amount <= 0) {
     return { ok: false, message: "Usage: *manualcredit <member code> <amount> <narration>*" };
   }
   if (!narration.trim() || narration.trim().length < 3) {
-    return { ok: false, message: "A narration (reason for the credit) is required — e.g. *manualcredit MEM001 5000 Refund for July*" };
+    return {
+      ok: false,
+      message:
+        "A narration (reason for the credit) is required — e.g. *manualcredit MEM001 5000 Refund for July*",
+    };
   }
 
   const target = await prisma.member.findFirst({
     where: { code: memberCode.trim().toUpperCase(), cooperativeId: actor.cooperativeId },
   });
-  if (!target) return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
+  if (!target)
+    return { ok: false, message: `No member with code *${memberCode}* in this cooperative.` };
   if (target.id === actor.id) {
-    return { ok: false, message: "You can't credit yourself — another super admin must approve the credit (dual control)." };
+    return {
+      ok: false,
+      message:
+        "You can't credit yourself — another super admin must approve the credit (dual control).",
+    };
   }
 
   const credit = await prisma.manualCredit.create({
@@ -69,10 +92,16 @@ export async function requestManualCredit(
 
   // Notify all other super admins that a credit awaits their dual sign-off.
   const otherSupers = await prisma.member.findMany({
-    where: { cooperativeId: actor.cooperativeId, role: "superadmin", id: { not: actor.id }, status: "active" },
+    where: {
+      cooperativeId: actor.cooperativeId,
+      role: "superadmin",
+      id: { not: actor.id },
+      status: "active",
+    },
   });
   for (const s of otherSupers) {
-    await notifyMember(s,
+    await notifyMember(
+      s,
       `🧾 *Pending manual credit*\n\n` +
         `*${actor.name}* wants to credit *${target.name}* with *${formatBalance(amount)}*.\n` +
         `Narration: ${narration.trim()}\n\n` +
@@ -95,8 +124,13 @@ export async function approveManualCredit(
   shortId: string,
   pin: string,
 ): Promise<ManualCreditResult> {
-  const actor = await prisma.member.findFirst({ where: { phone: actorPhone } });
+  const actor = await prisma.member.findFirst({
+    where: { phone: actorPhone, ...(getCoopId() ? { cooperativeId: getCoopId() } : {}) },
+  });
   if (!actor) return { ok: false, message: "You need to be an admin of a cooperative first." };
+  if (!isSuperAdmin(actor.role)) {
+    return { ok: false, message: "Only a super admin can approve a manual credit." };
+  }
   if (!pin) return { ok: false, message: "Usage: *approvemanualcredit <credit id> <your PIN>*" };
 
   const credit = await findManualCredit(actor.cooperativeId, shortId.trim());
@@ -105,7 +139,18 @@ export async function approveManualCredit(
     return { ok: false, message: `That credit is already *${credit.status}*.` };
   }
   if (credit.initiatorId === actor.id) {
-    return { ok: false, message: "You can't approve a credit you initiated yourself — dual control requires a different super admin." };
+    return {
+      ok: false,
+      message:
+        "You can't approve a credit you initiated yourself — dual control requires a different super admin.",
+    };
+  }
+
+  // Verify the checker's PIN (hashed, timing-safe) BEFORE any money moves — a
+  // stolen admin session must not be able to approve a credit without the PIN.
+  const pinCheck = await verifyMemberPin(actor, pin);
+  if (!pinCheck.ok) {
+    return { ok: false, message: pinCheck.message ?? "Incorrect PIN." };
   }
 
   const target = await prisma.member.findUnique({
@@ -114,48 +159,63 @@ export async function approveManualCredit(
   });
   if (!target) return { ok: false, message: "The target member no longer exists." };
 
-  // Atomic: credit the wallet, record the contribution, mark approved, journal.
-  const result = await prisma.$transaction(async (tx) => {
-    const wallet = target.wallet ?? (await tx.wallet.create({
-      data: { memberId: target.id },
-    }));
+  let newBalance: number;
+  try {
+    // Atomic claim: only ONE concurrent approver moves pending → approved, so a
+    // racing second approver can never double-credit the wallet.
+    newBalance = await withTx(async (tx) => {
+      const claimed = await tx.manualCredit.updateMany({
+        where: { id: credit.id, status: "pending" },
+        data: { status: "approved", approvedById: actor.id, approvedAt: new Date() },
+      });
+      if (claimed.count === 0) {
+        throw new ManualCreditClaimError();
+      }
 
-    await tx.wallet.update({
-      where: { id: wallet.id },
-      data: { balance: { increment: credit.amount } },
-    });
+      const wallet =
+        target.wallet ??
+        (await tx.wallet.create({
+          data: { memberId: target.id },
+        }));
 
-    await tx.contribution.create({
-      data: {
-        amount: credit.amount,
-        type: "manual",
-        note: `Manual credit (${credit.narration})`,
-        reference: `MC-${credit.id.slice(-8)}`,
-        status: "confirmed",
-        paidAt: new Date(),
-        memberId: target.id,
+      await tx.wallet.update({
+        where: { id: wallet.id },
+        data: { balance: { increment: credit.amount } },
+      });
+
+      await tx.contribution.create({
+        data: {
+          amount: credit.amount,
+          type: "manual",
+          note: `Manual credit (${credit.narration})`,
+          reference: `MC-${credit.id.slice(-8)}`,
+          status: "confirmed",
+          paidAt: new Date(),
+          memberId: target.id,
+          cooperativeId: credit.cooperativeId,
+        },
+      });
+
+      await recordLedger({
         cooperativeId: credit.cooperativeId,
-      },
-    });
+        type: "income",
+        category: "other",
+        amount: credit.amount,
+        note: `Manual credit to ${target.name} — ${credit.narration}`,
+        reference: `MC-${credit.id.slice(-8)}`,
+        txRef: `mc_${credit.id}`,
+        counterAccount: `member_wallet:${wallet.id}`,
+        tx,
+      });
 
-    await tx.manualCredit.update({
-      where: { id: credit.id },
-      data: { status: "approved", approvedById: actor.id, approvedAt: new Date() },
+      return wallet.balance + credit.amount;
     });
-
-    await recordLedger({
-      cooperativeId: credit.cooperativeId,
-      type: "income",
-      category: "other",
-      amount: credit.amount,
-      note: `Manual credit to ${target.name} — ${credit.narration}`,
-      reference: `MC-${credit.id.slice(-8)}`,
-      txRef: `mc_${credit.id}`,
-      tx,
-    });
-
-    return wallet.balance + credit.amount;
-  });
+  } catch (err) {
+    if (err instanceof ManualCreditClaimError) {
+      return { ok: false, message: "That credit was just approved by another super admin." };
+    }
+    throw err;
+  }
 
   await audit({
     cooperativeId: credit.cooperativeId,
@@ -168,11 +228,12 @@ export async function approveManualCredit(
     detail: `approved manual credit ${credit.id.slice(-6)} to ${target.name}, amount ${formatBalance(credit.amount)}`,
   });
 
-  await notifyMember(target,
+  await notifyMember(
+    target,
     `✅ *You received a credit*\n\n` +
       `*${formatBalance(credit.amount)}* has been added to your wallet.\n` +
       `Narration: ${credit.narration}\n` +
-      `New balance: *${formatBalance(result)}*`,
+      `New balance: *${formatBalance(newBalance)}*`,
   ).catch(() => false);
 
   return {
@@ -186,8 +247,13 @@ export async function rejectManualCredit(
   shortId: string,
   reason?: string,
 ): Promise<ManualCreditResult> {
-  const actor = await prisma.member.findFirst({ where: { phone: actorPhone } });
+  const actor = await prisma.member.findFirst({
+    where: { phone: actorPhone, ...(getCoopId() ? { cooperativeId: getCoopId() } : {}) },
+  });
   if (!actor) return { ok: false, message: "You need to be an admin of a cooperative first." };
+  if (!isSuperAdmin(actor.role)) {
+    return { ok: false, message: "Only a super admin can reject a manual credit." };
+  }
 
   const credit = await findManualCredit(actor.cooperativeId, shortId.trim());
   if (!credit) return { ok: false, message: `No manual credit matching *${shortId}*.` };
@@ -221,10 +287,13 @@ async function findManualCredit(cooperativeId: string, shortId: string) {
   const exact = await prisma.manualCredit.findFirst({
     where: { id: shortId, cooperativeId },
   });
-  const pending = await prisma.manualCredit.findMany({
-    where: { cooperativeId, status: "pending", id: { endsWith: shortId } },
+  // Suffix match across ALL statuses (not just pending) so a repeat approve or
+  // reject of an already-processed credit reports "already ..." instead of an
+  // opaque "no manual credit matching".
+  const matches = await prisma.manualCredit.findMany({
+    where: { cooperativeId, id: { endsWith: shortId } },
     take: 2,
   });
-  if (pending.length === 1) return pending[0];
+  if (matches.length === 1) return matches[0];
   return exact;
 }

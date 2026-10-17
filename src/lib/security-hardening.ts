@@ -2,12 +2,12 @@ import crypto from "node:crypto";
 import { prisma } from "./prisma.js";
 import { sendText } from "./messaging.js";
 import { audit } from "../services/audit.js";
+import { getCoopId } from "./runtime-context.js";
 
 // ---- Device Binding & Session Anomaly Detection ----
 // Detects SIM swap / session hijack by tracking device fingerprints.
 
 const DEVICE_FINGERPRINT_KEY = "session:device:";
-const ANOMALY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Record and validate a device fingerprint for a member session.
@@ -18,8 +18,8 @@ export async function validateDeviceSession(params: {
   memberPhone: string;
   platform: string;
   ip: string;
-}): Promise<{ ok: true } | { ok: false; reason: string }> {
-  const { memberPhone, platform, ip } = params;
+}): Promise<{ ok: true; warning?: string }> {
+  const { memberPhone, platform } = params;
   const cacheKey = `${DEVICE_FINGERPRINT_KEY}${memberPhone}`;
   const now = Date.now();
 
@@ -29,69 +29,56 @@ export async function validateDeviceSession(params: {
     if (!redis) return { ok: true }; // no Redis, allow (can't check)
 
     const existing = await redis.get(cacheKey);
+    const record = () => redis.setex(cacheKey, 600, JSON.stringify({ platform, recordedAt: now }));
     if (!existing) {
-      // First session — record it
-      await redis.setex(cacheKey, 600, JSON.stringify({
-        platform,
-        ip,
-        recordedAt: now,
-      }));
+      await record();
       return { ok: true };
     }
 
-    const prev = JSON.parse(existing) as { platform: string; ip: string; recordedAt: number };
-    const timeDiff = now - prev.recordedAt;
+    const prev = JSON.parse(existing) as { platform: string; recordedAt: number };
 
-    // If same session within window, no anomaly
-    if (timeDiff < ANOMALY_WINDOW_MS && prev.ip === ip && prev.platform === platform) {
-      return { ok: true };
-    }
-
-    // If platform changed (WhatsApp → Telegram) or IP changed rapidly, alert
-    if (prev.platform !== platform || prev.ip !== ip) {
-      if (timeDiff < ANOMALY_WINDOW_MS) {
-        // Rapid platform/IP switch = suspicious
-        const member = await prisma.member.findFirst({
-          where: { phone: memberPhone },
-          select: { id: true, name: true, cooperativeId: true, phone: true },
+    // ADVISORY ONLY. A platform switch (WhatsApp <-> Telegram) is logged and the
+    // supers alerted, but it NEVER blocks the member: a lockout here is an
+    // availability/DoS bug with no self-service recovery. The webhook IP is
+    // intentionally NOT part of the fingerprint — `req.ip` is Meta's egress
+    // server, not the member's device, so it changes constantly (false positives).
+    if (prev.platform !== platform) {
+      const member = await prisma.member.findFirst({
+        where: { phone: memberPhone, ...(getCoopId() ? { cooperativeId: getCoopId() } : {}) },
+        select: { id: true, name: true, cooperativeId: true, phone: true },
+      });
+      if (member) {
+        await audit({
+          cooperativeId: member.cooperativeId,
+          actorPhone: memberPhone,
+          actorId: member.id,
+          actorRole: "member",
+          action: "security.session_anomaly",
+          targetType: "member",
+          targetId: member.id,
+          detail: `Platform change: ${prev.platform}→${platform}`,
         });
-        if (member) {
-          // Log anomaly
-          await audit({
-            cooperativeId: member.cooperativeId,
-            actorPhone: memberPhone,
-            actorId: member.id,
-            actorRole: "member",
-            action: "security.session_anomaly",
-            targetType: "member",
-            targetId: member.id,
-            detail: `Platform/IP change: ${prev.platform}→${platform}, ${prev.ip}→${ip} within ${Math.round(timeDiff / 1000)}s`,
-          });
 
-          // Alert superadmins
-          const superadmins = await prisma.member.findMany({
-            where: { cooperativeId: member.cooperativeId, role: "superadmin" },
-            select: { phone: true },
+        const superadmins = await prisma.member.findMany({
+          where: { cooperativeId: member.cooperativeId, role: "superadmin" },
+          select: { phone: true },
+        });
+        for (const sa of superadmins) {
+          await sendText({
+            to: sa.phone,
+            text: `🚨 Platform switch for ${member.name}: ${prev.platform} → ${platform}.\n\nIf this is unexpected, consider suspending the member and changing their PIN.`,
           });
-          for (const sa of superadmins) {
-            await sendText({
-              to: sa.phone,
-              text: `🚨 Session anomaly detected!\n\nMember: ${member.name}\nFrom: ${prev.platform} (${prev.ip})\nTo: ${platform} (${ip})\nTime: ${Math.round(timeDiff / 1000)}s\n\nIf this is unexpected, consider suspending the member and changing their PIN.`,
-            });
-          }
-
-          return { ok: false, reason: `Rapid session change detected (${Math.round(timeDiff / 1000)}s). Please try again.` };
         }
       }
+      await record();
+      return {
+        ok: true,
+        warning:
+          "We noticed a change in how you're reaching us. If this wasn't you, contact your cooperative admin.",
+      };
     }
 
-    // Update fingerprint
-    await redis.setex(cacheKey, 600, JSON.stringify({
-      platform,
-      ip,
-      recordedAt: now,
-    }));
-
+    await record();
     return { ok: true };
   } catch {
     return { ok: true }; // Redis unavailable, allow
@@ -255,7 +242,9 @@ export async function checkMultiSigRequirement(params: {
 
   if (superadmins.length < 2) {
     // Only 1 superadmin — can't enforce multi-sig, but log warning
-    console.warn(`[security] Payout ${amount}kobo needs multi-sig but only ${superadmins.length} superadmin(s) exist`);
+    console.warn(
+      `[security] Payout ${amount}kobo needs multi-sig but only ${superadmins.length} superadmin(s) exist`,
+    );
     await audit({
       cooperativeId,
       actorPhone: initiatorPhone,
@@ -266,7 +255,10 @@ export async function checkMultiSigRequirement(params: {
       targetId: cooperativeId,
       detail: `Payout ${amount}kobo needs multi-sig but only ${superadmins.length} superadmin(s) exist`,
     });
-    return { needsApproval: false, warning: `Only ${superadmins.length} superadmin(s) — multi-sig unavailable. Add more superadmins.` };
+    return {
+      needsApproval: false,
+      warning: `Only ${superadmins.length} superadmin(s) — multi-sig unavailable. Add more superadmins.`,
+    };
   }
 
   // Create a pending approval request
@@ -282,21 +274,26 @@ export async function checkMultiSigRequirement(params: {
         return {
           needsApproval: false,
           blocked: true,
-          error: "Multi-sig service temporarily unavailable. The payout has been blocked for safety. Please try again shortly.",
+          error:
+            "Multi-sig service temporarily unavailable. The payout has been blocked for safety. Please try again shortly.",
         };
       }
       return { needsApproval: false };
     }
 
-    const pendingId = `msig_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
-    await redis.setex(cacheKey, 3600, JSON.stringify({
-      pendingId,
-      amount,
-      initiatorPhone,
-      targetId,
-      requestedAt: Date.now(),
-      approvals: [initiatorPhone],
-    }));
+    const pendingId = `msig_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
+    await redis.setex(
+      cacheKey,
+      3600,
+      JSON.stringify({
+        pendingId,
+        amount,
+        initiatorPhone,
+        targetId,
+        requestedAt: Date.now(),
+        approvals: [initiatorPhone],
+      }),
+    );
 
     // Notify all other superadmins
     for (const sa of superadmins) {
@@ -316,7 +313,8 @@ export async function checkMultiSigRequirement(params: {
       return {
         needsApproval: false,
         blocked: true,
-        error: "Multi-sig service temporarily unavailable. The payout has been blocked for safety. Please try again shortly.",
+        error:
+          "Multi-sig service temporarily unavailable. The payout has been blocked for safety. Please try again shortly.",
       };
     }
     return { needsApproval: false };
@@ -342,10 +340,18 @@ export async function processMultiSigResponse(params: {
     // Find the pending request. Use SCAN (not KEYS) so the whole Redis keyspace
     // is never blocked on large/multi-tenant installs; the match is still
     // scoped to this cooperative's multisig keys.
-    type PendingSig = { pendingId: string; requestedAt: number; initiatorPhone: string; approvals: string[] };
+    type PendingSig = {
+      pendingId: string;
+      requestedAt: number;
+      initiatorPhone: string;
+      approvals: string[];
+    };
     let foundKey: string | null = null;
     let found: PendingSig | null = null;
-    for await (const batch of redis.scanStream({ match: `multisig:${cooperativeId}:*`, count: 100 })) {
+    for await (const batch of redis.scanStream({
+      match: `multisig:${cooperativeId}:*`,
+      count: 100,
+    })) {
       for (const key of batch) {
         const data = await redis.get(key);
         if (!data) continue;
@@ -448,9 +454,9 @@ export async function auditSuperadminCommand(params: {
 // Limits withdrawal amounts based on how long the member has been active.
 
 const TENURE_LIMITS = [
-  { minMonths: 0, maxMonths: 3, maxDaily: 50_000_00 },    // ₦50k/day for first 3 months
-  { minMonths: 3, maxMonths: 6, maxDaily: 200_000_00 },   // ₦200k/day for 3-6 months
-  { minMonths: 6, maxMonths: 12, maxDaily: 500_000_00 },  // ₦500k/day for 6-12 months
+  { minMonths: 0, maxMonths: 3, maxDaily: 50_000_00 }, // ₦50k/day for first 3 months
+  { minMonths: 3, maxMonths: 6, maxDaily: 200_000_00 }, // ₦200k/day for 3-6 months
+  { minMonths: 6, maxMonths: 12, maxDaily: 500_000_00 }, // ₦500k/day for 6-12 months
   { minMonths: 12, maxMonths: Infinity, maxDaily: Infinity }, // Unlimited after 1 year
 ];
 
@@ -471,7 +477,9 @@ export async function checkTenureLimit(params: {
   if (!member) return { allowed: false, message: "Member not found." };
 
   const tenureMonths = (Date.now() - member.createdAt.getTime()) / (30 * 24 * 60 * 60 * 1000);
-  const limit = TENURE_LIMITS.find(l => tenureMonths >= l.minMonths && tenureMonths < l.maxMonths);
+  const limit = TENURE_LIMITS.find(
+    (l) => tenureMonths >= l.minMonths && tenureMonths < l.maxMonths,
+  );
   if (!limit || limit.maxDaily === Infinity) return { allowed: true };
 
   // Check total withdrawals today

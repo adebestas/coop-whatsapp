@@ -7,7 +7,6 @@
 
   // ---- Config ----
   const API_BASE = '/api/admin';
-  const STORAGE_TOKEN = 'coop_token'; // NOTE: In production, use httpOnly cookies instead of localStorage for JWT storage
   const STORAGE_MEMBER = 'coop_member';
   const STORAGE_THEME = 'coop_theme';
 
@@ -23,8 +22,44 @@
   // ---- Init ----
   document.addEventListener('DOMContentLoaded', init);
 
+  // ---- Delegated event handling ----
+  // Inline on* handlers are replaced with data-action attributes so the CSP can
+  // drop 'unsafe-inline' for script attributes (see src/app.ts).
+  function runAction(el, event) {
+    const fn = window[el.dataset.action];
+    if (typeof fn === 'function') fn(el.dataset.arg, event, el);
+  }
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-action]');
+    if (el) runAction(el, e);
+  });
+  document.addEventListener('change', (e) => {
+    const el = e.target.closest('[data-action-change]');
+    if (el) runAction(el, e);
+  });
+
+  // Helpers for handlers that were previously inline expressions.
+  window.clickImport = function () {
+    document.getElementById('importFileInput').click();
+  };
+  window.showNewElection = function () {
+    document.getElementById('newElectionCard').hidden = false;
+  };
+  window.hideNewElection = function () {
+    document.getElementById('newElectionCard').hidden = true;
+  };
+  window.showNewPost = function () {
+    document.getElementById('newPostCard').hidden = false;
+  };
+  window.hideNewPost = function () {
+    document.getElementById('newPostCard').hidden = true;
+  };
+  window.closeModalOnBackdrop = function (_arg, event, el) {
+    if (event.target === el) window.closeMessageModal();
+  };
+
   function init() {
-    if (!getToken()) {
+    if (!getMember()) {
       window.location.href = 'login.html';
       return;
     }
@@ -34,10 +69,8 @@
   }
 
   // ---- Auth ----
-  function getToken() {
-    return localStorage.getItem(STORAGE_TOKEN);
-  }
-
+  // The admin token is an httpOnly cookie (not readable by JS), so the dashboard
+  // never stores or sends it — it only keeps the non-sensitive member profile.
   function getMember() {
     try {
       return JSON.parse(localStorage.getItem(STORAGE_MEMBER));
@@ -77,16 +110,26 @@
     try {
       await api('/logout', { method: 'POST' });
     } catch { /* ignore */ }
-    localStorage.removeItem(STORAGE_TOKEN);
     localStorage.removeItem(STORAGE_MEMBER);
     window.location.href = 'login.html';
   };
 
   // ---- API helper ----
+  async function tryRefresh() {
+    try {
+      const res = await fetch(`${API_BASE}/refresh`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   async function api(path, opts = {}) {
-    const token = getToken();
     const headers = { ...(opts.headers || {}) };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
     const method = (opts.method || 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
       headers['X-Requested-With'] = 'XMLHttpRequest';
@@ -97,9 +140,20 @@
     }
     showLoader();
     try {
-      const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
+      let res = await fetch(`${API_BASE}${path}`, {
+        ...opts,
+        headers,
+        credentials: 'same-origin',
+      });
+      // Session expired mid-session: refresh once and retry the request.
+      if (res.status === 401 && path !== '/refresh' && (await tryRefresh())) {
+        res = await fetch(`${API_BASE}${path}`, {
+          ...opts,
+          headers,
+          credentials: 'same-origin',
+        });
+      }
       if (res.status === 401) {
-        localStorage.removeItem(STORAGE_TOKEN);
         localStorage.removeItem(STORAGE_MEMBER);
         window.location.href = 'login.html';
         throw new Error('Unauthorized');
@@ -111,6 +165,9 @@
       hideLoader();
     }
   }
+
+  // Keep an active session alive: refresh the short-lived token periodically.
+  setInterval(() => { tryRefresh(); }, 30 * 60 * 1000);
 
   // ---- Theme ----
   window.toggleTheme = function () {
@@ -224,7 +281,7 @@
       <div class="card">
         <div class="card-header">
           <span class="card-title">Recent Contributions</span>
-          <button class="btn btn-secondary btn-sm" onclick="navigateTo('contributions')">View All</button>
+          <button class="btn btn-secondary btn-sm" data-action="navigateTo" data-arg="contributions">View All</button>
         </div>
         <div class="card-body flush" id="recentContributions">
           <div class="empty-state"><p class="text-muted">Loading...</p></div>
@@ -416,9 +473,9 @@
           <span class="card-title">All Members</span>
           <div class="flex gap-2">
             <input type="search" id="memberSearch" placeholder="Search members..." style="padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.8125rem; background:var(--bg-card); color:var(--text); width:200px;">
-            <button class="btn btn-secondary" onclick="document.getElementById('importFileInput').click()">Import CSV/Excel</button>
-            <input type="file" id="importFileInput" accept=".csv,.xlsx,.xls" style="display:none;" onchange="importMembers(this)">
-            <button class="btn btn-primary" onclick="openMessageModal()">Send Message</button>
+            <button class="btn btn-secondary" data-action="clickImport">Import CSV/Excel</button>
+            <input type="file" id="importFileInput" accept=".csv,.xlsx,.xls" style="display:none;" data-action-change="importMembers">
+            <button class="btn btn-primary" data-action="openMessageModal">Send Message</button>
           </div>
         </div>
         <div class="card-body flush" id="membersTable">
@@ -473,7 +530,7 @@
               <td class="font-mono">${currency(m.wallet?.balance || 0)}</td>
               <td class="font-mono">${currency(m.wallet?.totalSaved || 0)}</td>
               <td class="text-muted text-sm">${date(m.createdAt)}</td>
-              <td><button class="btn btn-outline btn-xs" onclick="openMessageModal('${esc(m.id)}')">Message</button></td>
+              <td><button class="btn btn-outline btn-xs" data-action="openMessageModal" data-arg="${esc(m.id)}">Message</button></td>
             </tr>`).join('')}
           </tbody>
         </table>
@@ -493,16 +550,16 @@
       </label>`).join('');
 
     host.innerHTML = `
-      <div class="modal-overlay" onclick="if(event.target===this)closeMessageModal()">
+      <div class="modal-overlay" data-action="closeModalOnBackdrop">
         <div class="modal modal-lg" role="dialog" aria-modal="true">
           <div class="modal-header">
             <span class="card-title">Message Members</span>
-            <button class="btn btn-ghost btn-xs" onclick="closeMessageModal()">&times;</button>
+            <button class="btn btn-ghost btn-xs" data-action="closeMessageModal">&times;</button>
           </div>
           <div class="modal-body">
-            <label class="msg-broadcast"><input type="checkbox" id="msgToAll" onchange="toggleMsgAll()"> <strong>Broadcast to all active members</strong></label>
+            <label class="msg-broadcast"><input type="checkbox" id="msgToAll" data-action-change="toggleMsgAll"> <strong>Broadcast to all active members</strong></label>
             <div id="msgMemberList" class="msg-member-list">
-              <div class="msg-select-all"><label><input type="checkbox" id="msgCheckAll" onchange="toggleMsgCheckAll()"> Select all</label></div>
+              <div class="msg-select-all"><label><input type="checkbox" id="msgCheckAll" data-action-change="toggleMsgCheckAll"> Select all</label></div>
               ${checkboxes}
             </div>
             <div class="form-group" style="margin-top:14px;">
@@ -516,8 +573,8 @@
             <div id="msgResult" class="text-muted text-sm" style="margin-top:8px;"></div>
           </div>
           <div class="modal-footer">
-            <button class="btn btn-ghost" onclick="closeMessageModal()">Cancel</button>
-            <button class="btn btn-primary" id="msgSendBtn" onclick="sendMessage()">Send</button>
+            <button class="btn btn-ghost" data-action="closeMessageModal">Cancel</button>
+            <button class="btn btn-primary" id="msgSendBtn" data-action="sendMessage">Send</button>
           </div>
         </div>
       </div>`;
@@ -584,7 +641,8 @@
   };
 
   // ---- Bulk Import Members ----
-  window.importMembers = async function (input) {
+  window.importMembers = async function (_arg, _event, el) {
+    const input = el;
     const file = input.files[0];
     if (!file) return;
     const ext = file.name.split('.').pop().toLowerCase();
@@ -699,8 +757,8 @@
               <td class="text-sm">${(l.guarantors || []).map(g => esc(g.member?.name || '?')).join(', ') || '—'}</td>
               <td>
                 <div class="loan-actions">
-                  ${l.status === 'guaranteed' ? `<button class="btn btn-success btn-xs" onclick="approveLoan('${l.id}')">Approve</button>` : ''}
-                  ${l.status === 'pending' ? `<button class="btn btn-danger btn-xs" onclick="rejectLoan('${l.id}')">Reject</button>` : ''}
+                  ${l.status === 'guaranteed' ? `<button class="btn btn-success btn-xs" data-action="approveLoan" data-arg="${l.id}">Approve</button>` : ''}
+                  ${l.status === 'pending' ? `<button class="btn btn-danger btn-xs" data-action="rejectLoan" data-arg="${l.id}">Reject</button>` : ''}
                 </div>
               </td>
             </tr>`).join('')}
@@ -1005,7 +1063,7 @@
       <div class="card">
         <div class="card-header">
           <span class="card-title">Elections</span>
-          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('newElectionCard').hidden = false">New Election</button>
+          <button class="btn btn-secondary btn-sm" data-action="showNewElection">New Election</button>
         </div>
         <div class="card-body" id="electionsContent">
           <div class="empty-state"><p class="text-muted">Loading elections...</p></div>
@@ -1030,8 +1088,8 @@
             <input id="electionTitle" style="padding:8px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:0.8125rem; background:var(--bg-card); color:var(--text); width:100%;" placeholder="e.g. 2026 Executive Committee Election">
           </label>
           <div class="flex gap-2">
-            <button class="btn btn-primary btn-sm" onclick="startElection()">Start Election</button>
-            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('newElectionCard').hidden = true">Cancel</button>
+            <button class="btn btn-primary btn-sm" data-action="startElection">Start Election</button>
+            <button class="btn btn-ghost btn-sm" data-action="hideNewElection">Cancel</button>
           </div>
         </div>
       </div>`;
@@ -1065,10 +1123,10 @@
             </table>
             <div class="flex gap-2" style="margin-top:12px;">
               ${v.status === 'open' ? `
-                <button class="btn btn-secondary btn-sm" onclick="addElectionCandidate('${v.id}')">Add candidate</button>
-                <button class="btn btn-primary btn-sm" onclick="closeElection('${v.id}')">Close & tally</button>` : ''}
-              <button class="btn btn-secondary btn-sm" onclick="showElectionResults('${v.id}')">Live results</button>
-              ${v.status === 'closed' ? `<button class="btn btn-secondary btn-sm" onclick="exportElectionPdf('${v.id}')">Results PDF</button>` : ''}
+                <button class="btn btn-secondary btn-sm" data-action="addElectionCandidate" data-arg="${v.id}">Add candidate</button>
+                <button class="btn btn-primary btn-sm" data-action="closeElection" data-arg="${v.id}">Close & tally</button>` : ''}
+              <button class="btn btn-secondary btn-sm" data-action="showElectionResults" data-arg="${v.id}">Live results</button>
+              ${v.status === 'closed' ? `<button class="btn btn-secondary btn-sm" data-action="exportElectionPdf" data-arg="${v.id}">Results PDF</button>` : ''}
             </div>
           </div>
         </div>`).join('');
@@ -1195,7 +1253,7 @@
                 <td class="text-sm">${esc(g.message)}</td>
                 <td>${statusBadge(g.status)}</td>
                 <td class="text-muted text-sm">${date(g.createdAt)}</td>
-                <td>${g.status === 'open' ? `<button class="btn btn-primary btn-xs" onclick="resolveGrievance('${g.id}')">Resolve</button>` : '<span class="text-muted text-sm">By ' + esc(g.resolvedBy?.name || '—') + '</span>'}</td>
+                <td>${g.status === 'open' ? `<button class="btn btn-primary btn-xs" data-action="resolveGrievance" data-arg="${g.id}">Resolve</button>` : '<span class="text-muted text-sm">By ' + esc(g.resolvedBy?.name || '—') + '</span>'}</td>
               </tr>`).join('')}
             </tbody>
           </table>
@@ -1266,7 +1324,7 @@
                 <td>${priorityBadge(t.priority)}</td>
                 <td>${statusBadge(t.status)}</td>
                 <td class="text-muted text-sm">${date(t.createdAt)}</td>
-                <td>${t.status !== 'resolved' ? `<button class="btn btn-primary btn-xs" onclick="resolveTicket('${t.id}')">Resolve</button>` : '<span class="text-muted text-sm">By ' + esc(t.assignedTo?.name || '—') + '</span>'}</td>
+                <td>${t.status !== 'resolved' ? `<button class="btn btn-primary btn-xs" data-action="resolveTicket" data-arg="${t.id}">Resolve</button>` : '<span class="text-muted text-sm">By ' + esc(t.assignedTo?.name || '—') + '</span>'}</td>
               </tr>`).join('')}
             </tbody>
           </table>
@@ -1302,7 +1360,7 @@
       <div class="card">
         <div class="card-header">
           <span class="card-title">Executive Posts (Organogram)</span>
-          <button class="btn btn-secondary btn-sm" onclick="document.getElementById('newPostCard').hidden = false">New Post</button>
+          <button class="btn btn-secondary btn-sm" data-action="showNewPost">New Post</button>
         </div>
         <div class="card-body flush" id="postsTable">
           <div class="empty-state"><p class="text-muted">Loading posts...</p></div>
@@ -1313,8 +1371,8 @@
         <div class="card-header"><span class="card-title">Add an executive post</span></div>
         <div class="card-body" style="display:flex; gap:10px; align-items:center;">
           <input id="newPostTitle" placeholder="e.g. Financial Secretary" style="flex:1; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
-          <button class="btn btn-primary btn-sm" onclick="createPost()">Create</button>
-          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('newPostCard').hidden = true">Cancel</button>
+          <button class="btn btn-primary btn-sm" data-action="createPost">Create</button>
+          <button class="btn btn-ghost btn-sm" data-action="hideNewPost">Cancel</button>
         </div>
       </div>`;
 
@@ -1334,7 +1392,7 @@
                 <td class="font-bold">${esc(titleCase(p.title))}</td>
                 <td>${p.incumbent ? `<span class="font-semibold">${esc(p.incumbent.name)}</span><div class="text-muted text-sm">${esc(p.incumbent.code)}</div>` : '<span class="text-muted">Vacant</span>'}</td>
                 <td class="text-muted text-sm">${p.appointedAt ? date(p.appointedAt) : '—'}</td>
-                <td><button class="btn btn-outline btn-xs" onclick="assignPost('${p.id}')">${p.incumbent ? 'Reassign' : 'Assign'}</button></td>
+                <td><button class="btn btn-outline btn-xs" data-action="assignPost" data-arg="${p.id}">${p.incumbent ? 'Reassign' : 'Assign'}</button></td>
               </tr>`).join('')}
             </tbody>
           </table>
@@ -1389,8 +1447,8 @@
         <div class="card-header">
           <span class="card-title">Payroll Configuration</span>
           <div class="flex gap-2">
-            <button class="btn btn-secondary btn-sm" onclick="setSalary()">Set Salary</button>
-            <button class="btn btn-primary btn-sm" onclick="runPayroll()">Run Payroll</button>
+            <button class="btn btn-secondary btn-sm" data-action="setSalary">Set Salary</button>
+            <button class="btn btn-primary btn-sm" data-action="runPayroll">Run Payroll</button>
           </div>
         </div>
         <div class="card-body flush" id="payrollTable">
@@ -1513,7 +1571,7 @@
       <div class="card" style="margin-top:16px;">
         <div class="card-header">
           <span class="card-title">Reserve Allocations</span>
-          <button class="btn btn-secondary btn-sm" onclick="allocateReserve()">Allocate to Reserve</button>
+          <button class="btn btn-secondary btn-sm" data-action="allocateReserve">Allocate to Reserve</button>
         </div>
         <div class="card-body flush" id="fundsReserve">
           <div class="empty-state"><p class="text-muted">Loading...</p></div>
@@ -1597,7 +1655,7 @@
       <div class="card">
         <div class="card-header">
           <span class="card-title">Suspicious Transaction Reports (STR / AML)</span>
-          <button class="btn btn-primary btn-sm" onclick="exportCompliance('str')">Export STR</button>
+          <button class="btn btn-primary btn-sm" data-action="exportCompliance" data-arg="str">Export STR</button>
         </div>
         <div class="card-body flush" id="strTable">
           <div class="empty-state"><p class="text-muted">Loading STRs...</p></div>
@@ -1637,7 +1695,7 @@
       <div class="card">
         <div class="card-header">
           <span class="card-title">PAYE (State IRS) Records</span>
-          <button class="btn btn-primary btn-sm" onclick="exportCompliance('paye')">Export PAYE</button>
+          <button class="btn btn-primary btn-sm" data-action="exportCompliance" data-arg="paye">Export PAYE</button>
         </div>
         <div class="card-body flush" id="payeTable">
           <div class="empty-state"><p class="text-muted">Loading PAYE records...</p></div>
@@ -1672,13 +1730,10 @@
     }
   }
 
-  // Download an export file with the Authorization header (top-level window.open
-  // sends no headers, so the Bearer-protected endpoint would 401). Fetch the
-  // bytes as a blob and trigger a save instead.
+  // Download an export file. The auth token is an httpOnly cookie, so a plain
+  // fetch with credentials carries it (top-level window.open would not).
   async function downloadExport(url, fallbackName) {
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${getToken()}` },
-    });
+    const res = await fetch(url, { credentials: 'same-origin' });
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       throw new Error(errData.error || 'Download failed');
@@ -1738,9 +1793,15 @@
   }
 
   function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
+    // Escape every HTML-significant character, including quotes — this output is
+    // used inside attributes (e.g. data-name="${esc(...)}"), where an unescaped
+    // quote would let a crafted member name inject an event handler.
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function formatPhone(p) {

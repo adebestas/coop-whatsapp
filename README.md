@@ -54,12 +54,17 @@ tests/                   # vitest smoke tests
 | `save <amount>` | Get your personal funding account, then transfer that amount — your wallet is credited when the transfer confirms (e.g. `save 2000`) |
 | `withdraw <amount>` | Withdraw up to 45% of savings to your bank account |
 | `plan <amount> <weekly\|monthly>` | Set a recurring contribution plan |
+| `mandate <cap>` | Authorize automatic bank direct debits up to a cap (returns a bank consent link) |
+| `mandates` / `mandatestatus <id>` | View your direct-debit mandates |
+| `cancelmandate <id>` | Cancel a direct-debit mandate |
 | `fund` | Get your personal virtual account number for top-ups |
 | `loan <amount> <months>` | Apply for a loan (e.g. `loan 50000 3`) |
 | `repay` | Pay the monthly installment on your active loan |
 | `history` | Your personal transaction statement |
 | `ledger` | Cooperative ledger — transparency for all members |
 | `dividend <rate>` | Real-time dividend calculator (% of net profit) |
+| `shares` | Show your shareholding and its current value |
+| `buyshares <count>` | Buy shares from your savings balance (default ₦1,000/share) |
 | `buypolls` | See open buy-votes (what should the coop purchase?) |
 | `votebuy <poll id> <option>` | Vote in a buy-vote |
 | `joinunit <code>` | Join your workplace/unit |
@@ -69,7 +74,7 @@ tests/                   # vitest smoke tests
 | `support <issue>` | Open a support ticket with customer service |
 | `vote <election id> <member code>` | Vote in an open election |
 | `freeze` / `unfreeze` | Freeze your account so no money can leave, then lift it yourself |
-| `payees` / `addpayee <name> <account> <bank>` / `delpayee <name\|#>` | Save / list / remove favorite payout accounts (beneficiary memory) |
+| `payees` / `addpayee <name> <account>` / `delpayee <name\|#>` | Save / list / remove favorite payout accounts (beneficiary memory). Adding a payee uses the guided bank picker with account-name confirmation. |
 | `analytics` | Personal savings analytics (balance, totals, monthly rate, withdrawals, loans) |
 | `votediv <yes\|no>` | Vote on an open dividend-rate change ballot |
 | `statement <month\|year>` | Monthly or yearly statement |
@@ -77,6 +82,8 @@ tests/                   # vitest smoke tests
 | `reserveinfo` | Statutory reserve fund info |
 | `grievance <complaint>` | Submit a grievance to the cooperative |
 | `byelaws` | View the cooperative's registered byelaws |
+| `myrefcode` / `referrals` | Your referral code and the referrals you've earned |
+| `referralbonus` / `withdrawbonus` | See your referral bonus balance / withdraw it (wallet, saved bank account, or airtime) |
 
 > **Voice notes:** on WhatsApp you can send a voice note instead of typing a command — it is transcribed and processed as text (requires `GROQ_API_KEY` + `WHATSAPP_TOKEN`).
 
@@ -101,6 +108,32 @@ The super admin is any member with the `superadmin` role **or** the
 cooperative's registered `adminPhone`. Every money/admin action is written to
 an append-only **audit log** (`audit` command shows the latest entries).
 
+## Committees
+
+Cooperatives can run three formal committees, appointed by the super admin:
+
+| Committee | Default size | Powers |
+| --- | --- | --- |
+| **Credit** | 3 | Approves loans — **replaces the two super-admin signatures**. A loan at `admin_approved` is disbursed once a majority of the Credit Committee approves. |
+| **Supervisory / Audit** | 3 | Read-only oversight of the audit trail, ledger and reports, **plus** the power to freeze/suspend a member pending review. |
+| **Board** | 5 | Sets policy (interest tiers, dividend rate, limits). |
+
+Sizes are configurable per cooperative (`CooperativeConfig.creditCommitteeSize`,
+`supervisoryCommitteeSize`, `boardSize`). A member can sit on more than one
+committee.
+
+- Super admin: `addcommittee <credit|supervisory|board> <name> [size]` →
+  `appoint <type> <member code> [chair]` → `committees` lists them.
+- **Credit Committee:** when a cooperative has a Credit Committee staffed to at
+  least its majority, loans at `admin_approved` are decided by committee vote
+  (`cvote <loan id> approve|reject`; `committeequeue` lists pending decisions).
+  A cooperative **without** a staffed Credit Committee keeps the existing
+  admin → super → super approval chain.
+- **Supervisory freeze:** `supervisoryfreeze <member code> [reason]` /
+  `supervisoryunfreeze <member code>` — a supervisory freeze blocks all
+  money-out and **cannot** be lifted by the member themselves (only the
+  Supervisory Committee or a super admin can clear it).
+
 ## Admin commands
 
 | Command | Who | What it does |
@@ -121,6 +154,9 @@ an append-only **audit log** (`audit` command shows the latest entries).
 | `rejectwithdraw <id>` | admin + super | Reject a withdrawal request |
 | `overridewithdrawal <phone>` | admin + super | Let a member withdraw before the 6-month window |
 | `pendingwithdraw` | admin + super | List pending withdrawal requests |
+| `mandates` | admin + super | List the cooperative's direct-debit mandates |
+| `pausemandate <id> [purpose]` / `resumemandate <id> [purpose]` | admin + super | Pause/resume a whole mandate, or a single purpose (`savings`/`loan`/`group`) |
+| `skipdebit <id>` | admin + super | Skip one pending direct debit so it is never retried |
 | `deathclaim <member code> <family phone>` | admin + super | Open a death claim (then send the certificate) |
 | `claimbank <claim id> <account> <bank>` | admin + super | Set the family's payout account |
 | `approveclaim <id>` | super only | Pay the validated claim to the family |
@@ -137,6 +173,7 @@ an append-only **audit log** (`audit` command shows the latest entries).
 | `addunit <name> <code>` / `unitadmin <unit> <member>` / `units` | all admins | Manage workplaces |
 | `interest` | admin + super | Shows the fixed tiered flat rates: 5% (≤3 months), 8% (≤6), 9% (≤9), 10% (10–12) |
 | `paydividend <rate%>` | super only | Distribute a percentage of **net profit** to members by savings share |
+| `paysharedividend <rate%>` | super only | Distribute a percentage of **net profit** to members by **shareholding** (bank payout, distinct from `paydividend`) |
 | `startvotediv <rate%>` | super only | Open a member ballot when a dividend rate change is >5% |
 | `closedivid [approve\|reject]` | super only | Close a dividend-rate vote (auto-tally, or force approve/reject) |
 | `votedivstatus` | super + member | Live tally and status of the dividend-rate vote |
@@ -215,6 +252,59 @@ final signature the system auto-disburses to the account on file:
 
 The same super admin can't give both super signatures.
 
+## Loan protection
+
+Loans carry a **self-insured credit-life protection** — the cooperative pools a
+small premium instead of buying third-party insurance:
+
+- A **1% premium** of the loan principal (`loanProtectionPercent`, default `1`)
+  is withheld at disbursement and held in the cooperative's protection fund
+  (`protectionFundBalance`, a liability to insured members).
+- It is **per-cooperative configurable** and can be switched off entirely with
+  `loanProtectionEnabled` (then no premium is withheld).
+- It covers the borrower's **death and permanent disability**. When a death
+  claim is approved, every outstanding protected loan of the member is
+  **written off against the fund** — the loan is settled and the family still
+  receives the member's savings.
+- If the outstanding balance exceeds the fund, the excess is absorbed as a
+  cooperative expense; the fund never goes negative.
+
+## Loan-loss provisioning & PEARLS
+
+Past-due loans are aged into WOCCU PAR buckets and provisioned against a
+loan-loss reserve, and the cooperative's financial health is summarised with
+the six WOCCU **PEARLS** ratio groups.
+
+**PAR aging & provisioning.** Outstanding loans are bucketed by how long the
+next installment is past due — `1-30`, `31-90`, `91-180`, `180+` days. The
+expected loss is the outstanding balance × the bucket rate (defaults `1 / 5 /
+20 / 50%`, configurable per cooperative via `provisionRates`). `runProvision`
+snapshots the per-loan expected loss into a `ProvisionRun` (one per cooperative
+per month), posts a balanced journal (`expense:loan_loss_provision` →
+`assets:loan_loss_provision`), and increments the cooperative's
+`loanLossProvisionBalance`. Re-running the same month is refused.
+
+- Admin: `par` shows the ageing buckets, `provisionrates` shows the rates, and
+  `provision` (super admin) books the month's provision.
+
+**PEARLS ratios.** `computePearls(coopId)` derives six groups of named ratios
+from the double-entry journal, the loan book, the ledger, contributions and the
+membership roster. Every ratio is a fraction, and an inactive cooperative
+returns zeros without throwing.
+
+| Group | Ratios |
+| --- | --- |
+| **P** — Protection | `allowanceToLoans`, `netCapital` |
+| **E** — Effective structure | `loansToAssets`, `savingsToAssets` |
+| **A** — Asset quality | `parRatio`, `provisionCoverage` |
+| **R** — Rates of return | `interestIncomeToAssets`, `costOfFunds` |
+| **L** — Liquidity | `liquidAssetsToSavings` |
+| **S** — Signs of growth | `memberGrowth`, `savingsGrowth` (year-on-year) |
+
+- Admin: `pearls` prints a formatted PEARLS summary.
+- Dashboard: the **PEARLS** tab renders the six groups as ratio cards.
+- API: `GET /api/admin/pearls` (admin bearer token) returns the same figures.
+
 ## Workplaces (units)
 
 Members can be grouped by workplace. Each workplace has its own code and an
@@ -234,6 +324,102 @@ units are an organizational layer for communication and visibility.
 - Loan interest is **tiered and flat** — see `interest`. It applies to loans
   only, never to savings.
 
+## Direct debit mandates
+
+Members can authorize a **NIBSS direct-debit mandate** on their saved bank
+account, so the cooperative can pull money automatically for recurring savings,
+loan repayments and group (VSLA/ROSCA) contributions — instead of the
+reminder-and-reply flow.
+
+Direct debit is **off by default** and enabled per cooperative through
+`CooperativeConfig.directDebitEnabled` (super admin). An optional per-debit
+ceiling, `directDebitMaxCap` (kobo, `0` = none), caps every debit on top of the
+member's own mandate cap.
+
+- **Member commands** (create/cancel require the transaction PIN):
+  - `mandate <cap>` — start a mandate; the bot returns a provider-hosted consent
+    link and the mandate stays `pending` until the member authorizes it at their
+    bank and the provider webhook flips it to `active`.
+  - `mandates` / `mandatestatus <id>` — view your mandates.
+  - `cancelmandate <id>` — cancel a mandate (also cancelled at the provider).
+  - One flexible mandate per member: a single `amountCap` per debit, each debit
+    tagged with a purpose (`savings` | `loan` | `group`).
+- **Admin commands** (admin or super admin):
+  - `mandates` — list the cooperative's mandates.
+  - `pausemandate <id>` / `resumemandate <id>` — pause/resume the **whole**
+    mandate (status → `paused`).
+  - `pausemandate <id> <savings|loan|group>` / `resumemandate <id> <purpose>` —
+    pause/resume a **single purpose** (added to / removed from `pausedPurposes`).
+  - `skipdebit <id>` — mark one **pending** debit `skipped` so it is never
+    retried.
+- **Retry policy:** a failed debit is retried **once per day (never more)** until
+  it succeeds or the mandate is cancelled. The scheduler skips a `paused`
+  mandate, any purpose listed in `pausedPurposes`, and never retries a `skipped`
+  debit.
+- **No pre-debit notice** — the member is notified **after** each debit (success
+  or failure).
+- **Provider fallback:** mandates run through the same payment adapter as every
+  other movement — **Monnify** primary, **Paystack** fallback — behind the
+  existing circuit-breaker failover (`resolveProvider`).
+
+## Refunds
+
+Sometimes a member has **already paid** (say, by bank transfer or cheque) and the
+direct debit also pulled — a double payment. A refund is a **maker-checker** flow
+so no single person can move money back out to a member:
+
+- **Admin** `recommendrefund <member code|id> <amount> <reason>` — creates a
+  `pending` `RefundRequest` the cooperative owes the member.
+- **Super admin** `approverefund <id>` — approves and initiates a **payout to the
+  member's saved bank account** through the same payout path as withdrawals
+  (idempotent `Payout` row + a balanced `expense:refund` / `assets:bank` journal).
+  On success the request is marked `paid`; on failure it is marked `failed` and
+  super admins are alerted.
+- **Super admin** `rejectrefund <id> [reason]` — rejects a pending request.
+
+Approval refuses if the member has **no saved bank account**, and the refund only
+pays out from the cooperative's bank/settlement account — never the member's
+wallet. Every step (recommend / approve / reject / paid / failed) is audited with
+a human-readable description.
+
+## Member ombudsman
+
+Members have an **independent escalation tier above cooperative admins**: a
+**platform-level ombudsman** (not tied to any cooperative) who can investigate a
+grievance or dispute, issue a **binding decision**, and apply a remedy.
+
+- **Escalate.** A member replies `escalate <grievance id> [reason]` to escalate a
+  grievance, or `escalate dispute <loan_rejection|dividend|freeze|suspension|other>
+  <reference> [reason]` to escalate a dispute directly (one case per source). A
+  grievance left unresolved past `CooperativeConfig.ombudsmanSlaDays` (default
+  **7**) is auto-escalated by the scheduler.
+- **Ombudsman console** (gated to an active `Ombudsman` phone):
+  - `cases [status]` — cases across every cooperative (`open` / `investigating` /
+    `decided` / `closed`).
+  - `case <id>` — the full case timeline.
+  - `investigate <id> <note>` — open an investigation (notifies the cooperative's
+    admins).
+  - `decide <id> <decision>` — record a binding decision (notifies the member +
+    the cooperative).
+  - `remedy <id> unfreeze` — lift a member's self-freeze **and** any Supervisory
+    Committee freeze.
+  - `remedy <id> refund <amount> [reason]` — pay the member a refund through the
+    existing refund flow, with the ombudsman acting as the approver (the
+    admin-recommend step is bypassed). One remedy per case.
+- Every case action is audited and recorded on the case timeline.
+- `Ombudsman` / `OmbudsmanCase` / `OmbudsmanCaseEvent` are **platform-level**
+  tables (not cooperative-RLS-scoped); cross-tenant access is gated in code by the
+  ombudsman role plus an explicit `withCoopContext` per coop-scoped write.
+
+**Create an ombudsman:**
+
+```bash
+npm run seed:ombudsman -- --name "Ada Ombuds" --phone 2348012345678
+```
+
+or directly:
+`npx tsx src/seed.ts --ombudsman --name "Ada Ombuds" --phone 2348012345678`.
+
 ## Dividends
 
 Profit comes from the **ledger**: loan interest, fines and admin charges in;
@@ -249,6 +435,49 @@ salaries/stipends, pay-anyone and other expenses out.
   closes it (`closedivid [approve|reject]`, or `closedivid` auto-tallies).
   `votedivstatus` shows the live tally. A passed vote unlocks the rate for
   `paydividend <rate>`.
+
+## Share capital
+
+Members own part of the cooperative by buying shares from their savings
+balance with `buyshares <count>` — each share defaults to **₦1,000** (100,000
+kobo), configurable per cooperative via `CooperativeConfig.sharePrice`.
+`shares` shows their current holding and value.
+
+- Share capital is **permanent equity**, not savings: it is **not withdrawable**
+  unless the cooperative enables `allowShareRedemption`.
+- Share purchases post a balanced double-entry journal (`equity:share_capital`)
+  and are audited.
+- Super admins distribute profit **on shares** with `paysharedividend <rate%>`
+  — paid to shareholders by their shareholding (a bank payout). This is
+  **distinct from `paydividend`**, which pays on **savings**.
+
+## Savings products
+
+Members can hold separate **savings product accounts** alongside their wallet
+through four product types:
+
+| Type | What it is |
+| --- | --- |
+| `fixed` | Fixed deposit — locked until it matures, earning `interestRate`% at maturity. |
+| `goal` | Goal/target savings — a target amount with live progress; reaching 100% notifies the member. |
+| `seasonal` | Seasonal savings — a term-locked product for festive/seasonal saving. |
+| `junior` | Junior/youth — a **guardian-managed** account for a minor. |
+
+- Admin: create with `newproduct <fixed|goal|seasonal|junior> <name> [rate] [termMonths]`; browse with `products`.
+- Member: `products` to browse, `openproduct <product id> [target]` to open, `saveproduct <account id> <amount>` to deposit, `withdrawproduct <account id> <amount>` to withdraw, `myproducts` to list, `matureproduct <account id>` to mature.
+- Money moves **wallet → product account** through balanced double-entry
+  (`member_wallet:<walletId>` ↔ `liability:savings_product:<accountId>`), and
+  every movement is audited. Fixed/seasonal accounts are term-locked until
+  `maturesAt`; at maturity the principal (plus interest) is credited to the
+  holder's wallet.
+- **Junior accounts.** `openjunior <product id> <minor name> [minor phone]`
+  opens a guardian-managed account: the opening guardian controls it — only the
+  guardian may deposit, withdraw or mature it while a guardian is set (the minor
+  holder is refused). The guardian funds it from their own wallet; on maturity
+  the balance is released to the **minor's** wallet. If `minor phone` matches an
+  existing member of the cooperative, that member is the holder; otherwise a
+  junior member record is created (with a generated placeholder channel phone
+  when none is given).
 
 ## Withdrawals
 
@@ -319,6 +548,82 @@ configured salaries.
 files, saves them under `exports/`, emails download links to the requesting super
 admin (SMTP config), and returns dashboard links. Exports are audited.
 
+## Regulator reporting
+
+Cooperatives file **statutory financial returns** and **NFIU AML summaries** with
+their regulator (state Ministry of Cooperatives, CBN, NFIU, or a custom label).
+Both are produced as **Excel + PDF + CSV** from existing ledger/AML data — pack
+generation is read-only and adds no new accounting.
+
+- **Configure the regulator** — `regulatorconfig <label> [type] [email] [monthlyDue] [quarterlyDue]`
+  (type is one of `ministry`, `cbn`, `nfiu`, `custom`; due days default to the
+  10th for monthly returns and the 15th for quarterly). Setting a regulator also
+  switches scheduled reporting on.
+- **Generate on demand** — `regreport <YYYY-MM> <statutory|nfiu|both> [monthly|quarterly]`
+  writes the pack, archives it under `exports/`, and replies with the file paths
+  and the filing due date.
+- **Scheduled packs** — a daily scheduler job generates the monthly pack after
+  month-end and the quarterly pack after quarter-end for every coop with
+  reporting enabled, and reminds admins when a pack's filing due date is near or
+  past.
+- **Track filing** — `regreportstatus` lists generated/filed packs; once
+  submitted to the regulator, `regreport filed <id>` marks it filed. Filing is
+  always manual (no regulator-portal submission). Every generation, config change
+  and filing action is audited.
+
+Statutory packs contain the balance sheet, profit & loss, PAR aging, PEARLS
+ratios, and membership/savings/loans summaries. NFIU packs contain STR/SAR counts
+by status and the large-transaction (≥ ₦5M) list. All admin-only.
+
+## Referrals
+
+Members grow the cooperative: a member shares their **referral code** (their
+existing member `code`), a new member joins with it, and once the referred member
+makes their **first qualifying contribution** the referrer earns a reward.
+
+The program is **opt-in per cooperative** (`referralEnabled`, off by default) and
+is configured by an admin or the Board. When it is off or paused, referrals are
+neither recorded nor paid.
+
+- **Sharing a code** — `myrefcode` shows the member's own code plus a ready-to-share
+  invite; `referrals` lists who they referred and what they have earned.
+- **Joining** — the referral code is **optional** at registration. A joiner can
+  reply `join <coop code> ref <referrer code>` as a shortcut, or simply enter the
+  code when the bot asks *"were you referred by a member?"*. Reply `skip` (or leave
+  it blank) to join without one — no referral is recorded. Unknown and self-referral
+  codes are rejected; the join itself always succeeds.
+- **Reward types** — a qualifying referral credits the referrer's **running bonus
+  balance** (the default reward is **₦500**). The bonus is not paid out
+  automatically; the member chooses where to send it when they withdraw.
+- **Bonus balance & withdrawal** — `referralbonus` shows the member's current
+  withdrawable balance. `withdrawbonus` starts a guided flow:
+  1. **amount** — any amount up to the balance (partial withdrawals allowed);
+  2. **destination** — `wallet`, `bank`, or `airtime`, defaulting to the
+     cooperative's configured reward type (the member can change it);
+  3. **phone** — only for `airtime`; **any** number, no ownership check;
+  4. **PIN** — the member's transaction PIN confirms the withdrawal.
+  - `wallet` credits the member's wallet; `bank` pays to the member's **saved**
+    account (refused when none is on file); `airtime` recharges the entered
+    number through the VTU adapter (gated — refused when no VTU provider is
+    configured). Every withdrawal is recorded and audited; a definite payout
+    failure refunds the balance, and an `unsure` outcome is left pending for
+    reconciliation. The flow is channel-agnostic — it works on **WhatsApp and
+    Telegram**.
+- **Configuration** — `referralconfig [on|off] [wallet|bank|airtime] [amount] [maxRewards]`
+  (admin/super admin) updates the program; `referralreport` summarises the whole
+  cooperative (counts by status, rewards paid, total bonus **outstanding**, and
+  withdrawal counts). Every config change is audited.
+- **Board pause/activate** — the governance **Board committee** can pause or resume
+  the program at any time with `referralpause` / `referralresume` (active Board
+  members or the super admin), which toggles `referralEnabled`.
+
+**Anti-abuse.** One reward per referred member (a member can only ever be referred
+once), self-referral is blocked, a reward is only paid on the referred member's
+first qualifying contribution (real money-in — a provider top-up or a savings
+salary-deduction; loan late-fines and admin manual credits do not qualify), and a
+per-referrer cap (`referralMaxRewards`; `0` = unlimited) stops reward farming.
+Every recorded, qualified, rejected and paid referral is audited.
+
 ## Guarantor default deductions
 
 When a loan is **2+ months overdue**, each confirmed guarantor gets a
@@ -327,6 +632,56 @@ their savings unless the borrower clears the arrears first. If day 10 arrives
 and the loan still isn't repaid, the deduction executes automatically
 (savings balance + lifetime savings reduced, ledger entry recorded, everyone
 notified). Clearing the arrears during the window cancels it.
+
+## Employer salary-deduction remittance
+
+Admins collect members' agreed monthly deductions from their employer. The
+lifecycle is maker-checked and reconciled before any money is credited:
+
+1. **Set commitments** — `setcommit <code> <amount>` (0 stops it); members can
+   request a month off with `skipmonth`, admins approve with `waive <code>`.
+2. **Build a batch** — `newbatch` builds a draft from every active member's
+   commitment plus any active loan installment. Or upload the employer's file
+   (Excel, CSV, PDF, or a photo) as a WhatsApp document/photo, or via
+   `POST /api/admin/deductions/build`; rows are matched to members by code,
+   phone, or name.
+3. **Submit** — `submitbatch <ref>` (draft → submitted).
+4. **Record the cheque** — `recordcheque <ref> <amount> [cheque ref]`
+   (submitted → cheque_received).
+5. **Reconcile** — `reconbatch <ref> <amount>` (cheque_received → reconciled).
+   A matching bank credit can auto-reconcile a batch, or upload a bank statement
+   via `POST /api/admin/deductions/reconcile-statement` to match credits to
+   batches. Approval is blocked while the reconciled amount is below the batch
+   total.
+6. **Approve** — `approvebatch <ref>` credits wallets and repays loans in a
+   single transaction. If the employer under-remitted, `approvebatch <ref>
+   partial` credits only the items the reconciled amount covers and leaves the
+   rest pending (batch → `partially_approved`) for a later top-up. Maker-checker:
+   the approver must be a *different* super admin than the maker, and the maker's
+   name must be confirmed first with `confirmname <code>`.
+
+Uploaded files are stored in S3-compatible object storage (when `BACKUP_*` is
+configured) and linked to the batch via `sourceFileKey` / `sourceFileName`.
+
+Reject with `rejectbatch <ref> [reason]`.
+
+## Changing your phone number
+
+A member moves their account to a new number with `changephone <number>`: an
+OTP is sent to the new number, and once verified the request waits for a super
+admin to approve it (`approvephone <code>` / `rejectphone <code> [reason]`).
+The old channel is warned and its sessions are wiped. Super admins can still
+force a move with `relink <code> <number>`.
+
+## AI assistant
+
+The assistant answers plain-English/Pidgin questions and maps free text to bot
+commands. It is **not** a tool-calling agent: the model only classifies a
+question into a tool name, and the server enforces permissions in code via the
+registry in `src/lib/ai-tools.ts` (each tool declares its `scope` and
+`requiredRole`). The model never chooses which data to fetch and never bypasses
+a permission check. Command suggestions are shown for confirmation and then run
+through the normal PIN/2FA/approval pipeline.
 
 ## Backups
 
@@ -348,6 +703,66 @@ elections). Members add candidates (`candidate <id> <code>`) and vote
 (`vote <id> <code>`) — one ballot per member per election, unit elections
 restricted to unit members. `closevote <id>` tallies the result; the winner of
 a unit election is automatically installed as that unit's admin.
+
+## General meetings (AGM/SGM)
+
+Cooperatives can run **Annual General Meetings** (`agm`) and **Special General
+Meetings** (`sgm`) entirely through chat.
+
+- **Schedule** — an admin calls `startmeeting <agm|sgm> <title> [quorum%]`. The
+  quorum defaults to the cooperative's `agmQuorumPercent` (25% unless
+  configured).
+- **Open & attend** — `openmeeting <id>` moves the meeting to *open*, then
+  members mark themselves present with `attend <id>`. Attendance is
+  per-meeting and idempotent.
+- **Proxies** — a present member may carry another's vote with
+  `proxy <id> <member code>`. The represented member's attendance row records
+  the proxy holder, and **both count toward quorum**.
+- **Quorum** — quorum is met when attendance *including proxies* reaches
+  `quorumPercent`% of **active** members (pending/suspended members are not
+  counted).
+- **Motions** — admins table motions with
+  `addmotion <id> <title> | <description> [general|bylaw|dividend|election]`.
+  Present members vote `motionvote <id> yes|no|abstain` (one vote each;
+  non-attendees cannot vote).
+- **Close & tally** — `closemotion <id>` tallies the votes. A motion **passes
+  only when quorum is met and yes exceeds no**; otherwise it is *rejected* with
+  a clear no-quorum or no-majority note. `closemeeting <id>` closes the floor.
+- **Minutes & export** — `meetingminutes <id>` prints the minutes (type,
+  quorum, attendance, motions, tallies and carried resolutions) and generates a
+  downloadable **Excel + PDF** export via the shared export pipeline
+  (`/api/export/<file>`).
+
+## Groups (ROSCA / VSLA)
+
+Cooperatives can run informal **savings groups** inside the coop. An admin
+creates one with `newgroup <rosca|vsla> <name> <code> <amount> <cycleLength>`
+(amount in naira; cycle length in rounds). Members join with
+`joingroup <code>`, pay in with `groupcontribute <group id> <amount>`, and check
+their groups with `mygroups` / `groupstatus <group id>`. Admins manage cycles
+with `closegroupcycle <group id>` and review joint-liability lending with
+`grouploans <group id>`.
+
+**ROSCA (rotating savings).** Each round every member pays the same fixed
+contribution into the pot. Members are assigned a rotation position when they
+join, and `closegroupcycle` pays the whole pot to the member whose turn it is.
+A member may contribute only once per round.
+
+**VSLA (village savings & loans).** Members buy one or more *shares* per round
+(contributions must be a multiple of the group's share price). When the cycle
+closes, the pot is shared out **pro-rata by shares** using the largest-remainder
+method, so the whole pot is distributed with no rounding loss; shares are then
+redeemed for the next round.
+
+**Joint-liability group loans.** A group member borrows with
+`grouploan <group id> <amount> <months>` (up to 12 months). The group stands as
+**joint guarantor**, so an active-group loan is created already *guaranteed*
+and needs **no individual guarantors** before it moves through the approval
+chain — if the member defaults, the group is liable. A non-member, or a loan
+against a closed group, is refused.
+
+Every contribution, payout and share-out is booked through the double-entry
+journal against the group's pot account, so the books always balance.
 
 ## Payment provider failover
 
@@ -430,6 +845,9 @@ tunnel --url http://localhost:3000`.
   accounts with narrations, Excel/PDF exports by email, hash-chained audit,
   daily payout limits + approval cool-offs, guarantor default deductions,
   daily backups, Monnify primary provider
+- [x] Phase 3.7: employer deduction file ingestion (Excel/CSV/PDF/OCR) +
+  cheque/reconciliation lifecycle, maker-checker on batch approval, OTP-verified
+  member phone change, AI tool/permission registry
 - [ ] Phase 4: marketplace, state/LGA grouping, Pidgin, scale, more languages
 
 ## Tests

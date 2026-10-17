@@ -6,16 +6,6 @@ import { deleteTelegramMessage } from "../src/lib/telegram.js";
 import { extractWhatsAppMessages } from "../src/lib/inbound.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-}));
-
-vi.mock("../src/lib/telegram.js", () => ({
-  deleteTelegramMessage: vi.fn().mockResolvedValue(true),
-}));
-
 const PHONE = "2348012345678";
 
 async function makeCoop(code: string, name: string) {
@@ -38,6 +28,7 @@ async function makeMember(
       name: `Member ${phone.slice(-4)}`,
       cooperativeId: coopId,
       role: opts.role ?? "member",
+      consentAt: new Date(),
       pin: hashPin("1234"),
       ...(opts.bank
         ? { bankAccountNumber: "0123456789", bankCode: "044", bankName: "Access Bank" }
@@ -76,8 +67,8 @@ beforeEach(async () => {
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
-  await prisma.payout.deleteMany();
   await prisma.dividendEntry.deleteMany();
+  await prisma.payout.deleteMany();
   await prisma.dividend.deleteMany();
   await prisma.broadcast.deleteMany();
   await prisma.wallet.deleteMany();
@@ -92,9 +83,7 @@ describe("whatsapp inbound extraction", () => {
     const value = {
       messages: [{ type: "text", from: "234801", text: { body: "menu" } }],
     };
-    expect(extractWhatsAppMessages(value)).toEqual([
-      { from: "234801", text: "menu" },
-    ]);
+    expect(extractWhatsAppMessages(value)).toEqual([{ from: "234801", text: "menu" }]);
   });
 
   it("extracts flow (nfm_reply) submissions with the echoed flow token", () => {
@@ -133,6 +122,7 @@ describe("secure PIN challenges", () => {
     await makeCoop("TESTSP1", "Test Coop");
     await handleMessage(PHONE, "join TESTSP1");
     await handleMessage(PHONE, "Ada Obi");
+    await handleMessage(PHONE, "skip"); // referral step
     await handleMessage(PHONE, "YES"); // NDPR consent
     await handleMessage(PHONE, "skip");
     await handleMessage(PHONE, "skip");
@@ -152,6 +142,10 @@ describe("secure PIN challenges", () => {
   it("rejects a flow submission whose token does not match the outstanding challenge", async () => {
     const coop = await makeCoop("TESTSP2", "Test Coop");
     const member = await makeMember(PHONE, coop.id, { bank: true });
+    await prisma.wallet.update({
+      where: { memberId: member.id },
+      data: { balance: 5000000, totalSaved: 5000000 },
+    });
     await prisma.session.create({
       data: {
         phone: PHONE,
@@ -171,12 +165,16 @@ describe("secure PIN challenges", () => {
   it("accepts a flow submission with the matching token", async () => {
     const coop = await makeCoop("TESTSP3", "Test Coop");
     const member = await makeMember(PHONE, coop.id, { bank: true });
+    await prisma.wallet.update({
+      where: { memberId: member.id },
+      data: { balance: 5000000, totalSaved: 5000000 },
+    });
     await prisma.session.create({
       data: {
         phone: PHONE,
         state: "awaiting_withdraw_pin",
         data: JSON.stringify({
-          withdrawAmount: 10000,
+          withdrawAmount: 2000000,
           withdrawAccount: "0123456789",
           withdrawBankCode: "044",
           withdrawBankName: "Access Bank",
@@ -189,18 +187,22 @@ describe("secure PIN challenges", () => {
 
     const wr = await prisma.withdrawalRequest.findFirst({ where: { memberId: member.id } });
     expect(wr).not.toBeNull();
-    expect(wr!.amount).toBe(10000);
+    expect(wr!.amount).toBe(2000000);
   });
 
   it("still accepts typed PIN text when a flow challenge is outstanding", async () => {
     const coop = await makeCoop("TESTSP4", "Test Coop");
     const member = await makeMember(PHONE, coop.id, { bank: true });
+    await prisma.wallet.update({
+      where: { memberId: member.id },
+      data: { balance: 5000000, totalSaved: 5000000 },
+    });
     await prisma.session.create({
       data: {
         phone: PHONE,
         state: "awaiting_withdraw_pin",
         data: JSON.stringify({
-          withdrawAmount: 10000,
+          withdrawAmount: 2000000,
           withdrawAccount: "0123456789",
           withdrawBankCode: "044",
           withdrawBankName: "Access Bank",

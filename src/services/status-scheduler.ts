@@ -1,4 +1,5 @@
 import { prisma } from "../lib/prisma.js";
+import { withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
 
 const STATUS_TIPS = [
   "💡 Save before you spend. Even ₦500/day = ₦182,500/year.",
@@ -61,34 +62,36 @@ export async function postAutoStatus(): Promise<void> {
 
   const content = getStatusForHour(hour);
 
-  // Post to all cooperatives with status enabled
-  const cooperatives = await prisma.cooperative.findMany({
-    where: {
-      config: { statusEnabled: true },
-    },
-    select: { id: true },
-  });
+  // Post to all cooperatives with status enabled.
+  const coopIds = await listCooperativeIds();
+  for (const coopId of coopIds) {
+    await withCoopContext(coopId, async () => {
+      const coop = await prisma.cooperative.findUnique({
+        where: { id: coopId },
+        select: { config: { select: { statusEnabled: true } } },
+      });
+      if (!coop?.config?.statusEnabled) return;
 
-  for (const coop of cooperatives) {
-    const existing = await prisma.statusPost.findFirst({
-      where: {
-        cooperativeId: coop.id,
-        scheduledTime: {
-          gte: new Date(now.getFullYear(), now.getMonth(), now.getDate()),
-          lt: new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1),
+      const existing = await prisma.statusPost.findFirst({
+        where: {
+          cooperativeId: coopId,
+          scheduledTime: {
+            gte: new Date(now.getFullYear(), now.getMonth(), now.getDate()),
+            lt: new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1),
+          },
         },
-      },
-    });
+      });
 
-    if (existing) continue;
+      if (existing) return;
 
-    await prisma.statusPost.create({
-      data: {
-        cooperativeId: coop.id,
-        content,
-        scheduledTime: now,
-        postedAt: now,
-      },
+      await prisma.statusPost.create({
+        data: {
+          cooperativeId: coopId,
+          content,
+          scheduledTime: now,
+          postedAt: now,
+        },
+      });
     });
   }
 }

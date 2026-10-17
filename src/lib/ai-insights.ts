@@ -14,13 +14,12 @@
 import { prisma } from "./prisma.js";
 import { getCoopSnapshot, getSavingsTrend, getLoanPerformance } from "./ai-data.js";
 import { groqFetch, groqAvailable, groqModel, GROQ_TIMEOUT_MS } from "./groq.js";
+import { formatBalance } from "./money.js";
 
 /**
  * Generate AI-powered financial insights.
  */
-export async function generateFinancialInsights(
-  cooperativeId: string,
-): Promise<string> {
+export async function generateFinancialInsights(cooperativeId: string): Promise<string> {
   if (!groqAvailable()) {
     return generateFallbackInsights(cooperativeId);
   }
@@ -34,14 +33,15 @@ export async function generateFinancialInsights(
   const data = { snapshot, trends, performance };
 
   try {
-    const res = await groqFetch({
-      model: groqModel(),
-      temperature: 0.3,
-      max_tokens: 500,
-      messages: [
-        {
-          role: "system",
-          content: `You are a financial analyst for a Nigerian cooperative.
+    const res = await groqFetch(
+      {
+        model: groqModel(),
+        temperature: 0.3,
+        max_tokens: 500,
+        messages: [
+          {
+            role: "system",
+            content: `You are a financial analyst for a Nigerian cooperative.
 Generate concise, actionable insights from the provided data.
 Do not invent numbers. Only use data provided.
 Focus on:
@@ -51,22 +51,27 @@ Focus on:
 4. Recommendations for improvement
 
 Note: These are AI-generated observations, not financial advice.
-Use the format: ₦XX,XXX for amounts. Be specific with numbers.
+Use the account currency and format amounts like 12,345.67. Be specific with numbers.
 Keep it under 300 words. Be professional but warm.`,
-        },
-        {
-          role: "user",
-          content: `Generate financial insights for this cooperative:\n\n${JSON.stringify(data, null, 2)}`,
-        },
-      ],
-    }, GROQ_TIMEOUT_MS);
+          },
+          {
+            role: "user",
+            content: `Generate financial insights for this cooperative:\n\n${JSON.stringify(data, null, 2)}`,
+          },
+        ],
+      },
+      GROQ_TIMEOUT_MS,
+    );
 
     if (!res.ok) return generateFallbackInsights(cooperativeId);
     const body = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
     const raw = body.choices?.[0]?.message?.content ?? generateFallbackInsights(cooperativeId);
-    return raw + "\n\n_Disclaimer: This is an AI-generated analysis and may not be fully accurate. Contact your cooperative admin for official information._";
+    return (
+      raw +
+      "\n\n_Disclaimer: This is an AI-generated analysis and may not be fully accurate. Contact your cooperative admin for official information._"
+    );
   } catch {
     return generateFallbackInsights(cooperativeId);
   }
@@ -82,7 +87,7 @@ async function generateFallbackInsights(cooperativeId: string): Promise<string> 
     getLoanPerformance(cooperativeId),
   ]);
 
-  const fmt = (n: number) => `₦${(n / 100).toLocaleString()}`;
+  const fmt = (n: number) => formatBalance(n);
 
   let insights = `📊 *Cooperative Financial Insights*\n\n`;
 
@@ -143,14 +148,13 @@ export async function generateLoanRiskAssessment(
     }),
   ]);
 
-  const fmt = (n: number) => `₦${(n / 100).toLocaleString()}`;
+  const fmt = (n: number) => formatBalance(n);
 
   let assessment = `⚠️ *Loan Risk Assessment*\n\n`;
 
   // Overall risk
   const riskLevel =
-    performance.repaymentRate > 80 ? "Low" :
-    performance.repaymentRate > 60 ? "Medium" : "High";
+    performance.repaymentRate > 80 ? "Low" : performance.repaymentRate > 60 ? "Medium" : "High";
 
   assessment += `Risk Level: *${riskLevel}*\n`;
   assessment += `Repayment Rate: ${performance.repaymentRate.toFixed(1)}%\n\n`;
@@ -159,9 +163,7 @@ export async function generateLoanRiskAssessment(
   if (overdueLoans.length > 0) {
     assessment += `*Overdue Loans (${overdueLoans.length}):*\n`;
     overdueLoans.forEach((loan) => {
-      const daysOverdue = Math.ceil(
-        (Date.now() - loan.dueDate!.getTime()) / (24 * 60 * 60 * 1000),
-      );
+      const daysOverdue = Math.ceil((Date.now() - loan.dueDate!.getTime()) / (24 * 60 * 60 * 1000));
       assessment += `• ${loan.member.name}: ${fmt(loan.balance)} (${daysOverdue} days)\n`;
     });
     assessment += `\n`;

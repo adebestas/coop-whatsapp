@@ -22,11 +22,24 @@ export async function handleOnboardStart(phone: string): Promise<void> {
 }
 
 export async function handleJoinStart(phone: string, args: string[]): Promise<void> {
+  // Optional `ref <code>`: capture the referrer's member code so a referral can
+  // be recorded once the member is created. Unknown/malformed codes are rejected
+  // later (at record time) — the join itself always proceeds.
+  const refIdx = args.findIndex((a) => a.toLowerCase() === "ref");
+  const referrerCode = refIdx >= 0 ? args[refIdx + 1]?.toUpperCase() : undefined;
   if (args[0]) {
+    const data = {
+      joinCode: args[0].toUpperCase(),
+      ...(referrerCode ? { referrerCode } : {}),
+    };
     await prisma.session.upsert({
       where: { phone },
-      create: { phone, state: "awaiting_name", data: JSON.stringify({ joinCode: args[0].toUpperCase() }) },
-      update: { state: "awaiting_name", data: JSON.stringify({ joinCode: args[0].toUpperCase() }) },
+      create: {
+        phone,
+        state: "awaiting_name",
+        data: JSON.stringify(data),
+      },
+      update: { state: "awaiting_name", data: JSON.stringify(data) },
     });
     await sendText({
       to: phone,
@@ -37,7 +50,9 @@ export async function handleJoinStart(phone: string, args: string[]): Promise<vo
   await prisma.session.upsert({
     where: { phone },
     create: { phone, state: "awaiting_coop_code" },
-    update: { state: "awaiting_coop_code" },
+    // Reset any prior flow's data (e.g. a stale joinCode/referrerCode) so a
+    // previous attempt cannot leak into this fresh "ask again" session.
+    update: { state: "awaiting_coop_code", data: "{}" },
   });
   await sendText({
     to: phone,
@@ -80,6 +95,26 @@ export async function askNokName(phone: string, data: FlowData): Promise<void> {
     text:
       `Last KYC step — who is your *next of kin*? (full name)\n\n` +
       `If anything happens to you, they're who the cooperative works with on your savings.`,
+  });
+}
+
+/**
+ * Optional financial-literacy certification opt-in, asked after the member is
+ * created (so we have a memberId to persist `MemberProgress.certificationOptIn`).
+ * Skippable and never blocks registration.
+ */
+export async function askLiteracyOptIn(phone: string, data: FlowData): Promise<void> {
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_literacy_optin", data: JSON.stringify(data) },
+    update: { state: "awaiting_literacy_optin", data: JSON.stringify(data) },
+  });
+  await sendText({
+    to: phone,
+    text:
+      "📘 *Optional:* join our free financial-literacy certification? " +
+      "It takes ~10 minutes and unlocks a higher loan limit once you pass.\n\n" +
+      "Reply *yes* to enroll or *skip*.",
   });
 }
 

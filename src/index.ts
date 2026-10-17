@@ -2,99 +2,67 @@ import { buildApp } from "./app.js";
 import { config, validateConfig } from "./config.js";
 import { startTelegramBot } from "./services/telegram-bot.js";
 import {
-  runAutoSaveReminders,
-  runDailyDigest,
-  runMonthlyStatements,
-  runBirthdayGreetings,
-  runDataRetention,
-  runProactiveAlerts,
-  runBackupVerificationJob,
+  runSchedulerTick,
+  runBackupJob,
+  runReconcileJob,
+  runPollerJob,
+  runDigestJob,
 } from "./services/scheduler.js";
-import { checkAnniversaries } from "./services/anniversary.js";
-import { scanGuarantorDefaults, executeDueDeductions } from "./services/guarantordeduction.js";
-import { postAutoStatus } from "./services/status-scheduler.js";
-import { cleanupExpiredVirtualAccounts } from "./services/payments/topup.js";
 import { runBackup } from "./services/backup.js";
-import { runReconciliation } from "./services/reconcile.js";
-import { runTransferPolling, transferPollIntervalMs } from "./services/statuspoller.js";
+import { transferPollIntervalMs } from "./services/statuspoller.js";
 import { validateEnvironment } from "./lib/envcheck.js";
 import { prisma } from "./lib/prisma.js";
-import { closeQueues, initQueueProcessors } from "./lib/queue.js";
-import { initRedis, closeRedis, isRedisConnected } from "./lib/cache.js";
-import { AlertSeverity, logAndAlert } from "./lib/alerting.js";
+import { closeQueues, initQueueProcessors, scheduleSchedulerJobs } from "./lib/queue.js";
+import { initRedis, closeRedis, isRedisConnected, withDistributedLock } from "./lib/cache.js";
+import { log } from "./lib/logger.js";
+import { createShutdown } from "./lib/shutdown.js";
+import { rlsEnforcementStatus } from "./lib/tenant-context.js";
 
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
 const RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000; // nightly
 
-// NOTE: Custom structured logger; could be consolidated with Fastify's built-in logger.
-// ===== Structured Logger =====
-const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 } as const;
-type LogLevel = keyof typeof LOG_LEVELS;
-const CURRENT_LOG_LEVEL: LogLevel = (process.env.LOG_LEVEL as LogLevel) ?? "info";
-
-function structuredLog(level: LogLevel, message: string, meta?: Record<string, unknown>): void {
-  if (LOG_LEVELS[level] > LOG_LEVELS[CURRENT_LOG_LEVEL]) return;
-  const entry = {
-    timestamp: new Date().toISOString(),
-    level,
-    message,
-    pid: process.pid,
-    ...(meta ? { meta } : {}),
-  };
-  const line = JSON.stringify(entry);
-  if (level === "error") {
-    process.stderr.write(line + "\n");
-  } else {
-    process.stdout.write(line + "\n");
-  }
-}
-
-const log = {
-  info: (msg: string, meta?: Record<string, unknown>) => structuredLog("info", msg, meta),
-  warn: (msg: string, meta?: Record<string, unknown>) => structuredLog("warn", msg, meta),
-  error: (msg: string, meta?: Record<string, unknown>) => structuredLog("error", msg, meta),
-  debug: (msg: string, meta?: Record<string, unknown>) => structuredLog("debug", msg, meta),
-};
+let app: ReturnType<typeof buildApp>;
 
 // ===== Graceful Shutdown =====
-let isShuttingDown = false;
+// Steps run in order; a failure is logged and the process still exits non-zero.
+// A watchdog forces exit if a close hangs, so shutdown always terminates even
+// though the in-process scheduler/Telegram timers keep the event loop alive.
+const { shutdown, isShuttingDown } = createShutdown(
+  [
+    { name: "HTTP server", close: () => app?.close() },
+    { name: "queue workers", close: () => closeQueues() },
+    { name: "Redis", close: () => closeRedis() },
+    { name: "database", close: () => prisma.$disconnect() },
+  ],
+  {
+    onStart: (signal) => log.info("shutdown started", { signal }),
+    onStep: (name) => log.info(`${name} closed`),
+    onError: (step, err) =>
+      log.error("shutdown error", {
+        step,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    exit: (code) => process.exit(code),
+  },
+);
 
-async function shutdown(signal: string) {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
-  log.info("shutdown started", { signal });
-
-  try {
-    // 1. Stop accepting new connections
-    await app.close();
-    log.info("HTTP server closed");
-
-    // 2. Close queue workers
-    await closeQueues();
-    log.info("queue workers closed");
-
-    // 3. Disconnect Redis
-    await closeRedis();
-    log.info("Redis disconnected");
-
-    // 4. Disconnect database
-    await prisma.$disconnect();
-    log.info("database disconnected");
-
-    log.info("graceful shutdown complete");
-    process.exitCode = 0;
-  } catch (err) {
-    log.error("shutdown error", { error: err instanceof Error ? err.message : String(err) });
-    process.exitCode = 1;
-  }
-}
-
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-
-let app: ReturnType<typeof buildApp>;
+// Surface crashes off-box: an unhandled rejection in a money path must not
+// vanish into a container log nobody reads. An uncaught exception leaves the
+// process in an undefined state, so it must terminate — log, then shut down.
+process.on("unhandledRejection", (reason) => {
+  log.error("unhandledRejection", {
+    error: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+});
+process.on("uncaughtException", (err) => {
+  log.error("uncaughtException", { error: err.message, stack: err.stack });
+  void shutdown("uncaughtException", 1);
+});
 
 async function main() {
   // Fail fast on missing configuration — never run a money bot half-configured.
@@ -121,6 +89,33 @@ async function main() {
     log.warn("Redis not configured — running without cache");
   }
 
+  // RLS canary: a half-finished cutover must be visible, not assumed. In
+  // production, refuse to boot without tenant isolation.
+  try {
+    const rls = await rlsEnforcementStatus();
+    if (rls.postgres && !rls.enforced) {
+      const msg =
+        "RLS policies present but NOT enforced for the current role (table-owner bypass) — tenant isolation is not active";
+      if (process.env.NODE_ENV === "production") {
+        log.error(
+          `${msg}; refusing to boot. Provision the coop_app role and set DATABASE_URL (non-owner) + DATABASE_OWNER_URL (see DEPLOY.md).`,
+          { policies: rls.policies },
+        );
+        process.exit(1);
+      }
+      log.warn(msg, { policies: rls.policies });
+    } else if (rls.postgres) {
+      log.info("RLS enforced for the current role", { policies: rls.policies });
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    if (process.env.NODE_ENV === "production") {
+      log.error("RLS enforcement check failed — refusing to boot", { error: detail });
+      process.exit(1);
+    }
+    log.warn("RLS enforcement check failed", { error: detail });
+  }
+
   try {
     await app.listen({ port: config.port, host: config.host });
     app.log.info(`Coop bot running on http://${config.host}:${config.port}`);
@@ -136,40 +131,35 @@ async function main() {
   // backups, digests) are actually processed. No-op when Redis is down.
   initQueueProcessors();
 
+  // Scheduler: BullMQ repeatable jobs when Redis is available (durable across
+  // restarts, exactly one worker per job); otherwise in-process loops.
+  if (isRedisConnected()) {
+    await scheduleSchedulerJobs();
+    log.info("scheduler: BullMQ repeatable jobs registered");
+  } else {
+    log.warn("scheduler: Redis unavailable — using in-process loops (single instance)");
+    startInProcessScheduler();
+  }
+}
+
+function startInProcessScheduler(): void {
   // Background jobs: reminders, monthly statements + birthday greetings,
   // guarantor default notices/deductions.
   let schedulerRunning = false;
   async function runSchedulerLoop() {
-    while (true) {
+    while (!isShuttingDown()) {
       await new Promise((r) => setTimeout(r, SCHEDULER_INTERVAL_MS));
+      if (isShuttingDown()) return;
       if (schedulerRunning) {
         log.warn("[scheduler] previous iteration still running, skipping");
         continue;
       }
       schedulerRunning = true;
       try {
-        await runAutoSaveReminders().catch((err) => app.log.error("[scheduler] auto-save reminders failed", err));
-        await runMonthlyStatements().catch((err) => app.log.error("[scheduler] monthly statements failed", err));
-        await runBirthdayGreetings().catch((err) => app.log.error("[scheduler] birthday greetings failed", err));
-        await checkAnniversaries().catch((err) => app.log.error("[scheduler] anniversary greetings failed", err));
-        await scanGuarantorDefaults()
-          .then(async (n) => {
-            if (n > 0) {
-              // Critical: guarantor default deductions move money — alert on failure
-              await logAndAlert(
-                "system",
-                "executeDueDeductions (guarantor default deductions)",
-                async () => { await executeDueDeductions(); },
-                AlertSeverity.CRITICAL,
-              );
-            }
-          })
-          .catch((err) => app.log.error("[scheduler] guarantor default scan failed", err));
-        await postAutoStatus().catch((err) => app.log.error("[scheduler] status auto-post failed", err));
-        await cleanupExpiredVirtualAccounts().catch((err) => app.log.error("[scheduler] virtual account cleanup failed", err));
-        await runDataRetention().catch((err) => app.log.error("[scheduler] data retention failed", err));
-        await runProactiveAlerts().catch((err) => app.log.error("[scheduler] proactive alerts failed", err));
-        await runBackupVerificationJob().catch((err) => app.log.error("[scheduler] backup verification failed", err));
+        // Distributed lock: with multiple instances, exactly one runs the tick.
+        await withDistributedLock("scheduler:tick", SCHEDULER_INTERVAL_MS, () =>
+          runSchedulerTick(),
+        );
       } finally {
         schedulerRunning = false;
       }
@@ -180,18 +170,20 @@ async function main() {
   // Data-loss protection: full backup every day, plus one at startup.
   void runBackup();
   async function runBackupLoop() {
-    while (true) {
+    while (!isShuttingDown()) {
       await new Promise((r) => setTimeout(r, BACKUP_INTERVAL_MS));
-      await logAndAlert("system", "runBackup (daily backup)", async () => { await runBackup(); }, AlertSeverity.CRITICAL);
+      if (isShuttingDown()) return;
+      await withDistributedLock("scheduler:backup", 60 * 60 * 1000, () => runBackupJob());
     }
   }
   void runBackupLoop();
 
   // Nightly reconciliation + anomaly alerts to super admins.
   async function runReconcileLoop() {
-    while (true) {
+    while (!isShuttingDown()) {
       await new Promise((r) => setTimeout(r, RECONCILE_INTERVAL_MS));
-      await logAndAlert("system", "runReconciliation (nightly reconciliation)", async () => { await runReconciliation(); }, AlertSeverity.CRITICAL);
+      if (isShuttingDown()) return;
+      await withDistributedLock("scheduler:reconcile", 60 * 60 * 1000, () => runReconcileJob());
     }
   }
   void runReconcileLoop();
@@ -200,9 +192,10 @@ async function main() {
   const pollMs = transferPollIntervalMs();
   if (pollMs > 0) {
     async function runPollerLoop() {
-      while (true) {
+      while (!isShuttingDown()) {
         await new Promise((r) => setTimeout(r, pollMs));
-        await logAndAlert("system", "runTransferPolling (payout status polling)", async () => { await runTransferPolling(); }, AlertSeverity.CRITICAL);
+        if (isShuttingDown()) return;
+        await withDistributedLock("scheduler:poller", pollMs, () => runPollerJob());
       }
     }
     void runPollerLoop();
@@ -210,9 +203,10 @@ async function main() {
 
   // Daily movement digest — every super sees every debit (default 8pm).
   async function runDigestLoop() {
-    while (true) {
+    while (!isShuttingDown()) {
       await new Promise((r) => setTimeout(r, SCHEDULER_INTERVAL_MS));
-      await logAndAlert("system", "runDailyDigest (daily movement digest)", async () => { await runDailyDigest(); }, AlertSeverity.CRITICAL);
+      if (isShuttingDown()) return;
+      await withDistributedLock("scheduler:digest", SCHEDULER_INTERVAL_MS, () => runDigestJob());
     }
   }
   void runDigestLoop();

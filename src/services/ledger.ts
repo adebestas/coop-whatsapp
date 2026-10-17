@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { postJournal } from "./journal.js";
 import { roundMoney } from "./money.js";
 
@@ -34,6 +34,13 @@ export async function recordLedger(input: {
   txRef?: string;
   /** Fund segregation: member (trust), operational, or reserve. */
   fundType?: string;
+  /**
+   * The account the money actually moved to/from. Defaults to `assets:bank`
+   * (real bank cash). Pass the true leg when it is NOT bank cash — e.g.
+   * `member_wallet:<id>` for wallet-funded interest/fines, or
+   * `assets:loan_portfolio` for fees withheld from a loan disbursement.
+   */
+  counterAccount?: string;
   /** Optional transaction client for atomic operations. */
   tx?: Pick<typeof prisma, "ledgerEntry" | "journalEntry">;
 }) {
@@ -42,40 +49,45 @@ export async function recordLedger(input: {
 
   // Enforce: dividend-related categories must use "appropriation" type
   if (input.category.includes("dividend") && input.type !== "appropriation") {
-    console.error(`[ledger] category "${input.category}" contains "dividend" but type is "${input.type}" — forcing type to "appropriation"`);
+    console.error(
+      `[ledger] category "${input.category}" contains "dividend" but type is "${input.type}" — forcing type to "appropriation"`,
+    );
     input.type = "appropriation";
   }
 
   const fundType = input.fundType ?? "operational";
   const client = input.tx ?? prisma;
 
-  // Double-entry mapping: money in/out of the cooperative bank account.
+  // Double-entry mapping. `counter` is the account the money actually moved
+  // to/from — `assets:bank` for real bank cash, or the caller-supplied leg
+  // (member wallet, loan portfolio, ...) when no bank cash moved.
+  const counter = input.counterAccount ?? "assets:bank";
   const postings =
     input.type === "income"
       ? [
-          { account: "assets:bank", direction: "DEBIT" as const, amount },
+          { account: counter, direction: "DEBIT" as const, amount },
           { account: `income:${input.category}`, direction: "CREDIT" as const, amount },
         ]
       : input.type === "expense"
         ? [
             { account: `expense:${input.category}`, direction: "DEBIT" as const, amount },
-            { account: "assets:bank", direction: "CREDIT" as const, amount },
+            { account: counter, direction: "CREDIT" as const, amount },
           ]
         : input.type === "balance_sheet"
           ? [
               // Balance sheet movement: tracks asset/liability changes without
               // affecting P&L. The caller specifies the account via `category`.
               { account: input.category, direction: "DEBIT" as const, amount },
-              { account: "assets:bank", direction: "CREDIT" as const, amount },
+              { account: counter, direction: "CREDIT" as const, amount },
             ]
           : [
               // Appropriation: debits a liability account (dividend payable) and
-              // credits the bank account, representing a distribution of profits.
+              // credits the counter account, representing a distribution of profits.
               // Using liabilities:dividend_payable instead of equity:retained_earnings
               // ensures the cooperative's obligation to pay is tracked until wallets
               // are actually credited.
               { account: "liabilities:dividend_payable", direction: "DEBIT" as const, amount },
-              { account: "assets:bank", direction: "CREDIT" as const, amount },
+              { account: counter, direction: "CREDIT" as const, amount },
             ];
 
   if (input.tx) {
@@ -93,7 +105,7 @@ export async function recordLedger(input: {
     });
   } else {
     // Standalone call — wrap in its own batch transaction
-    await prisma.$transaction([
+    await withTxBatch([
       prisma.ledgerEntry.create({
         data: {
           cooperativeId: input.cooperativeId,
@@ -109,23 +121,32 @@ export async function recordLedger(input: {
   }
   // Non-blocking on duplicates here (callers that need strict idempotency
   // use postJournal directly with a deterministic txRef).
-  await postJournalSafe({
-    cooperativeId: input.cooperativeId,
-    txRef: input.txRef,
-    description: input.note ?? `${input.type}:${input.category}`,
-    postings,
-  }, client);
+  await postJournalSafe(
+    {
+      cooperativeId: input.cooperativeId,
+      txRef: input.txRef,
+      description: input.note ?? `${input.type}:${input.category}`,
+      postings,
+    },
+    client,
+  );
 }
 
 /** Journal posting that never breaks the main write (best-effort parity). */
-async function postJournalSafe(opts: {
-  cooperativeId: string;
-  txRef?: string;
-  description: string;
-  postings: Parameters<typeof postJournal>[0]["postings"];
-}, client: Pick<typeof prisma, "journalEntry" | "ledgerEntry"> = prisma) {
+async function postJournalSafe(
+  opts: {
+    cooperativeId: string;
+    txRef?: string;
+    description: string;
+    postings: Parameters<typeof postJournal>[0]["postings"];
+  },
+  client: Pick<typeof prisma, "journalEntry" | "ledgerEntry"> = prisma,
+) {
   try {
-    await postJournal({ ...opts, txRef: opts.txRef ?? `jr_${crypto.randomUUID()}`, description: opts.description }, client);
+    await postJournal(
+      { ...opts, txRef: opts.txRef ?? `jr_${crypto.randomUUID()}`, description: opts.description },
+      client,
+    );
   } catch (err) {
     console.error("[ledger] journal posting failed", {
       cooperativeId: opts.cooperativeId,
@@ -166,11 +187,15 @@ export async function computePnl(
   startDate?: Date,
   endDate?: Date,
 ): Promise<PnlSummary> {
-  const where: { cooperativeId: string; type: { in: ("income" | "expense")[] }; createdAt?: { gte?: Date; lte?: Date } } = {
+  const where: {
+    cooperativeId: string;
+    type: { in: ("income" | "expense")[] };
+    createdAt?: { gte?: Date; lte?: Date };
+  } = {
     cooperativeId,
     type: { in: ["income", "expense"] },
   };
-  
+
   if (startDate || endDate) {
     where.createdAt = {};
     if (startDate) where.createdAt.gte = startDate;
@@ -178,7 +203,7 @@ export async function computePnl(
   }
 
   const grouped = await prisma.ledgerEntry.groupBy({
-    by: ['type', 'category'],
+    by: ["type", "category"],
     where,
     _sum: { amount: true },
   });
@@ -206,12 +231,19 @@ export async function computePnl(
     totalIncome: roundMoney(totalIncome),
     totalExpense: roundMoney(totalExpense),
     netProfit: roundMoney(totalIncome - totalExpense),
-    period: startDate || endDate ? { start: startDate ?? new Date(0), end: endDate ?? new Date() } : undefined,
+    period:
+      startDate || endDate
+        ? { start: startDate ?? new Date(0), end: endDate ?? new Date() }
+        : undefined,
   };
 }
 
 /** Get monthly summary for a given month (0-11) */
-export async function getMonthlySummary(cooperativeId: string, year: number, month: number): Promise<PnlSummary> {
+export async function getMonthlySummary(
+  cooperativeId: string,
+  year: number,
+  month: number,
+): Promise<PnlSummary> {
   const start = new Date(year, month, 1);
   const end = new Date(year, month + 1, 0, 23, 59, 59);
   return computePnl(cooperativeId, start, end);

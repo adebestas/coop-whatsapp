@@ -1,14 +1,24 @@
 import { createHmac } from "node:crypto";
+import { z } from "zod";
 import type {
   ProviderAdapter,
   CreateVirtualAccountParams,
   VirtualAccountData,
   PaymentNotification,
+  PayoutNotification,
   ResolveAccountParams,
   ResolveAccountResult,
+  Bank,
   PayoutParams,
   PayoutResult,
   TransferStatus,
+  CreateMandateParams,
+  MandateResult,
+  DebitMandateParams,
+  DebitResult,
+  CancelMandateParams,
+  MandateNotification,
+  DebitNotification,
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
 import { forProvider } from "../../lib/money.js";
@@ -21,41 +31,101 @@ import { forProvider } from "../../lib/money.js";
  *      MONNIFY_BASE_URL (default: sandbox), MONNIFY_TRANSFER_OTP (sandbox OTP).
  */
 
-const BASE_URL = process.env.MONNIFY_BASE_URL || (
-  process.env.NODE_ENV === "production"
-    ? (() => { throw new Error("MONNIFY_BASE_URL is required in production — refusing to start with sandbox URL"); })()
-    : "https://sandbox.monnify.com"
-);
+const BASE_URL =
+  process.env.MONNIFY_BASE_URL ||
+  (process.env.NODE_ENV === "production"
+    ? (() => {
+        throw new Error(
+          "MONNIFY_BASE_URL is required in production — refusing to start with sandbox URL",
+        );
+      })()
+    : "https://sandbox.monnify.com");
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
+/** Hard cap on any single Monnify HTTP call so a hung socket cannot hold a connection. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Shape contract for a successful-transaction webhook (amounts arrive in NAIRA). */
+const MonnifyTxSchema = z
+  .object({
+    eventType: z.string().optional(),
+    type: z.string().optional(),
+    eventData: z
+      .object({
+        transactionReference: z.union([z.string(), z.number()]).optional(),
+        transactionId: z.union([z.string(), z.number()]).optional(),
+        paymentReference: z.string().optional(),
+        amountPaid: z.coerce.number().optional(),
+        amount: z.coerce.number().optional(),
+        currencyCode: z.string().optional(),
+        destinationAccountInformation: z
+          .object({ accountNumber: z.union([z.string(), z.number()]).optional() })
+          .passthrough()
+          .optional(),
+        accountNumber: z.union([z.string(), z.number()]).optional(),
+        product: z.object({ reference: z.string().optional() }).passthrough().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+/** Shape contract for a disbursement (payout) webhook. */
+const MonnifyDisbursementSchema = z
+  .object({
+    eventType: z.string().optional(),
+    type: z.string().optional(),
+    eventData: z
+      .object({
+        reference: z.string().optional(),
+        paymentReference: z.string().optional(),
+        providerReference: z.string().optional(),
+        status: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
 function configured(): boolean {
-  return Boolean(process.env.MONNIFY_API_KEY && process.env.MONNIFY_SECRET_KEY && process.env.MONNIFY_CONTRACT_CODE);
+  return Boolean(
+    process.env.MONNIFY_API_KEY &&
+    process.env.MONNIFY_SECRET_KEY &&
+    process.env.MONNIFY_CONTRACT_CODE,
+  );
 }
 
 async function accessToken(): Promise<string> {
   if (cachedToken && cachedToken.expiresAt > Date.now() + 30_000) {
     return cachedToken.token;
   }
-  const basic = Buffer.from(`${process.env.MONNIFY_API_KEY}:${process.env.MONNIFY_SECRET_KEY}`).toString("base64");
+  const basic = Buffer.from(
+    `${process.env.MONNIFY_API_KEY}:${process.env.MONNIFY_SECRET_KEY}`,
+  ).toString("base64");
   const res = await fetch(`${BASE_URL}/api/v1/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Basic ${basic}` },
     body: "{}",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`Monnify auth failed (${res.status})`);
   const json = (await res.json()) as { responseBody: { accessToken: string; expiresIn: number } };
-  cachedToken = { token: json.responseBody.accessToken, expiresAt: Date.now() + json.responseBody.expiresIn * 1000 };
+  cachedToken = {
+    token: json.responseBody.accessToken,
+    expiresAt: Date.now() + json.responseBody.expiresIn * 1000,
+  };
   return cachedToken.token;
 }
 
-async function api<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+async function api<T>(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<T> {
   const token = await accessToken();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
   const res = await fetch(`${BASE_URL}${path}`, {
     method,
     headers,
-    body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
+    body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const json = (await res.json()) as T;
   return json;
@@ -82,10 +152,12 @@ export const monnifyAdapter: ProviderAdapter = {
   },
 
   parseNotification(body: unknown): PaymentNotification | null {
-    const b = body as any;
-    const eventType: string | undefined = b?.eventType ?? b?.type;
+    const parsed = MonnifyTxSchema.safeParse(body);
+    if (!parsed.success) return null;
+    const b = parsed.data;
+    const eventType: string | undefined = b.eventType ?? b.type;
     if (!eventType?.toUpperCase().includes("SUCCESSFUL_TRANSACTION")) return null;
-    const payload = b?.eventData ?? {};
+    const payload: any = b.eventData ?? {};
     const account = payload.destinationAccountInformation?.accountNumber ?? payload.accountNumber;
     if (!account) return null;
     return {
@@ -102,14 +174,41 @@ export const monnifyAdapter: ProviderAdapter = {
     };
   },
 
+  parsePayoutNotification(body: unknown): PayoutNotification | null {
+    const parsed = MonnifyDisbursementSchema.safeParse(body);
+    if (!parsed.success) return null;
+    const b = parsed.data;
+    const eventType = String(b.eventType ?? b.type ?? "").toUpperCase();
+    // Only disbursement (payout) events; tolerate DISBURSEMENT_SUCCESS /
+    // SUCCESSFUL_DISBURSEMENT / FAILED_DISBURSEMENT naming drift.
+    if (!eventType.includes("DISBURSEMENT")) return null;
+    const status: PayoutNotification["status"] | null = eventType.includes("SUCCESS")
+      ? "successful"
+      : eventType.includes("FAIL") || eventType.includes("REVERS")
+        ? "failed"
+        : null;
+    if (!status) return null;
+    const reference = b.eventData?.reference ?? b.eventData?.paymentReference;
+    if (!reference) return null;
+    return {
+      reference,
+      status,
+      providerRef: b.eventData?.providerReference,
+      provider: "monnify",
+      raw: body,
+    };
+  },
+
   async getTransferStatus(reference) {
     if (!configured()) return { status: "unknown", error: "Monnify is not configured" };
     try {
-      const res = await api<MonnifyResponse<{
-        reference?: string;
-        status?: string;
-        providerReference?: string;
-      }>>("GET", `/api/v2/disbursements/single/summary?reference=${encodeURIComponent(reference)}`);
+      const res = await api<
+        MonnifyResponse<{
+          reference?: string;
+          status?: string;
+          providerReference?: string;
+        }>
+      >("GET", `/api/v2/disbursements/single/summary?reference=${encodeURIComponent(reference)}`);
       const s = String(res.responseBody?.status ?? "").toUpperCase();
       const status: TransferStatus["status"] =
         s === "SUCCESSFUL" || s === "PAID"
@@ -127,12 +226,14 @@ export const monnifyAdapter: ProviderAdapter = {
 
   async createVirtualAccount(params: CreateVirtualAccountParams): Promise<VirtualAccountData> {
     if (!configured()) throw new Error("Monnify is not configured (MONNIFY_* env vars missing)");
-    const res = await api<MonnifyResponse<{
-      accountNumber: string;
-      bankName: string;
-      accountReference: string;
-      reservationReference?: string;
-    }>>("POST", "/api/v2/bank-transfer/reserved-accounts", {
+    const res = await api<
+      MonnifyResponse<{
+        accountNumber: string;
+        bankName: string;
+        accountReference: string;
+        reservationReference?: string;
+      }>
+    >("POST", "/api/v2/bank-transfer/reserved-accounts", {
       contractCode: process.env.MONNIFY_CONTRACT_CODE,
       accountReference: params.reference,
       accountName: params.name,
@@ -141,7 +242,8 @@ export const monnifyAdapter: ProviderAdapter = {
       currencyCode: params.currency ?? "NGN",
       getAllAvailableBanks: false,
     });
-    if (!res.requestSuccessful) throw new Error(res.responseMessage ?? "Monnify reserved-account failed");
+    if (!res.requestSuccessful)
+      throw new Error(res.responseMessage ?? "Monnify reserved-account failed");
     return {
       accountNumber: res.responseBody.accountNumber,
       bank: res.responseBody.bankName,
@@ -150,7 +252,10 @@ export const monnifyAdapter: ProviderAdapter = {
     };
   },
 
-  async resolveAccount({ accountNumber, bankCode }: ResolveAccountParams): Promise<ResolveAccountResult> {
+  async resolveAccount({
+    accountNumber,
+    bankCode,
+  }: ResolveAccountParams): Promise<ResolveAccountResult> {
     if (!configured()) return { ok: false, error: "Monnify is not configured" };
     try {
       const res = await api<MonnifyResponse<{ accountName: string }>>(
@@ -166,15 +271,37 @@ export const monnifyAdapter: ProviderAdapter = {
     }
   },
 
+  async listBanks(_currency?: string): Promise<Bank[]> {
+    if (!configured()) return [];
+    try {
+      const res = await api<MonnifyResponse<Array<{ code: string; name: string }>>>(
+        "GET",
+        "/api/v1/banks",
+      );
+      if (!res.requestSuccessful || !Array.isArray(res.responseBody)) return [];
+      return res.responseBody
+        .map((b) => ({ code: String(b.code ?? ""), name: String(b.name ?? "") }))
+        .filter((b) => b.code && b.name);
+    } catch {
+      return [];
+    }
+  },
+
   async payout(params: PayoutParams): Promise<PayoutResult> {
     if (!configured()) return { ok: false, error: "Monnify is not configured" };
+    // Once the transfer is INITIATED, any later uncertainty must be reported as
+    // `pending` (ambiguous), never as a clean failure — Monnify may already be
+    // holding the transfer awaiting authorization.
+    let initiated = false;
     try {
       // Step 1: initiate the transfer (2FA required).
-      const init = await api<MonnifyResponse<{
-        reference: string;
-        transferReference: string;
-        status: string;
-      }>>("POST", "/api/v2/disbursements/single", {
+      const init = await api<
+        MonnifyResponse<{
+          reference: string;
+          transferReference: string;
+          status: string;
+        }>
+      >("POST", "/api/v2/disbursements/single", {
         amount: forProvider(params.amount, "monnify"),
         bankCode: params.bankCode,
         bankAccountNumber: params.bankAccountNumber,
@@ -185,23 +312,27 @@ export const monnifyAdapter: ProviderAdapter = {
         coin: "NGN",
       });
       if (!init.requestSuccessful) {
+        // Hard decline by Monnify — no transfer was accepted. Safe as failed.
         return { ok: false, error: init.responseMessage ?? "transfer rejected" };
       }
+      initiated = true;
 
-      // Step 2: Complete transfer with OTP
-      // ⚠️ PRODUCTION LIMITATION: Monnify generates a NEW OTP per transfer,
-      // sent to the account holder via SMS/email from Monnify directly.
-      // This env-var approach only works in sandbox. For production, use one of:
-      //   1. Monnify's "business factor" API for programmatic OTP retrieval
-      //   2. Route OTP to admin via WhatsApp for manual entry
-      //   3. Use Monnify's "resend OTP" endpoint to trigger re-delivery
-      //   4. Contact Monnify support to enable "auto-approve" for your contract
+      // Step 2: Complete transfer with OTP.
+      // ⚠️ PRODUCTION LIMITATION: Monnify issues a NEW OTP per transfer. The
+      // static-env approach only works in sandbox or on contracts with
+      // auto-approve. Without an OTP we CANNOT complete here, but the transfer
+      // is already initiated — report `pending` so the caller flags it for
+      // reconciliation instead of refunding a possibly in-flight transfer.
       const otp = process.env.MONNIFY_TRANSFER_OTP;
       if (!otp) {
-        console.warn("[Monnify] MONNIFY_TRANSFER_OTP not set — transfers will fail in production");
+        console.warn(
+          "[Monnify] transfer initiated but MONNIFY_TRANSFER_OTP not set — flagged as pending",
+        );
         return {
           ok: false,
-          error: "Monnify OTP not configured. Set MONNIFY_TRANSFER_OTP environment variable.",
+          pending: true,
+          error:
+            "Monnify transfer requires authorization (OTP). Configure an auto-approve contract, a business-factor OTP source, or authorized OTP relay.",
         };
       }
 
@@ -210,12 +341,150 @@ export const monnifyAdapter: ProviderAdapter = {
         "/api/v2/disbursements/single/complete",
         { reference: init.responseBody.transferReference, authorizationCode: otp },
       );
-      if (!validate.requestSuccessful || validate.responseBody.status === "FAILED") {
+      if (!validate.requestSuccessful) {
+        // Completion could not be confirmed — treat as ambiguous.
+        return {
+          ok: false,
+          pending: true,
+          error: validate.responseMessage ?? "transfer authorization unconfirmed",
+        };
+      }
+      if (validate.responseBody.status === "FAILED") {
+        // Monnify explicitly reports failure — safe as failed.
         return { ok: false, error: validate.responseMessage ?? "transfer validation failed" };
       }
       return { ok: true, providerRef: init.responseBody.reference };
     } catch (err: any) {
-      return { ok: false, error: err?.message ?? "monnify payout failed" };
+      // If the transfer was already initiated, an exception (network/timeout)
+      // leaves its outcome unknown — report `pending`, not failed.
+      return {
+        ok: false,
+        pending: initiated,
+        error: err?.message ?? "monnify payout failed",
+      };
     }
+  },
+
+  async createMandate(params: CreateMandateParams): Promise<MandateResult> {
+    if (!configured()) return { ok: false, error: "Monnify is not configured" };
+    try {
+      const res = await api<
+        MonnifyResponse<{
+          mandateCode: string;
+          authorizationLink?: string;
+          mandateStatus?: string;
+        }>
+      >("POST", "/api/v1/disbursements/mandate", {
+        customerName: params.memberName,
+        customerEmail: params.memberEmail,
+        customerPhoneNumber: params.memberPhone,
+        customerAccountDetails: {
+          accountNumber: params.accountNumber,
+          bankCode: params.bankCode,
+          accountName: params.accountName,
+        },
+        mandateDate: new Date().toISOString().slice(0, 10),
+        mandateAmount: forProvider(params.amountCap, "monnify"),
+        narration: params.narration ?? "Cooperative savings/loan mandate",
+        redirectUrl: params.redirectUrl,
+      });
+      if (!res.requestSuccessful) {
+        return { ok: false, error: res.responseMessage ?? "mandate rejected" };
+      }
+      return {
+        ok: true,
+        providerMandateId: res.responseBody.mandateCode,
+        authorizationUrl: res.responseBody.authorizationLink,
+        status: res.responseBody.mandateStatus,
+      };
+    } catch (err: any) {
+      return { ok: false, error: err?.message ?? "mandate failed" };
+    }
+  },
+
+  async debitMandate(params: DebitMandateParams): Promise<DebitResult> {
+    if (!configured()) return { ok: false, error: "Monnify is not configured" };
+    try {
+      const res = await api<MonnifyResponse<{ transactionReference: string; debitStatus: string }>>(
+        "POST",
+        "/api/v1/disbursements/debit",
+        {
+          mandateId: params.providerMandateId,
+          amount: forProvider(params.amount, "monnify"),
+          reference: params.reference,
+          narration: params.narration,
+        },
+      );
+      if (!res.requestSuccessful) {
+        return { ok: false, error: res.responseMessage ?? "debit rejected" };
+      }
+      return {
+        ok: true,
+        providerRef: res.responseBody.transactionReference,
+        status: res.responseBody.debitStatus,
+      };
+    } catch (err: any) {
+      return { ok: false, error: err?.message ?? "debit failed" };
+    }
+  },
+
+  async cancelMandate(params: CancelMandateParams): Promise<{ ok: boolean; error?: string }> {
+    if (!configured()) return { ok: false, error: "Monnify is not configured" };
+    try {
+      const res = await api<MonnifyResponse<unknown>>(
+        "PUT",
+        `/api/v1/disbursements/mandate/${encodeURIComponent(params.providerMandateId)}`,
+        { action: "CANCEL" },
+      );
+      return {
+        ok: res.requestSuccessful,
+        error: res.requestSuccessful ? undefined : res.responseMessage,
+      };
+    } catch (err: any) {
+      return { ok: false, error: err?.message ?? "cancel failed" };
+    }
+  },
+
+  parseMandateNotification(body: unknown): MandateNotification | null {
+    const b: any = body;
+    if (String(b?.eventType ?? "").toUpperCase() !== "MANDATE_UPDATE") return null;
+    const d = b.eventData ?? {};
+    const map: Record<string, MandateNotification["status"]> = {
+      ACTIVATED: "active",
+      CANCELLED: "cancelled",
+      FAILED: "failed",
+      EXPIRED: "expired",
+    };
+    const status = map[String(d.mandateStatus ?? "").toUpperCase()];
+    if (!status || !d.mandateCode) return null;
+    return {
+      providerMandateId: String(d.mandateCode),
+      status,
+      provider: "monnify",
+      raw: body,
+    };
+  },
+
+  parseDebitNotification(body: unknown): DebitNotification | null {
+    const b: any = body;
+    const eventType = String(b?.eventType ?? b?.type ?? "").toUpperCase();
+    if (!eventType.includes("DISBURSEMENT")) return null;
+    const d = b.eventData ?? {};
+    const reference = d.reference ?? d.paymentReference;
+    if (!reference) return null;
+    const status: DebitNotification["status"] | null = eventType.includes("SUCCESS")
+      ? "successful"
+      : eventType.includes("FAIL") || eventType.includes("REVERS")
+        ? "failed"
+        : null;
+    if (!status) return null;
+    return {
+      reference,
+      status,
+      providerTransactionId: d.providerReference,
+      reason: d.status,
+      provider: "monnify",
+      raw: body,
+    };
   },
 };

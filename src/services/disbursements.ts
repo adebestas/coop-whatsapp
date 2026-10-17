@@ -1,15 +1,28 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx } from "../lib/prisma.js";
+import { setCoopContext } from "../lib/tenant-context.js";
+import { getCurrency } from "../lib/runtime-context.js";
 import { notifyMember } from "../lib/messaging.js";
-import { resolveProvider, markProviderDown, markProviderUp } from "./payments/index.js";
+import {
+  resolveProvider,
+  markProviderDown,
+  markProviderUp,
+  type ProviderAdapter,
+} from "./payments/index.js";
 import { formatBalance } from "./cooperative.js";
+import { maskId } from "../lib/security.js";
 import { recordLedger } from "./ledger.js";
 import { postJournal } from "./journal.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
+import { screenAndRecord, isBlocking } from "./screening.js";
 
 export interface DisbursementResult {
   ok: boolean;
-  status: "successful" | "failed" | "name_mismatch" | "unsure";
+  status: "successful" | "failed" | "name_mismatch" | "unsure" | "screening_blocked";
   message: string;
+  /** Provider-resolved account-holder name, when the transfer succeeded. */
+  verifiedName?: string;
+  /** Payout.id of the created payout row, when the transfer succeeded. */
+  payoutId?: string;
 }
 
 interface SendToBankOpts {
@@ -41,6 +54,57 @@ interface SendToBankOpts {
   onFailure?: (status: string, error: string) => Promise<void>;
 }
 
+/** Outcome of a bank-account name confirmation. */
+export interface NameConfirmResult {
+  /** True only when the name was resolved and (unless skipped) matched. */
+  ok: boolean;
+  status: "confirmed" | "name_mismatch" | "unresolved";
+  /** Provider-resolved account name, when the provider returned one. */
+  name?: string;
+  /** Provider error when the account could not be resolved. */
+  error?: string;
+}
+
+/**
+ * Resolve a bank account's registered name via the provider and confirm it
+ * against the expected recipient's name. Fail-closed: when the provider cannot
+ * resolve the account (or has no resolver), the result is `unresolved` and the
+ * caller MUST hold the payout rather than send it blind.
+ *
+ * This is the single name-confirmation step shared by every payout path:
+ * `sendToBank` (withdrawals, refunds, dividends, loan disbursements) and the
+ * pay-anyone flow. Non-Monnify providers use their own `resolveAccount`.
+ */
+export async function confirmAccountName(params: {
+  provider: Pick<ProviderAdapter, "name" | "resolveAccount">;
+  accountNumber: string;
+  bankCode: string;
+  expectedName: string;
+  /** Skip the comparison (e.g. death-claim payouts to a family member). */
+  skip?: boolean;
+}): Promise<NameConfirmResult> {
+  const { provider, accountNumber, bankCode, expectedName, skip } = params;
+
+  if (!provider.resolveAccount) {
+    if (skip) return { ok: true, status: "confirmed" };
+    return { ok: false, status: "unresolved", error: "provider has no resolver" };
+  }
+
+  const resolved = await provider.resolveAccount({ accountNumber, bankCode });
+  if (skip) {
+    // Death claims etc. — the money goes to a family member, not the account
+    // holder. Security comes from the validations + super admin approval.
+    return { ok: true, status: "confirmed", name: resolved.ok ? resolved.name : undefined };
+  }
+  if (!resolved.ok || !resolved.name) {
+    return { ok: false, status: "unresolved", error: resolved.error ?? "resolution failed" };
+  }
+  if (!namesMatch(resolved.name, expectedName)) {
+    return { ok: false, status: "name_mismatch", name: resolved.name };
+  }
+  return { ok: true, status: "confirmed", name: resolved.name };
+}
+
 /**
  * Verify the account holder's name against the member's registered name, then
  * send the money. Shared by loan disbursements and member withdrawals.
@@ -50,7 +114,7 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
   const member = await prisma.member.findUnique({ where: { id: opts.memberId } });
   if (!member) return { ok: false, status: "failed", message: "Member not found." };
 
-  const provider = await resolveProvider();
+  const provider = await resolveProvider(undefined, getCurrency());
   if (!provider.resolveAccount) {
     if (opts.skipNameCheck) {
       return payOut(opts, member, null);
@@ -58,43 +122,62 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
     const msg = "Payment provider has no account resolver — can't verify the bank account.";
     await opts.onFailure?.("failed", "provider has no resolver");
     await notify(member, msg);
+    await alertSupers(
+      member.cooperativeId,
+      `🛑 Payout *held* for ${member.name} — ${formatBalance(opts.amount)} NOT sent: the payment provider has no account resolver, so the destination account can't be verified.`,
+      AlertSeverity.CRITICAL,
+    ).catch(() => {});
     return { ok: false, status: "failed", message: msg };
   }
 
   // 1. Verify the account holder's name matches the member's registered name.
-  const resolved = await provider.resolveAccount!({
+  const confirm = await confirmAccountName({
+    provider,
     accountNumber: opts.bankAccountNumber,
     bankCode: opts.bankCode,
+    expectedName: member.name,
+    skip: opts.skipNameCheck,
   });
-  if (opts.skipNameCheck) {
-    // Death claims etc. — the money goes to a family member, not the account
-    // holder. Security comes from the validations + super admin approval.
-    return payOut(opts, member, resolved.ok ? (resolved.name ?? null) : null);
-  }
-  if (!resolved.ok || !resolved.name) {
-    const msg = `Not paid out: could not verify the account (${resolved.error ?? "unknown error"}). Check the bank details.`;
-    await opts.onFailure?.("failed", resolved.error ?? "resolution failed");
-    await notify(member, msg);
-    return { ok: false, status: "failed", message: msg };
+  if (confirm.ok) {
+    // 2. Names match — send the money.
+    return payOut(opts, member, confirm.name ?? null);
   }
 
-  if (!namesMatch(resolved.name, member.name)) {
-    const msg = `Not paid out: the account name (*${resolved.name}*) does not match your registered name (*${member.name}*). Admin must verify before paying.`;
-    await opts.onFailure?.("name_mismatch", `account name is "${resolved.name}"`);
+  if (confirm.status === "name_mismatch") {
+    const msg = `Not paid out: the account name (*${confirm.name}*) does not match your registered name (*${member.name}*). Admin must verify before paying.`;
+    await opts.onFailure?.("name_mismatch", `account name is "${confirm.name}"`);
     await notify(member, msg);
+    await alertSupers(
+      member.cooperativeId,
+      `🛑 Payout *held* for ${member.name} — ${formatBalance(opts.amount)} NOT sent: name mismatch. The bank account resolves to *${confirm.name}*, not the registered *${member.name}*. Verify the bank details before retrying.`,
+      AlertSeverity.CRITICAL,
+    ).catch(() => {});
     return { ok: false, status: "name_mismatch", message: msg };
   }
 
-  // 2. Names match — send the money.
-  return payOut(opts, member, resolved.name);
+  const msg = `Not paid out: could not verify the account (${confirm.error ?? "unknown error"}). Check the bank details.`;
+  await opts.onFailure?.("failed", confirm.error ?? "resolution failed");
+  await notify(member, msg);
+  await alertSupers(
+    member.cooperativeId,
+    `🛑 Payout *held* for ${member.name} — ${formatBalance(opts.amount)} NOT sent: the destination account could not be resolved (${confirm.error ?? "unknown error"}).`,
+    AlertSeverity.CRITICAL,
+  ).catch(() => {});
+  return { ok: false, status: "failed", message: msg };
 }
 
 async function payOut(
   opts: SendToBankOpts,
-  member: { id: string; name: string; cooperativeId: string; phone: string },
-  _verifiedName: string | null,
+  member: {
+    id: string;
+    name: string;
+    cooperativeId: string;
+    phone: string;
+    bankAccountName?: string | null;
+  },
+  verifiedName: string | null,
 ): Promise<DisbursementResult> {
-  const provider = await resolveProvider();
+  const provider = await resolveProvider(undefined, getCurrency());
   // Deterministic reference: retries reuse the SAME key, so the provider and
   // our own unique constraint both reject a second execution.
   const reference = opts.idempotencyKey ?? `TFR-${opts.memberId.slice(-8)}-${Date.now()}`;
@@ -107,6 +190,26 @@ async function payOut(
       status: "failed",
       message: `Duplicate payout blocked: reference ${reference.slice(-10)} was already processed (${existing.status}).`,
     };
+  }
+
+  // CFT: screen the recipient name (the provider-resolved account holder when
+  // available, else the registered name) before initiating any transfer. A
+  // strong or weak watchlist match blocks the payout.
+  const screenName = verifiedName ?? member.name;
+  const screening = await screenAndRecord(screenName, {
+    cooperativeId: member.cooperativeId,
+    subjectType: "payout",
+    subjectId: member.id,
+    subjectName: screenName,
+  }).catch((err) => {
+    console.error("[disbursements] screening failed", err);
+    return null;
+  });
+  if (screening && isBlocking(screening.status)) {
+    const msg = `🛑 Payout NOT sent: the recipient name ("${screenName}") failed compliance screening (${screening.status}). A supervisor has been alerted to review.`;
+    await opts.onFailure?.("screening_blocked", `screening ${screening.status}`);
+    await notify(member, msg);
+    return { ok: false, status: "screening_blocked", message: msg };
   }
 
   // Tracks whether the payment provider has accepted/submitted this transfer.
@@ -123,8 +226,18 @@ async function payOut(
         bankCode: opts.bankCode,
         recipientName: member.name,
         reference,
+        currency: getCurrency(),
       });
       if (!result.ok) {
+        if (result.pending) {
+          // The provider ACCEPTED the transfer but it is not confirmed yet
+          // (e.g. Monnify awaiting a per-transfer OTP). This is ambiguous — do
+          // NOT mark it failed or refund/reverse; flag for reconciliation.
+          const msg = `⚠️ The payout was initiated but is awaiting provider authorization (${result.error ?? "pending"}). Do not retry or refund until it is confirmed.`;
+          await opts.onFailure?.("unsure", result.error ?? "pending authorization");
+          await notify(member, msg);
+          return { ok: false, status: "unsure", message: msg };
+        }
         // Provider explicitly declined — transfer not accepted. Safe to refund.
         markProviderDown(provider.name);
         const msg = `Not paid out: provider error (${result.error ?? "unknown"}). No money moved.`;
@@ -138,8 +251,9 @@ async function payOut(
       markProviderUp(provider.name);
     }
 
+    let payoutId: string;
     try {
-      await prisma.payout.create({
+      const payout = await prisma.payout.create({
         data: {
           amount: opts.amount,
           reference,
@@ -147,11 +261,12 @@ async function payOut(
           status: "successful",
           provider: provider.name,
           providerRef,
-          note: opts.note,
+          note: verifiedName ? `${opts.note} · confirmed: ${verifiedName}` : opts.note,
           memberId: member.id,
           cooperativeId: member.cooperativeId,
         },
       });
+      payoutId = payout.id;
     } catch (err: any) {
       if (err?.code === "P2002") {
         // Lost the race with a concurrent identical payout — treat as duplicate.
@@ -163,6 +278,14 @@ async function payOut(
         };
       }
       throw err;
+    }
+
+    // Persist the provider-verified account name once (Zero-BVN assurance), so
+    // later payouts to the same destination can trust it.
+    if (verifiedName && !member.bankAccountName) {
+      await prisma.member
+        .update({ where: { id: member.id }, data: { bankAccountName: verifiedName } })
+        .catch(() => {});
     }
 
     // Double-entry: expense leaves the cooperative bank account. Withdrawn by
@@ -189,9 +312,17 @@ async function payOut(
       }
     }
 
-    const msg = opts.successMessage ?? `✅ ${formatBalance(opts.amount)} sent to your bank account (${opts.bankName ?? opts.bankCode} ****${opts.bankAccountNumber.slice(-4)}). Ref: ${reference.slice(-6)}.`;
+    const msg =
+      opts.successMessage ??
+      `✅ ${formatBalance(opts.amount)} sent to your bank account (${opts.bankName ?? opts.bankCode} ****${opts.bankAccountNumber.slice(-4)}). Ref: ${reference.slice(-6)}.`;
     await notify(member, msg);
-    return { ok: true, status: "successful", message: msg };
+    return {
+      ok: true,
+      status: "successful",
+      message: msg,
+      verifiedName: verifiedName ?? undefined,
+      payoutId,
+    };
   } catch (err: any) {
     if (submitted) {
       // The provider accepted the transfer but a later bookkeeping step failed.
@@ -223,7 +354,11 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
   });
   if (!loan) return { ok: false, status: "failed", message: "Loan not found." };
   if (loan.status !== "approved") {
-    return { ok: false, status: "failed", message: `Loan must be approved before disbursement (current: ${loan.status}).` };
+    return {
+      ok: false,
+      status: "failed",
+      message: `Loan must be approved before disbursement (current: ${loan.status}).`,
+    };
   }
 
   // ATOMIC CLAIM — flips disbursementStatus to "processing" only if no other
@@ -261,9 +396,16 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
     return { ok: false, status: "failed", message: msg };
   }
 
-  // The member receives the loan minus the flat admin charge.
+  // The member receives the loan minus the flat admin charge and, when
+  // enabled, the credit-life protection premium withheld into the coop fund.
   const adminCharge = loan.adminCharge ?? 0;
-  const disbursable = Math.max(0, loan.amount - adminCharge);
+  const config = await prisma.cooperativeConfig.findUnique({
+    where: { cooperativeId: loan.cooperativeId },
+  });
+  const protectionEnabled = config?.loanProtectionEnabled ?? true;
+  const protectionPercent = config?.loanProtectionPercent ?? 1;
+  const premium = protectionEnabled ? Math.floor((loan.amount * protectionPercent) / 100) : 0;
+  const disbursable = Math.max(0, loan.amount - adminCharge - premium);
 
   const result = await sendToBank({
     memberId: member.id,
@@ -275,7 +417,7 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
     // Deterministic per-loan key: a retried disbursement of THIS loan can
     // never pay out twice, even across app restarts.
     idempotencyKey: `TFR-LOAN-${loan.id}`,
-    successMessage: `🎉 Loan *disbursed!* ${formatBalance(loan.amount)} approved — *${formatBalance(disbursable)}* (after the ${formatBalance(adminCharge)} admin charge) is on its way to your ${loan.bankName ?? loan.bankCode} account ****${loan.bankAccountNumber.slice(-4)}.`,
+    successMessage: `🎉 Loan *disbursed!* ${formatBalance(loan.amount)} approved — *${formatBalance(disbursable)}* (after the ${formatBalance(adminCharge)} admin charge${premium > 0 ? ` and the ${formatBalance(premium)} protection premium` : ""}) is on its way to your ${loan.bankName ?? loan.bankCode} account ****${loan.bankAccountNumber.slice(-4)}.`,
     onFailure: async (status, error) => {
       // "failed" is retryable; the next attempt re-claims via the gate above.
       await prisma.loan.update({
@@ -286,46 +428,107 @@ export async function disburseLoan(loanId: string): Promise<DisbursementResult> 
   });
 
   if (result.ok) {
-    // Defensive final claim — even if two paths somehow reached here, only
-    // the one that flips the status books the ledger entry.
-    const finalized = await prisma.loan.updateMany({
-      where: { id: loan.id, status: "approved" },
-      data: {
-        status: "disbursed",
-        disbursedAt: new Date(),
-        disbursementStatus: "successful",
-        disbursementAmount: disbursable,
-        disbursementError: null,
-      },
+    // All post-payout bookkeeping — loan finalization, admin-charge and
+    // portfolio ledger entries, and the protection-fund write — happens in ONE
+    // transaction. The member has already been paid (external sendToBank), so
+    // either every internal side effect lands or none does; the loan can never
+    // reach a terminal "disbursed" state without its protection row and fund
+    // credit, which no retry could repair.
+    const booked = await withTx(async (tx) => {
+      await setCoopContext(tx as never, loan.cooperativeId);
+      // Defensive final claim — even if two paths somehow reached here, only
+      // the one that flips the status books the ledger entry.
+      const finalized = await tx.loan.updateMany({
+        where: { id: loan.id, status: "approved" },
+        data: {
+          status: "disbursed",
+          disbursedAt: new Date(),
+          disbursementStatus: "successful",
+          disbursementAmount: disbursable,
+          disbursementError: null,
+        },
+      });
+      if (finalized.count === 0) {
+        console.error(`[loan] disbursement succeeded but loan ${loan.id} was already finalized`);
+        return false;
+      }
+      // P&L: the admin charge is cooperative income. It is withheld from the
+      // loan (no bank cash moved), so its counter-leg is the loan portfolio.
+      await recordLedger({
+        cooperativeId: loan.cooperativeId,
+        type: "income",
+        category: "admin_charge",
+        amount: adminCharge,
+        note: `Admin charge on loan ${loan.id.slice(-6)}`,
+        reference: loan.id,
+        fundType: "operational",
+        counterAccount: "assets:loan_portfolio",
+        tx: tx as never,
+      });
+      // Balance sheet: loan portfolio increases, bank decreases.
+      await recordLedger({
+        cooperativeId: loan.cooperativeId,
+        type: "balance_sheet",
+        category: "assets:loan_portfolio",
+        amount: disbursable,
+        note: `Loan disbursement ${loan.id.slice(-6)} to ${member.name}`,
+        reference: loan.id,
+        fundType: "operational",
+        tx: tx as never,
+      });
+      // Credit-life protection: the premium withheld from the payout is held in
+      // the cooperative's protection fund (a liability to the insured members).
+      if (premium > 0) {
+        await tx.loanProtection.create({
+          data: {
+            cooperativeId: loan.cooperativeId,
+            loanId: loan.id,
+            memberId: member.id,
+            premium,
+            status: "active",
+          },
+        });
+        await tx.cooperative.update({
+          where: { id: loan.cooperativeId },
+          data: { protectionFundBalance: { increment: premium } },
+        });
+        await tx.ledgerEntry.create({
+          data: {
+            cooperativeId: loan.cooperativeId,
+            type: "balance_sheet",
+            category: "liabilities:loan_protection_fund",
+            amount: premium,
+            note: `Loan protection premium on loan ${loan.id.slice(-6)}`,
+            reference: loan.id,
+            fundType: "operational",
+          },
+        });
+        await postJournal(
+          {
+            cooperativeId: loan.cooperativeId,
+            txRef: `LOAN-PROT-${loan.id}`,
+            description: `Loan protection premium on loan ${loan.id.slice(-6)}`,
+            postings: [
+              { account: "assets:bank", direction: "DEBIT", amount: premium },
+              {
+                account: "liabilities:loan_protection_fund",
+                direction: "CREDIT",
+                amount: premium,
+              },
+            ],
+          },
+          tx,
+        );
+      }
+      return true;
     });
-    if (finalized.count === 0) {
-      console.error(`[loan] disbursement succeeded but loan ${loan.id} was already finalized`);
-      return result;
-    }
-    // P&L: the admin charge is cooperative income.
-    await recordLedger({
-      cooperativeId: loan.cooperativeId,
-      type: "income",
-      category: "admin_charge",
-      amount: adminCharge,
-      note: `Admin charge on loan ${loan.id.slice(-6)}`,
-      reference: loan.id,
-      fundType: "operational",
-    });
-    // Balance sheet: loan portfolio increases, bank decreases.
-    await recordLedger({
-      cooperativeId: loan.cooperativeId,
-      type: "balance_sheet",
-      category: "assets:loan_portfolio",
-      amount: disbursable,
-      note: `Loan disbursement ${loan.id.slice(-6)} to ${member.name}`,
-      reference: loan.id,
-      fundType: "operational",
-    });
+    // Another path finalized this loan first — bookkeeping is skipped and the
+    // payout result is returned unchanged.
+    if (!booked) return result;
     return {
       ok: true,
       status: "successful",
-      message: `🎉 Loan *disbursed!* ${formatBalance(loan.amount)} approved — *${formatBalance(disbursable)}* (after the ${formatBalance(adminCharge)} admin charge) is on its way to your ${loan.bankName ?? loan.bankCode} account ****${loan.bankAccountNumber.slice(-4)}.`,
+      message: `🎉 Loan *disbursed!* ${formatBalance(loan.amount)} approved — *${formatBalance(disbursable)}* (after the ${formatBalance(adminCharge)} admin charge${premium > 0 ? ` and the ${formatBalance(premium)} protection premium` : ""}) is on its way to your ${loan.bankName ?? loan.bankCode} account ****${loan.bankAccountNumber.slice(-4)}.`,
     };
   }
   return result;
@@ -352,10 +555,13 @@ export function namesMatch(accountName: string, registeredName: string): boolean
   return a.size > 0;
 }
 
-async function notify(member: { phone: string; altChannelId?: string | null; preferredChannel?: string | null }, text: string): Promise<void> {
+async function notify(
+  member: { phone: string; altChannelId?: string | null; preferredChannel?: string | null },
+  text: string,
+): Promise<void> {
   try {
     await notifyMember(member, text);
   } catch (err) {
-    console.error(`[disbursements] Failed to notify member ${member.phone}:`, err);
+    console.error(`[disbursements] Failed to notify member ${maskId(member.phone)}:`, err);
   }
 }

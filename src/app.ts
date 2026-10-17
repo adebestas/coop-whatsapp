@@ -5,12 +5,15 @@ import fastifyStatic from "@fastify/static";
 import rateLimit from "@fastify/rate-limit";
 import path from "node:path";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { webhookRoutes } from "./routes/webhook.js";
 import { paymentWebhookRoutes } from "./routes/payments.js";
 import { adminApiRoutes } from "./routes/admin.js";
 import { serveExportFile } from "./routes/exports.js";
+import { certificateRoutes } from "./routes/certificate.js";
 import { prisma } from "./lib/prisma.js";
 import { isRedisConnected } from "./lib/cache.js";
+import { incCounter, renderMetrics } from "./lib/metrics.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -20,6 +23,21 @@ declare module "fastify" {
   }
 }
 
+/**
+ * Directory holding the admin dashboard static files.
+ *
+ * Previously hardcoded to `/app/dashboard`, which only exists inside the Docker
+ * image — every non-container deploy (and the test suite) silently served no
+ * dashboard. Resolve relative to this module (`<root>/dashboard` when built to
+ * `dist/app.js`, `<root>/dashboard` from source) so it works everywhere, with
+ * `DASHBOARD_DIR` as an explicit override.
+ */
+export function resolveDashboardDir(): string {
+  if (process.env.DASHBOARD_DIR) return path.resolve(process.env.DASHBOARD_DIR);
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(here, "..", "dashboard");
+}
+
 export function buildApp() {
   const app = Fastify({
     logger: true,
@@ -27,6 +45,9 @@ export function buildApp() {
     trustProxy: true,
     bodyLimit: 256 * 1024, // 256 KB
     requestTimeout: 30_000,
+    // Force-close keep-alive sockets on app.close() so graceful shutdown can't
+    // hang waiting on idle client connections (OPS-1).
+    forceCloseConnections: true,
   });
 
   // Capture the RAW request body before JSON parsing — provider webhook
@@ -62,8 +83,11 @@ export function buildApp() {
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-hashes'", "https://cdn.jsdelivr.net"],
-        scriptSrcAttr: ["'unsafe-inline'"],
+        // No 'unsafe-inline' for scripts: the dashboard uses delegated
+        // data-action handlers and external scripts only (dashboard/app.js,
+        // dashboard/login.js). Inline event handlers are blocked outright.
+        scriptSrc: ["'self'", "https://cdn.jsdelivr.net"],
+        scriptSrcAttr: ["'none'"],
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         imgSrc: ["'self'", "data:", "https:"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
@@ -115,6 +139,23 @@ export function buildApp() {
     }
   });
 
+  // Prometheus-format metrics. Protect with METRICS_TOKEN when set.
+  app.get("/metrics", async (req, reply) => {
+    const token = process.env.METRICS_TOKEN;
+    if (token) {
+      const auth = req.headers.authorization;
+      if (auth !== `Bearer ${token}`) {
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+    }
+    return reply.type("text/plain; version=0.0.4").send(renderMetrics());
+  });
+
+  // Count every response by method + status for the metrics endpoint.
+  app.addHook("onResponse", async (req, reply) => {
+    incCounter("http_requests_total", { method: req.method, status: String(reply.statusCode) });
+  });
+
   app.get("/", async (_req, reply) => {
     return reply.code(200).send({ name: "coop-whatsapp", status: "running", health: "/health" });
   });
@@ -123,9 +164,10 @@ export function buildApp() {
   void app.register(paymentWebhookRoutes);
   void app.register(adminApiRoutes);
   void app.register(serveExportFile);
+  void app.register(certificateRoutes);
 
   // Serve static files — admin dashboard
-  const dashboardDir = path.resolve("/app/dashboard");
+  const dashboardDir = resolveDashboardDir();
   if (!fs.existsSync(dashboardDir)) {
     console.warn(`[app] Dashboard directory not found at ${dashboardDir} — static files disabled`);
   } else {

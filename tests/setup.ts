@@ -10,50 +10,77 @@ import { buildApp } from "../src/app.js";
 import { PrismaClient } from "@prisma/client";
 import { vi } from "vitest";
 
-// Use SQLite for tests (local schema)
+// Use SQLite for tests (local schema). `connection_limit=1` forces a single
+// connection so `PRAGMA foreign_keys = OFF` in cleanupDatabase() reliably
+// applies to the DELETEs (Prisma otherwise pools 9 connections and the pragma
+// is connection-scoped).
 export const prisma = new PrismaClient({
   datasources: {
     db: {
-      url: "file:./dev.db",
+      url: "file:./dev.db?connection_limit=1",
     },
   },
 });
 
 // ===== Global Mocks =====
-// Mock WhatsApp API to prevent real API calls during tests
+// Mock only the TRANSPORT layer, never src/lib/messaging.js itself.
+// The messaging module is wrapped in vi.fn() instead of replaced, so real behaviour
+// runs (opt-out suppression, WhatsApp 24h session window, channel selection) while
+// existing `vi.mocked(sendText).mock.calls` assertions keep working. Replacing it
+// with a pass-through stub — which is what this file used to do — silently hid all
+// of that from the suite, and left console.log noise in the output.
 vi.mock("../src/lib/whatsapp.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
   sendFlowMessage: vi.fn().mockResolvedValue(true),
+  sendDocument: vi.fn().mockResolvedValue(true),
 }));
 
-// Mock messaging to use mocked WhatsApp
+vi.mock("../src/lib/telegram.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/telegram.js")>();
+  return {
+    ...actual,
+    sendTelegramMessage: vi.fn().mockResolvedValue(true),
+    sendTelegramKeyboard: vi.fn().mockResolvedValue(1),
+    deleteTelegramMessage: vi.fn().mockResolvedValue(true),
+    getTelegramUpdates: vi.fn().mockResolvedValue([]),
+    sendTelegramDocument: vi.fn().mockResolvedValue(true),
+  };
+});
+
 vi.mock("../src/lib/messaging.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/messaging.js")>();
   return {
     ...actual,
-    sendText: vi.fn().mockImplementation(async (params) => {
-      console.log('[GLOBAL MOCK sendText]', params);
-      return true;
-    }),
-    notifyMember: vi.fn().mockImplementation(async (member, text) => {
-      console.log('[GLOBAL MOCK notifyMember]', member?.phone, text?.slice(0, 30));
-      return true;
-    }),
-    platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-    sendSecurePrompt: vi.fn().mockResolvedValue(true),
+    sendText: vi.fn(actual.sendText),
+    sendSecurePrompt: vi.fn(actual.sendSecurePrompt),
+    notifyMember: vi.fn(actual.notifyMember),
   };
 });
 
-// Mock payments module to avoid real API calls in tests
+// Mock payments module to avoid real API calls in tests. This mock is
+// registered before the app import below, so a per-file mock of the same
+// module would be inert — tests arm tests/payment-state.ts instead.
 vi.mock("../src/services/payments/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/services/payments/index.js")>();
+  const { paymentState } = await import("./payment-state.js");
   return {
     ...actual,
     resolveProvider: vi.fn(() => ({
       name: "monnify",
-      createVirtualAccount: vi.fn(),
-      payout: vi.fn(async () => ({ ok: true, providerRef: "pay-trx-1" })),
-      resolveAccount: vi.fn(async () => ({ ok: true, name: "ADA OBI" })),
+      createVirtualAccount: vi.fn(async () => ({ accountNumber: "1234567890" })),
+      payout: vi.fn(async () =>
+        paymentState.payoutFails
+          ? { ok: false, error: "insufficient balance" }
+          : paymentState.payoutPending
+            ? { ok: false, pending: true, error: "awaiting authorization" }
+            : { ok: true, providerRef: "trx-1" },
+      ),
+      resolveAccount: vi.fn(async () =>
+        paymentState.resolveFails
+          ? { ok: false, error: "account not found" }
+          : { ok: true, name: paymentState.resolveName },
+      ),
+      getTransferStatus: vi.fn(async () => ({ status: paymentState.transferStatus })),
       verifyWebhook: () => true,
       parseNotification: () => null,
     })),
@@ -64,8 +91,40 @@ vi.mock("../src/services/payments/index.js", async (importOriginal) => {
   };
 });
 
+// Wrap `sendToBank` in a passthrough spy so tests can inject a throw AFTER a
+// real payout (to exercise the refund-remedy "money may have moved" guard).
+// Registered before the app import, so per-file mocks of this module are inert.
+vi.mock("../src/services/disbursements.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/services/disbursements.js")>();
+  return { ...actual, sendToBank: vi.fn(actual.sendToBank) };
+});
+
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
+import { beforeAll, beforeEach } from "vitest";
+
+// ===== Global Fixtures =====
+// Wipe the DB ONCE before each test file. Many files clean up only a subset of
+// tables by hand; without this, a row left behind by a previous file (e.g. a
+// Payout/VoteBallot) makes the next file's `member.deleteMany()` fail with a
+// foreign-key/unique-constraint error. cleanupDatabase() disables FK checks and
+// deletes every table, so this makes the suite order-independent.
+beforeAll(async () => {
+  // The RLS isolation suite runs against PostgreSQL with the PostgreSQL-generated
+  // client (see .github/workflows/ci.yml). The SQLite cleanup below would fail
+  // there, so skip it — that suite manages its own fixtures.
+  if ((process.env.DATABASE_URL ?? "").startsWith("postgres")) return;
+  await cleanupDatabase();
+});
+
+// getMemberByPhone() memoises member rows for 30s and tests reuse the same phone
+// numbers across cases, so a cached row from the previous test survives its own
+// beforeEach DELETE and later writes fail with "No record was found for an update".
+// Clearing the cache before every test isolates cases regardless of which cleanup
+// helper the file happens to use.
+beforeEach(() => {
+  clearMemberCache();
+});
 
 // ===== Test App =====
 
@@ -163,52 +222,45 @@ export async function createTestMember(
     update: { role, name, consentAt: new Date() },
   });
 
-  return { id: member.id, phone: member.phone, code: member.code, name: member.name, role: member.role };
+  return {
+    id: member.id,
+    phone: member.phone,
+    code: member.code,
+    name: member.name,
+    role: member.role,
+  };
 }
 
 // ===== Database Helpers =====
 
 /**
- * Clean up test data
+ * Clean up test data.
+ *
+ * Deletes every table in the database rather than a hand-maintained list: the
+ * list silently drifted from the schema (it predates DataConsent, AccountOfficer,
+ * GuarantorVerification and others), so rows survived between test files and made
+ * unrelated tests fail depending on execution order. Foreign keys are disabled for
+ * the duration so the order does not matter.
  */
 export async function cleanupDatabase(): Promise<void> {
   clearMemberCache();
-  // Delete in reverse dependency order
-  const tables = [
-    "Posting",
-    "JournalEntry",
-    "WebhookEvent",
-    "AuditLog",
-    "VoteBallot",
-    "PollOption",
-    "PurchasePoll",
-    "DeathClaim",
-    "DeathValidation",
-    "DeathCertificate",
-    "Beneficiary",
-    "LoanRepayment",
-    "Loan",
-    "Guarantor",
-    "WithdrawalRequest",
-    "ExternalPayment",
-    "Contribution",
-    "DeductionItem",
-    "DeductionBatch",
-    "DeductionWaiver",
-    "Payout",
-    "Wallet",
-    "Session",
-    "Member",
-    "Unit",
-    "Cooperative",
-  ];
+  const tables = await prisma.$queryRawUnsafe<{ name: string }[]>(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_prisma%'`,
+  );
+  if (tables.length === 0) return;
 
-  for (const table of tables) {
-    try {
-      await prisma.$executeRawUnsafe(`DELETE FROM "${table}"`);
-    } catch {
-      // Table might not exist
+  await prisma.$executeRawUnsafe(`PRAGMA foreign_keys = OFF`);
+  try {
+    // Delete children before parents. sqlite_master lists tables in creation
+    // order (parents first), so reverse it. This is FK-safe even when the
+    // `foreign_keys = OFF` pragma lands on a different pooled connection than
+    // the DELETEs (Prisma uses a connection pool, so the pragma is not
+    // guaranteed to apply to every connection).
+    for (const table of [...tables].reverse()) {
+      await prisma.$executeRawUnsafe(`DELETE FROM "${table.name}"`);
     }
+  } finally {
+    await prisma.$executeRawUnsafe(`PRAGMA foreign_keys = ON`);
   }
 }
 
@@ -254,7 +306,7 @@ export async function expectError(
     throw new Error("Expected an error to be thrown");
   } catch (err: any) {
     if (expectedMessage && !err.message.includes(expectedMessage)) {
-      throw new Error(`Expected "${expectedMessage}" but got "${err.message}"`);
+      throw new Error(`Expected "${expectedMessage}" but got "${err.message}"`, { cause: err });
     }
   }
 }

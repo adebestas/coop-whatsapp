@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { disburseLoan } from "./disbursements.js";
 import { requiredGuarantors } from "./guarantors.js";
@@ -8,13 +8,22 @@ import { LIMITS } from "../lib/money.js";
 import { flagTransaction } from "./aml.js";
 import { getCoopConfig } from "./coop-config.js";
 import { sendText } from "../lib/messaging.js";
+import { hasActiveCommittee, isCommitteeMember, recordCommitteeVote } from "./committees.js";
 
 /** After a loan leaves the queue, renumber positions for remaining pending loans. */
 async function renumberQueue(cooperativeId: string): Promise<void> {
   const pending = await prisma.loan.findMany({
     where: {
       cooperativeId,
-      status: { in: ["pending", "guaranteed", "account_officer_approved", "admin_approved", "super_approved_1"] },
+      status: {
+        in: [
+          "pending",
+          "guaranteed",
+          "account_officer_approved",
+          "admin_approved",
+          "super_approved_1",
+        ],
+      },
       queuePosition: { not: null },
     },
     orderBy: { queueJoinedAt: "asc" },
@@ -51,17 +60,19 @@ export const LOAN_TO_SAVINGS_RATIO = Number(process.env.LOAN_TO_SAVINGS_RATIO ??
 /** Flat admin charge deducted from every loan at disbursement (₦2,000 in kobo). */
 export const LOAN_ADMIN_CHARGE = Number(process.env.LOAN_ADMIN_CHARGE ?? "200000");
 /** Maximum allowed interest rate per CBN guidance on cooperative lending. */
-const MAX_ALLOWED_RATE = 15; // 15% max per CBN guidance
+const MAX_ALLOWED_RATE = 10; // 10% max per CBN guidance
 
 /**
  * Annual interest rates by tenure tier (declining balance / reducing balance).
  * These are annual percentage rates (APR) applied monthly on declining balance.
+ * 10% is the ceiling and belongs to the 10-month (longest) tier; shorter
+ * tenures price below it.
  */
 const ANNUAL_RATE_BY_TENURE: Record<string, number> = {
-  "1-3": 20.0,   // ~5% flat equivalent over 3 months
-  "4-6": 16.0,   // ~8% flat equivalent over 6 months
-  "7-9": 12.0,   // ~9% flat equivalent over 9 months
-  "10-12": 10.0, // ~10% flat equivalent over 12 months
+  "1-3": 6.0,
+  "4-6": 8.0,
+  "7-9": 9.0,
+  "10-12": 10.0,
 };
 
 /**
@@ -91,7 +102,7 @@ export function calculateMonthlyPayment(principal: number, tenureMonths: number)
   const r = monthlyRateFor(tenureMonths);
   if (r === 0) return Math.round(principal / tenureMonths);
   const n = tenureMonths;
-  const monthlyPayment = principal * r / (1 - Math.pow(1 + r, -n));
+  const monthlyPayment = (principal * r) / (1 - Math.pow(1 + r, -n));
   return Math.round(monthlyPayment);
 }
 
@@ -107,7 +118,11 @@ export function calculateInterestPortion(remainingBalance: number, tenureMonths:
 }
 
 /** Calculate principal portion of a specific installment for declining balance loan. */
-export function calculatePrincipalPortion(installmentAmount: number, remainingBalance: number, tenureMonths: number): number {
+export function calculatePrincipalPortion(
+  installmentAmount: number,
+  remainingBalance: number,
+  tenureMonths: number,
+): number {
   const interestPortion = calculateInterestPortion(remainingBalance, tenureMonths);
   return Math.max(0, installmentAmount - interestPortion);
 }
@@ -130,7 +145,10 @@ export async function applyForLoan(
     return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
   }
   if (!Number.isFinite(amount) || amount <= 0 || tenureMonths < 1 || tenureMonths > 12) {
-    return { ok: false, message: "Use the format *loan <amount> <months>*, e.g. *loan 50000 3* (up to 12 months)." };
+    return {
+      ok: false,
+      message: "Use the format *loan <amount> <months>*, e.g. *loan 50000 3* (up to 12 months).",
+    };
   }
   if (amount < LIMITS.MIN_LOAN) {
     return { ok: false, message: `Minimum loan amount is *${formatBalance(LIMITS.MIN_LOAN)}*.` };
@@ -139,9 +157,20 @@ export async function applyForLoan(
     return { ok: false, message: `Maximum loan amount is *${formatBalance(LIMITS.MAX_LOAN)}*.` };
   }
 
-  // Rule: a loan can't exceed 2x the member's total savings.
+  // Rule: a loan can't exceed the member's savings multiple. Members who pass the
+  // financial-literacy quiz get a boosted cap, but only while the cooperative
+  // enables certification and their certificate is still valid (not revoked).
   const savings = member.wallet?.totalSaved ?? 0;
-  const loanMultiplier = LOAN_TO_SAVINGS_RATIO;
+  const config = await getCoopConfig(member.cooperativeId);
+  let boost = 0;
+  if (config.literacyCertificationEnabled && config.certifiedLoanBoost > 0) {
+    const cert = await prisma.literacyCertificate.findUnique({
+      where: { memberId: member.id },
+      select: { revokedAt: true },
+    });
+    if (cert && !cert.revokedAt) boost = config.certifiedLoanBoost;
+  }
+  const loanMultiplier = LOAN_TO_SAVINGS_RATIO + boost;
   const maxLoan = Math.floor(savings * loanMultiplier);
   if (maxLoan <= 0) {
     return {
@@ -150,12 +179,16 @@ export async function applyForLoan(
     };
   }
   if (amount > maxLoan) {
+    const boostNote =
+      boost === 0 && config.literacyCertificationEnabled && config.certifiedLoanBoost > 0
+        ? `\n🎓 Pass the financial-literacy quiz to raise your cap to *${LOAN_TO_SAVINGS_RATIO + config.certifiedLoanBoost}x*.`
+        : "";
     return {
       ok: false,
       message:
         `Loans are capped at *${loanMultiplier}x your savings*.\n` +
         `Your savings: ${formatBalance(savings)} → max loan: *${formatBalance(maxLoan)}*.\n` +
-        `Try a smaller amount or save more first.`,
+        `Try a smaller amount or save more first.${boostNote}`,
     };
   }
 
@@ -171,13 +204,14 @@ export async function applyForLoan(
   if (defaulted) {
     return {
       ok: false,
-      message:
-        `⛔ You're behind on loan *${defaulted.id.slice(-6)}* (due ${defaulted.dueDate?.toISOString().slice(0, 10)}). Clear it — reply *repay* — before applying again.`,
+      message: `⛔ You're behind on loan *${defaulted.id.slice(-6)}* (due ${defaulted.dueDate?.toISOString().slice(0, 10)}). Clear it — reply *repay* — before applying again.`,
     };
   }
 
   // Interest is tiered by tenure and charged on declining balance (reducing balance).
-  const interestRate = annualRateFor(tenureMonths);
+  // Clamped to MAX_ALLOWED_RATE so quoted pricing can never exceed the ceiling that
+  // approveLoan enforces at disbursement.
+  const interestRate = Math.min(annualRateFor(tenureMonths), MAX_ALLOWED_RATE);
   const monthly = calculateMonthlyPayment(amount, tenureMonths);
   const total = totalRepayable(amount, tenureMonths);
 
@@ -218,8 +252,11 @@ export async function applyForLoan(
       `Tenure: *${tenureMonths} months*\n` +
       `Interest: *${annualRateFor(tenureMonths)}% APR* declining balance → repay *${formatBalance(Math.round(total))}*\n` +
       `Monthly installment: *${formatBalance(Math.round(monthly))}*\n` +
-      `Admin charge: *${formatBalance(LOAN_ADMIN_CHARGE)}* (you'll receive ${formatBalance(amount - LOAN_ADMIN_CHARGE)})\n\n` +
-      `You still need to add *${needed} guarantor${needed > 1 ? "s" : ""}* before the loan can be approved.`,
+      `Admin charge: *${formatBalance(LOAN_ADMIN_CHARGE)}* (you'll receive ${formatBalance(amount - LOAN_ADMIN_CHARGE)})\n` +
+      (boost > 0
+        ? `🎓 Certified-member boost applied: cap raised to *${loanMultiplier}x your savings*.\n`
+        : "") +
+      `\nYou still need to add *${needed} guarantor${needed > 1 ? "s" : ""}* before the loan can be approved.`,
   };
 }
 
@@ -329,7 +366,8 @@ export async function approveLoanByAccountOfficer(
   // Audit the approval
   await audit({
     cooperativeId: opts.cooperativeId,
-    actorPhone: (await prisma.member.findUnique({ where: { id: opts.actorId } }))?.phone ?? opts.actorId,
+    actorPhone:
+      (await prisma.member.findUnique({ where: { id: opts.actorId } }))?.phone ?? opts.actorId,
     actorId: opts.actorId,
     actorRole: "account_officer",
     action: "loan.account_officer_approve",
@@ -347,10 +385,10 @@ export async function approveLoanByAccountOfficer(
 /**
  * 5-Stage Loan Approval State Machine:
  * PENDING → GUARANTEED → ADMIN_APPROVED → SUPER_APPROVED_1 → APPROVED → DISBURSED
- * 
+ *
  * Rejection states (terminal, restart at PENDING on reapplication):
  * REJECTED_BY_GUARANTOR, REJECTED_BY_OFFICER, REJECTED_BY_SUPER_1, REJECTED_BY_SUPER_2
- * 
+ *
  * Enforcement rules:
  * - No stage can be skipped
  * - Same actorId cannot appear in two approval roles (Account Officer, Super Admin 1, Super Admin 2)
@@ -410,6 +448,36 @@ export async function approveLoan(
 
   // Stage 4: SUPER_APPROVED_1 (first super admin approval)
   if (loan.status === "admin_approved") {
+    // A cooperative with a staffed Credit Committee delegates the final loan
+    // approval to that committee. A bare-majority vote replaces the two
+    // super-admin signatures and triggers disbursement. Cooperatives without a
+    // credit committee keep the legacy admin -> super -> super chain below.
+    if (await hasActiveCommittee(opts.cooperativeId, "credit")) {
+      const memberId = opts.actorId;
+      if (!memberId || !(await isCommitteeMember(opts.cooperativeId, "credit", memberId))) {
+        return {
+          ok: false,
+          message: `Loan *${shortId}* is awaiting *Credit Committee* approval. Only committee members may vote.`,
+        };
+      }
+      const voteOutcome = await recordCommitteeVote(
+        opts.cooperativeId,
+        "credit",
+        "loan",
+        loan.id,
+        memberId,
+        "approve",
+      );
+      if (!voteOutcome.ok) {
+        return { ok: false, message: voteOutcome.message };
+      }
+      if (voteOutcome.decided === "approved") {
+        return finalizeLoanApproval(loan.id, memberId, "admin_approved");
+      }
+      // Vote recorded but the committee has not reached a majority yet.
+      return { ok: true, message: voteOutcome.message };
+    }
+
     if (!opts.superAdmin) {
       return {
         ok: false,
@@ -417,7 +485,10 @@ export async function approveLoan(
       };
     }
     // Check if this super admin already acted as Account Officer or will be second super admin
-    if (opts.actorId && (loan.accountOfficerApprovedById === opts.actorId || loan.finalApprovedById === opts.actorId)) {
+    if (
+      opts.actorId &&
+      (loan.accountOfficerApprovedById === opts.actorId || loan.finalApprovedById === opts.actorId)
+    ) {
       return {
         ok: false,
         message: `⛔ You have already acted on this loan in another role. The same person cannot fill multiple approval roles.`,
@@ -429,7 +500,10 @@ export async function approveLoan(
       data: { status: "super_approved_1", finalApprovedById: opts.actorId, approvedAt: new Date() },
     });
     if (moved.count === 0) {
-      return { ok: false, message: `Loan *${shortId}* was just updated by another approval. Check *pending*.` };
+      return {
+        ok: false,
+        message: `Loan *${shortId}* was just updated by another approval. Check *pending*.`,
+      };
     }
     // Notify applicant
     await notifyLoanStatusChange(loan, "super_approved_1");
@@ -461,7 +535,10 @@ export async function approveLoan(
       data: { status: "admin_approved", adminApprovedById: opts.actorId },
     });
     if (movedAdmin.count === 0) {
-      return { ok: false, message: `Loan *${shortId}* was just updated by another approval. Check *pending*.` };
+      return {
+        ok: false,
+        message: `Loan *${shortId}* was just updated by another approval. Check *pending*.`,
+      };
     }
     // Audit log
     const adminActor = await prisma.member.findUnique({ where: { id: opts.actorId } });
@@ -509,7 +586,10 @@ export async function approveLoan(
       };
     }
     // Check if this admin already acted as Super Admin on this loan
-    if (opts.actorId && (loan.finalApprovedById === opts.actorId || loan.superApproved2ById === opts.actorId)) {
+    if (
+      opts.actorId &&
+      (loan.finalApprovedById === opts.actorId || loan.superApproved2ById === opts.actorId)
+    ) {
       return {
         ok: false,
         message: `⛔ You have already acted on this loan in another role. The same person cannot fill multiple approval roles.`,
@@ -525,12 +605,16 @@ export async function approveLoan(
       },
     });
     if (moved.count === 0) {
-      return { ok: false, message: `Loan *${shortId}* was just updated by another officer. Check *pending*.` };
+      return {
+        ok: false,
+        message: `Loan *${shortId}* was just updated by another officer. Check *pending*.`,
+      };
     }
     // Audit log
     await audit({
       cooperativeId: opts.cooperativeId,
-      actorPhone: (await prisma.member.findUnique({ where: { id: opts.actorId! } }))?.phone ?? opts.actorId!,
+      actorPhone:
+        (await prisma.member.findUnique({ where: { id: opts.actorId! } }))?.phone ?? opts.actorId!,
       actorId: opts.actorId!,
       actorRole: "account_officer",
       action: "loan.account_officer_approve",
@@ -557,7 +641,13 @@ export async function approveLoan(
   }
 
   // Rejected states - terminal
-  const rejectedStates = ["rejected", "rejected_by_guarantor", "rejected_by_officer", "rejected_by_super_1", "rejected_by_super_2"];
+  const rejectedStates = [
+    "rejected",
+    "rejected_by_guarantor",
+    "rejected_by_officer",
+    "rejected_by_super_1",
+    "rejected_by_super_2",
+  ];
   if (rejectedStates.includes(loan.status)) {
     return {
       ok: false,
@@ -583,41 +673,61 @@ export async function approveLoan(
 /**
  * Second (final) super approval — sets terms, marks approved, disburses.
  * The status flip happens as an atomic CLAIM: exactly one concurrent caller
- * can move super_approved_1 -> approved, so the loan can never be disbursed
+ * can move the loan to `approved`, so the loan can never be disbursed
  * twice even under racing approvals.
+ *
+ * `expectedStatus` is the status this finalization claims from: the second
+ * super-admin signature claims `super_approved_1`, while a Credit Committee
+ * majority claims the loan directly from `admin_approved`.
  */
-async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{ ok: boolean; message: string }> {
+async function finalizeLoanApproval(
+  loanId: string,
+  actorId?: string,
+  expectedStatus: "super_approved_1" | "admin_approved" = "super_approved_1",
+): Promise<{ ok: boolean; message: string }> {
   const loan = await prisma.loan.findUnique({
     where: { id: loanId },
     include: { member: true },
   });
-  if (!loan || loan.status !== "super_approved_1") {
+  if (!loan || loan.status !== expectedStatus) {
     return { ok: false, message: "Loan isn't ready for final approval." };
   }
 
   // Cooperative Societies Act: minimum 20 active members before disbursing loans
-  const memberCount = await prisma.member.count({ where: { cooperativeId: loan.cooperativeId, status: "active" } });
+  const memberCount = await prisma.member.count({
+    where: { cooperativeId: loan.cooperativeId, status: "active" },
+  });
   if (memberCount < 20) {
-    return { ok: false, message: "Cooperative must have at least 20 active members before disbursing loans (Cooperative Societies Act)." };
+    return {
+      ok: false,
+      message:
+        "Cooperative must have at least 20 active members before disbursing loans (Cooperative Societies Act).",
+    };
   }
 
   // Regulatory compliance: reject if interest rate exceeds CBN guidance ceiling.
   if (loan.interestRate > MAX_ALLOWED_RATE) {
-    return { ok: false, message: `Loan *${loan.id.slice(-6)}* has an interest rate of ${loan.interestRate}% which exceeds the regulatory maximum of ${MAX_ALLOWED_RATE}%. Contact your cooperative registrar.` };
+    return {
+      ok: false,
+      message: `Loan *${loan.id.slice(-6)}* has an interest rate of ${loan.interestRate}% which exceeds the regulatory maximum of ${MAX_ALLOWED_RATE}%. Contact your cooperative registrar.`,
+    };
   }
 
   const monthly = calculateMonthlyPayment(loan.amount, loan.tenureMonths);
-  const total = totalRepayable(loan.amount, loan.tenureMonths);
   const due = new Date();
   due.setMonth(due.getMonth() + 1);
 
   // ATOMIC CLAIM — the second concurrent finalizer gets count=0 and stops.
   const claimed = await prisma.loan.updateMany({
-    where: { id: loan.id, status: "super_approved_1" },
+    where: { id: loan.id, status: expectedStatus },
     data: {
       status: "approved",
       monthlyPayment: monthly,
-      balance: total,
+      // `balance` is the OUTSTANDING PRINCIPAL (declining balance). Interest is
+      // charged per installment on the remaining principal, so the opening
+      // balance must be the principal — not principal + all interest (which
+      // made the loan never close and overcharged the member).
+      balance: loan.amount,
       superApproved2ById: actorId,
       approvedAt: new Date(),
       dueDate: due,
@@ -630,8 +740,7 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
     };
   }
 
-  const approvedMsg =
-    `Loan *${loan.id.slice(-6)}* fully approved for ${loan.member.name}: ${formatBalance(loan.amount)} @ ${loan.interestRate}% APR declining balance for ${loan.tenureMonths} months. Monthly: ${formatBalance(Math.round(monthly))}.`;
+  const approvedMsg = `Loan *${loan.id.slice(-6)}* fully approved for ${loan.member.name}: ${formatBalance(loan.amount)} @ ${loan.interestRate}% APR declining balance for ${loan.tenureMonths} months. Monthly: ${formatBalance(Math.round(monthly))}.`;
 
   // AML check on final approval
   const amlCheck = await flagTransaction({
@@ -641,9 +750,7 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
     type: "loan_disbursement",
     direction: "out",
   });
-  const amlNote = amlCheck.flagged
-    ? `\n\n⚠️ *AML Alert*: ${amlCheck.reasons.join("; ")}`
-    : "";
+  const amlNote = amlCheck.flagged ? `\n\n⚠️ *AML Alert*: ${amlCheck.reasons.join("; ")}` : "";
 
   // Clear queue position and renumber remaining loans
   await prisma.loan.update({
@@ -661,9 +768,37 @@ async function finalizeLoanApproval(loanId: string, actorId?: string): Promise<{
 class RepayBalanceChangedError extends Error {}
 
 /**
+ * The full amount `repayLoan` will debit for `loan` at `nowMs`: the installment
+ * plus any late fine (`lateFinePercent`% of the installment per full month
+ * overdue, minimum one month). Exported so the mandate scheduler can create a
+ * debit for EXACTLY what repayment will charge — a partial debit would settle the
+ * bank pull but leave `repayLoan` short, stranding the money and wedging the loan.
+ */
+export function computeRepaymentDue(
+  loan: { monthlyPayment: number | null; balance: number; dueDate: Date | null },
+  nowMs: number,
+  lateFinePercent: number,
+): { amount: number; fine: number; totalDue: number } {
+  const amount = loan.monthlyPayment ?? loan.balance;
+  let fine = 0;
+  if (loan.dueDate && loan.dueDate.getTime() < nowMs) {
+    const monthsLate = Math.max(
+      1,
+      Math.floor((nowMs - loan.dueDate.getTime()) / (30 * 24 * 60 * 60 * 1000)),
+    );
+    fine = Math.round(amount * (lateFinePercent / 100) * monthsLate);
+  }
+  return { amount, fine, totalDue: amount + fine };
+}
+
+/**
  * Member repays their loan monthly installment. Debited from wallet.
  */
-export async function repayLoan(phone: string, loanId?: string, cooperativeId?: string): Promise<{ ok: boolean; message: string }> {
+export async function repayLoan(
+  phone: string,
+  loanId?: string,
+  cooperativeId?: string,
+): Promise<{ ok: boolean; message: string }> {
   const member = cooperativeId
     ? await prisma.member.findUnique({
         where: { cooperativeId_phone: { cooperativeId, phone } },
@@ -690,18 +825,14 @@ export async function repayLoan(phone: string, loanId?: string, cooperativeId?: 
   const amount = loan.monthlyPayment ?? loan.balance;
 
   // Late fine: lateFinePercent% of the installment per month overdue.
-  let fine = 0;
   const now = Date.now();
+  let lateFinePercent = 0;
   if (loan.dueDate && loan.dueDate.getTime() < now) {
-    const coopConfig = await getCoopConfig(member.cooperativeId);
-    const fineRate = coopConfig.lateFinePercent;
-    const monthsLate = Math.max(
-      1,
-      Math.floor((now - loan.dueDate.getTime()) / (30 * 24 * 60 * 60 * 1000)),
-    );
-    fine = Math.round(amount * (fineRate / 100) * monthsLate);
+    lateFinePercent = (await getCoopConfig(member.cooperativeId)).lateFinePercent;
   }
-  const totalDue = amount + fine;
+  // Shared with the mandate scheduler so a direct debit always covers exactly
+  // what is charged here (installment + fine).
+  const { fine, totalDue } = computeRepaymentDue(loan, now, lateFinePercent);
 
   if (member.wallet.balance < totalDue) {
     return {
@@ -718,13 +849,15 @@ export async function repayLoan(phone: string, loanId?: string, cooperativeId?: 
   // NOTE: Interest is declining balance (reducing balance) per CBN guidance.
   // P&L: the interest slice of this installment is cooperative income; fines too.
   const interestPortion = calculateInterestPortion(loan.balance, loan.tenureMonths);
-  const principalPortion = Math.max(0, amount - interestPortion);
+  // Never repay more principal than is outstanding (the final installment can
+  // overshoot by a few kobo due to rounding).
+  const principalPortion = Math.min(Math.max(0, amount - interestPortion), loan.balance);
 
   // Atomic: debit the wallet and update the loan/repayment/fines inside ONE
   // transaction so a mid-way failure rolls everything back — money can never
   // leave the wallet without the matching loan/repayment record.
   try {
-    await prisma.$transaction(async (tx) => {
+    await withTx(async (tx) => {
       // Conditional debit — only succeeds if the balance still covers totalDue.
       const debited = await tx.wallet.updateMany({
         where: { id: walletId, balance: { gte: totalDue } },
@@ -750,8 +883,51 @@ export async function repayLoan(phone: string, loanId?: string, cooperativeId?: 
             amount: fine,
             status: "confirmed",
             reference: `FINE-${loan.id.slice(-6)}-${Date.now()}`,
-            note: `Late fine on loan ${loan.id.slice(-6)}`,
+            note: `Loan repayment by ${member.name}: late fine ${formatBalance(fine)} on loan ${loan.id.slice(-6)}`,
           },
+        });
+      }
+
+      // Book the P&L inside the SAME transaction so a crash can never leave the
+      // wallet debited without the matching ledger/journal entries.
+      await recordLedger({
+        cooperativeId: member.cooperativeId,
+        type: "income",
+        category: "interest",
+        amount: interestPortion,
+        note: `Loan repayment by ${member.name}: interest ${formatBalance(interestPortion)} on loan ${loan.id.slice(-6)}`,
+        reference: loan.id,
+        fundType: "operational",
+        counterAccount: `member_wallet:${walletId}`,
+        tx,
+      });
+      // Principal repayment is a return of capital, NOT income. It reduces the
+      // outstanding loan asset on the balance sheet — only interest and fines
+      // are profit. Booking principal as "income" overstated P&L.
+      if (principalPortion > 0) {
+        await recordLedger({
+          cooperativeId: member.cooperativeId,
+          type: "balance_sheet",
+          category: "assets:loan_portfolio",
+          amount: principalPortion,
+          note: `Loan repayment by ${member.name}: principal ${formatBalance(principalPortion)} on loan ${loan.id.slice(-6)}`,
+          reference: loan.id,
+          fundType: "member",
+          counterAccount: `member_wallet:${walletId}`,
+          tx,
+        });
+      }
+      if (fine > 0) {
+        await recordLedger({
+          cooperativeId: member.cooperativeId,
+          type: "income",
+          category: "fine",
+          amount: fine,
+          note: `Late fine on loan ${loan.id.slice(-6)}`,
+          reference: loan.id,
+          fundType: "operational",
+          counterAccount: `member_wallet:${walletId}`,
+          tx,
         });
       }
     });
@@ -760,39 +936,6 @@ export async function repayLoan(phone: string, loanId?: string, cooperativeId?: 
       return { ok: false, message: "Your wallet balance changed — please try again." };
     }
     throw err;
-  }
-
-  await recordLedger({
-    cooperativeId: member.cooperativeId,
-    type: "income",
-    category: "interest",
-    amount: interestPortion,
-    note: `Installment interest on loan ${loan.id.slice(-6)}`,
-    reference: loan.id,
-    fundType: "operational",
-  });
-  // Principal repayment: credits the bank account (the loan principal is returned to the cooperative)
-  if (principalPortion > 0) {
-    await recordLedger({
-      cooperativeId: member.cooperativeId,
-      type: "income",
-      category: "loan_repayment",
-      amount: principalPortion,
-      note: `Principal repayment on loan ${loan.id.slice(-6)}`,
-      reference: loan.id,
-      fundType: "member",
-    });
-  }
-  if (fine > 0) {
-    await recordLedger({
-      cooperativeId: member.cooperativeId,
-      type: "income",
-      category: "fine",
-      amount: fine,
-      note: `Late fine on loan ${loan.id.slice(-6)}`,
-      reference: loan.id,
-      fundType: "operational",
-    });
   }
 
   const updated = await prisma.loan.findUnique({ where: { id: loan.id } });
@@ -835,7 +978,10 @@ export async function getQueuePosition(
   memberId: string,
 ): Promise<{ position: number; total: number; estimatedWait: string } | null> {
   const loan = await prisma.loan.findFirst({
-    where: { memberId, status: { in: ["pending", "guaranteed", "admin_approved", "super_approved_1"] } },
+    where: {
+      memberId,
+      status: { in: ["pending", "guaranteed", "admin_approved", "super_approved_1"] },
+    },
     orderBy: { queueJoinedAt: "asc" },
   });
   if (!loan) return null;
@@ -862,7 +1008,10 @@ export async function getQueuePosition(
     },
   });
 
-  const daysElapsed = Math.max(1, Math.floor((Date.now() - startOfMonth.getTime()) / (24 * 60 * 60 * 1000)));
+  const daysElapsed = Math.max(
+    1,
+    Math.floor((Date.now() - startOfMonth.getTime()) / (24 * 60 * 60 * 1000)),
+  );
   const dailyRate = disbursedThisMonth / daysElapsed;
 
   let estimatedWait: string;
@@ -886,32 +1035,39 @@ export async function getQueuePosition(
 /**
  * Notify the loan applicant about a status change.
  */
-async function notifyLoanStatusChange(loan: { id: string; memberId: string; member: { name: string } }, newStatus: string): Promise<void> {
+async function notifyLoanStatusChange(
+  loan: { id: string; memberId: string; member: { name: string } },
+  newStatus: string,
+): Promise<void> {
   const member = await prisma.member.findUnique({ where: { id: loan.memberId } });
   if (!member) return;
 
   const statusMessages: Record<string, string> = {
-    "guaranteed": `Your loan *${loan.id.slice(-6)}* has been guaranteed by all required guarantors. It is now awaiting Account Officer review.`,
-    "account_officer_approved": `Your loan *${loan.id.slice(-6)}* has been approved by the Account Officer. It is now awaiting admin approval.`,
-    "admin_approved": `Your loan *${loan.id.slice(-6)}* has been approved by admin. It is now awaiting the first super admin's approval.`,
-    "super_approved_1": `Your loan *${loan.id.slice(-6)}* has received the first super admin approval. It needs one more super admin to approve before disbursement.`,
-    "approved": `Your loan *${loan.id.slice(-6)}* has been fully approved! Funds will be disbursed to your account shortly.`,
-    "disbursed": `Your loan *${loan.id.slice(-6)}* has been disbursed. Check your bank account.`,
-    "rejected_by_guarantor": `Your loan *${loan.id.slice(-6)}* was rejected by a guarantor.`,
-    "rejected_by_officer": `Your loan *${loan.id.slice(-6)}* was rejected by the Account Officer.`,
-    "rejected_by_super_1": `Your loan *${loan.id.slice(-6)}* was rejected by the first super admin.`,
-    "rejected_by_super_2": `Your loan *${loan.id.slice(-6)}* was rejected by the second super admin.`,
-    "rejected": `Your loan *${loan.id.slice(-6)}* was rejected.`,
+    guaranteed: `Your loan *${loan.id.slice(-6)}* has been guaranteed by all required guarantors. It is now awaiting Account Officer review.`,
+    account_officer_approved: `Your loan *${loan.id.slice(-6)}* has been approved by the Account Officer. It is now awaiting admin approval.`,
+    admin_approved: `Your loan *${loan.id.slice(-6)}* has been approved by admin. It is now awaiting the first super admin's approval.`,
+    super_approved_1: `Your loan *${loan.id.slice(-6)}* has received the first super admin approval. It needs one more super admin to approve before disbursement.`,
+    approved: `Your loan *${loan.id.slice(-6)}* has been fully approved! Funds will be disbursed to your account shortly.`,
+    disbursed: `Your loan *${loan.id.slice(-6)}* has been disbursed. Check your bank account.`,
+    rejected_by_guarantor: `Your loan *${loan.id.slice(-6)}* was rejected by a guarantor.`,
+    rejected_by_officer: `Your loan *${loan.id.slice(-6)}* was rejected by the Account Officer.`,
+    rejected_by_super_1: `Your loan *${loan.id.slice(-6)}* was rejected by the first super admin.`,
+    rejected_by_super_2: `Your loan *${loan.id.slice(-6)}* was rejected by the second super admin.`,
+    rejected: `Your loan *${loan.id.slice(-6)}* was rejected.`,
   };
 
-  const message = statusMessages[newStatus] || `Your loan *${loan.id.slice(-6)}* status changed to ${newStatus}.`;
+  const message =
+    statusMessages[newStatus] || `Your loan *${loan.id.slice(-6)}* status changed to ${newStatus}.`;
   await sendText({ to: member.phone, text: message });
 }
 
 /**
  * Notify the next required approver that a loan is waiting for their action.
  */
-async function notifyNextApprover(loan: { id: string; cooperativeId: string; member: { name: string } }, nextStage: string): Promise<void> {
+async function notifyNextApprover(
+  loan: { id: string; cooperativeId: string; member: { name: string } },
+  nextStage: string,
+): Promise<void> {
   if (nextStage === "admin_approved") {
     // Find admins (not super admins) in this cooperative
     const admins = await prisma.member.findMany({
@@ -951,7 +1107,12 @@ async function notifyNextApprover(loan: { id: string; cooperativeId: string; mem
  */
 export async function rejectLoan(
   loanId: string,
-  opts: { actorId: string; cooperativeId: string; reason: string; stage: "guarantor" | "officer" | "super_1" | "super_2" },
+  opts: {
+    actorId: string;
+    cooperativeId: string;
+    reason: string;
+    stage: "guarantor" | "officer" | "super_1" | "super_2";
+  },
 ): Promise<{ ok: boolean; message: string }> {
   const loan = await findLoan(loanId, opts.cooperativeId);
   if (!loan) return { ok: false, message: "Loan not found. Check the id and try again." };
@@ -985,7 +1146,10 @@ export async function rejectLoan(
 
   const validStages = validStagesForRejection[opts.stage];
   if (!validStages.includes(loan.status)) {
-    return { ok: false, message: `Cannot reject at this stage (${loan.status}). Loan must be at a stage where ${opts.stage} can act.` };
+    return {
+      ok: false,
+      message: `Cannot reject at this stage (${loan.status}). Loan must be at a stage where ${opts.stage} can act.`,
+    };
   }
 
   // Verify actor has permission for this stage
@@ -1015,15 +1179,24 @@ export async function rejectLoan(
   });
 
   if (updated.count === 0) {
-    return { ok: false, message: `Loan *${shortId}* was just updated by another action. Check *pending*.` };
+    return {
+      ok: false,
+      message: `Loan *${shortId}* was just updated by another action. Check *pending*.`,
+    };
   }
 
   // Audit log
   await audit({
     cooperativeId: opts.cooperativeId,
-    actorPhone: (await prisma.member.findUnique({ where: { id: opts.actorId } }))?.phone ?? opts.actorId,
+    actorPhone:
+      (await prisma.member.findUnique({ where: { id: opts.actorId } }))?.phone ?? opts.actorId,
     actorId: opts.actorId,
-    actorRole: opts.stage === "guarantor" ? "guarantor" : opts.stage === "officer" ? "account_officer" : "super_admin",
+    actorRole:
+      opts.stage === "guarantor"
+        ? "guarantor"
+        : opts.stage === "officer"
+          ? "account_officer"
+          : "super_admin",
     action: `loan.reject_by_${opts.stage}`,
     targetType: "loan",
     targetId: loan.id,

@@ -70,14 +70,32 @@ export async function bulkImportMembers(
   } else if (ext === "xlsx" || ext === "xls") {
     rows = await parseExcel(buffer);
   } else {
-    return { ok: false, imported: 0, skipped: 0, errors: ["Unsupported file type. Use .csv or .xlsx."], message: "Unsupported file type." };
+    return {
+      ok: false,
+      imported: 0,
+      skipped: 0,
+      errors: ["Unsupported file type. Use .csv or .xlsx."],
+      message: "Unsupported file type.",
+    };
   }
 
   if (rows.length === 0) {
-    return { ok: false, imported: 0, skipped: 0, errors: ["No valid rows found. Ensure columns: Name, Phone."], message: "No rows found." };
+    return {
+      ok: false,
+      imported: 0,
+      skipped: 0,
+      errors: ["No valid rows found. Ensure columns: Name, Phone."],
+      message: "No rows found.",
+    };
   }
   if (rows.length > MAX_ROWS) {
-    return { ok: false, imported: 0, skipped: 0, errors: [`Too many rows (max ${MAX_ROWS}). File has ${rows.length}.`], message: "Too many rows." };
+    return {
+      ok: false,
+      imported: 0,
+      skipped: 0,
+      errors: [`Too many rows (max ${MAX_ROWS}). File has ${rows.length}.`],
+      message: "Too many rows.",
+    };
   }
 
   const existingPhones = new Set(
@@ -90,7 +108,14 @@ export async function bulkImportMembers(
   );
 
   const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
-  if (!coop) return { ok: false, imported: 0, skipped: 0, errors: ["Cooperative not found"], message: "Cooperative not found." };
+  if (!coop)
+    return {
+      ok: false,
+      imported: 0,
+      skipped: 0,
+      errors: ["Cooperative not found"],
+      message: "Cooperative not found.",
+    };
 
   let imported = 0;
   let skipped = 0;
@@ -106,16 +131,26 @@ export async function bulkImportMembers(
       skipped += 1;
       continue;
     }
+    const name = row.name.trim().replace(/\s+/g, " ");
+    if (name.length < 2 || name.length > 80 || !/^[\p{L}\p{M}'’. -]+$/u.test(name)) {
+      errors.push(`"${row.name}" — invalid name`);
+      continue;
+    }
     try {
-      const seq = coop.memberSeq + 1;
-      await prisma.cooperative.update({ where: { id: cooperativeId }, data: { memberSeq: seq } });
+      // Atomic sequence bump — never read-then-write, which would collide
+      // member codes when two imports (or a join) run concurrently.
+      const { memberSeq: seq } = await prisma.cooperative.update({
+        where: { id: cooperativeId },
+        data: { memberSeq: { increment: 1 } },
+        select: { memberSeq: true },
+      });
       const code = `${coop.code}/${String(seq).padStart(3, "0")}`;
 
       const member = await prisma.member.create({
         data: {
           code,
           phone,
-          name: row.name.trim().slice(0, 100),
+          name,
           cooperativeId,
           status: "active",
           role: "member",
@@ -131,9 +166,10 @@ export async function bulkImportMembers(
     }
   }
 
-  const msg = imported > 0
-    ? `${imported} member(s) imported. ${skipped > 0 ? `${skipped} skipped (existing).` : ""} ${errors.length > 0 ? `${errors.length} errors.` : ""}`
-    : `No members imported. ${skipped > 0 ? `${skipped} already exist.` : ""} ${errors.length > 0 ? errors[0] : ""}`;
+  const msg =
+    imported > 0
+      ? `${imported} member(s) imported. ${skipped > 0 ? `${skipped} skipped (existing).` : ""} ${errors.length > 0 ? `${errors.length} errors.` : ""}`
+      : `No members imported. ${skipped > 0 ? `${skipped} already exist.` : ""} ${errors.length > 0 ? errors[0] : ""}`;
 
   return { ok: imported > 0, imported, skipped, errors, message: msg };
 }

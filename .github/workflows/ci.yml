@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -50,10 +50,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -61,14 +61,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate Prisma Client
-        run: npx prisma generate
+      - name: Generate Prisma Client (SQLite, matches `npm test`)
+        run: npm run prisma:generate:local
+
+      - name: Create SQLite test schema
+        run: npx prisma db push --schema prisma/schema.local.prisma --skip-generate
+        env:
+          DATABASE_URL: "file:./dev.db"
 
       - name: Run unit tests
         run: npm test
         env:
-          # Use SQLite for fast local tests (schema.local.prisma)
+          # Tests run on SQLite via prisma/schema.local.prisma (see vitest.config.ts)
           DATABASE_URL: "file:./dev.db"
+          # The app loads these from .env locally; on CI they must be supplied.
+          # Non-placeholder values so the startup weak-secret checks stay quiet.
+          ADMIN_JWT_SECRET: "ci-unit-test-admin-jwt-0123456789abcdef"
+          SESSION_SECRET: "ci-unit-test-session-secret-0123456789abcdef"
 
   # ---------- Security Tests ----------
   security-tests:
@@ -76,10 +85,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -87,19 +96,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate Prisma Client
-        run: npx prisma generate
+      - name: Generate Prisma Client (SQLite)
+        run: npm run prisma:generate:local
+
+      - name: Create SQLite test schema
+        run: npx prisma db push --schema prisma/schema.local.prisma --skip-generate
+        env:
+          DATABASE_URL: "file:./dev.db"
 
       - name: Run security tests only
         run: npx vitest run tests/security.test.ts
         env:
           DATABASE_URL: "file:./dev.db"
 
-  # ---------- RLS Tests (PostgreSQL) ----------
-  # These tests verify Row-Level Security policies prevent cross-cooperative data access.
-  # They require a PostgreSQL database with RLS policies applied.
-  rls-tests:
-    name: RLS Isolation Tests
+  # ---------- PostgreSQL migrations ----------
+  # Proves the production migration path on a real PostgreSQL: scripts/db-migrate.mjs
+  # must bring a fresh database to the current schema. The RLS isolation suite then
+  # runs as a NON-OWNER role (the owner bypasses RLS), so the policies are actually
+  # exercised — see tests/rls-isolation.test.ts.
+  postgres-migrations:
+    name: PostgreSQL migrations + RLS isolation
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -117,10 +133,10 @@ jobs:
           --health-retries=5
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -128,30 +144,58 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate Prisma Client
-        run: npx prisma generate
+      - name: Generate Prisma Client (PostgreSQL)
+        run: npm run prisma:generate
 
-      - name: Run migrations (including RLS policies)
-        run: npx prisma migrate deploy
+      - name: Apply migrations via the production boot script
+        run: node scripts/db-migrate.mjs
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/coop_test
 
-      - name: Run RLS isolation tests
+      - name: Boot script is idempotent
+        run: node scripts/db-migrate.mjs
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/coop_test
+
+      - name: Run RLS isolation tests (non-owner role, PostgreSQL)
         run: npx vitest run tests/rls-isolation.test.ts
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/coop_test
+          RLS_ENABLED: "1"
+
+  # ---------- Dependency Audit ----------
+  # Fails on a HIGH/CRITICAL vulnerability in a SHIPPED (production) dependency.
+  # Dev-only advisories (test tooling) do not block shipping.
+  dependency-audit:
+    name: Dependency Audit (prod)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
 
   # ---------- Build Verification ----------
   build:
     name: Build Verification
     runs-on: ubuntu-latest
-    needs: [typecheck-and-lint, unit-tests, security-tests, rls-tests]
+    needs: [typecheck-and-lint, unit-tests, security-tests, postgres-migrations, dependency-audit]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -166,27 +210,44 @@ jobs:
         run: npm run build
 
   # ---------- Staging Deploy Gate ----------
-  # This job only runs on the `staging` branch (not PRs).
-  # It passes through if all previous jobs succeeded.
-  # Render handles the actual deploy via autoDeploy.
+  # Runs only on the `staging` branch (not PRs), and only after every check job
+  # above has succeeded. Render's auto-deploy is OFF (see render.yaml), so this
+  # job is what actually ships: it POSTs the Render Deploy Hook.
   staging-deploy-gate:
     name: Staging Deploy Gate
     runs-on: ubuntu-latest
-    needs: [typecheck-and-lint, unit-tests, security-tests, build]
+    needs:
+      [typecheck-and-lint, unit-tests, security-tests, postgres-migrations, dependency-audit, build]
     if: github.ref == 'refs/heads/staging'
     steps:
-      - name: Staging deploy gate passed
-        run: echo "All checks passed. Render will auto-deploy staging."
+      - name: Trigger staging deploy
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_STAGING }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK_STAGING is not configured — skipping deploy trigger."
+            exit 0
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
+          echo "Staging deploy triggered."
 
   # ---------- Production Deploy Gate ----------
-  # This job only runs on the `main` branch (not PRs).
-  # It passes through if all previous jobs succeeded.
-  # Render handles the actual deploy via autoDeploy.
+  # Runs only on the `main` branch (not PRs), after all checks pass. Render's
+  # auto-deploy is OFF (see render.yaml); this job triggers the deploy itself.
   production-deploy-gate:
     name: Production Deploy Gate
     runs-on: ubuntu-latest
-    needs: [typecheck-and-lint, unit-tests, security-tests, build]
+    needs:
+      [typecheck-and-lint, unit-tests, security-tests, postgres-migrations, dependency-audit, build]
     if: github.ref == 'refs/heads/main'
     steps:
-      - name: Production deploy gate passed
-        run: echo "All checks passed. Render will auto-deploy production."
+      - name: Trigger production deploy
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_PRODUCTION }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK" ]; then
+            echo "RENDER_DEPLOY_HOOK_PRODUCTION is not configured — skipping deploy trigger."
+            exit 0
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK"
+          echo "Production deploy triggered."

@@ -12,7 +12,8 @@ import { prisma } from "../lib/prisma.js";
 
 export function beneficiaryHoldMs(): number {
   const raw = process.env.NEW_BENEFICIARY_HOLD_HOURS;
-  const hours = raw !== undefined && raw !== "" ? Number(raw) : process.env.NODE_ENV === "test" ? 0 : 24;
+  const hours =
+    raw !== undefined && raw !== "" ? Number(raw) : process.env.NODE_ENV === "test" ? 0 : 24;
   return Math.max(0, hours) * 60 * 60 * 1000;
 }
 

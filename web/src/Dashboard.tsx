@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-type Tab = "overview" | "members" | "loans" | "contributions" | "payouts";
+type Tab = "overview" | "members" | "loans" | "contributions" | "payouts" | "pearls";
 
 interface Overview {
   memberCount: number;
@@ -48,6 +48,7 @@ export default function Dashboard({ token, onLogout }: { token: string; onLogout
         {tab === "loans" && <LoansView api={api} />}
         {tab === "contributions" && <ContributionsView api={api} />}
         {tab === "payouts" && <PayoutsView api={api} />}
+        {tab === "pearls" && <PearlsView api={api} />}
       </main>
     </div>
   );
@@ -68,6 +69,7 @@ function Sidebar({
     { key: "loans", label: "Loans" },
     { key: "contributions", label: "Contributions" },
     { key: "payouts", label: "Payouts" },
+    { key: "pearls", label: "PEARLS" },
   ];
   return (
     <nav style={{ width: 220, background: "#111827", color: "#e5e7eb", padding: 20 }}>
@@ -330,6 +332,102 @@ function PayoutsView({ api }: { api: (path: string, init?: RequestInit) => Promi
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+interface Pearls {
+  protection: { allowanceToLoans: number; netCapital: number };
+  effectiveStructure: { loansToAssets: number; savingsToAssets: number };
+  assetQuality: { parRatio: number; provisionCoverage: number };
+  ratesOfReturn: { interestIncomeToAssets: number; costOfFunds: number };
+  liquidity: { liquidAssetsToSavings: number };
+  signsOfGrowth: { memberGrowth: number; savingsGrowth: number };
+  totals: {
+    members: number;
+    savings: number;
+    loans: number;
+    allowance: number;
+    bank: number;
+    assets: number;
+    pastDue: number;
+  };
+}
+
+function pct(n: number): string {
+  return (n * 100).toFixed(1) + "%";
+}
+
+function PearlsView({ api }: { api: (path: string, init?: RequestInit) => Promise<any> }) {
+  const [pearls, setPearls] = useState<Pearls | null>(null);
+  useEffect(() => {
+    api("/api/admin/pearls").then(setPearls).catch(console.error);
+  }, [api]);
+  if (!pearls) return <p>Loading…</p>;
+
+  const groups: { title: string; rows: [string, number][] }[] = [
+    {
+      title: "P — Protection",
+      rows: [
+        ["Allowance / loans", pearls.protection.allowanceToLoans],
+        ["Net capital", pearls.protection.netCapital],
+      ],
+    },
+    {
+      title: "E — Effective structure",
+      rows: [
+        ["Loans / assets", pearls.effectiveStructure.loansToAssets],
+        ["Savings / assets", pearls.effectiveStructure.savingsToAssets],
+      ],
+    },
+    {
+      title: "A — Asset quality",
+      rows: [
+        ["PAR ratio", pearls.assetQuality.parRatio],
+        ["Provision coverage", pearls.assetQuality.provisionCoverage],
+      ],
+    },
+    {
+      title: "R — Rates of return",
+      rows: [
+        ["Interest income / assets", pearls.ratesOfReturn.interestIncomeToAssets],
+        ["Cost of funds", pearls.ratesOfReturn.costOfFunds],
+      ],
+    },
+    {
+      title: "L — Liquidity",
+      rows: [["Liquid assets / savings", pearls.liquidity.liquidAssetsToSavings]],
+    },
+    {
+      title: "S — Signs of growth",
+      rows: [
+        ["Member growth (YoY)", pearls.signsOfGrowth.memberGrowth],
+        ["Savings growth (YoY)", pearls.signsOfGrowth.savingsGrowth],
+      ],
+    },
+  ];
+
+  return (
+    <div>
+      <h2>PEARLS health check</h2>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 }}>
+        {groups.map((g) => (
+          <div key={g.title} style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 3px rgba(0,0,0,.1)" }}>
+            <div style={{ fontWeight: 700, marginBottom: 12 }}>{g.title}</div>
+            {g.rows.map(([label, value]) => (
+              <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}>
+                <span style={{ color: "#6b7280", fontSize: 13 }}>{label}</span>
+                <span style={{ fontWeight: 600 }}>{pct(value)}</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+      <p style={{ color: "#6b7280", marginTop: 16 }}>
+        Book: {pearls.totals.members} members · savings {naira(pearls.totals.savings)} · loans{" "}
+        {naira(pearls.totals.loans)} · allowance {naira(pearls.totals.allowance)} · liquid{" "}
+        {naira(pearls.totals.bank)} · past due {naira(pearls.totals.pastDue)}
+      </p>
     </div>
   );
 }

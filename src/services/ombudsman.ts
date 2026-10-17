@@ -1,0 +1,794 @@
+import { prisma, withTx } from "../lib/prisma.js";
+import { setCoopContext, withCoopContext } from "../lib/tenant-context.js";
+import { audit } from "./audit.js";
+import { sendText, notifyMember } from "../lib/messaging.js";
+import { recommendRefund, approveRefundAsOmbudsman } from "./refunds.js";
+import { formatBalance } from "../lib/money.js";
+import { Prisma } from "@prisma/client";
+
+const DEFAULT_SLA_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export type CaseSourceType = "grievance" | "dispute";
+
+export interface EscalateInput {
+  sourceType: CaseSourceType;
+  sourceId?: string;
+  category: string;
+  summary: string;
+}
+
+export interface EscalateActor {
+  id: string;
+  phone: string;
+}
+
+export interface CaseSummary {
+  id: string;
+  cooperativeId: string;
+  memberId: string;
+  sourceType: string;
+  sourceId: string | null;
+  category: string;
+  summary: string;
+  status: string;
+  escalatedBy: string;
+  slaDueAt: Date | null;
+  createdAt: Date;
+}
+
+export interface CaseEvent {
+  id: string;
+  actorId: string;
+  actorRole: string;
+  action: string;
+  detail: string;
+  createdAt: Date;
+}
+
+export interface CaseDetail extends CaseSummary {
+  decision: string | null;
+  decisionById: string | null;
+  decidedAt: Date | null;
+  remedy: string | null;
+  updatedAt: Date;
+  events: CaseEvent[];
+}
+
+function toSummary(c: {
+  id: string;
+  cooperativeId: string;
+  memberId: string;
+  sourceType: string;
+  sourceId: string | null;
+  category: string;
+  summary: string;
+  status: string;
+  escalatedBy: string;
+  slaDueAt: Date | null;
+  createdAt: Date;
+}): CaseSummary {
+  return {
+    id: c.id,
+    cooperativeId: c.cooperativeId,
+    memberId: c.memberId,
+    sourceType: c.sourceType,
+    sourceId: c.sourceId,
+    category: c.category,
+    summary: c.summary,
+    status: c.status,
+    escalatedBy: c.escalatedBy,
+    slaDueAt: c.slaDueAt,
+    createdAt: c.createdAt,
+  };
+}
+
+/** Notify every active platform ombudsman. Never throws. */
+async function notifyOmbudsmen(text: string): Promise<void> {
+  const ombudsmen = await prisma.ombudsman.findMany({ where: { active: true } });
+  await Promise.all(ombudsmen.map((o) => sendText({ to: o.phone, text }))).catch(() => {});
+}
+
+/** Notify the admins of a cooperative (member admins + the coop admin phone). Never throws. */
+async function notifyCoop(cooperativeId: string, text: string): Promise<void> {
+  // Member/Cooperative are cooperative-RLS-scoped: read them inside the coop's
+  // context or they return nothing under Stage-2 RLS.
+  const { admins, coop } = await withCoopContext(cooperativeId, async () => {
+    const admins = await prisma.member.findMany({
+      where: { cooperativeId, role: { in: ["admin", "superadmin"] }, status: "active" },
+      select: { phone: true, altChannelId: true, preferredChannel: true, optedOut: true },
+    });
+    const coop = await prisma.cooperative.findUnique({
+      where: { id: cooperativeId },
+      select: { adminPhone: true },
+    });
+    return { admins, coop };
+  });
+  const seen = new Set<string>();
+  await Promise.all(
+    admins.map((a) => {
+      seen.add(a.phone);
+      return notifyMember(a, text);
+    }),
+  ).catch(() => {});
+  if (coop?.adminPhone && !seen.has(coop.adminPhone)) {
+    await sendText({ to: coop.adminPhone, text }).catch(() => {});
+  }
+}
+
+/**
+ * Resolve a case by exact id, or by a unique prefix/suffix of at least 6
+ * characters. Ambiguous or short refs are refused rather than guessing, so an
+ * ombudsman never acts on the wrong (PII-bearing) case.
+ */
+async function lookupCase(ref: string) {
+  const id = ref?.trim();
+  if (!id) return { ok: false as const, message: "Which case? Give the case id." };
+  const exact = await prisma.ombudsmanCase.findUnique({ where: { id } });
+  if (exact) return { ok: true as const, case: exact };
+  if (id.length < 6) {
+    return {
+      ok: false as const,
+      message: "That id is too short. Give at least 6 characters of the case id.",
+    };
+  }
+  const matches = await prisma.ombudsmanCase.findMany({
+    where: { OR: [{ id: { startsWith: id } }, { id: { endsWith: id } }] },
+    take: 2,
+  });
+  if (matches.length === 0) return { ok: false as const, message: "Case not found." };
+  if (matches.length > 1) {
+    return {
+      ok: false as const,
+      message: "More than one case matches that id. Give more characters of the case id.",
+    };
+  }
+  return { ok: true as const, case: matches[0] };
+}
+
+/**
+ * Escalate a grievance or dispute to the platform ombudsman. Creates a
+ * platform-level `OmbudsmanCase` (open), records the `escalated` event, notifies
+ * every active ombudsman, and audits the action. One case per source: escalating
+ * the same source id twice is refused.
+ */
+export async function escalateCase(
+  coopId: string,
+  memberId: string,
+  input: EscalateInput,
+  actor: EscalateActor,
+): Promise<{ ok: boolean; message: string; caseId?: string }> {
+  const summary = input.summary?.trim() ?? "";
+  if (!summary) {
+    return { ok: false, message: "Add a short summary of the issue you're escalating." };
+  }
+  const sourceType: CaseSourceType = input.sourceType === "dispute" ? "dispute" : "grievance";
+  const sourceId = input.sourceId?.trim() || null;
+  const category = (input.category?.trim() || "other").slice(0, 60);
+
+  const outcome = await withTx(async (tx) => {
+    await setCoopContext(tx as never, coopId);
+
+    if (sourceType === "grievance") {
+      if (!sourceId) return { error: "missing_source" as const };
+      const grievance = await tx.grievance.findFirst({
+        where: { id: sourceId, cooperativeId: coopId, memberId },
+        select: { id: true },
+      });
+      if (!grievance) return { error: "not_found" as const };
+    }
+
+    const config = await tx.cooperativeConfig.findUnique({
+      where: { cooperativeId: coopId },
+      select: { ombudsmanSlaDays: true },
+    });
+    const slaDays = config?.ombudsmanSlaDays ?? DEFAULT_SLA_DAYS;
+    const slaDueAt = new Date(Date.now() + slaDays * DAY_MS);
+
+    // Pre-check for an existing case for this source INSIDE the transaction.
+    // `escalateCase` runs inside `handleMessage`'s outer `withCoopContext`
+    // transaction, so letting a duplicate INSERT hit the unique index would
+    // abort that shared Postgres transaction (an aborted statement poisons it)
+    // and the friendly "already escalated" reply would never be delivered. The
+    // unique index stays as a race backstop.
+    if (sourceId) {
+      const existing = await tx.ombudsmanCase.findFirst({
+        where: { cooperativeId: coopId, sourceType, sourceId },
+        select: { id: true },
+      });
+      if (existing) return { error: "duplicate" as const };
+    }
+
+    const c = await tx.ombudsmanCase.create({
+      data: {
+        cooperativeId: coopId,
+        memberId,
+        sourceType,
+        sourceId,
+        category,
+        summary,
+        status: "open",
+        escalatedBy: "member",
+        slaDueAt,
+      },
+      select: { id: true },
+    });
+    await tx.ombudsmanCaseEvent.create({
+      data: {
+        caseId: c.id,
+        actorId: actor.id,
+        actorRole: "member",
+        action: "escalated",
+        detail: summary,
+      },
+    });
+    return { caseId: c.id };
+  }).catch((err: unknown) => {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      return { error: "duplicate" as const };
+    }
+    throw err;
+  });
+
+  if ("error" in outcome) {
+    if (outcome.error === "missing_source") {
+      return { ok: false, message: "Which grievance? Reply *escalate <grievance id> [reason]*." };
+    }
+    if (outcome.error === "not_found") {
+      return {
+        ok: false,
+        message: "We couldn't find that grievance. Reply *grievances* to list yours.",
+      };
+    }
+    return { ok: false, message: "This matter has already been escalated to the ombudsman." };
+  }
+  const caseId = outcome.caseId;
+
+  await audit({
+    cooperativeId: coopId,
+    actorPhone: actor.phone,
+    actorId: actor.id,
+    actorRole: "member",
+    action: "ombudsman.case_escalated",
+    targetType: "ombudsman_case",
+    targetId: caseId,
+    detail: `${sourceType} escalation (${category}): ${summary}`,
+  }).catch(() => {});
+
+  await notifyOmbudsmen(
+    `⚖️ *New ombudsman case* #${caseId.slice(-6)}\n\n` +
+      `Category: *${category}*\n${summary}\n\n` +
+      `Reply *cases* to review.`,
+  );
+
+  return {
+    ok: true,
+    message:
+      `✅ Escalated to the independent ombudsman.\n\n` +
+      `Case ID: *${caseId}*\n` +
+      `You'll be notified when the ombudsman reviews it.`,
+    caseId,
+  };
+}
+
+/** Platform-level: list cases across every cooperative, optionally by status. */
+export async function listCases(
+  status?: string,
+): Promise<{ ok: boolean; message: string; cases?: CaseSummary[] }> {
+  const rows = await prisma.ombudsmanCase.findMany({
+    where: status ? { status } : {},
+    orderBy: { createdAt: "desc" },
+    take: 50,
+  });
+  const cases = rows.map(toSummary);
+  return {
+    ok: true,
+    message: cases.length
+      ? `${cases.length} ${status ? `${status} ` : ""}case(s).`
+      : status
+        ? `No ${status} cases.`
+        : "No cases yet.",
+    cases,
+  };
+}
+
+/**
+ * Platform-level: read one case and its full timeline. An exact id is resolved
+ * with `findUnique`; a partial prefix/suffix must be at least 6 characters and
+ * resolve to exactly one case, otherwise an ambiguity error is returned rather
+ * than an arbitrary case's (PII-bearing) timeline.
+ */
+export async function getCase(
+  caseId: string,
+): Promise<{ ok: boolean; message: string; case?: CaseDetail }> {
+  const id = caseId?.trim();
+  if (!id) return { ok: false, message: "Which case? Give the case id." };
+
+  const include = { events: { orderBy: { createdAt: "asc" as const } } };
+  let c = await prisma.ombudsmanCase.findUnique({ where: { id }, include });
+  if (!c) {
+    if (id.length < 6) {
+      return {
+        ok: false,
+        message: "That id is too short. Give at least 6 characters of the case id.",
+      };
+    }
+    const matches = await prisma.ombudsmanCase.findMany({
+      where: { OR: [{ id: { startsWith: id } }, { id: { endsWith: id } }] },
+      include,
+      take: 2,
+    });
+    if (matches.length === 0) return { ok: false, message: "Case not found." };
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        message: "More than one case matches that id. Give more characters of the case id.",
+      };
+    }
+    c = matches[0];
+  }
+  return {
+    ok: true,
+    message: `Case #${c.id.slice(-6)} (${c.status}).`,
+    case: {
+      ...toSummary(c),
+      decision: c.decision,
+      decisionById: c.decisionById,
+      decidedAt: c.decidedAt,
+      remedy: c.remedy,
+      updatedAt: c.updatedAt,
+      events: c.events.map((e) => ({
+        id: e.id,
+        actorId: e.actorId,
+        actorRole: e.actorRole,
+        action: e.action,
+        detail: e.detail,
+        createdAt: e.createdAt,
+      })),
+    },
+  };
+}
+
+/** True only for a phone belonging to an active platform ombudsman. */
+export async function isOmbudsman(phone: string): Promise<boolean> {
+  return (await getActiveOmbudsman(phone)) !== null;
+}
+
+/** Load the active platform ombudsman for a phone, if any. */
+export async function getActiveOmbudsman(
+  phone: string,
+): Promise<{ id: string; name: string } | null> {
+  if (!phone) return null;
+  return prisma.ombudsman.findFirst({
+    where: { phone, active: true },
+    select: { id: true, name: true },
+  });
+}
+
+/**
+ * Ombudsman-only: open an investigation on a case, record the `investigating`
+ * event, notify the cooperative's admins, and audit the action.
+ */
+export async function investigateCase(
+  caseId: string,
+  note: string,
+  actor: { id: string; phone: string },
+): Promise<{ ok: boolean; message: string }> {
+  if (!(await isOmbudsman(actor.phone))) {
+    return { ok: false, message: "Only the independent ombudsman can act on a case." };
+  }
+  const detail = note?.trim() ?? "";
+  if (!detail) {
+    return { ok: false, message: "Add a short note describing what you're investigating." };
+  }
+  const lookup = await lookupCase(caseId);
+  if (!lookup.ok) return { ok: false, message: lookup.message };
+  const c = lookup.case;
+  if (c.status === "decided" || c.status === "closed") {
+    return { ok: false, message: "This case has already been decided." };
+  }
+
+  await withTx(async (tx) => {
+    await tx.ombudsmanCase.update({
+      where: { id: c.id },
+      data: { status: "investigating" },
+    });
+    await tx.ombudsmanCaseEvent.create({
+      data: {
+        caseId: c.id,
+        actorId: actor.id,
+        actorRole: "ombudsman",
+        action: "investigating",
+        detail,
+      },
+    });
+  });
+
+  await audit({
+    cooperativeId: c.cooperativeId,
+    actorPhone: actor.phone,
+    actorId: actor.id,
+    actorRole: "ombudsman",
+    action: "ombudsman.case_investigating",
+    targetType: "ombudsman_case",
+    targetId: c.id,
+    detail: `Investigating case #${c.id.slice(-6)}: ${detail}`,
+  }).catch(() => {});
+
+  await notifyCoop(
+    c.cooperativeId,
+    `⚖️ *Ombudsman investigation opened* — case #${c.id.slice(-6)}\n\n` +
+      `The independent ombudsman is investigating this matter and needs your input:\n${detail}`,
+  );
+
+  return { ok: true, message: `✅ Case #${c.id.slice(-6)} is now under investigation.` };
+}
+
+/**
+ * Ombudsman-only: record a binding decision on a case (status `decided`,
+ * decision, decisionById, decidedAt), add the `decided` event, notify both the
+ * member and the cooperative, and audit the action.
+ */
+export async function decideCase(
+  caseId: string,
+  decision: string,
+  actor: { id: string; phone: string },
+): Promise<{ ok: boolean; message: string }> {
+  if (!(await isOmbudsman(actor.phone))) {
+    return { ok: false, message: "Only the independent ombudsman can act on a case." };
+  }
+  const detail = decision?.trim() ?? "";
+  if (!detail) {
+    return { ok: false, message: "Give the decision you're issuing." };
+  }
+  const lookup = await lookupCase(caseId);
+  if (!lookup.ok) return { ok: false, message: lookup.message };
+  const c = lookup.case;
+  if (c.status === "decided" || c.status === "closed") {
+    return { ok: false, message: "This case has already been decided or closed." };
+  }
+
+  const decidedAt = new Date();
+  await withTx(async (tx) => {
+    await tx.ombudsmanCase.update({
+      where: { id: c.id },
+      data: { status: "decided", decision: detail, decisionById: actor.id, decidedAt },
+    });
+    await tx.ombudsmanCaseEvent.create({
+      data: {
+        caseId: c.id,
+        actorId: actor.id,
+        actorRole: "ombudsman",
+        action: "decided",
+        detail,
+      },
+    });
+  });
+
+  await audit({
+    cooperativeId: c.cooperativeId,
+    actorPhone: actor.phone,
+    actorId: actor.id,
+    actorRole: "ombudsman",
+    action: "ombudsman.case_decided",
+    targetType: "ombudsman_case",
+    targetId: c.id,
+    detail: `Decision on case #${c.id.slice(-6)}: ${detail}`,
+  }).catch(() => {});
+
+  const member = await withCoopContext(c.cooperativeId, () =>
+    prisma.member.findUnique({
+      where: { id: c.memberId },
+      select: { phone: true, altChannelId: true, preferredChannel: true, optedOut: true },
+    }),
+  );
+  if (member) {
+    await notifyMember(
+      member,
+      `⚖️ *Ombudsman decision on your case* #${c.id.slice(-6)}\n\n${detail}`,
+    ).catch(() => {});
+  }
+  await notifyCoop(
+    c.cooperativeId,
+    `⚖️ *Ombudsman decision* — case #${c.id.slice(-6)}\n\n${detail}\n\n_This decision is binding._`,
+  );
+
+  return { ok: true, message: `✅ Decision recorded for case #${c.id.slice(-6)}.` };
+}
+
+export type RemedyAction = "unfreeze" | "refund";
+
+/** Reset a remedy claim back to null — only if it is still exactly our claim. */
+async function resetRemedyClaim(caseId: string, claim: string): Promise<void> {
+  await prisma.ombudsmanCase.updateMany({
+    where: { id: caseId, remedy: claim },
+    data: { remedy: null },
+  });
+}
+
+/**
+ * True when a refund linked to a case may already have moved money: it is
+ * `paid`/`approved`, or it failed with an "unsure:" provider outcome. Read inside
+ * the coop's context so it resolves under Stage-2 RLS.
+ */
+async function linkedRefundMayHavePaid(cooperativeId: string, refundId: string): Promise<boolean> {
+  const refund = await withCoopContext(cooperativeId, () =>
+    prisma.refundRequest.findUnique({
+      where: { id: refundId },
+      select: { status: true, payoutRef: true },
+    }),
+  );
+  if (!refund) return false;
+  return (
+    refund.status === "paid" ||
+    refund.status === "approved" ||
+    (refund.payoutRef ?? "").startsWith("unsure:")
+  );
+}
+
+/** Persist an "unconfirmed" remedy marker so the case is never re-paid automatically. */
+async function markRemedyUnconfirmed(
+  caseId: string,
+  action: RemedyAction,
+  refundId: string,
+): Promise<void> {
+  await prisma.ombudsmanCase.update({
+    where: { id: caseId },
+    data: {
+      remedy: JSON.stringify({
+        action,
+        status: "unconfirmed",
+        refundId,
+        appliedAt: new Date().toISOString(),
+      }),
+    },
+  });
+}
+
+/**
+ * Record a completed remedy. For `unfreeze` the member's freeze fields are
+ * cleared in the same coop-context transaction; the final `remedy` JSON and the
+ * `remedy_applied` event are written for both actions.
+ */
+async function recordRemedy(
+  c: { id: string; cooperativeId: string; memberId: string },
+  action: RemedyAction,
+  detail: string,
+  actorId: string,
+): Promise<void> {
+  const remedy = JSON.stringify({
+    action,
+    detail,
+    appliedAt: new Date().toISOString(),
+    status: "applied",
+  });
+  await withTx(async (tx) => {
+    await setCoopContext(tx as never, c.cooperativeId);
+    if (action === "unfreeze") {
+      await tx.member.update({
+        where: { id: c.memberId },
+        data: { frozenAt: null, supervisoryFrozenAt: null },
+      });
+    }
+    await tx.ombudsmanCase.update({ where: { id: c.id }, data: { remedy } });
+    await tx.ombudsmanCaseEvent.create({
+      data: {
+        caseId: c.id,
+        actorId,
+        actorRole: "ombudsman",
+        action: "remedy_applied",
+        detail,
+      },
+    });
+  });
+}
+
+/**
+ * Ombudsman-only: apply a binding remedy to a case. `unfreeze` lifts both the
+ * member's self-freeze and any Supervisory Committee freeze (inside
+ * `withCoopContext`); `refund` pays the member through the existing refund flow
+ * with the ombudsman acting as the approver (the admin-recommend step is
+ * bypassed).
+ *
+ * The case is **atomically claimed** (`remedy: null` -> a `status: "applying"`
+ * marker) before any money moves or state changes, so two concurrent calls
+ * cannot both proceed — exactly one pays. Once a refund exists, its id is
+ * written into the marker BEFORE paying, so if the payout step later throws we
+ * can still find the linked refund and tell whether money may have moved. The
+ * claim is reset to null on a clean failure (no money moved) so the remedy can
+ * be retried, but is deliberately LEFT in place when a payout is unconfirmed or
+ * may have been accepted, so it is never re-paid automatically. Records the
+ * final `remedy` JSON + a `remedy_applied` event, audits the action, and
+ * notifies the member.
+ */
+export async function applyRemedy(
+  caseId: string,
+  action: RemedyAction,
+  params: { amount?: number; reason?: string },
+  actor: { id: string; phone: string },
+): Promise<{ ok: boolean; message: string }> {
+  if (!(await isOmbudsman(actor.phone))) {
+    return { ok: false, message: "Only the independent ombudsman can act on a case." };
+  }
+  if (action !== "unfreeze" && action !== "refund") {
+    return {
+      ok: false,
+      message:
+        "Unknown remedy. Use *remedy <id> unfreeze* or *remedy <id> refund <amount> [reason]*.",
+    };
+  }
+  const lookup = await lookupCase(caseId);
+  if (!lookup.ok) return { ok: false, message: lookup.message };
+  const c = lookup.case;
+  if (c.remedy) {
+    let prior: { status?: string } = {};
+    try {
+      prior = JSON.parse(c.remedy) as { status?: string };
+    } catch {
+      // A malformed marker is treated as an applied remedy.
+    }
+    if (prior.status === "unconfirmed") {
+      return {
+        ok: false,
+        message:
+          "This case's refund payout is unconfirmed — an admin must reconcile with the provider before any retry.",
+      };
+    }
+    return { ok: false, message: "This case already has a remedy applied." };
+  }
+
+  const member = await withCoopContext(c.cooperativeId, () =>
+    prisma.member.findUnique({
+      where: { id: c.memberId },
+      select: {
+        name: true,
+        phone: true,
+        altChannelId: true,
+        preferredChannel: true,
+        optedOut: true,
+      },
+    }),
+  );
+  if (!member) return { ok: false, message: "The member on this case no longer exists." };
+
+  let amount: number | undefined;
+  let reason = "";
+  if (action === "refund") {
+    if (!Number.isInteger(params.amount) || (params.amount ?? 0) <= 0) {
+      return {
+        ok: false,
+        message: "Give the refund amount in naira, e.g. *remedy <id> refund 5000*.",
+      };
+    }
+    amount = params.amount as number;
+    reason = (params.reason?.trim() || `Ombudsman remedy (case #${c.id.slice(-6)})`).slice(0, 200);
+  }
+
+  // Atomic claim: exactly one concurrent remedy proceeds. Every other caller
+  // sees count === 0 and is refused rather than paying a second time.
+  const claim = JSON.stringify({
+    action,
+    status: "applying",
+    appliedAt: new Date().toISOString(),
+  });
+  const claimed = await prisma.ombudsmanCase.updateMany({
+    where: { id: c.id, remedy: null },
+    data: { remedy: claim },
+  });
+  if (claimed.count === 0) {
+    return { ok: false, message: "This case already has a remedy applied or one is in progress." };
+  }
+
+  // The marker currently in the DB; it grows to carry the refund id once a
+  // refund exists, so a throw after money moved can still be traced.
+  let activeClaim = claim;
+  let refundId: string | undefined;
+
+  let detail: string;
+  try {
+    if (action === "unfreeze") {
+      detail = `Wallet unfrozen by ombudsman remedy (case #${c.id.slice(-6)})`;
+      await recordRemedy(c, action, detail, actor.id);
+    } else {
+      // Ombudsman bypasses the admin-recommend step and acts as the approver:
+      // create the request, then approve it through the shared payout path.
+      const recommended = await recommendRefund(c.cooperativeId, c.memberId, amount!, reason, {
+        id: actor.id,
+        phone: actor.phone,
+        role: "ombudsman",
+      });
+      if (!recommended.ok || !recommended.refundId) {
+        await resetRemedyClaim(c.id, activeClaim);
+        return { ok: false, message: recommended.message };
+      }
+      refundId = recommended.refundId;
+      // Persist the refund id into the claim BEFORE paying: if the payout step
+      // later throws, we can still find the linked refund and tell whether money
+      // may have moved (a brand-new retry would otherwise double-pay).
+      activeClaim = JSON.stringify({
+        action,
+        status: "applying",
+        refundId,
+        appliedAt: new Date().toISOString(),
+      });
+      await prisma.ombudsmanCase.updateMany({
+        where: { id: c.id, remedy: claim },
+        data: { remedy: activeClaim },
+      });
+
+      const paid = await approveRefundAsOmbudsman(c.cooperativeId, refundId, {
+        id: actor.id,
+        phone: actor.phone,
+      });
+      if (!paid.ok) {
+        const refund = await withCoopContext(c.cooperativeId, () =>
+          prisma.refundRequest.findUnique({
+            where: { id: refundId },
+            select: { status: true, payoutRef: true },
+          }),
+        );
+        const unsure =
+          refund?.status === "failed" && (refund.payoutRef ?? "").startsWith("unsure:");
+        if (unsure) {
+          // The transfer may already have been sent — keep the claim so this case
+          // is never re-paid automatically; a human must reconcile.
+          await markRemedyUnconfirmed(c.id, action, refundId);
+          return { ok: false, message: paid.message };
+        }
+        // No money moved: cancel the orphan request and reset the claim so the
+        // remedy can be retried cleanly.
+        await withTx(async (tx) => {
+          await setCoopContext(tx as never, c.cooperativeId);
+          await tx.refundRequest.updateMany({
+            where: { id: refundId, status: { in: ["pending", "failed"] } },
+            data: { status: "rejected", reason: `${reason} (ombudsman remedy failed)` },
+          });
+        });
+        await resetRemedyClaim(c.id, activeClaim);
+        return { ok: false, message: paid.message };
+      }
+      detail =
+        `Refund of ${formatBalance(amount!)} ordered for ${member.name} — ${reason} ` +
+        `(refund #${refundId.slice(-6)})`;
+      await recordRemedy(c, action, detail, actor.id);
+    }
+  } catch (err) {
+    // A throw here may have happened AFTER the payout was accepted (e.g. a DB
+    // error writing the Payout row or the final refund update). If a refund
+    // linked to this case is paid/approved/unsure, money may have moved: keep the
+    // claim and mark it unconfirmed so a retry can NEVER re-pay. Only a clean
+    // failure (no such linked refund) releases the claim for a retry.
+    if (refundId && (await linkedRefundMayHavePaid(c.cooperativeId, refundId))) {
+      await markRemedyUnconfirmed(c.id, action, refundId);
+      return {
+        ok: false,
+        message:
+          "⚠️ The refund payout could not be confirmed. Do NOT retry until an admin reconciles with the provider.",
+      };
+    }
+    await resetRemedyClaim(c.id, activeClaim);
+    throw err;
+  }
+
+  await audit({
+    cooperativeId: c.cooperativeId,
+    actorPhone: actor.phone,
+    actorId: actor.id,
+    actorRole: "ombudsman",
+    action: "ombudsman.remedy_applied",
+    targetType: "ombudsman_case",
+    targetId: c.id,
+    ...(amount ? { amount } : {}),
+    detail,
+  }).catch(() => {});
+
+  await notifyMember(
+    member,
+    `⚖️ *Ombudsman remedy applied* on case #${c.id.slice(-6)}\n\n${detail}`,
+  ).catch(() => {});
+
+  return {
+    ok: true,
+    message: `✅ Remedy applied to case #${c.id.slice(-6)}: ${action}.\n\n${detail}`,
+  };
+}

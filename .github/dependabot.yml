@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Application dependencies (npm). Weekly. Minor + patch updates are grouped
+  # into one PR to reduce noise; majors arrive individually for review.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Keep GitHub Actions up to date. The workflow pins each action to a full
+  # commit SHA (supply-chain hardening); Dependabot bumps the SHA + version
+  # comment together.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10

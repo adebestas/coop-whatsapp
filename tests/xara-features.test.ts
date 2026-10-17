@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { prisma } from "../tests/setup.js";
 import { savePayee, listPayees, resolvePayee, deletePayee } from "../src/lib/beneficiaries.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
@@ -29,6 +29,7 @@ async function makeCoopAndMember() {
         code: generateMemberCode(),
         role: "member",
         status: "active",
+        consentAt: new Date(),
         pin: hashPin("1234"),
         wallet: { create: {} },
       },
@@ -59,7 +60,8 @@ describe("Favorite Payees (Beneficiary Memory)", () => {
     const { member } = await makeCoopAndMember();
     await savePayee(member.id, "Mama Ngozi", "0123456789", "044", "GTBank");
     await savePayee(member.id, "Chuks", "0987654321", "033", "Access");
-    const found = await resolvePayee(member.id, "2");
+    // listPayees is most-recently-used first, so the newest save is index 1.
+    const found = await resolvePayee(member.id, "1");
     expect(found).not.toBeNull();
     expect(found!.name).toBe("chuks");
   });

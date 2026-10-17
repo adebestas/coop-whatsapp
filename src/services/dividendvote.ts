@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTxBatch } from "../lib/prisma.js";
 import { audit } from "./audit.js";
 import { getCoopConfig, updateCoopConfig } from "./coop-config.js";
 
@@ -20,18 +20,27 @@ export async function startDividendVote(
 ): Promise<VoteResult> {
   const rate = Number(rateArg);
   if (!Number.isFinite(rate) || rate <= 0 || rate > 25) {
-    return { ok: false, message: "Usage: *startvotediv <rate%>*, e.g. *startvotediv 8* for an 8% dividend rate vote." };
+    return {
+      ok: false,
+      message: "Usage: *startvotediv <rate%>*, e.g. *startvotediv 8* for an 8% dividend rate vote.",
+    };
   }
   const activeOpen = await prisma.dividendVote.findFirst({
     where: { cooperativeId: actor.cooperativeId, status: "open" },
   });
   if (activeOpen) {
-    return { ok: false, message: `A dividend-rate vote is already open (proposed ${activeOpen.proposedRate}%). Close it before opening another.` };
+    return {
+      ok: false,
+      message: `A dividend-rate vote is already open (proposed ${activeOpen.proposedRate}%). Close it before opening another.`,
+    };
   }
   const config = await getCoopConfig(actor.cooperativeId);
   const lastRate = config.lastDividendRate;
   if (lastRate !== null && Math.abs(rate - lastRate) <= 5) {
-    return { ok: false, message: `This rate (${rate}%) is within 5% of the last rate (${lastRate}%); no member vote is required — use *paydividend ${rate}* directly.` };
+    return {
+      ok: false,
+      message: `This rate (${rate}%) is within 5% of the last rate (${lastRate}%); no member vote is required — use *paydividend ${rate}* directly.`,
+    };
   }
 
   const expiresAt = new Date(Date.now() + VOTE_DAYS * 24 * 60 * 60 * 1000);
@@ -90,9 +99,13 @@ export async function castDividendVote(
     where: { voteId_memberId: { voteId: vote.id, memberId: member.id } },
   });
   if (existing) {
-    return { ok: false, message: "You've already voted in this dividend-rate ballot. Reply *votedivstatus* to see the tally." };
+    return {
+      ok: false,
+      message:
+        "You've already voted in this dividend-rate ballot. Reply *votedivstatus* to see the tally.",
+    };
   }
-  await prisma.$transaction([
+  await withTxBatch([
     prisma.dividendVoteBallot.create({
       data: { voteId: vote.id, memberId: member.id, choice: choice === "yes" },
     }),
@@ -103,15 +116,14 @@ export async function castDividendVote(
   ]);
   return {
     ok: true,
-    message: choice === "yes"
-      ? `✅ Your *yes* vote for a ${vote.proposedRate}% dividend rate has been recorded.`
-      : `🗳️ Your *no* vote for a ${vote.proposedRate}% dividend rate has been recorded.`,
+    message:
+      choice === "yes"
+        ? `✅ Your *yes* vote for a ${vote.proposedRate}% dividend rate has been recorded.`
+        : `🗳️ Your *no* vote for a ${vote.proposedRate}% dividend rate has been recorded.`,
   };
 }
 
-export async function dividendVoteStatus(
-  cooperativeId: string,
-): Promise<VoteResult> {
+export async function dividendVoteStatus(cooperativeId: string): Promise<VoteResult> {
   const latest = await prisma.dividendVote.findFirst({
     where: { cooperativeId },
     orderBy: { createdAt: "desc" },
@@ -148,8 +160,11 @@ export async function closeDividendVote(
   const action = decision?.toLowerCase();
 
   if (action === "reject") {
-    await prisma.$transaction([
-      prisma.dividendVote.update({ where: { id: vote.id }, data: { status: "rejected", closedById: actor.id, closedAt: new Date() } }),
+    await withTxBatch([
+      prisma.dividendVote.update({
+        where: { id: vote.id },
+        data: { status: "rejected", closedById: actor.id, closedAt: new Date() },
+      }),
       prisma.cooperativeConfig.update({
         where: { cooperativeId: actor.cooperativeId },
         data: { pendingDividendRate: null },
@@ -165,17 +180,24 @@ export async function closeDividendVote(
       targetId: vote.id,
       detail: `rejected ${vote.proposedRate}% dividend-rate proposal`,
     });
-    return { ok: true, message: `The ${vote.proposedRate}% dividend-rate proposal was *rejected*. No dividend at this rate.` };
+    return {
+      ok: true,
+      message: `The ${vote.proposedRate}% dividend-rate proposal was *rejected*. No dividend at this rate.`,
+    };
   }
 
   const activeCount = await activeMemberCountForVote(actor.cooperativeId);
   const yesPct = activeCount > 0 ? Math.round((vote.yesVotes / activeCount) * 100) : 0;
   const passed = action === "approve" || (vote.yesVotes > 0 && yesPct >= vote.requiredYesPct);
 
-  await prisma.$transaction([
+  await withTxBatch([
     prisma.dividendVote.update({
       where: { id: vote.id },
-      data: { status: passed ? "approved" : "rejected", closedById: actor.id, closedAt: new Date() },
+      data: {
+        status: passed ? "approved" : "rejected",
+        closedById: actor.id,
+        closedAt: new Date(),
+      },
     }),
     prisma.cooperativeConfig.update({
       where: { cooperativeId: actor.cooperativeId },

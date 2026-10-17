@@ -1,4 +1,4 @@
-import { prisma } from "../../lib/prisma.js";
+import { prisma, withTx } from "../../lib/prisma.js";
 import { resolveProvider, markProviderDown, markProviderUp } from "./index.js";
 import type { PaymentNotification } from "./index.js";
 import { notifyMember } from "../../lib/messaging.js";
@@ -7,6 +7,15 @@ import { postJournal } from "../journal.js";
 import { roundMoney } from "../money.js";
 import { formatBalance } from "../cooperative.js";
 import { flagTransaction } from "../aml.js";
+import { qualifyReferral } from "../referrals.js";
+import {
+  resolveCoopByVirtualAccount,
+  withCoopContext,
+  forEachCoop,
+  getCoopMeta,
+} from "../../lib/tenant-context.js";
+import { getCurrency } from "../../lib/runtime-context.js";
+import { maskId } from "../../lib/security.js";
 
 /**
  * Create a virtual account for a member so they can receive transfers.
@@ -30,8 +39,7 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
   // Real phone for the provider KYC. WhatsApp members have it on `phone`;
   // Telegram members must have set `contactPhone` (collected at onboarding
   // or via the `phone <number>` command).
-  const kycPhone =
-    member.contactPhone ?? (member.phone.startsWith("tg:") ? null : member.phone);
+  const kycPhone = member.contactPhone ?? (member.phone.startsWith("tg:") ? null : member.phone);
   if (!kycPhone) {
     return {
       ok: false,
@@ -40,11 +48,12 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
     };
   }
 
+  const { currency } = await getCoopMeta(member.cooperativeId);
   const params = {
     phone: kycPhone,
     name: member.name,
     reference: `MEM-${member.id}`,
-    currency: "NGN",
+    currency,
   };
 
   // Virtual account expiry: 90 days from now
@@ -56,7 +65,7 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
   const fallbacks = otherThan(undefined);
   const attempts = [undefined, ...fallbacks];
   for (const preferred of attempts) {
-    const provider = await resolveProvider(preferred ?? lastProviderName);
+    const provider = await resolveProvider(preferred ?? lastProviderName, currency);
     if (lastProviderName && provider.name === lastProviderName) continue; // skip already-failed
     lastProviderName = provider.name;
     try {
@@ -93,7 +102,7 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
 
 function otherThan(name?: string): string[] {
   const providers = ["monnify", "paystack"];
-  return providers.filter(p => p !== name);
+  return providers.filter((p) => p !== name);
 }
 
 /**
@@ -106,104 +115,161 @@ function otherThan(name?: string): string[] {
  */
 export async function handlePaymentNotification(n: PaymentNotification): Promise<void> {
   if (n.status !== "successful") return;
-  if (n.currency !== "NGN") {
-    console.warn(`[topup] rejected notification with currency ${n.currency} (expected NGN), txId=${n.transactionId}`);
+
+  // Resolve the cooperative from the virtual account number (SECURITY DEFINER
+  // resolver bypasses RLS so we can find the tenant before setting the GUC).
+  const coopId = await resolveCoopByVirtualAccount(n.accountNumber);
+  if (!coopId) {
+    console.warn(`[topup] credit for unknown account ${maskId(n.accountNumber)}, ignoring`);
     return;
   }
 
-  // Find the member by their virtual account number.
-  const member = await prisma.member.findFirst({
-    where: { virtualAccountNumber: n.accountNumber },
-    include: { wallet: true },
-  });
-  if (!member || !member.wallet) {
-    console.warn(`[topup] credit for unknown account ${n.accountNumber}, ignoring`);
-    return;
-  }
-
-  const amount = roundMoney(n.amount);
-  if (amount <= 0) return;
-  const reference = `${n.provider}-${n.transactionId}`;
-
-  await prisma.$transaction(async (tx) => {
-    // Idempotency gate FIRST: duplicate delivery throws P2002 here, which
-    // rolls back everything � the wallet is never credited twice.
-    try {
-      await postJournal(
-        {
-          cooperativeId: member.cooperativeId,
-          txRef: `TOPUP-${reference}`,
-          description: `Wallet top-up via ${n.provider} (${n.transactionId})`,
-          postings: [
-            { account: "assets:bank", direction: "DEBIT" as const, amount },
-            { account: `member_wallet:${member.wallet!.id}`, direction: "CREDIT" as const, amount, memberId: member.id },
-          ],
-          throwOnDuplicate: true,
-        },
-        tx as any,
-      );
-    } catch (err: any) {
-      if (err?.code === "P2002") {
-        console.log(`[topup] duplicate credit blocked: ${reference}`);
-        return; // treat like a no-op success
-      }
-      throw err;
-    }
-
-    await tx.contribution.create({
-      data: {
-        amount,
-        type: "topup",
-        note: `Incoming transfer via ${n.provider}`,
-        reference,
-        status: "confirmed",
-        paidAt: new Date(),
-        memberId: member.id,
-        cooperativeId: member.cooperativeId,
-      },
-    });
-    await tx.wallet.update({
-      where: { id: member.wallet!.id },
-      data: {
-        balance: { increment: amount },
-        totalSaved: { increment: amount },
-      },
-    });
-  });
-
-  // AML/CFT: flag + auto-file STR for large/suspicious deposits (money-in).
+  // Run the whole credit flow inside the cooperative's RLS context. A true
+  // concurrent duplicate can still trip the JournalEntry.txRef unique constraint
+  // (which aborts the Postgres tx); that losing delivery is a safe no-op — the
+  // winner already credited and this transaction rolled back in full.
   try {
-    await flagTransaction({
-      memberId: member.id,
-      cooperativeId: member.cooperativeId,
-      amount,
-      type: "deposit",
-      direction: "in",
-      createdAt: new Date(),
+    await withCoopContext(coopId, async () => {
+      if (n.currency !== getCurrency()) {
+        console.warn(
+          `[topup] rejected notification currency ${n.currency} (coop expects ${getCurrency()}), txId=${n.transactionId}`,
+        );
+        return;
+      }
+
+      // Find the member by their virtual account number.
+      const member = await prisma.member.findFirst({
+        where: { virtualAccountNumber: n.accountNumber },
+        include: { wallet: true },
+      });
+      if (!member || !member.wallet) {
+        console.warn(`[topup] credit for unknown account ${maskId(n.accountNumber)}, ignoring`);
+        return;
+      }
+
+      const amount = roundMoney(n.amount);
+      if (amount <= 0) return;
+      const reference = `${n.provider}-${n.transactionId}`;
+      const txRef = `TOPUP-${reference}`;
+
+      const credited = await withTx(async (tx) => {
+        // Idempotency gate: READ the entry first — a replayed delivery then
+        // no-ops without triggering a unique-constraint violation (which would
+        // abort the whole Postgres transaction).
+        const existing = await tx.journalEntry.findFirst({
+          where: { txRef },
+          select: { id: true },
+        });
+        if (existing) {
+          console.log(`[topup] duplicate credit blocked: ${reference}`);
+          return false; // no-op success
+        }
+        const posted = await postJournal(
+          {
+            cooperativeId: member.cooperativeId,
+            txRef,
+            description: `Wallet top-up of ${formatBalance(amount)} by ${member.name} via ${n.provider} (${n.transactionId})`,
+            postings: [
+              { account: "assets:bank", direction: "DEBIT" as const, amount },
+              {
+                account: `member_wallet:${member.wallet!.id}`,
+                direction: "CREDIT" as const,
+                amount,
+                memberId: member.id,
+              },
+            ],
+          },
+          tx as any,
+        );
+        if (!posted.posted) {
+          console.log(`[topup] credit not posted (${posted.reason}): ${reference}`);
+          return false;
+        }
+
+        await tx.contribution.create({
+          data: {
+            amount,
+            type: "topup",
+            note: `Incoming transfer via ${n.provider}`,
+            reference,
+            status: "confirmed",
+            paidAt: new Date(),
+            memberId: member.id,
+            cooperativeId: member.cooperativeId,
+          },
+        });
+        await tx.wallet.update({
+          where: { id: member.wallet!.id },
+          data: {
+            balance: { increment: amount },
+            totalSaved: { increment: amount },
+          },
+        });
+        return true;
+      });
+
+      // Duplicate delivery — nothing was credited; run no side effects.
+      if (!credited) return;
+
+      // A successful real money-in contribution is a "first qualifying contribution":
+      // qualify any pending referral for this member. Idempotent. A referral bug
+      // must never break crediting.
+      await qualifyReferral(member.cooperativeId, member.id).catch((err) => {
+        console.warn("[topup] referral qualification failed:", err);
+      });
+
+      // AML/CFT: flag + auto-file STR for large/suspicious deposits (money-in).
+      try {
+        await flagTransaction({
+          memberId: member.id,
+          cooperativeId: member.cooperativeId,
+          amount,
+          type: "deposit",
+          direction: "in",
+          createdAt: new Date(),
+        });
+      } catch (err) {
+        console.error("[topup] AML flag failed:", err);
+      }
+
+      console.log(
+        `[topup] credited ${maskId(member.phone)} with ${amount} ${n.currency} (${n.transactionId})`,
+      );
+
+      // Real-time credit alert: tell the member the moment their bank transfer lands.
+      const newBalance = (member.wallet?.balance ?? 0) + amount;
+      await notifyMember(
+        member,
+        `✅ *Wallet credited!*\n\n${formatBalance(amount)} just landed in your savings via ${n.provider} (Ref ${n.transactionId.slice(-8)}).\n\nNew balance: *${formatBalance(newBalance)}*.`,
+      ).catch((err) => {
+        console.error("[topup] Failed to notify member of credit:", err);
+      });
+
+      // Append-only audit must never turn a successful credit into a 500: if the
+      // audit write fails, log it and keep the money path idempotently successful.
+      try {
+        await audit({
+          cooperativeId: member.cooperativeId,
+          actorPhone: member.phone,
+          actorId: member.id,
+          actorRole: member.role,
+          action: "topup.credit",
+          targetType: "contribution",
+          detail: `Wallet top-up of ${formatBalance(amount)} by ${member.name} via ${n.provider} (${n.transactionId})`,
+        });
+      } catch (err) {
+        console.error("[topup] credit audit failed:", err);
+      }
     });
-  } catch (err) {
-    console.error("[topup] AML flag failed:", err);
+  } catch (err: any) {
+    if (err?.code === "P2002") {
+      console.log(
+        `[topup] duplicate delivery (concurrent) blocked: ${n.provider}-${n.transactionId}`,
+      );
+      return;
+    }
+    throw err;
   }
-
-  console.log(`[topup] credited ${member.phone} with ${amount} ${n.currency} (${n.transactionId})`);
-
-  // Real-time credit alert: tell the member the moment their bank transfer lands.
-  const newBalance = (member.wallet?.balance ?? 0) + amount;
-await notifyMember(member,
-    `✅ *Wallet credited!*\n\n${formatBalance(amount)} just landed in your savings via ${n.provider} (Ref ${n.transactionId.slice(-8)}).\n\nNew balance: *${formatBalance(newBalance)}*.`,
-  ).catch((err) => {
-    console.error("[topup] Failed to notify member of credit:", err);
-  });
-
-  await audit({
-    cooperativeId: member.cooperativeId,
-    actorPhone: member.phone,
-    actorId: member.id,
-    actorRole: member.role,
-    action: "topup.credit",
-    targetType: "contribution",
-    detail: `${amount} ${n.currency} via ${n.provider} (${n.transactionId})`,
-  });
 }
 
 /**
@@ -211,29 +277,38 @@ await notifyMember(member,
  * Clears the virtual account fields so stale provider accounts are not used.
  */
 export async function cleanupExpiredVirtualAccounts(): Promise<number> {
-  const expired = await prisma.member.findMany({
-    where: {
-      virtualAccountNumber: { not: null },
-      virtualAccountExpiresAt: { lt: new Date() },
-    },
-    select: { id: true, phone: true, virtualAccountNumber: true },
+  let cleaned = 0;
+  await forEachCoop(async (coopId) => {
+    const expired = await prisma.member.findMany({
+      where: {
+        cooperativeId: coopId,
+        virtualAccountNumber: { not: null },
+        virtualAccountExpiresAt: { lt: new Date() },
+      },
+      select: { id: true, phone: true, virtualAccountNumber: true },
+    });
+
+    if (expired.length === 0) return;
+
+    await prisma.member.updateMany({
+      where: {
+        cooperativeId: coopId,
+        virtualAccountNumber: { not: null },
+        virtualAccountExpiresAt: { lt: new Date() },
+      },
+      data: {
+        virtualAccountNumber: null,
+        virtualAccountBank: null,
+        virtualAccountProvider: null,
+        virtualAccountExpiresAt: null,
+      },
+    });
+
+    cleaned += expired.length;
   });
 
-  if (expired.length === 0) return 0;
-
-  await prisma.member.updateMany({
-    where: {
-      virtualAccountNumber: { not: null },
-      virtualAccountExpiresAt: { lt: new Date() },
-    },
-    data: {
-      virtualAccountNumber: null,
-      virtualAccountBank: null,
-      virtualAccountProvider: null,
-      virtualAccountExpiresAt: null,
-    },
-  });
-
-  console.log(`[topup] cleaned up ${expired.length} expired virtual accounts`);
-  return expired.length;
+  if (cleaned > 0) {
+    console.log(`[topup] cleaned up ${cleaned} expired virtual accounts`);
+  }
+  return cleaned;
 }

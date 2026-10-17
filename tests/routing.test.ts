@@ -3,19 +3,9 @@ import { prisma } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { notifyMember } from "../src/lib/messaging.js";
 import { sendText as sendWhatsApp } from "../src/lib/whatsapp.js";
-import { sendTelegramMessage, deleteTelegramMessage } from "../src/lib/telegram.js";
+import { sendTelegramMessage } from "../src/lib/telegram.js";
 import { runAutoSaveReminders } from "../src/services/scheduler.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
-
-vi.mock("../src/lib/whatsapp.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendFlowMessage: vi.fn().mockResolvedValue(true),
-}));
-
-vi.mock("../src/lib/telegram.js", () => ({
-  sendTelegramMessage: vi.fn().mockResolvedValue(true),
-  deleteTelegramMessage: vi.fn().mockResolvedValue(true),
-}));
 
 const PHONE = "2348012345678";
 
@@ -47,6 +37,7 @@ async function makeMember(
       name: `Member ${phone.slice(-4)}`,
       cooperativeId: coopId,
       pin: hashPin("1234"),
+      consentAt: new Date(),
       ...(opts.autosave
         ? {
             autoSaveEnabled: true,
@@ -89,8 +80,8 @@ beforeEach(async () => {
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
-  await prisma.payout.deleteMany();
   await prisma.dividendEntry.deleteMany();
+  await prisma.payout.deleteMany();
   await prisma.dividend.deleteMany();
   await prisma.broadcast.deleteMany();
   await prisma.wallet.deleteMany();
@@ -110,6 +101,7 @@ describe("channel linking", () => {
 
     await handleMessage("tg:555", "join TESTR1");
     await handleMessage("tg:555", "Ada Obi");
+    await handleMessage("tg:555", "skip"); // referral step
     await handleMessage("tg:555", "YES"); // NDPR consent
     await handleMessage("tg:555", "08087654321"); // real phone → OTP sent to WhatsApp
 
@@ -180,9 +172,7 @@ describe("notifyMember routing", () => {
 
   it("falls back to the primary channel when no alternate exists", async () => {
     await notifyMember({ phone: PHONE, preferredChannel: "telegram" }, "Loan approved 🎉");
-    expect(vi.mocked(sendWhatsApp)).toHaveBeenCalledWith(
-      { to: PHONE, text: "Loan approved 🎉" },
-    );
+    expect(vi.mocked(sendWhatsApp)).toHaveBeenCalledWith({ to: PHONE, text: "Loan approved 🎉" });
     expect(vi.mocked(sendTelegramMessage)).not.toHaveBeenCalled();
   });
 

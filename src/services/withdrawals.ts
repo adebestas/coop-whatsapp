@@ -1,4 +1,4 @@
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { sendText, notifyMember } from "../lib/messaging.js";
 import { sendToBank } from "./disbursements.js";
@@ -10,11 +10,29 @@ import { recordLedger } from "./ledger.js";
 import { checkTenureLimit } from "../lib/security-hardening.js";
 import { flagTransaction } from "./aml.js";
 import { assertNotRevoked } from "./revocation.js";
+import { getCoopId } from "../lib/runtime-context.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
 /** Minimum gap between two withdrawals (6 months). */
 export const WITHDRAW_COOLDOWN_MS = 180 * 24 * 60 * 60 * 1000;
+
+/**
+ * Resolve a member by phone WITHIN the active cooperative. A phone can belong
+ * to more than one cooperative, so a bare-phone lookup can pick the wrong
+ * tenant's member/wallet/books. Inside a coop context we key on
+ * (cooperativeId, phone); outside one we fall back to phone-only.
+ */
+async function memberByPhone(phone: string, client: typeof prisma = prisma) {
+  const coopId = getCoopId();
+  if (coopId) {
+    return client.member.findUnique({
+      where: { cooperativeId_phone: { cooperativeId: coopId, phone } },
+      include: { wallet: true },
+    });
+  }
+  return client.member.findFirst({ where: { phone }, include: { wallet: true } });
+}
 
 export interface WithdrawResult {
   ok: boolean;
@@ -22,9 +40,15 @@ export interface WithdrawResult {
 }
 
 /** Resolve short ID to full withdrawal request ID, scoped to one cooperative. */
-async function resolveRequestId(shortId: string, cooperativeId: string): Promise<{ id: string } | { error: string }> {
+async function resolveRequestId(
+  shortId: string,
+  cooperativeId: string,
+): Promise<{ id: string } | { error: string }> {
   // Try exact match first
-  const exact = await prisma.withdrawalRequest.findUnique({ where: { id: shortId, cooperativeId }, select: { id: true } });
+  const exact = await prisma.withdrawalRequest.findUnique({
+    where: { id: shortId, cooperativeId },
+    select: { id: true },
+  });
   if (exact) return exact;
 
   // Try suffix match — require exactly one result
@@ -34,29 +58,40 @@ async function resolveRequestId(shortId: string, cooperativeId: string): Promise
     take: 2,
   });
   if (matches.length === 1) return matches[0];
-  if (matches.length > 1) return { error: `Multiple requests match "${shortId}" — use a longer ID to disambiguate.` };
+  if (matches.length > 1)
+    return { error: `Multiple requests match "${shortId}" — use a longer ID to disambiguate.` };
   return { error: "Withdrawal request not found. Check the id." };
 }
 
 /** The maximum a member can withdraw right now (45% of current balance). */
-export async function withdrawLimit(phone: string): Promise<{ balance: number; max: number } | null> {
-  const member = await prisma.member.findFirst({
-    where: { phone },
-    include: { wallet: true },
-  });
+export async function withdrawLimit(
+  phone: string,
+): Promise<{ balance: number; max: number } | null> {
+  const member = await memberByPhone(phone);
   if (!member || !member.wallet) return null;
   const balance = member.wallet.balance ?? 0;
   return { balance, max: Math.floor(balance * WITHDRAW_LIMIT_RATIO) };
 }
 
 /** Is this member allowed to withdraw under the 6-month rule? */
-export async function canWithdraw(phone: string): Promise<{ ok: boolean; message: string; member: any }> {
-  const member = await prisma.member.findFirst({ where: { phone }, include: { wallet: true } });
+export async function canWithdraw(
+  phone: string,
+): Promise<{ ok: boolean; message: string; member: any }> {
+  const member = await memberByPhone(phone);
   if (!member || !member.wallet) {
-    return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*.", member: null };
+    return {
+      ok: false,
+      message: "You need to join a cooperative first. Reply *join <code>*.",
+      member: null,
+    };
   }
   if (member.status === "deceased") {
-    return { ok: false, message: "This account is under a death claim. The family withdrawal is handled by the cooperative admin.", member };
+    return {
+      ok: false,
+      message:
+        "This account is under a death claim. The family withdrawal is handled by the cooperative admin.",
+      member,
+    };
   }
   if (member.lastWithdrawalAt && !member.withdrawalOverride) {
     const coopConfig = await getCoopConfig(member.cooperativeId);
@@ -84,43 +119,92 @@ export async function canWithdraw(phone: string): Promise<{ ok: boolean; message
 export async function requestWithdrawal(
   phone: string,
   amount: number,
-  bank?: { accountNumber: string; bankCode: string; bankName?: string },
+  bank?: { accountNumber: string; bankCode: string; bankName?: string; accountName?: string },
 ): Promise<WithdrawResult> {
   if (!Number.isFinite(amount) || amount <= 0) {
     return { ok: false, message: "Enter a valid amount, e.g. *withdraw 5000*." };
   }
   // Get the member first to access cooperative config
-  const memberForConfig = await prisma.member.findFirst({ where: { phone } });
+  const memberForConfig = await memberByPhone(phone);
   if (memberForConfig) {
     const coopConfig = await getCoopConfig(memberForConfig.cooperativeId);
     if (amount < coopConfig.minWithdrawal) {
-      return { ok: false, message: `Minimum withdrawal amount is *${formatBalance(coopConfig.minWithdrawal)}*.` };
+      return {
+        ok: false,
+        message: `Minimum withdrawal amount is *${formatBalance(coopConfig.minWithdrawal)}*.`,
+      };
     }
     if (amount > coopConfig.maxWithdrawal) {
-      return { ok: false, message: `Maximum withdrawal amount is *${formatBalance(coopConfig.maxWithdrawal)}*.` };
+      return {
+        ok: false,
+        message: `Maximum withdrawal amount is *${formatBalance(coopConfig.maxWithdrawal)}*.`,
+      };
     }
   } else {
     // amount is in kobo
     if (amount < LIMITS.MIN_WITHDRAW) {
-      return { ok: false, message: `Minimum withdrawal amount is *${formatBalance(LIMITS.MIN_WITHDRAW)}*.` };
+      return {
+        ok: false,
+        message: `Minimum withdrawal amount is *${formatBalance(LIMITS.MIN_WITHDRAW)}*.`,
+      };
     }
     if (amount > LIMITS.MAX_WITHDRAW) {
-      return { ok: false, message: `Maximum withdrawal amount is *${formatBalance(LIMITS.MAX_WITHDRAW)}*.` };
+      return {
+        ok: false,
+        message: `Maximum withdrawal amount is *${formatBalance(LIMITS.MAX_WITHDRAW)}*.`,
+      };
     }
   }
 
   // Atomic eligibility check + request creation inside a transaction.
-  // SELECT ... FOR UPDATE locks the member row so concurrent requests queue.
-  const result = await prisma.$transaction(async (tx) => {
-    const member = await tx.member.findFirst({
-      where: { phone },
-      include: { wallet: true },
-    });
+  // The member row is locked (SELECT ... FOR UPDATE on Postgres) so concurrent
+  // requests for the same member serialize instead of both passing the checks.
+  const result = await withTx(async (tx) => {
+    const member = await memberByPhone(phone, tx as unknown as typeof prisma);
     if (!member || !member.wallet) {
-      return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." } as const;
+      return {
+        ok: false,
+        message: "You need to join a cooperative first. Reply *join <code>*.",
+      } as const;
+    }
+
+    // Lock the member row. Postgres supports FOR UPDATE; SQLite has none and
+    // serializes writes itself (treat it as already locked inside the tx).
+    if ((process.env.DATABASE_URL ?? "").startsWith("postgres")) {
+      await tx.$queryRaw`SELECT "id" FROM "Member" WHERE "id" = ${member.id} FOR UPDATE`;
+    }
+
+    // One open withdrawal request per member. `lastWithdrawalAt` only moves on a
+    // successful payout, so without this a member could stack several pending
+    // requests and bypass the once-per-cooldown rule and the 45% balance cap.
+    // Enforced under the row lock so two concurrent requests cannot both pass.
+    const openRequest = await tx.withdrawalRequest.findFirst({
+      where: {
+        memberId: member.id,
+        status: { in: ["pending", "admin_approved", "processing"] },
+      },
+      select: { id: true },
+    });
+    if (openRequest) {
+      return {
+        ok: false,
+        message: `You already have a withdrawal request in progress (*${openRequest.id.slice(-6)}*). Wait for it to be decided — or ask an admin if it's stuck.`,
+      } as const;
+    }
+
+    if (member.supervisoryFrozenAt) {
+      return {
+        ok: false,
+        message:
+          "🔒 Your wallet is frozen by the *Supervisory Committee*, so you can't withdraw right now. Only the committee or a super admin can lift it — please contact your cooperative.",
+      } as const;
     }
     if (member.frozenAt) {
-      return { ok: false, message: "🔒 Your wallet is frozen, so you can't withdraw right now. Reply *unfreeze* to lift the freeze." } as const;
+      return {
+        ok: false,
+        message:
+          "🔒 Your wallet is frozen, so you can't withdraw right now. Reply *unfreeze* to lift the freeze.",
+      } as const;
     }
     if (member.status === "deceased") {
       return { ok: false, message: "This account is under a death claim." } as const;
@@ -167,7 +251,8 @@ export async function requestWithdrawal(
     if (!accNo || !bankCode) {
       return {
         ok: false,
-        message: "No bank account on file. Reply *withdraw <amount> <account number> <bank>* to set one.",
+        message:
+          "No bank account on file. Reply *withdraw <amount> <account number> <bank>* to set one.",
       } as const;
     }
 
@@ -185,7 +270,14 @@ export async function requestWithdrawal(
 
     await tx.member.update({
       where: { id: member.id },
-      data: { bankAccountNumber: accNo, bankCode, bankName },
+      data: {
+        bankAccountNumber: accNo,
+        bankCode,
+        bankName,
+        // Persist the name confirmed in the guided bank-picker flow so future
+        // payouts can trust the destination (Zero-BVN identity assurance).
+        ...(bank?.accountName ? { bankAccountName: bank.accountName } : {}),
+      },
     });
 
     return {
@@ -236,7 +328,8 @@ export async function approveWithdrawal(
     };
   }
 
-  const isSuper = actor.role === "superadmin" || (await isSuperAdminOf(actor.phone, request.cooperativeId));
+  const isSuper =
+    actor.role === "superadmin" || (await isSuperAdminOf(actor.phone, request.cooperativeId));
 
   if (isSuper && ["pending", "admin_approved"].includes(request.status)) {
     return finalizeWithdrawal(requestId, actor);
@@ -275,6 +368,7 @@ export async function approveWithdrawal(
 export async function finalizeWithdrawal(
   requestId: string,
   actor: { id: string; role: string; phone: string; cooperativeId: string },
+  opts: { overrideAml?: boolean } = {},
 ): Promise<WithdrawResult> {
   const fullId = await resolveRequestId(requestId, actor.cooperativeId);
   if ("error" in fullId) return { ok: false, message: fullId.error };
@@ -286,12 +380,26 @@ export async function finalizeWithdrawal(
   if (request.status === "paid") return { ok: false, message: "This withdrawal was already paid." };
   if (request.status === "rejected") return { ok: false, message: "This withdrawal was rejected." };
   if (request.status === "processing") {
-    return { ok: false, message: "This withdrawal is being processed right now — wait for it to settle." };
+    return {
+      ok: false,
+      message: "This withdrawal is being processed right now — wait for it to settle.",
+    };
+  }
+  // Held for AML review (OPS-4): releasing requires an explicit override.
+  if (request.status === "aml_review" && !opts.overrideAml) {
+    return {
+      ok: false,
+      message: `🛑 This withdrawal is held for *AML review*. Review the flagged activity, then release it with *finalize ${request.id.slice(-6)} override* — or *reject ${request.id.slice(-6)}*.`,
+    };
   }
 
-  const isSuper = actor.role === "superadmin" || (await isSuperAdminOf(actor.phone, request.cooperativeId));
+  const isSuper =
+    actor.role === "superadmin" || (await isSuperAdminOf(actor.phone, request.cooperativeId));
   if (!isSuper) {
-    return { ok: false, message: "Only the cooperative's super admin can give the final approval." };
+    return {
+      ok: false,
+      message: "Only the cooperative's super admin can give the final approval.",
+    };
   }
 
   // Dual-control: nobody finalizes their own withdrawal.
@@ -303,7 +411,7 @@ export async function finalizeWithdrawal(
   }
 
   // Velocity check: max 5 money-out per 10 minutes per member.
-  if (!await checkVelocity(request.memberId)) {
+  if (!(await checkVelocity(request.memberId))) {
     return {
       ok: false,
       message: `🛑 Too many transactions in a short period. Please wait a few minutes and try again.`,
@@ -311,12 +419,18 @@ export async function finalizeWithdrawal(
   }
 
   // STEP 1 — atomic claim.
+  const claimable = opts.overrideAml
+    ? ["pending", "admin_approved", "aml_review"]
+    : ["pending", "admin_approved"];
   const claimed = await prisma.withdrawalRequest.updateMany({
-    where: { id: request.id, status: { in: ["pending", "admin_approved"] } },
+    where: { id: request.id, status: { in: claimable } },
     data: { status: "processing", finalizedById: actor.id },
   });
   if (claimed.count === 0) {
-    return { ok: false, message: "This withdrawal was just taken by another approval — check *pending*." };
+    return {
+      ok: false,
+      message: "This withdrawal was just taken by another approval — check *pending*.",
+    };
   }
 
   const member = request.member;
@@ -327,6 +441,43 @@ export async function finalizeWithdrawal(
   let paid = false;
 
   try {
+    // AML gate (OPS-4): a suspicious PATTERN must be reviewed by a human BEFORE
+    // money leaves the bank — not merely flagged after payout. Threshold
+    // crossings (CTR) are reported but do not block; only suspicious patterns
+    // (STR) hold. Fail OPEN on an AML error so a detector bug can't deadlock
+    // every payout; a positive STR hit always holds unless explicitly overridden.
+    if (!opts.overrideAml) {
+      let reportType = "CTR";
+      try {
+        const aml = await flagTransaction({
+          memberId: member.id,
+          cooperativeId: request.cooperativeId,
+          amount: request.amount,
+          type: "withdrawal",
+          direction: "out",
+          createdAt: request.createdAt,
+        });
+        reportType = aml.reportType;
+      } catch (err) {
+        console.error("[withdrawal] AML pre-payout check failed:", err);
+      }
+      if (reportType === "STR") {
+        await prisma.withdrawalRequest.updateMany({
+          where: { id: request.id, status: "processing" },
+          data: { status: "aml_review" },
+        });
+        await notifySuperAdmins(
+          request.cooperativeId,
+          `🛑 Withdrawal *${request.id.slice(-6)}* for ${member.name} (${formatBalance(request.amount)}) was *held for AML review* — a suspicious pattern was detected. ` +
+            `Reply *finalize ${request.id.slice(-6)} override* to release it after review, or *reject ${request.id.slice(-6)}*.`,
+        );
+        return {
+          ok: false,
+          message: `🛑 Held for *AML review* — a suspicious pattern was detected. A super admin must release it with *finalize ${request.id.slice(-6)} override*, or reject it.`,
+        };
+      }
+    }
+
     // STEP 2 — debit BEFORE paying. If the balance can't cover it the whole
     // thing stops here; no money ever leaves the cooperative's bank.
     if (!wallet || wallet.balance < request.amount) {
@@ -334,7 +485,10 @@ export async function finalizeWithdrawal(
         where: { id: request.id, status: "processing" },
         data: { status: "rejected", rejectedAt: new Date() },
       });
-      return { ok: false, message: `Insufficient balance (${formatBalance(wallet?.balance ?? 0)}). Request rejected.` };
+      return {
+        ok: false,
+        message: `Insufficient balance (${formatBalance(wallet?.balance ?? 0)}). Request rejected.`,
+      };
     }
     const debited = await prisma.wallet.updateMany({
       where: { id: wallet.id, balance: { gte: request.amount } },
@@ -345,7 +499,10 @@ export async function finalizeWithdrawal(
         where: { id: request.id, status: "processing" },
         data: { status: "rejected", rejectedAt: new Date() },
       });
-      return { ok: false, message: "Balance changed during payout — request rejected. Investigate immediately." };
+      return {
+        ok: false,
+        message: "Balance changed during payout — request rejected. Investigate immediately.",
+      };
     }
 
     // STEP 3 — pay out (deterministic key => provider retries are safe).
@@ -367,7 +524,7 @@ export async function finalizeWithdrawal(
       // The provider may have submitted the transfer. NEVER auto-refund here or
       // the member keeps their money AND the payout lands → double payment.
       // Flag for manual reconciliation.
-      await prisma.$transaction([
+      await withTxBatch([
         prisma.withdrawalRequest.updateMany({
           where: { id: request.id },
           data: { status: "investigating" },
@@ -377,15 +534,21 @@ export async function finalizeWithdrawal(
         request.cooperativeId,
         `🔍 Withdrawal *${request.id.slice(-6)}* has an *unconfirmed payout outcome*. The bank transfer may have been sent but could not be confirmed in-app. Please reconcile with the payment provider before retrying or refunding.`,
       );
-      return { ok: false, message: `⚠️ The payout could not be confirmed. Do NOT retry or refund until an admin reconciles with the provider: ${result.message}` };
+      return {
+        ok: false,
+        message: `⚠️ The payout could not be confirmed. Do NOT retry or refund until an admin reconciles with the provider: ${result.message}`,
+      };
     }
 
     if (!result.ok) {
       // STEP 4b — refund and hand back for retry/rejection by humans.
       // Only reached when the provider CONFIRMED the transfer did not go out,
       // so the refund is safe.
-      await prisma.$transaction([
-        prisma.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: request.amount } } }),
+      await withTxBatch([
+        prisma.wallet.update({
+          where: { id: wallet.id },
+          data: { balance: { increment: request.amount } },
+        }),
         prisma.withdrawalRequest.updateMany({
           where: { id: request.id },
           data: { status: "admin_approved" },
@@ -396,7 +559,7 @@ export async function finalizeWithdrawal(
     }
 
     // STEP 4a — success.
-    await prisma.$transaction([
+    await withTxBatch([
       prisma.withdrawalRequest.updateMany({
         where: { id: request.id, status: "processing" },
         data: { status: "paid", finalizedAt: new Date(), finalizedById: actor.id },
@@ -409,28 +572,17 @@ export async function finalizeWithdrawal(
     // Money HAS left the bank from here on — the outer catch must not refund.
     paid = true;
 
-    // AML/CFT: flag + auto-file STR for large/suspicious withdrawals.
-    try {
-      await flagTransaction({
-        memberId: member.id,
-        cooperativeId: request.cooperativeId,
-        amount: request.amount,
-        type: "withdrawal",
-        direction: "out",
-        createdAt: request.createdAt,
-      });
-    } catch (err) {
-      console.error("[withdrawal] AML flag failed:", err);
-    }
-
     // Post-success bookkeeping is best-effort — a failure here must NOT roll
     // back the debit/refund (the bank transfer already happened).
     try {
-      // Record ledger entry for the withdrawal
+      // A withdrawal is NOT an operating expense — it is a return of the
+      // member's own savings. Book it as a balance-sheet movement (debit the
+      // member's savings liability, credit the bank asset) so P&L is not
+      // distorted by money leaving the cooperative back to its owners.
       await recordLedger({
         cooperativeId: request.cooperativeId,
-        type: "expense",
-        category: "withdrawal",
+        type: "balance_sheet",
+        category: `member_wallet:${wallet.id}`,
         amount: request.amount,
         note: `Member withdrawal by ${member.name}`,
         reference: request.id,
@@ -475,7 +627,10 @@ export async function finalizeWithdrawal(
         `🔍 Withdrawal *${request.id.slice(-6)}* sent money but later bookkeeping threw. Reconcile with the payment provider.`,
       ).catch(() => {});
       console.error(`[withdrawal] post-payout error for paid withdrawal: ${request.id}`, err);
-      return { ok: false, message: `⚠️ The payout was sent but in-app bookkeeping failed. It was flagged for manual reconciliation.` };
+      return {
+        ok: false,
+        message: `⚠️ The payout was sent but in-app bookkeeping failed. It was flagged for manual reconciliation.`,
+      };
     }
     await prisma.withdrawalRequest
       .updateMany({
@@ -488,11 +643,17 @@ export async function finalizeWithdrawal(
       `🔍 Withdrawal *${request.id.slice(-6)}* hit an unexpected error with an unconfirmed outcome. Reconcile with the payment provider before retrying.`,
     ).catch(() => {});
     console.error(`[withdrawal] finalized threw (unconfirmed outcome): ${request.id}`, err);
-    return { ok: false, message: `Withdrawal hit an unexpected error with an *unconfirmed* outcome and was flagged for reconciliation (${String(err?.message ?? err).slice(0, 120)}).` };
+    return {
+      ok: false,
+      message: `Withdrawal hit an unexpected error with an *unconfirmed* outcome and was flagged for reconciliation (${String(err?.message ?? err).slice(0, 120)}).`,
+    };
   }
 }
 
-export async function rejectWithdrawal(requestId: string, cooperativeId: string): Promise<WithdrawResult> {
+export async function rejectWithdrawal(
+  requestId: string,
+  cooperativeId: string,
+): Promise<WithdrawResult> {
   const fullId = await resolveRequestId(requestId, cooperativeId);
   if ("error" in fullId) return { ok: false, message: fullId.error };
   const request = await prisma.withdrawalRequest.findFirst({
@@ -509,17 +670,27 @@ export async function rejectWithdrawal(requestId: string, cooperativeId: string)
     data: { status: "rejected", rejectedAt: new Date() },
   });
   if (moved.count === 0) {
-    return { ok: false, message: `This request just changed state (now ${request.status}) — it wasn't rejected.` };
+    return {
+      ok: false,
+      message: `This request just changed state (now ${request.status}) — it wasn't rejected.`,
+    };
   }
-  return { ok: true, message: `Withdrawal *${request.id.slice(-6)}* for ${request.member.name} was rejected.` };
+  return {
+    ok: true,
+    message: `Withdrawal *${request.id.slice(-6)}* for ${request.member.name} was rejected.`,
+  };
 }
 
 /** Grant an admin override so a member can withdraw before the 6-month window. */
-export async function overrideWithdrawalRule(phone: string, memberPhone: string): Promise<WithdrawResult> {
+export async function overrideWithdrawalRule(
+  phone: string,
+  memberPhone: string,
+): Promise<WithdrawResult> {
   const member = await prisma.member.findFirst({
     where: { phone: memberPhone, cooperative: { members: { some: { phone } } } },
   });
-  if (!member) return { ok: false, message: "No member found with that phone in your cooperative." };
+  if (!member)
+    return { ok: false, message: "No member found with that phone in your cooperative." };
   await prisma.member.update({ where: { id: member.id }, data: { withdrawalOverride: true } });
   return {
     ok: true,

@@ -1,18 +1,58 @@
 import { prisma } from "../lib/prisma.js";
+import { resolveCoopsByPhone, resolveCoopByCode, withCoopContext } from "../lib/tenant-context.js";
 import { sendText, platformOf } from "../lib/messaging.js";
-import { getMemberByPhone } from "./cooperative.js";
-import { handleAdminCommand } from "./admin.js";
+import {
+  MESSAGE_CONSENT_PROMPT,
+  AI_CONSENT_PROMPT,
+  AI_CONSENT_GRANTED,
+  AI_CONSENT_DECLINED,
+} from "../lib/consent.js";
+import { getAiConsentState } from "../lib/ai-consent.js";
+import { transcribeAudioMessage, transcriptionEnabled } from "../lib/transcribe.js";
+import { getMemberByPhone, invalidateMemberCache } from "./cooperative.js";
+import { handleAdminCommand, handleOmbudsmanCommand } from "./admin.js";
+import { isOmbudsman } from "./ombudsman.js";
 import { checkMoneyRateLimit, checkAIRateLimit } from "./fraud.js";
 import { aiEnabled, suggestCommand } from "../lib/ai.js";
 import { handleAIQuery, isNaturalLanguageQuery } from "../lib/ai-query.js";
 import { generateSupportResponse } from "../lib/ai-support.js";
+import { extractLoanRequest } from "../lib/ai-loan.js";
+import { toKobo } from "../lib/money.js";
 import { getLesson, getTotalLessons } from "./literacy.js";
 import { getReserveInfo } from "./dividends.js";
 import { formatBalance } from "./cooperative.js";
 import { validateDeviceSession } from "../lib/security-hardening.js";
 import { isFrozen, freezeMessage, unfreezeMessage } from "../lib/freeze.js";
-import { savePayee, listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js";
+import { listPayees, deletePayee, getPayeesText } from "../lib/beneficiaries.js";
 import { castDividendVote, dividendVoteStatus } from "./dividendvote.js";
+import { joinGroup, contributeToGroup, myGroups, groupStatus } from "./groups.js";
+import { requestPhoneChange } from "./phone-change.js";
+import {
+  listFederationsForCoop,
+  getPosition,
+  contribute,
+  borrow,
+  fundFederation,
+  repay,
+} from "./federation/index.js";
+import { detectLocale, localeFromLanguageCode, t, LOCALES, type Locale } from "../lib/i18n.js";
+import { runWithLocale, getLocale } from "../lib/runtime-context.js";
+import { translateToEnglish } from "../lib/translate.js";
+import { submitNin, isValidNin } from "./kyc.js";
+
+export { LOCALES } from "../lib/i18n.js";
+
+export function resolveMemberLocale(
+  member: { locale?: string | null } | null,
+  coopDefault: string,
+  text: string,
+): Locale {
+  const pref = member?.locale as Locale | undefined;
+  if (pref && LOCALES.includes(pref)) return pref;
+  const coop = coopDefault as Locale;
+  if (LOCALES.includes(coop) && coop !== "en") return coop;
+  return detectLocale(text);
+}
 
 /** Session TTL — how long an awaiting state stays alive before reset. */
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -27,17 +67,25 @@ const TIER_LIMITS = {
   tier2: { maxSingle: 500_000_00, dailyMax: 5_000_000_00 }, // ₦500k single, ₦5M daily (in kobo)
 } as const;
 
-async function checkTierLimit(phone: string, amount: number, memberId: string): Promise<string | null> {
-  const tier = "tier1"; // Default tier — upgrade via BVN verification
+async function checkTierLimit(
+  phone: string,
+  amount: number,
+  member: { id: string; kycStatus?: string | null },
+): Promise<string | null> {
+  // The tier is derived from KYC: a verified NIN unlocks tier 2. Everything
+  // else (unset/pending/failed) stays on the low tier-1 ceiling.
+  const tier: keyof typeof TIER_LIMITS = member.kycStatus === "verified" ? "tier2" : "tier1";
   const limits = TIER_LIMITS[tier];
   if (amount > limits.maxSingle) {
-    return `Your tier (${tier}) limits single transactions to ${formatBalance(limits.maxSingle)}. Complete BVN verification to upgrade to tier 2.`;
+    return tier === "tier1"
+      ? `Your account is *Tier 1*: single transactions are capped at ${formatBalance(limits.maxSingle)}. Verify your *NIN* to upgrade to Tier 2 — reply *verify <your 11-digit NIN>*.`
+      : `Your account is *Tier 2*: single transactions are capped at ${formatBalance(limits.maxSingle)}.`;
   }
   // Check daily limit
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
   const dailyTotal = await prisma.contribution.aggregate({
-    where: { memberId, createdAt: { gte: startOfDay }, status: "confirmed" },
+    where: { memberId: member.id, createdAt: { gte: startOfDay }, status: "confirmed" },
     _sum: { amount: true },
   });
   const total = (dailyTotal._sum.amount ?? 0) + amount;
@@ -47,9 +95,68 @@ async function checkTierLimit(phone: string, amount: number, memberId: string): 
   return null;
 }
 
+type MemberRow = Awaited<ReturnType<typeof getMemberByPhone>>;
+
+/**
+ * Shared guard for member money commands (save, loan, withdraw, …). Returns
+ * true when the flow may proceed; otherwise it sends the block reason and
+ * returns false. `amountKobo` is the movement amount for the tier cap (null
+ * when the command's arg isn't a single amount, e.g. mandate).
+ */
+async function moneyFlowAllowed(
+  phone: string,
+  member: MemberRow,
+  cmd: string,
+  amountKobo: number | null,
+): Promise<boolean> {
+  if (member && (member.status === "suspended" || member.status === "deceased")) {
+    await sendText({
+      to: phone,
+      text: "🔒 Your account is currently suspended. No money can move until a cooperative admin restores it. Please contact them to review.",
+    });
+    return false;
+  }
+  if (cmd !== "save" && member) {
+    const frozen = await isFrozen(member.id);
+    if (frozen.frozen) {
+      await sendText({ to: phone, text: frozen.message });
+      return false;
+    }
+  }
+  if (!(await checkMoneyRateLimit(phone))) {
+    await sendText({
+      to: phone,
+      text: "⏳ You've made several money requests in the last hour. For your safety, please wait a little before trying again.",
+    });
+    return false;
+  }
+  if (cmd !== "buyshares" && cmd !== "mandate" && amountKobo !== null && member) {
+    const tierError = await checkTierLimit(phone, amountKobo, member);
+    if (tierError) {
+      await sendText({ to: phone, text: `⛔ ${tierError}` });
+      return false;
+    }
+  }
+  return true;
+}
+
 import { z } from "zod"; // used by FlowDataSchema below
 
-import { buildMenu, buildFullMenu, buildAdminMenu, handleAwaitingInput, parseNaira } from "./handlers/session.js";
+import {
+  buildMenu,
+  buildFullMenu,
+  buildAdminMenu,
+  buildOmbudsmanMenu,
+  handleAwaitingInput,
+  parseNaira,
+  startLoanFromNL,
+  handleMyRefCode,
+  handleReferrals,
+  handleReferralBonus,
+  handleStartBonusWithdrawal,
+  startLiteracyQuiz,
+  resendCertificate,
+} from "./handlers/session.js";
 import { handleJoinStart, handleOnboardStart } from "./handlers/join.js";
 import {
   handleBalance,
@@ -63,7 +170,24 @@ import {
   handleJoinUnit,
   handleLoanQueue,
   handleAnalytics,
+  handleShares,
+  handleBuyShares,
+  handleGroupLoan,
+  handleProducts,
+  handleOpenProduct,
+  handleSaveProduct,
+  handleWithdrawProduct,
+  handleMyProducts,
+  handleMatureProduct,
+  handleOpenJunior,
+  handleMandate,
+  handleMandates,
+  handleMandateStatus,
+  handleCancelMandate,
+  handleAddPayee,
+  handleEscalate,
 } from "./handlers/money.js";
+import { handleDoctor, handleInsurance } from "./handlers/insurance.js";
 import {
   handleValidateClaim,
   handleConfirmClaim,
@@ -80,6 +204,7 @@ import {
   handleInsights,
   handleContextHelp,
   handleRisk,
+  handleAnomalies,
   handleTickets,
   handleResolve,
   handleDeleteAccount,
@@ -96,13 +221,22 @@ import {
   handlePollResults,
   handleElections,
 } from "./handlers/voting.js";
+import {
+  assignProxy,
+  attendMeeting,
+  castMotionVote,
+  listMeetings,
+  listMotions,
+} from "./meetings.js";
 
 export type BotState =
   | "idle"
   | "awaiting_name"
   | "awaiting_coop_code"
+  | "awaiting_referral"
   | "awaiting_phone"
   | "awaiting_otp"
+  | "awaiting_changephone_otp"
   | "awaiting_email"
   | "awaiting_birthday"
   | "awaiting_nok_name"
@@ -119,30 +253,48 @@ export type BotState =
   | "awaiting_guarantor_1"
   | "awaiting_guarantor_2"
   | "awaiting_withdraw_amount"
-  | "awaiting_withdraw_account"
-  | "awaiting_withdraw_bank"
   | "awaiting_withdraw_pin"
+  | "awaiting_bonus_amount"
+  | "awaiting_bonus_destination"
+  | "awaiting_bonus_phone"
+  | "awaiting_bonus_pin"
   | "awaiting_repay_pin"
+  | "awaiting_buyshares_pin"
+  | "awaiting_bank_account"
+  | "awaiting_bank_choice"
+  | "awaiting_bank_confirm"
+  | "awaiting_mandate_pin"
+  | "awaiting_cancelmandate_pin"
   | "awaiting_death_cert"
   | "awaiting_ai_confirm"
   | "awaiting_ai_query_confirm"
+  | "awaiting_dividend_confirm"
+  | "awaiting_sharedividend_confirm"
   | "awaiting_consent"
   | "awaiting_delete_account_pin"
   | "awaiting_optin"
+  | "awaiting_ai_consent"
+  | "awaiting_literacy_optin"
+  | "literacy_quiz"
   | "awaiting_onboard_name"
   | "awaiting_onboard_code"
   | "awaiting_onboard_state"
-  | "awaiting_onboard_phone";
+  | "awaiting_onboard_phone"
+  | "awaiting_insurance_product"
+  | "awaiting_insurance_plan"
+  | "awaiting_insurance_confirm";
 
 // ===== Session Data Schema (validates against corruption/tampering) =====
 export const FlowDataSchema = z.object({
   joinCode: z.string().optional(),
+  referrerCode: z.string().optional(),
   coopName: z.string().optional(),
   coopCode: z.string().optional(),
   coopState: z.string().nullable().optional(),
   pin: z.string().optional(),
   name: z.string().optional(),
   contactPhone: z.string().optional(),
+  newPhone: z.string().optional(),
   otp: z.string().optional(),
   otpExpiresAt: z.number().optional(),
   phoneVerified: z.boolean().optional(),
@@ -157,18 +309,56 @@ export const FlowDataSchema = z.object({
   loanBankCode: z.string().optional(),
   loanBankName: z.string().optional(),
   loanId: z.string().optional(),
+  // Guarantors the member supplied up front (e.g. via the AI intake) to add
+  // automatically once the loan is created.
+  pendingGuarantors: z.array(z.string()).optional(),
   withdrawAmount: z.number().positive().optional(),
+  bonusAmount: z.number().positive().optional(),
+  bonusDestination: z.string().optional(),
+  bonusPhone: z.string().optional(),
+  shareCount: z.number().positive().optional(),
+  mandateCap: z.number().positive().optional(),
+  mandateId: z.string().optional(),
+  referralId: z.string().optional(),
   withdrawAccount: z.string().optional(),
   withdrawBankCode: z.string().optional(),
   withdrawBankName: z.string().optional(),
+  // Guided bank-account entry (mandate / withdrawal / payee).
+  bankIntent: z.string().optional(),
+  bankAccount: z.string().optional(),
+  bankCode: z.string().optional(),
+  insuranceProduct: z.string().optional(),
+  insurancePlan: z.string().optional(),
+  insuranceConfirm: z.boolean().optional(),
+  productCode: z.string().optional(),
+  premiumKobo: z.number().optional(),
+  bankName: z.string().optional(),
+  bankAccountName: z.string().optional(),
+  // True when the resolved account name didn't match the member's registered
+  // name — the flow warns them and lets them decide.
+  bankNameMismatch: z.boolean().optional(),
+  payeeName: z.string().optional(),
+  bankChoices: z.array(z.object({ code: z.string(), name: z.string() })).optional(),
   deathClaimId: z.string().optional(),
   aiCommand: z.string().optional(),
   aiArgs: z.array(z.string()).optional(),
   aiQueryText: z.string().optional(),
   aiQueryResponse: z.string().optional(),
+  // Two-step dividend guardrail: the rate staged for explicit confirmation.
+  dividendRate: z.number().positive().optional(),
+  shareDividendRate: z.number().positive().optional(),
   flowToken: z.string().optional(),
   consentGiven: z.boolean().optional(),
   memberId: z.string().optional(),
+  // In-progress literacy quiz: the selected question ids, the current index,
+  // and the answers chosen so far (option indices).
+  quiz: z
+    .object({
+      questionIds: z.array(z.number()),
+      index: z.number(),
+      answers: z.array(z.number()),
+    })
+    .optional(),
   tgPinBuf: z.string().optional(),
   keyboardMsgId: z.number().optional(),
   tgPinPrompt: z.string().optional(),
@@ -177,7 +367,20 @@ export const FlowDataSchema = z.object({
 export type FlowData = z.infer<typeof FlowDataSchema>;
 
 /** States where the user is typing a secret — flow-token guarded, Telegram messages deleted after read. */
-export const SECRET_STATES: BotState[] = ["awaiting_pin", "awaiting_pin_confirm", "awaiting_withdraw_pin", "awaiting_repay_pin", "awaiting_delete_account_pin"];
+export const SECRET_STATES: BotState[] = [
+  "awaiting_pin",
+  "awaiting_pin_confirm",
+  "awaiting_withdraw_pin",
+  "awaiting_bonus_pin",
+  "awaiting_repay_pin",
+  "awaiting_buyshares_pin",
+  "awaiting_mandate_pin",
+  "awaiting_cancelmandate_pin",
+  "awaiting_delete_account_pin",
+  "awaiting_insurance_product",
+  "awaiting_insurance_plan",
+  "awaiting_insurance_confirm",
+];
 
 /** Metadata about how a message arrived (channel-specific extras). */
 export interface MessageMeta {
@@ -187,6 +390,10 @@ export interface MessageMeta {
   telegramMessageId?: number;
   /** Client IP for anomaly detection. */
   ip?: string;
+  /** Whisper-detected language code from a voice note (e.g. "yo"). */
+  languageHint?: string;
+  /** WhatsApp media id of a voice note — transcribed downstream, after consent. */
+  audioMediaId?: string;
 }
 
 function isAwaitingState(state: BotState): boolean {
@@ -202,10 +409,242 @@ function parseCommand(text: string): { cmd: string; args: string[] } {
   return { cmd: parts[0] ?? "", args: parts.slice(1) };
 }
 
+/** Extract the pending join code from a session's JSON data, if any. */
+function parseJoinCode(data: string | null | undefined): string | null {
+  if (!data) return null;
+  try {
+    const parsed = JSON.parse(data) as { joinCode?: unknown };
+    return typeof parsed.joinCode === "string" && parsed.joinCode ? parsed.joinCode : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the text the command parser should see, applying the AI-processing
+ * gate (NDPR). A voice note is transcribed and a non-English message is
+ * translated ONLY when the member has consented to AI processing; otherwise the
+ * content is never sent to the LLM (Groq). Returns `{ ok: false }` when a
+ * consent prompt was sent or the voice note could not be read (message already
+ * answered).
+ */
+async function resolveAiText(
+  phone: string,
+  member: MemberRow,
+  rawText: string,
+  meta: MessageMeta,
+): Promise<{ ok: true; text: string } | { ok: false }> {
+  const wantsAudio = !!meta.audioMediaId;
+  const hint = localeFromLanguageCode(meta.languageHint);
+  const detected = hint && hint !== "en" ? hint : detectLocale(rawText);
+  const needsTranslation = detected !== "en" && rawText.trim().length > 0;
+  if (!wantsAudio && !needsTranslation) return { ok: true, text: rawText };
+
+  const unreadable = () =>
+    sendText({
+      to: phone,
+      text: "I couldn't read that voice note. Please type your message instead.",
+    });
+
+  // No registered member (e.g. a join flow): nobody can consent, so never send
+  // the content to the LLM — pass plain text through untouched, drop audio.
+  if (!member) {
+    if (wantsAudio) {
+      await unreadable();
+      return { ok: false };
+    }
+    return { ok: true, text: rawText };
+  }
+
+  const state = await getAiConsentState(member);
+  if (state !== "granted") {
+    if (state === "declined") {
+      // Already refused — do not re-ask. Keep the content on-device.
+      await sendText({
+        to: phone,
+        text: wantsAudio
+          ? "AI processing is off, so I can't read voice notes. Please type your message in English. Reply *aioptin* to enable it."
+          : AI_CONSENT_DECLINED,
+      });
+      return { ok: false };
+    }
+    // Never asked — prompt for consent and remember the answer.
+    await prisma.session.upsert({
+      where: { phone },
+      create: {
+        phone,
+        state: "awaiting_ai_consent",
+        data: JSON.stringify({ memberId: member.id }),
+      },
+      update: { state: "awaiting_ai_consent", data: JSON.stringify({ memberId: member.id }) },
+    });
+    await sendText({ to: phone, text: AI_CONSENT_PROMPT });
+    return { ok: false };
+  }
+
+  // AI budget (PERF-4): voice transcription and translation both bill Groq
+  // tokens. Enforce the per-member limit BEFORE spending so a member cannot burn
+  // unbounded spend by looping voice notes. (The NL→query paths check this again
+  // before their own call — a non-English voice note legitimately costs two.)
+  if (!(await checkAIRateLimit(member.id))) {
+    if (wantsAudio) {
+      await sendText({
+        to: phone,
+        text: "You've reached the AI usage limit for now. Please type your message, and try again a little later.",
+      });
+      return { ok: false };
+    }
+    // Typed text: skip the (billed) translation and pass it through untranslated
+    // so the command still has a chance to parse.
+    return { ok: true, text: rawText };
+  }
+
+  let text = rawText;
+  if (wantsAudio) {
+    if (!transcriptionEnabled()) {
+      await unreadable();
+      return { ok: false };
+    }
+    const transcript = await transcribeAudioMessage(meta.audioMediaId!);
+    if (!transcript) {
+      await unreadable();
+      return { ok: false };
+    }
+    meta.languageHint = transcript.language ?? undefined;
+    text = transcript.text;
+  }
+  const hint2 = localeFromLanguageCode(meta.languageHint);
+  const detected2 = hint2 && hint2 !== "en" ? hint2 : detectLocale(text);
+  if (detected2 !== "en" && text.trim()) {
+    text = await translateToEnglish(text, detected2);
+  }
+  return { ok: true, text };
+}
+
+/**
+ * Gate an NL→AI (Groq) path on AI-processing consent (SEC-3). Returns true only
+ * when the member has granted it. When unset it sends the consent prompt and
+ * parks the session; when declined it tells the member the feature is off. The
+ * member's text is never sent to the LLM unless this returns true.
+ */
+async function requireAiConsent(
+  phone: string,
+  member: { id: string; aiConsentAt?: Date | null },
+): Promise<boolean> {
+  const state = await getAiConsentState(member);
+  if (state === "granted") return true;
+  if (state === "declined") {
+    await sendText({
+      to: phone,
+      text: "AI features are off. Reply *aioptin* to enable them, or use *menu* to see your options.",
+    });
+    return false;
+  }
+  await prisma.session.upsert({
+    where: { phone },
+    create: { phone, state: "awaiting_ai_consent", data: JSON.stringify({ memberId: member.id }) },
+    update: { state: "awaiting_ai_consent", data: JSON.stringify({ memberId: member.id }) },
+  });
+  await sendText({ to: phone, text: AI_CONSENT_PROMPT });
+  return false;
+}
+
+/**
+ * Entry point for an inbound chat message.
+ *
+ * Resolves the sender's cooperative BEFORE any RLS-protected read (via the
+ * SECURITY DEFINER resolver) and runs the whole handler inside that tenant's
+ * RLS context, so every query below is scoped to the member's cooperative.
+ *
+ * Unregistered senders (no cooperative yet — the join flow) run without a
+ * context; the join flow resolves its cooperative from the code it is given.
+ */
 export async function handleMessage(
   phone: string,
   text: string,
   meta: MessageMeta = {},
+): Promise<void> {
+  const coops = await resolveCoopsByPhone(phone);
+
+  // Exactly one cooperative (or none — the join flow): the common case.
+  if (coops.length <= 1) {
+    const coopId = coops[0]?.id ?? null;
+    if (coopId) {
+      return withCoopContext(coopId, async () => {
+        const member = await getMemberByPhone(phone, coopId);
+        // AI-first text handling (transcribe/translate) runs only after the
+        // member + AI consent are resolved — never before, and never for a
+        // non-consenting member.
+        const ai = await resolveAiText(phone, member, text, meta);
+        if (!ai.ok) return;
+        const locale = resolveMemberLocale(member, getLocale(), text);
+        return runWithLocale(locale, () =>
+          handleMessageInner(phone, ai.text, meta, coopId, member),
+        );
+      });
+    }
+    // No cooperative yet — a join flow may be in progress. Resolve the
+    // cooperative from the session's join code so the flow runs in context.
+    const joinSession = await prisma.session.findUnique({ where: { phone } });
+    const joinCode = parseJoinCode(joinSession?.data);
+    if (joinCode) {
+      const joinCoopId = await resolveCoopByCode(joinCode);
+      if (joinCoopId) {
+        return withCoopContext(joinCoopId, () => handleMessageInner(phone, text, meta, joinCoopId));
+      }
+    }
+    return handleMessageInner(phone, text, meta);
+  }
+
+  // The phone belongs to more than one cooperative. Use the remembered choice
+  // if it is still valid; otherwise ask the member to pick one.
+  const session = await prisma.session.findUnique({ where: { phone } });
+  const selected = session?.selectedCoopId ?? null;
+  if (selected && coops.some((c) => c.id === selected)) {
+    return withCoopContext(selected, async () => {
+      const member = await getMemberByPhone(phone, selected);
+      const ai = await resolveAiText(phone, member, text, meta);
+      if (!ai.ok) return;
+      const locale = resolveMemberLocale(member, getLocale(), text);
+      return runWithLocale(locale, () =>
+        handleMessageInner(phone, ai.text, meta, selected, member),
+      );
+    });
+  }
+
+  const choice = text.trim();
+  if (/^\d+$/.test(choice)) {
+    const idx = parseInt(choice, 10) - 1;
+    if (idx >= 0 && idx < coops.length) {
+      const picked = coops[idx];
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, selectedCoopId: picked.id },
+        update: { selectedCoopId: picked.id },
+      });
+      await sendText({
+        to: phone,
+        text: `✅ You're now using *${picked.name}*. Reply *menu* to continue.`,
+      });
+      return;
+    }
+  }
+
+  const lines = coops.map((c, i) => `${i + 1}. ${c.name} (${c.code})`);
+  await sendText({
+    to: phone,
+    text:
+      `You belong to more than one cooperative. Reply with the number to choose which one to use:\n\n` +
+      lines.join("\n"),
+  });
+}
+
+async function handleMessageInner(
+  phone: string,
+  text: string,
+  meta: MessageMeta = {},
+  coopId?: string,
+  preloadedMember?: Awaited<ReturnType<typeof getMemberByPhone>>,
 ): Promise<void> {
   messageCounter++;
   const shouldUpdateTimestamp = messageCounter % SESSION_UPDATE_EVERY === 0;
@@ -228,16 +667,17 @@ export async function handleMessage(
     return;
   }
 
-  // Device binding: detect SIM swap / session hijack (playbook Attack 1, 6)
+  // Device/session anomaly: ADVISORY only — warn, but never block the message
+  // (a lockout here is an availability bug; the webhook IP is Meta's, not the
+  // member's). Supers are alerted inside validateDeviceSession. SEC-8.
   const platform = phone.startsWith("tg:") ? "telegram" : "whatsapp";
   const deviceCheck = await validateDeviceSession({
     memberPhone: phone,
     platform,
     ip: meta.ip ?? "unknown",
   });
-  if (!deviceCheck.ok) {
-    await sendText({ to: phone, text: `⚠️ ${deviceCheck.reason}\n\nIf this was you, try again in a few minutes.` });
-    return;
+  if (deviceCheck.warning) {
+    await sendText({ to: phone, text: `ℹ️ ${deviceCheck.warning}` });
   }
 
   if (isAwaitingState(session.state as BotState)) {
@@ -245,16 +685,29 @@ export async function handleMessage(
     return;
   }
 
-  const member = await getMemberByPhone(phone);
+  const member = preloadedMember ?? (await getMemberByPhone(phone, coopId));
 
-  // Opt-out: skip all processing for opted-out members (except opt-in command)
   const { cmd: preCmd } = parseCommand(text);
-  if (member?.optedOut && preCmd !== "optin") {
-    return;
-  }
 
-  // Consent check: skip messages for members who haven't consented (except opt-in command)
-  if (member && member.consentAt === null && preCmd !== "optin") {
+  // Message consent (NDPR). Members created outside the chat `join` flow — the
+  // founding superadmin, bulk-imported members, seeds — have never been asked.
+  // Ask now instead of silently ignoring them: put the session into the same
+  // `awaiting_optin` state the join flow uses, so their next YES/NO is recorded.
+  // Members who already answered NO (optedOut=true, consentAt=null) are not re-asked.
+  if (
+    member &&
+    member.consentAt === null &&
+    !member.optedOut &&
+    preCmd !== "optin" &&
+    preCmd !== "aioptin" &&
+    preCmd !== "aioptout"
+  ) {
+    await prisma.session.upsert({
+      where: { phone },
+      create: { phone, state: "awaiting_optin", data: JSON.stringify({ memberId: member.id }) },
+      update: { state: "awaiting_optin", data: JSON.stringify({ memberId: member.id }) },
+    });
+    await sendText({ to: phone, text: MESSAGE_CONSENT_PROMPT });
     return;
   }
 
@@ -262,7 +715,11 @@ export async function handleMessage(
   if (preCmd === "stop" || preCmd === "unsubscribe" || preCmd === "optout") {
     if (member) {
       await prisma.member.update({ where: { id: member.id }, data: { optedOut: true } });
-      await sendText({ to: phone, text: "You have been opted out of all messages. Reply *optin* to re-enable." });
+      invalidateMemberCache(phone, member.cooperativeId);
+      await sendText({
+        to: phone,
+        text: "You have been opted out of all messages. Reply *optin* to re-enable.",
+      });
     } else {
       await sendText({ to: phone, text: "You are not a registered member." });
     }
@@ -270,11 +727,46 @@ export async function handleMessage(
   }
   if (preCmd === "optin") {
     if (member) {
-      await prisma.member.update({ where: { id: member.id }, data: { optedOut: false, consentAt: member.consentAt ?? new Date() } });
-      await sendText({ to: phone, text: "Welcome back! You have been re-enabled for messages. Reply *menu* to see your options." });
+      await prisma.member.update({
+        where: { id: member.id },
+        data: { optedOut: false, consentAt: member.consentAt ?? new Date() },
+      });
+      invalidateMemberCache(phone, member.cooperativeId);
+      await sendText({
+        to: phone,
+        text: "Welcome back! You have been re-enabled for messages. Reply *menu* to see your options.",
+      });
     } else {
-      await sendText({ to: phone, text: "You are not a registered member. Reply *join* to get started." });
+      await sendText({
+        to: phone,
+        text: "You are not a registered member. Reply *join* to get started.",
+      });
     }
+    return;
+  }
+  // AI-processing consent is separate from message consent (NDPR purpose
+  // limitation): voice notes / non-English text are only sent to the LLM when
+  // this is on.
+  if (preCmd === "aioptin" || preCmd === "aioptout") {
+    if (!member) {
+      await sendText({ to: phone, text: "You are not a registered member." });
+      return;
+    }
+    const granted = preCmd === "aioptin";
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { aiConsentAt: granted ? new Date() : null },
+    });
+    invalidateMemberCache(phone, member.cooperativeId);
+    await prisma.dataConsent.create({
+      data: { memberId: member.id, consentType: "ai_processing", granted },
+    });
+    await sendText({
+      to: phone,
+      text: granted
+        ? AI_CONSENT_GRANTED
+        : "AI processing turned off. I won't send voice notes or non-English messages to the AI. Reply *aioptin* to re-enable.",
+    });
     return;
   }
 
@@ -302,7 +794,182 @@ export async function handleMessage(
     });
   }
 
+  if (member && /^language$/i.test(text.trim())) {
+    await sendText({
+      to: phone,
+      text: t("cmd.language.current", {
+        lang: resolveMemberLocale(member, getLocale(), text),
+      }),
+    });
+    return;
+  }
+  if (member && /^language\s+/i.test(text.trim())) {
+    const want = text.trim().split(/\s+/)[1]?.toLowerCase() as Locale;
+    if (!LOCALES.includes(want)) {
+      await sendText({
+        to: phone,
+        text: t("error.unsupportedLanguage", { list: LOCALES.join(", ") }),
+      });
+      return;
+    }
+    await prisma.member.update({ where: { id: member.id }, data: { locale: want } });
+    invalidateMemberCache(phone, member.cooperativeId);
+    await sendText({ to: phone, text: t("cmd.language.set", { lang: want }, want) });
+    return;
+  }
+
+  if (member && /^federation\s+(position|fund|contribute|borrow|repay)\b/i.test(text.trim())) {
+    const parts = text.trim().split(/\s+/);
+    const sub = (parts[1] ?? "").toLowerCase();
+    const feds = await listFederationsForCoop(member.cooperativeId);
+    if (!feds.length) {
+      await sendText({ to: phone, text: "Your cooperative is not in a federation." });
+      return;
+    }
+    const fed = feds[0];
+    if (sub === "position") {
+      const pos = await getPosition(fed.id, member.cooperativeId);
+      // Position balances are booked in the federation's BASE currency, so
+      // format with `fed.baseCurrency`, not the coop's.
+      await sendText({
+        to: phone,
+        text: `*${fed.name}* position\n\nPool stake: *${formatBalance(pos.stakeKobo, fed.baseCurrency)}*\nOwed to federation: *${formatBalance(pos.owedKobo, fed.baseCurrency)}*`,
+      });
+      return;
+    }
+    if (member.role !== "admin" && member.role !== "superadmin") {
+      await sendText({ to: phone, text: "Only a coop admin can manage federation funds." });
+      return;
+    }
+    if (sub === "contribute") {
+      const amount = toKobo(Number(parts[2]));
+      if (!(amount > 0)) {
+        await sendText({ to: phone, text: "Usage: *federation contribute <amount>*" });
+        return;
+      }
+      try {
+        await contribute(fed.id, member.cooperativeId, amount);
+        await sendText({
+          to: phone,
+          text: `✅ Contributed *${formatBalance(amount)}* to *${fed.name}*.`,
+        });
+      } catch (err: any) {
+        await sendText({
+          to: phone,
+          text:
+            err?.message === "INSUFFICIENT_BALANCE"
+              ? "Insufficient wallet balance."
+              : "Could not contribute right now.",
+        });
+      }
+      return;
+    }
+    if (sub === "borrow") {
+      const amount = toKobo(Number(parts[2]));
+      const months = Number(parts[3]);
+      if (!(amount > 0) || !(months > 0)) {
+        await sendText({
+          to: phone,
+          text: "Usage: *federation borrow <amount> <months> [lender code]*",
+        });
+        return;
+      }
+      // An optional 5th token names a lending coop (by code) for a bilateral
+      // inter-coop loan; omit it to borrow from the shared pool.
+      let lenderCooperativeId: string | undefined;
+      const lenderCode = parts[4];
+      if (lenderCode) {
+        const lender = await prisma.cooperative.findUnique({ where: { code: lenderCode } });
+        if (!lender) {
+          await sendText({ to: phone, text: `No cooperative found with code *${lenderCode}*.` });
+          return;
+        }
+        lenderCooperativeId = lender.id;
+      }
+      try {
+        const loan = await borrow(
+          fed.id,
+          member.cooperativeId,
+          amount,
+          months,
+          lenderCooperativeId,
+        );
+        await sendText({
+          to: phone,
+          text: `✅ Loan request *${loan.id.slice(0, 8)}* for *${formatBalance(amount)}* over ${months} months is pending federation approval.`,
+        });
+      } catch (err: any) {
+        const msg =
+          err?.message === "INSUFFICIENT_POOL_LIQUIDITY"
+            ? "The federation pool does not have enough liquidity."
+            : err?.message === "INSUFFICIENT_LENDER_STAKE"
+              ? "The chosen lender does not have enough available stake."
+              : "Could not request the loan right now.";
+        await sendText({ to: phone, text: msg });
+      }
+      return;
+    }
+    if (sub === "fund") {
+      const amount = toKobo(Number(parts[2]));
+      if (!(amount > 0)) {
+        await sendText({ to: phone, text: "Usage: *federation fund <amount>*" });
+        return;
+      }
+      try {
+        await fundFederation(member.cooperativeId, amount);
+        await sendText({
+          to: phone,
+          text: `✅ Funded *${fed.name}* with *${formatBalance(amount)}* from your reserve fund.`,
+        });
+      } catch (err: any) {
+        await sendText({
+          to: phone,
+          text:
+            err?.message === "INSUFFICIENT_RESERVE"
+              ? "Insufficient reserve fund to fund the federation."
+              : "Could not fund the federation right now.",
+        });
+      }
+      return;
+    }
+    if (sub === "repay") {
+      const loanId = parts[2];
+      const amount = toKobo(Number(parts[3]));
+      if (!loanId || !(amount > 0)) {
+        await sendText({ to: phone, text: "Usage: *federation repay <loanId> <amount>*" });
+        return;
+      }
+      try {
+        await repay(loanId, amount, member.cooperativeId);
+        await sendText({
+          to: phone,
+          text: `✅ Repaid *${formatBalance(amount)}* to *${fed.name}*.`,
+        });
+      } catch (err: any) {
+        const msg =
+          err?.message === "INSUFFICIENT_BALANCE"
+            ? "Insufficient federation fund balance to repay."
+            : err?.message === "NOT_YOUR_LOAN"
+              ? "That loan does not belong to your cooperative."
+              : err?.message === "LOAN_NOT_REPAYABLE"
+                ? "That loan is not open for repayment."
+                : "Could not repay the federation loan right now.";
+        await sendText({ to: phone, text: msg });
+      }
+      return;
+    }
+    await sendText({
+      to: phone,
+      text: "Usage: *federation position|fund <amount>|contribute <amount>|borrow <amount> <months> [lender code]|repay <loanId> <amount>*",
+    });
+    return;
+  }
+
   const { cmd, args } = parseCommand(text);
+
+  // Platform-level ombudsman commands run before the member/admin routers:
+  // ombudsmen are not cooperative members, so they have no member row.
+  if (await handleOmbudsmanCommand(phone, cmd, args)) return;
 
   const handled = await handleAdminCommand(phone, cmd, args);
   if (handled) return;
@@ -312,12 +979,35 @@ export async function handleMessage(
     case "hello":
     case "hey":
     case "menu":
+      if (await isOmbudsman(phone)) {
+        await sendText({ to: phone, text: buildOmbudsmanMenu() });
+        break;
+      }
       await sendText({ to: phone, text: buildMenu(member) });
       break;
 
     case "help":
+      if (await isOmbudsman(phone)) {
+        await sendText({ to: phone, text: buildOmbudsmanMenu() });
+        break;
+      }
       await sendText({ to: phone, text: buildFullMenu(member) });
       break;
+
+    case "switchcoop": {
+      await prisma.session.update({ where: { phone }, data: { selectedCoopId: null } });
+      const choices = await resolveCoopsByPhone(phone);
+      if (choices.length <= 1) {
+        await sendText({ to: phone, text: "You only belong to one cooperative." });
+        break;
+      }
+      const lines = choices.map((c, i) => `${i + 1}. ${c.name} (${c.code})`);
+      await sendText({
+        to: phone,
+        text: `Reply with the number of the cooperative to use:\n\n${lines.join("\n")}`,
+      });
+      break;
+    }
 
     case "admin": {
       if (!member || (member.role !== "admin" && member.role !== "superadmin")) {
@@ -340,45 +1030,60 @@ export async function handleMessage(
       await handleBalance(phone, member);
       break;
 
+    case "shares":
+      await handleShares(phone);
+      break;
+
+    case "doctor":
+      await handleDoctor(phone);
+      break;
+
+    case "insurance":
+      await handleInsurance(phone);
+      break;
+
     case "save":
     case "loan":
     case "repay":
-    case "withdraw": {
-      if (member && (member.status === "suspended" || member.status === "deceased")) {
-        await sendText({
-          to: phone,
-          text: "🔒 Your account is currently suspended. No money can move until a cooperative admin restores it. Please contact them to review.",
-        });
-        break;
-      }
-      if (cmd !== "save" && member) {
-        const frozen = await isFrozen(member.id);
-        if (frozen.frozen) {
-          await sendText({ to: phone, text: frozen.message });
-          break;
-        }
-      }
-      if (!await checkMoneyRateLimit(phone)) {
-        await sendText({
-          to: phone,
-          text: "⏳ You've made several money requests in the last hour. For your safety, please wait a little before trying again.",
-        });
-        break;
-      }
+    case "withdraw":
+    case "buyshares":
+    case "openproduct":
+    case "openjunior":
+    case "saveproduct":
+    case "withdrawproduct":
+    case "matureproduct":
+    case "mandate":
+    case "mandates":
+    case "mandatestatus":
+    case "cancelmandate":
+    case "grouploan": {
       // Tier-based transaction limit check. TIER_LIMITS and contribution
       // amounts are stored in KOBO, so parse the user's naira into kobo before
       // comparing (otherwise a naira-vs-kobo mismatch silently disables the cap).
-      const amt = parseNaira(args[0]);
-      if (amt !== null && member) {
-        const tierError = await checkTierLimit(phone, amt, member.id);
-        if (tierError) {
-          await sendText({ to: phone, text: `⛔ ${tierError}` });
-          break;
-        }
-      }
+      // grouploan is *grouploan <group id> <amount> <months>* — its amount is
+      // the SECOND arg, so parse the right token for the tier cap. `mandate` is
+      // exempt: its arg is a RECURRING CAP, not a single movement, so it is
+      // bounded by `directDebitMaxCap` inside createMandate instead.
+      const amt = parseNaira(
+        cmd === "grouploan" || cmd === "saveproduct" || cmd === "withdrawproduct"
+          ? args[1]
+          : args[0],
+      );
+      if (!(await moneyFlowAllowed(phone, member, cmd, amt))) break;
       if (cmd === "save") await handleSave(phone, args);
       else if (cmd === "loan") await handleLoan(phone, args);
       else if (cmd === "repay") await handleRepay(phone, args);
+      else if (cmd === "buyshares") await handleBuyShares(phone, args);
+      else if (cmd === "openproduct") await handleOpenProduct(phone, args);
+      else if (cmd === "openjunior") await handleOpenJunior(phone, args);
+      else if (cmd === "saveproduct") await handleSaveProduct(phone, args);
+      else if (cmd === "withdrawproduct") await handleWithdrawProduct(phone, args);
+      else if (cmd === "matureproduct") await handleMatureProduct(phone, args);
+      else if (cmd === "mandate") await handleMandate(phone, args);
+      else if (cmd === "mandates") await handleMandates(phone);
+      else if (cmd === "mandatestatus") await handleMandateStatus(phone, args);
+      else if (cmd === "cancelmandate") await handleCancelMandate(phone, args);
+      else if (cmd === "grouploan") await handleGroupLoan(phone, args);
       else await handleWithdraw(phone, args);
       break;
     }
@@ -390,10 +1095,27 @@ export async function handleMessage(
     case "freeze":
     case "unfreeze": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const freezing = cmd === "freeze";
+      if (!freezing) {
+        // A Supervisory Committee freeze is not the member's to lift.
+        const current = await prisma.member.findUnique({
+          where: { id: member.id },
+          select: { supervisoryFrozenAt: true },
+        });
+        if (current?.supervisoryFrozenAt) {
+          await sendText({
+            to: phone,
+            text: "🔒 Your account is frozen by the *Supervisory Committee*. Only the committee or a super admin can lift it — please contact your cooperative.",
+          });
+          break;
+        }
+      }
       await prisma.member.update({
         where: { id: member.id },
         data: { frozenAt: freezing ? new Date() : null },
@@ -407,7 +1129,10 @@ export async function handleMessage(
 
     case "payees": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const payees = await listPayees(member.id);
@@ -417,32 +1142,30 @@ export async function handleMessage(
 
     case "addpayee": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
-        break;
-      }
-      const name = args[0];
-      const acct = args[1];
-      const bank = args[2];
-      if (!name || !acct || !bank) {
         await sendText({
           to: phone,
-          text: "Usage: *addpayee <name> <account> <bank>*, e.g. *addpayee mama-ngozi 0123456789 gtb*.",
+          text: "You need to join a cooperative first. Reply *join <code>*.",
         });
         break;
       }
-      const result = await savePayee(member.id, name, acct, bank);
-      await sendText({ to: phone, text: result.ok ? `✅ Payee *${result.payee.name}* saved. Reply *payees* to see your list.` : result.message });
+      await handleAddPayee(phone, args);
       break;
     }
 
     case "delpayee": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const target = args[0];
       if (!target) {
-        await sendText({ to: phone, text: "Usage: *delpayee <name or number>* — choose from your *payees* list." });
+        await sendText({
+          to: phone,
+          text: "Usage: *delpayee <name or number>* — choose from your *payees* list.",
+        });
         break;
       }
       const payees = await listPayees(member.id);
@@ -450,7 +1173,10 @@ export async function handleMessage(
         ? payees[parseInt(target, 10) - 1]
         : payees.find((p) => p.name.includes(target.toLowerCase()));
       if (!picked) {
-        await sendText({ to: phone, text: "Couldn't find that payee. Reply *payees* to see your saved list." });
+        await sendText({
+          to: phone,
+          text: "Couldn't find that payee. Reply *payees* to see your saved list.",
+        });
         break;
       }
       await deletePayee(member.id, picked.id);
@@ -470,9 +1196,31 @@ export async function handleMessage(
       await handleCode(phone);
       break;
 
+    case "myrefcode":
+      await handleMyRefCode(phone);
+      break;
+
+    case "referrals":
+      await handleReferrals(phone);
+      break;
+
+    case "referralbonus":
+      await handleReferralBonus(phone);
+      break;
+
+    case "withdrawbonus":
+      await handleStartBonusWithdrawal(phone);
+      break;
+
     case "phone":
       await handlePhone(phone, args);
       break;
+
+    case "changephone": {
+      const result = await requestPhoneChange(phone, args.join(""));
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
 
     case "ledger":
       await handleLedger(phone);
@@ -552,6 +1300,18 @@ export async function handleMessage(
       await handleNextLesson(phone, member);
       break;
 
+    case "certificate": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to be a member first. Reply *join* to get started.",
+        });
+        break;
+      }
+      await resendCertificate(phone, member.id);
+      break;
+    }
+
     case "reserveinfo":
       await handleReserveInfo(phone, member);
       break;
@@ -561,10 +1321,10 @@ export async function handleMessage(
         to: phone,
         text:
           "*Loan interest (declining balance tiers)*\n\n" +
-          "• Up to 3 months: *20% APR* (~5% flat equivalent)\n" +
-          "• 4–6 months: *16% APR* (~8% flat equivalent)\n" +
-          "• 7–9 months: *12% APR* (~9% flat equivalent)\n" +
-          "• 10–12 months: *10% APR* (~10% flat equivalent)\n\n" +
+          "• Up to 3 months: *6% APR*\n" +
+          "• 4–6 months: *8% APR*\n" +
+          "• 7–9 months: *9% APR*\n" +
+          "• 10–12 months: *10% APR*\n\n" +
           `Admin charge per loan: ${formatBalance(2000)} (deducted at disbursement).`,
       });
       break;
@@ -576,6 +1336,10 @@ export async function handleMessage(
 
     case "risk":
       await handleRisk(phone, member);
+      break;
+
+    case "anomalies":
+      await handleAnomalies(phone, member);
       break;
 
     case "startvote":
@@ -614,9 +1378,110 @@ export async function handleMessage(
       await handleElections(phone);
       break;
 
+    case "meetings": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const meetings = await listMeetings(member.cooperativeId);
+      await sendText({ to: phone, text: meetings.message });
+      break;
+    }
+
+    case "attend": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const attendRef = args[0];
+      if (!attendRef) {
+        await sendText({ to: phone, text: "Usage: *attend <meeting id>*" });
+        break;
+      }
+      const attendRes = await attendMeeting(member.cooperativeId, attendRef, member.id);
+      await sendText({ to: phone, text: attendRes.message });
+      break;
+    }
+
+    case "proxy": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const proxyRef = args[0];
+      const proxyCode = args[1];
+      if (!proxyRef || !proxyCode) {
+        await sendText({
+          to: phone,
+          text: "Usage: *proxy <meeting id> <member code>* — carry an absent member's vote.",
+        });
+        break;
+      }
+      const proxyRes = await assignProxy(member.cooperativeId, proxyRef, member.id, proxyCode);
+      await sendText({ to: phone, text: proxyRes.message });
+      break;
+    }
+
+    case "motions": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const motionsRef = args[0];
+      if (!motionsRef) {
+        await sendText({ to: phone, text: "Usage: *motions <meeting id>*" });
+        break;
+      }
+      const motionsRes = await listMotions(member.cooperativeId, motionsRef);
+      await sendText({ to: phone, text: motionsRes.message });
+      break;
+    }
+
+    case "motionvote": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const motionRef = args[0];
+      const motionChoice = args[1];
+      if (!motionRef || !motionChoice) {
+        await sendText({
+          to: phone,
+          text: "Usage: *motionvote <motion id> <yes|no|abstain>*",
+        });
+        break;
+      }
+      const voteRes = await castMotionVote(
+        member.cooperativeId,
+        motionRef,
+        member.id,
+        motionChoice,
+      );
+      await sendText({ to: phone, text: voteRes.message });
+      break;
+    }
+
     case "votediv": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const voteResult = await castDividendVote(
@@ -629,7 +1494,10 @@ export async function handleMessage(
 
     case "votedivstatus": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to join a cooperative first. Reply *join <code>*." });
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
         break;
       }
       const voteResult = await dividendVoteStatus(member.cooperativeId);
@@ -645,14 +1513,46 @@ export async function handleMessage(
       await handleMyData(phone);
       break;
 
+    case "verify": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+        });
+        break;
+      }
+      const nin = (args[0] ?? "").trim();
+      if (!isValidNin(nin)) {
+        await sendText({
+          to: phone,
+          text:
+            "Please send your 11-digit *NIN* like this: *verify 12345678901*.\n\n" +
+            "Your NIN is the National Identification Number on your NIMC slip — it is never shared with anyone outside the cooperative.",
+        });
+        break;
+      }
+      const result = await submitNin(
+        { id: member.id, name: member.name, phone, cooperativeId: member.cooperativeId },
+        nin,
+      );
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
     case "grievance": {
       const grievanceMsg = args.join(" ").trim();
       if (!grievanceMsg) {
-        await sendText({ to: phone, text: "Usage: *grievance <your complaint>* — submit a grievance to the cooperative admin." });
+        await sendText({
+          to: phone,
+          text: "Usage: *grievance <your complaint>* — submit a grievance to the cooperative admin.",
+        });
         break;
       }
       if (!member) {
-        await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+        await sendText({
+          to: phone,
+          text: "You need to be a member first. Reply *join* to get started.",
+        });
         break;
       }
       await prisma.grievance.create({
@@ -676,9 +1576,17 @@ export async function handleMessage(
       break;
     }
 
+    case "escalate": {
+      await handleEscalate(phone, args);
+      break;
+    }
+
     case "byelaws": {
       if (!member) {
-        await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+        await sendText({
+          to: phone,
+          text: "You need to be a member first. Reply *join* to get started.",
+        });
         break;
       }
       const coop = await prisma.cooperative.findUnique({
@@ -705,7 +1613,142 @@ export async function handleMessage(
       break;
     }
 
+    case "joingroup": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      if (!args[0]) {
+        await sendText({ to: phone, text: "Usage: *joingroup <group code>*" });
+        break;
+      }
+      const joined = await joinGroup(member.cooperativeId, args[0], member.id);
+      await sendText({ to: phone, text: joined.message });
+      break;
+    }
+
+    case "groupcontribute": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const groupId = args[0];
+      const amount = parseNaira(args[1]);
+      if (!groupId || amount === null) {
+        await sendText({
+          to: phone,
+          text: "Usage: *groupcontribute <group id> <amount>* — e.g. *groupcontribute abc123 5000*",
+        });
+        break;
+      }
+      const contributed = await contributeToGroup(member.cooperativeId, groupId, member.id, amount);
+      await sendText({ to: phone, text: contributed.message });
+      break;
+    }
+
+    case "mygroups": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const mine = await myGroups(member.cooperativeId, member.id);
+      if (!mine.groups || mine.groups.length === 0) {
+        await sendText({
+          to: phone,
+          text: "You have not joined any savings group yet. Reply *joingroup <code>* to join one.",
+        });
+        break;
+      }
+      const lines = ["*👥 Your Savings Groups*", ""];
+      for (const g of mine.groups) {
+        lines.push(
+          `• *${g.name}* (${g.code}) — ${g.type.toUpperCase()} — ${formatBalance(g.contributionAmount)} × ${g.cycleLength}`,
+          `  ID: ${g.id}`,
+        );
+      }
+      await sendText({ to: phone, text: lines.join("\n") });
+      break;
+    }
+
+    case "products": {
+      await handleProducts(phone);
+      break;
+    }
+
+    case "myproducts": {
+      await handleMyProducts(phone);
+      break;
+    }
+
+    case "groupstatus": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      if (!args[0]) {
+        await sendText({ to: phone, text: "Usage: *groupstatus <group id>*" });
+        break;
+      }
+      const status = await groupStatus(member.cooperativeId, args[0]);
+      if (!status.ok || !status.group) {
+        await sendText({ to: phone, text: status.message });
+        break;
+      }
+      const lines = [
+        `*👥 ${status.group.name}* (${status.group.code}) — ${status.group.type.toUpperCase()}`,
+        "",
+        `• Contribution: *${formatBalance(status.group.contributionAmount)}* per round`,
+        `• Cycle length: *${status.group.cycleLength}* rounds`,
+        `• Pot: *${formatBalance(status.pot ?? 0)}*`,
+        status.cycle
+          ? `• Open cycle: *#${status.cycle.cycleNumber}*`
+          : `• Status: *${status.group.status}*`,
+        "",
+        `*Members (${status.members?.length ?? 0}):*`,
+      ];
+      for (const m of status.members ?? []) {
+        const pos = m.rotationPosition ? ` — pos #${m.rotationPosition}` : "";
+        const sh = m.shares > 0 ? ` — ${m.shares} share(s)` : "";
+        lines.push(`• ${m.name}${pos}${sh}`);
+      }
+      await sendText({ to: phone, text: lines.join("\n") });
+      break;
+    }
+
     default: {
+      // Natural-language loan intake: a member can type "I need a loan of 150k,
+      // guarantors 080…, ABC123-XYZ" and the AI pre-fills the loan flow. This
+      // runs BEFORE the query branch below, because isNaturalLanguageQuery()
+      // returns true for any message that contains the word "loan".
+      if (
+        aiEnabled() &&
+        member &&
+        /\b(loan|borrow)\b/i.test(text) &&
+        text.trim().length >= 4 &&
+        !/^[\d\s.,]+$/.test(text)
+      ) {
+        if ((await requireAiConsent(phone, member)) && (await checkAIRateLimit(member.id))) {
+          const intent = await extractLoanRequest(text);
+          if (intent) {
+            const amountKobo = intent.amountNaira !== null ? toKobo(intent.amountNaira) : null;
+            if (!(await moneyFlowAllowed(phone, member, "loan", amountKobo))) break;
+            await startLoanFromNL(phone, intent);
+            return;
+          }
+        }
+      }
       if (aiEnabled() && text.trim().length >= 4 && !/^[\d\s.,]+$/.test(text)) {
         if (isNaturalLanguageQuery(text)) {
           if (!member) {
@@ -715,7 +1758,8 @@ export async function handleMessage(
             });
             break;
           }
-          if (!await checkAIRateLimit(member.id)) {
+          if (!(await requireAiConsent(phone, member))) break;
+          if (!(await checkAIRateLimit(member.id))) {
             await sendText({
               to: phone,
               text: "⏳ You've reached the limit of 10 AI queries per hour. Please try again later.",
@@ -750,7 +1794,11 @@ export async function handleMessage(
           }
         }
 
-        if (member && await checkAIRateLimit(member.id)) {
+        if (
+          member &&
+          (await requireAiConsent(phone, member)) &&
+          (await checkAIRateLimit(member.id))
+        ) {
           const suggestion = await suggestCommand(text);
           if (suggestion) {
             await prisma.session.upsert({
@@ -783,18 +1831,15 @@ export async function handleMessage(
           });
           return;
         }
-        if (!await checkAIRateLimit(member.id)) {
+        if (!(await requireAiConsent(phone, member))) return;
+        if (!(await checkAIRateLimit(member.id))) {
           await sendText({
             to: phone,
             text: "⏳ You've reached the limit of 10 AI queries per hour. Please try again later.",
           });
           return;
         }
-        const supportResponse = await generateSupportResponse(
-          text,
-          member.name,
-          member.role,
-        );
+        const supportResponse = await generateSupportResponse(text, member.name, member.role);
         await sendText({ to: phone, text: supportResponse });
         return;
       }
@@ -808,26 +1853,50 @@ export async function handleMessage(
   }
 }
 
-async function handleClass(phone: string, member: { id: string } | null, args: string[]): Promise<void> {
+async function handleClass(
+  phone: string,
+  member: { id: string } | null,
+  args: string[],
+): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
     return;
   }
 
   const arg = args.join(" ").trim().toLowerCase();
 
+  // Start the certification quiz.
+  if (arg === "quiz") {
+    await startLiteracyQuiz(phone, member.id);
+    return;
+  }
+
   // Check for progress command
   if (arg === "progress") {
     const progress = await prisma.memberProgress.findUnique({ where: { memberId: member.id } });
     if (!progress) {
-      await sendText({ to: phone, text: "You haven't started the financial class yet. Reply *class* to begin." });
+      await sendText({
+        to: phone,
+        text: "You haven't started the financial class yet. Reply *class* to begin.",
+      });
       return;
     }
     const completed = JSON.parse(progress.completedLessons) as number[];
     const total = getTotalLessons();
+    const cert = await prisma.literacyCertificate.findUnique({ where: { memberId: member.id } });
+    const certLine = !progress.certificationOptIn
+      ? "\n\n📘 Certification: not enrolled (reply *class quiz* to learn more)."
+      : cert && !cert.revokedAt
+        ? `\n\n🎓 Certified! Ref: ${cert.referenceCode} (score ${cert.score}/${cert.totalQuestions}).`
+        : progress.quizPassedAt
+          ? "\n\n🎓 Certification: passed."
+          : `\n\n📘 Certification: enrolled — attempts: ${progress.quizAttempts}${progress.quizScore !== null ? `, last score: ${progress.quizScore}` : ""}. Reply *class quiz* to take the quiz.`;
     await sendText({
       to: phone,
-      text: `📚 *Your Progress*\n\nCompleted: ${completed.length}/${total} lessons\n${completed.map((l) => `✅ Lesson ${l}`).join("\n")}${progress.completedAt ? "\n\n🎉 Class completed!" : `\n\nReply *class* for Lesson ${progress.currentLesson}.`}`,
+      text: `📚 *Your Progress*\n\nCompleted: ${completed.length}/${total} lessons\n${completed.map((l) => `✅ Lesson ${l}`).join("\n")}${progress.completedAt ? "\n\n🎉 Class completed!" : `\n\nReply *class* for Lesson ${progress.currentLesson}.`}${certLine}`,
     });
     return;
   }
@@ -837,7 +1906,10 @@ async function handleClass(phone: string, member: { id: string } | null, args: s
     const lessonNum = parseInt(arg.replace("replay ", ""));
     const lesson = getLesson(lessonNum);
     if (!lesson) {
-      await sendText({ to: phone, text: "Invalid lesson number. Reply *class progress* to see your progress." });
+      await sendText({
+        to: phone,
+        text: "Invalid lesson number. Reply *class progress* to see your progress.",
+      });
       return;
     }
     await sendText({ to: phone, text: lesson.content });
@@ -855,7 +1927,10 @@ async function handleClass(phone: string, member: { id: string } | null, args: s
   // Get current lesson
   const lesson = getLesson(progress.currentLesson);
   if (!lesson) {
-    await sendText({ to: phone, text: "🎉 You've completed all lessons! Reply *class progress* to review." });
+    await sendText({
+      to: phone,
+      text: "🎉 You've completed all lessons! Reply *class progress* to review.",
+    });
     return;
   }
 
@@ -864,7 +1939,10 @@ async function handleClass(phone: string, member: { id: string } | null, args: s
 
 async function handleNextLesson(phone: string, member: { id: string } | null): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
     return;
   }
 
@@ -915,19 +1993,26 @@ async function handleNextLesson(phone: string, member: { id: string } | null): P
   }
 }
 
-async function handleReserveInfo(phone: string, member: { cooperativeId: string } | null): Promise<void> {
+async function handleReserveInfo(
+  phone: string,
+  member: { cooperativeId: string } | null,
+): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
     return;
   }
 
   const info = await getReserveInfo(member.cooperativeId);
-  
-  const growthText = info.growthPercent > 0
-    ? `📈 *+${info.growthPercent}%* growth this quarter`
-    : info.growthPercent < 0
-      ? `📉 *${info.growthPercent}%* this quarter`
-      : `➡️ No change this quarter`;
+
+  const growthText =
+    info.growthPercent > 0
+      ? `📈 *+${info.growthPercent}%* growth this quarter`
+      : info.growthPercent < 0
+        ? `📉 *${info.growthPercent}%* this quarter`
+        : `➡️ No change this quarter`;
 
   const body = [
     `🛡️ *Reserve Fund Dashboard*`,
@@ -945,18 +2030,35 @@ async function handleReserveInfo(phone: string, member: { cooperativeId: string 
   await sendText({ to: phone, text: body.join("\n") });
 }
 
-async function handleAnniversary(phone: string, member: { id: string; name: string; createdAt: Date; wallet?: { totalSaved: number } | null } | null): Promise<void> {
+async function handleAnniversary(
+  phone: string,
+  member: {
+    id: string;
+    name: string;
+    createdAt: Date;
+    wallet?: { totalSaved: number } | null;
+  } | null,
+): Promise<void> {
   if (!member) {
-    await sendText({ to: phone, text: "You need to be a member first. Reply *join* to get started." });
+    await sendText({
+      to: phone,
+      text: "You need to be a member first. Reply *join* to get started.",
+    });
     return;
   }
 
   const now = new Date();
   const diffMs = now.getTime() - member.createdAt.getTime();
   const years = Math.floor(diffMs / (365.25 * 24 * 60 * 60 * 1000));
-  const months = Math.floor((diffMs % (365.25 * 24 * 60 * 60 * 1000)) / (30.44 * 24 * 60 * 60 * 1000));
+  const months = Math.floor(
+    (diffMs % (365.25 * 24 * 60 * 60 * 1000)) / (30.44 * 24 * 60 * 60 * 1000),
+  );
 
-  const regDate = member.createdAt.toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" });
+  const regDate = member.createdAt.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
 
   const message = [
     `📅 *Your Anniversary Info*`,

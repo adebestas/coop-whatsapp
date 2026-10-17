@@ -28,7 +28,8 @@ export async function createTicket(phone: string, message: string): Promise<Tick
   if (text.length < 5) {
     return {
       ok: false,
-      message: "Please describe your issue, e.g. *support My top-up has not reflected since yesterday*.",
+      message:
+        "Please describe your issue, e.g. *support My top-up has not reflected since yesterday*.",
     };
   }
 
@@ -105,7 +106,11 @@ export async function resolveTicket(
   }
   const ticket = await prisma.supportTicket.findFirst({
     where: {
-      OR: [{ id: ticketCode }, { id: { startsWith: ticketCode } }, { id: { endsWith: ticketCode } }],
+      OR: [
+        { id: ticketCode },
+        { id: { startsWith: ticketCode } },
+        { id: { endsWith: ticketCode } },
+      ],
     },
     include: { member: true },
   });
@@ -133,5 +138,8 @@ export async function resolveTicket(
       (note.trim() ? `Note: ${note.trim()}` : ""),
   ).catch(() => {});
 
-  return { ok: true, message: `Ticket *${ticket.id.slice(-6)}* resolved. ${ticket.member.name} has been notified.` };
+  return {
+    ok: true,
+    message: `Ticket *${ticket.id.slice(-6)}* resolved. ${ticket.member.name} has been notified.`,
+  };
 }

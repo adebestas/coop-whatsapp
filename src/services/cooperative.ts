@@ -1,8 +1,9 @@
 import { prisma } from "../lib/prisma.js";
 import { hashPin } from "../lib/security.js";
-import { audit } from "./audit.js";
-import { LIMITS, formatBalance } from "../lib/money.js";
-import { getCoopConfig } from "./coop-config.js";
+import { recordReferral } from "./referrals.js";
+import { screenAndRecord } from "./screening.js";
+import { getRedis } from "../lib/cache.js";
+import { countryFromPhone, currencyForCountry } from "../lib/currency.js";
 
 export { formatBalance } from "../lib/money.js";
 
@@ -51,17 +52,24 @@ export async function findOrCreateMember(
   dateOfBirth?: Date,
   nextOfKin?: { name: string; phone: string },
   phoneVerified = false,
+  referrerCode?: string,
 ): Promise<JoinResult> {
   const coop = await prisma.cooperative.findUnique({ where: { code: coopCode } });
   if (!coop) {
-    return { ok: false, message: `We couldn't find a cooperative with code *${coopCode}*. Check the code and try again.` };
+    return {
+      ok: false,
+      message: `We couldn't find a cooperative with code *${coopCode}*. Check the code and try again.`,
+    };
   }
 
   const existing = await prisma.member.findUnique({
     where: { cooperativeId_phone: { cooperativeId: coop.id, phone } },
   });
   if (existing) {
-    return { ok: false, message: `You're already a member of *${coop.name}*. Reply *menu* to see what you can do.` };
+    return {
+      ok: false,
+      message: `You're already a member of *${coop.name}*. Reply *menu* to see what you can do.`,
+    };
   }
 
   // Platform lock: one account per person per cooperative. A member who
@@ -118,6 +126,38 @@ export async function findOrCreateMember(
     },
   });
 
+  // Capture the referral (if the member joined with a `ref <code>`). Never let a
+  // bad/unknown code break onboarding — the referral is simply not recorded.
+  if (referrerCode) {
+    await recordReferral(coop.id, referrerCode, member.id).catch(() => {});
+  }
+
+  // CFT: screen the member (and their next-of-kin) against sanctions/PEP lists.
+  // Never blocks onboarding by itself — the result is recorded and supers are
+  // alerted; the payout gate blocks money-out to a matched name.
+  try {
+    const outcome = await screenAndRecord(name, {
+      cooperativeId: coop.id,
+      subjectType: "member",
+      subjectId: member.id,
+      subjectName: name,
+    });
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { screeningStatus: outcome.status, screeningAt: new Date() },
+    });
+    if (nextOfKin?.name) {
+      await screenAndRecord(nextOfKin.name, {
+        cooperativeId: coop.id,
+        subjectType: "nok",
+        subjectId: member.id,
+        subjectName: nextOfKin.name,
+      });
+    }
+  } catch (err) {
+    console.error("[cooperative] member screening failed", err);
+  }
+
   return {
     ok: true,
     memberId: member.id,
@@ -126,13 +166,109 @@ export async function findOrCreateMember(
 }
 
 const memberCache = new Map<string, { data: any; expires: number }>();
-const CACHE_TTL = 30_000;
+const CACHE_TTL = 30_000; // ms
+const MEMBER_CACHE_PREFIX = "membercache:";
+
+// Prisma DateTime values become ISO strings over JSON; revive them so a cached
+// member has the same shape as a live query (callers use `.getTime()` etc.).
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+function reviveDates(_key: string, value: unknown): unknown {
+  return typeof value === "string" && ISO_DATE.test(value) ? new Date(value) : value;
+}
+
+/**
+ * Read a cached member. Redis is the shared cache (so an invalidation on one
+ * instance is seen by the others); the in-memory map is a fallback when Redis
+ * is unavailable. Returns null on a miss.
+ */
+async function readMemberCache(key: string): Promise<any | null> {
+  const redis = getRedis();
+  if (redis) {
+    try {
+      const raw = await redis.get(MEMBER_CACHE_PREFIX + key);
+      if (raw) return JSON.parse(raw, reviveDates);
+    } catch {
+      /* fall through to the in-memory cache */
+    }
+  }
+  const local = memberCache.get(key);
+  if (local && Date.now() < local.expires) return local.data;
+  return null;
+}
+
+async function writeMemberCache(key: string, data: unknown): Promise<void> {
+  const redis = getRedis();
+  if (redis) {
+    try {
+      await redis.set(MEMBER_CACHE_PREFIX + key, JSON.stringify(data), "PX", CACHE_TTL);
+      return;
+    } catch {
+      /* fall through */
+    }
+  }
+  memberCache.set(key, { data, expires: Date.now() + CACHE_TTL });
+}
+
+async function deleteRedisKey(key: string): Promise<void> {
+  const redis = getRedis();
+  if (!redis) return;
+  try {
+    await redis.del(MEMBER_CACHE_PREFIX + key);
+  } catch {
+    /* ignore */
+  }
+}
+
+async function deleteRedisPattern(phone: string): Promise<void> {
+  const redis = getRedis();
+  if (!redis) return;
+  try {
+    // `<coopId>:<phone>` keys (plus the bare `<phone>` key). Phone ids never
+    // contain Redis glob metacharacters, so the pattern is safe.
+    let cursor = "0";
+    do {
+      const [next, keys] = await redis.scan(
+        cursor,
+        "MATCH",
+        `${MEMBER_CACHE_PREFIX}*:${phone}`,
+        "COUNT",
+        100,
+      );
+      cursor = next;
+      if (keys.length) await redis.del(...keys);
+    } while (cursor !== "0");
+    await redis.del(MEMBER_CACHE_PREFIX + phone);
+  } catch {
+    /* ignore */
+  }
+}
 
 /**
  * Clear the member cache — useful for tests.
  */
 export function clearMemberCache(): void {
   memberCache.clear();
+}
+
+/**
+ * Drop the cached member for a phone after a write that changes consent,
+ * role or status fields. Clears both the shared Redis cache and the local map,
+ * so another instance cannot serve the stale row. The consent gate in
+ * conversation.ts reads `consentAt`/`optedOut` from this cache.
+ */
+export function invalidateMemberCache(phone: string, cooperativeId?: string): void {
+  if (cooperativeId) {
+    memberCache.delete(`${cooperativeId}:${phone}`);
+    void deleteRedisKey(`${cooperativeId}:${phone}`);
+    return;
+  }
+  // No cooperative given: drop every cached entry for this phone, including the
+  // cooperative-scoped keys (`<coopId>:<phone>`) written by getMemberByPhone.
+  memberCache.delete(phone);
+  for (const key of memberCache.keys()) {
+    if (key.endsWith(`:${phone}`)) memberCache.delete(key);
+  }
+  void deleteRedisPattern(phone);
 }
 
 /**
@@ -145,15 +281,15 @@ export function clearMemberCache(): void {
  */
 export async function getMemberByPhone(phone: string, cooperativeId?: string) {
   const cacheKey = cooperativeId ? `${cooperativeId}:${phone}` : phone;
-  const cached = memberCache.get(cacheKey);
-  if (cached && Date.now() < cached.expires) return cached.data;
+  const cached = await readMemberCache(cacheKey);
+  if (cached) return cached;
 
   if (cooperativeId) {
     const member = await prisma.member.findUnique({
       where: { cooperativeId_phone: { cooperativeId, phone } },
       include: { cooperative: true, wallet: true },
     });
-    if (member) memberCache.set(cacheKey, { data: member, expires: Date.now() + CACHE_TTL });
+    if (member) await writeMemberCache(cacheKey, member);
     return member;
   }
 
@@ -171,79 +307,8 @@ export async function getMemberByPhone(phone: string, cooperativeId?: string) {
     return null;
   }
   const member = candidates[0] ?? null;
-  if (member) memberCache.set(cacheKey, { data: member, expires: Date.now() + CACHE_TTL });
+  if (member) await writeMemberCache(cacheKey, member);
   return member;
-}
-
-/**
- * TEST-ONLY helper — DO NOT call from any production/flux path.
- *
- * This fabricates a wallet credit with NO real payment (no Monnify/Paystack).
- * The only legitimate money-in path is topup.ts handlePaymentNotification via a
- * provider webhook. Kept only so tests can pre-fund wallets when setting up
- * unrelated scenarios. Any production code that wants to credit a wallet must
- * go through a verified payment — never through this function.
- */
-export async function createContribution(phone: string, amount: number): Promise<{ ok: boolean; message: string }> {
-  const member = await getMemberByPhone(phone);
-  if (!member) {
-    return { ok: false, message: "You need to join a cooperative first. Reply *join <code>* to get started." };
-  }
-  if (!member.wallet) {
-    return { ok: false, message: "No wallet found. Please contact your cooperative admin." };
-  }
-  if (!Number.isFinite(amount) || amount <= 0) {
-    return { ok: false, message: "Please enter a valid amount, e.g. *save 2000*." };
-  }
-  const coopConfig = await getCoopConfig(member.cooperativeId);
-  if (amount < coopConfig.minContribution) {
-    return { ok: false, message: `Minimum save amount is *${formatBalance(coopConfig.minContribution)}*.` };
-  }
-  if (amount > LIMITS.MAX_SAVE) {
-    return { ok: false, message: `Maximum save amount is *${formatBalance(LIMITS.MAX_SAVE)}*.` };
-  }
-
-  const reference = `CON-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-
-  // ✅ Wrapped in transaction — both succeed or both fail (prevents money loss)
-  await prisma.$transaction([
-    prisma.contribution.create({
-      data: {
-        amount,
-        reference,
-        status: "confirmed",
-        paidAt: new Date(),
-        memberId: member.id,
-        cooperativeId: member.cooperativeId,
-      },
-    }),
-    prisma.wallet.update({
-      where: { id: member.wallet.id },
-      data: {
-        balance: { increment: amount },
-        totalSaved: { increment: amount },
-      },
-    }),
-  ]);
-
-  const balanceBefore = member.wallet.balance ?? 0;
-  const balance = balanceBefore + amount;
-  await audit({
-    cooperativeId: member.cooperativeId,
-    actorPhone: phone,
-    actorId: member.id,
-    actorRole: member.role,
-    action: "contribution.create",
-    targetType: "contribution",
-    amount,
-    balanceBefore,
-    balanceAfter: balance,
-    detail: formatBalance(amount),
-  });
-  return {
-    ok: true,
-    message: `✅ Saved ${formatBalance(amount)}.\nYour new balance is *${formatBalance(balance)}*.\n\nReply *balance* anytime to check.`,
-  };
 }
 
 export async function createCooperative(data: {
@@ -252,9 +317,24 @@ export async function createCooperative(data: {
   adminPhone?: string;
   state?: string;
   registrationNumber?: string;
+  country?: string;
 }) {
   if (!data.registrationNumber) {
-    console.warn(`[compliance] Cooperative "${data.name}" created without a registration number. Registration number is required under CAMA for legal recognition.`);
+    console.warn(
+      `[compliance] Cooperative "${data.name}" created without a registration number. Registration number is required under CAMA for legal recognition.`,
+    );
   }
-  return prisma.cooperative.create({ data });
+  const country =
+    data.country ?? (data.adminPhone ? countryFromPhone(data.adminPhone) : null) ?? "NG";
+  const currency = currencyForCountry(country);
+  return prisma.cooperative.create({
+    data: {
+      name: data.name,
+      code: data.code,
+      adminPhone: data.adminPhone,
+      state: data.state,
+      country,
+      currency,
+    },
+  });
 }

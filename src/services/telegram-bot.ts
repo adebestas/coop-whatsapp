@@ -11,10 +11,40 @@ import { handleMessage } from "./conversation.js";
 import { SECRET_STATES, type BotState } from "./conversation.js";
 import { handleAwaitingInput, safeParse } from "./handlers/session.js";
 import { prisma } from "../lib/prisma.js";
+import { getRedis } from "../lib/cache.js";
+import { RedisMutex } from "../lib/redis-mutex.js";
 
 const API_BASE = "https://api.telegram.org";
 
 let offset = 0;
+const OFFSET_KEY = "telegram:offset";
+
+/** Serialize message processing per Telegram user (mirrors the WhatsApp mutex). */
+async function withTelegramUserMutex<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  if (!getRedis()) return fn(); // single-process dev/test — no cross-instance contention
+  return RedisMutex.withMutex(key, fn, 10_000);
+}
+
+async function loadOffset(): Promise<void> {
+  const client = getRedis();
+  if (!client) return;
+  try {
+    const value = await client.get(OFFSET_KEY);
+    if (value) offset = Number(value);
+  } catch (err) {
+    console.error("[telegram] failed to load polling offset:", err);
+  }
+}
+
+async function saveOffset(): Promise<void> {
+  const client = getRedis();
+  if (!client) return;
+  try {
+    await client.set(OFFSET_KEY, String(offset));
+  } catch (err) {
+    console.error("[telegram] failed to save polling offset:", err);
+  }
+}
 
 /**
  * Register the bot's command list with Telegram so users see
@@ -34,6 +64,8 @@ async function setTelegramCommands(): Promise<void> {
     { command: "repay", description: "Repay your loan installment" },
     { command: "plan", description: "Set a recurring plan (e.g. /plan 5000 weekly)" },
     { command: "fund", description: "Get your personal top-up account number" },
+    { command: "shares", description: "View your shares" },
+    { command: "buyshares", description: "Buy shares in the cooperative" },
     { command: "history", description: "Your transaction statement" },
     { command: "statement", description: "Get a statement" },
     { command: "ledger", description: "Cooperative ledger (transparency)" },
@@ -54,6 +86,10 @@ async function setTelegramCommands(): Promise<void> {
     { command: "insights", description: "AI financial analysis" },
     // Support & governance
     { command: "support", description: "Open a support ticket (e.g. /support issue)" },
+    {
+      command: "insurance",
+      description: "Insurance: /insurance - browse, /mypolicy - view, /claim - submit claim",
+    },
     { command: "tickets", description: "See your support tickets" },
     { command: "grievance", description: "Submit a complaint to admin" },
     { command: "reserveinfo", description: "Reserve Fund dashboard" },
@@ -70,7 +106,10 @@ async function setTelegramCommands(): Promise<void> {
     { command: "approve", description: "Admin: approve a loan" },
     { command: "reject", description: "Admin: reject a loan" },
     { command: "approvewdraw", description: "Admin: approve a withdrawal" },
-    { command: "startvote", description: "Admin: start an election (/startvote exec President ...)" },
+    {
+      command: "startvote",
+      description: "Admin: start an election (/startvote exec President ...)",
+    },
     { command: "candidate", description: "Admin: add election candidate (/candidate ID CODE)" },
     { command: "closevote", description: "Admin: close & tally an election" },
     { command: "startbuyvote", description: "Admin: start a buy poll (/startbuyvote title)" },
@@ -133,7 +172,8 @@ async function handlePinCallback(callbackQuery: {
 
   if (!SECRET_STATES.includes(state)) {
     // Stale / non-secret card — tear it down quietly.
-    if (sessionData.keyboardMsgId) await deleteTelegramMessage(chatId, sessionData.keyboardMsgId).catch(() => {});
+    if (sessionData.keyboardMsgId)
+      await deleteTelegramMessage(chatId, sessionData.keyboardMsgId).catch(() => {});
     return;
   }
 
@@ -146,7 +186,8 @@ async function handlePinCallback(callbackQuery: {
   } else if (action === "ok") {
     // Submit the accumulated PIN through the normal awaiting-input path.
     if (buf) {
-      if (sessionData.keyboardMsgId) await deleteTelegramMessage(chatId, sessionData.keyboardMsgId).catch(() => {});
+      if (sessionData.keyboardMsgId)
+        await deleteTelegramMessage(chatId, sessionData.keyboardMsgId).catch(() => {});
       await prisma.session.update({
         where: { phone: userId },
         data: { data: JSON.stringify({ ...sessionData, tgPinBuf: "" }) },
@@ -160,7 +201,12 @@ async function handlePinCallback(callbackQuery: {
   const dots = "●".repeat(buf.length) + "○".repeat(4 - buf.length);
   const header = sessionData.tgPinPrompt ?? "Enter your PIN";
   if (sessionData.keyboardMsgId) {
-    await editTelegramMessage(chatId, sessionData.keyboardMsgId, `${header}\n\nPIN:\n${dots}`, buildPinKeyboard()).catch(() => {});
+    await editTelegramMessage(
+      chatId,
+      sessionData.keyboardMsgId,
+      `${header}\n\nPIN:\n${dots}`,
+      buildPinKeyboard(),
+    ).catch(() => {});
   }
   await prisma.session.update({
     where: { phone: userId },
@@ -182,6 +228,7 @@ export async function startTelegramBot(): Promise<void> {
 
   console.log("[telegram] long-polling started");
   await setTelegramCommands();
+  await loadOffset();
   let consecutiveEmpty = 0;
   for (;;) {
     try {
@@ -200,9 +247,12 @@ export async function startTelegramBot(): Promise<void> {
       for (const update of updates) {
         offset = Math.max(offset, update.update_id + 1);
         if (update.callback_query) {
-          void handlePinCallback(update.callback_query).catch((err) => {
-            console.error(`[telegram] handlePinCallback failed for ${update.callback_query?.from.id}`, err);
-          });
+          const cb = update.callback_query;
+          void withTelegramUserMutex(`tg:${cb.from.id}`, () => handlePinCallback(cb)).catch(
+            (err) => {
+              console.error(`[telegram] handlePinCallback failed for ${cb.from.id}`, err);
+            },
+          );
           continue;
         }
         const message = update.message;
@@ -221,10 +271,13 @@ export async function startTelegramBot(): Promise<void> {
         const userId = `tg:${chatId}`;
         const text = message.text.trim();
 
-        void handleMessage(userId, text, { telegramMessageId: message.message_id }).catch((err) => {
+        void withTelegramUserMutex(userId, () =>
+          handleMessage(userId, text, { telegramMessageId: message.message_id }),
+        ).catch((err) => {
           console.error(`[telegram] handleMessage failed for ${userId}`, err);
         });
       }
+      await saveOffset();
     } catch (err) {
       console.error("[telegram] polling error:", err);
       await sleep(5000);

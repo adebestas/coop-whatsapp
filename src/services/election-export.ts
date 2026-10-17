@@ -38,7 +38,10 @@ export async function exportElectionPdf(
     return { ok: false, message: "Election not found." };
   }
   if (vote.status !== "closed") {
-    return { ok: false, message: "Election results PDF is only available after the election is closed." };
+    return {
+      ok: false,
+      message: "Election results PDF is only available after the election is closed.",
+    };
   }
 
   const unitName = vote.unitId
@@ -68,7 +71,9 @@ export async function exportElectionPdf(
 
   await mkdir(EXPORT_DIR, { recursive: true });
   const token = randomBytes(16).toString("hex");
-  const pdfName = `election-results-${token.slice(0, 8)}.pdf`;
+  // Coop-scoped filename (SEC-4): the download route requires the leading
+  // segment to equal the caller's cooperativeId.
+  const pdfName = `${cooperativeId}-election-results-${token.slice(0, 8)}.pdf`;
   const path = join(EXPORT_DIR, pdfName);
 
   await writeElectionPdf(path, vote, unitName, tally, totalVotes, winner, voters, channelCount);
@@ -128,7 +133,10 @@ function writeElectionPdf(
     doc.text(`Quorum required: ${vote.quorumRequired}% of active members`);
 
     if (vote.winnerId && winner) {
-      doc.moveDown(1).fontSize(12).text(`Winner: ${winner.name}  (${winner.code || "—"})`, { underline: true });
+      doc
+        .moveDown(1)
+        .fontSize(12)
+        .text(`Winner: ${winner.name}  (${winner.code || "—"})`, { underline: true });
     }
 
     doc.moveDown(1).fontSize(10).text("Voters", { underline: true });

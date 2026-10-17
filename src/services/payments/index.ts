@@ -54,10 +54,27 @@ export interface PayoutParams {
   currency?: string;
 }
 
+/** A provider webhook notification about a payout/transfer WE initiated. */
+export interface PayoutNotification {
+  /** Our internal reference (Payout.idempotencyKey / provider reference). */
+  reference: string;
+  status: "successful" | "failed";
+  providerRef?: string;
+  provider: string;
+  raw: unknown;
+}
+
 export interface PayoutResult {
   ok: boolean;
   providerRef?: string;
   error?: string;
+  /**
+   * True when the provider ACCEPTED the transfer but it is not yet confirmed
+   * (e.g. Monnify awaiting a per-transfer OTP). Callers must treat this as an
+   * ambiguous "unsure" outcome — never as a confirmed failure — so they do not
+   * refund/reverse money that may already be in flight.
+   */
+  pending?: boolean;
 }
 
 export interface ResolveAccountParams {
@@ -74,6 +91,94 @@ export interface ResolveAccountResult {
   error?: string;
 }
 
+/** A bank the member can pick from when entering an account number. */
+export interface Bank {
+  code: string;
+  name: string;
+}
+
+// ===== Direct-debit mandates =====
+
+export interface CreateMandateParams {
+  memberName: string;
+  memberEmail: string;
+  memberPhone: string;
+  accountNumber: string;
+  bankCode: string;
+  accountName: string;
+  amountCap: number; // kobo
+  reference: string;
+  narration?: string;
+  redirectUrl?: string;
+}
+
+export interface MandateResult {
+  ok: boolean;
+  providerMandateId?: string;
+  authorizationUrl?: string;
+  status?: string;
+  error?: string;
+}
+
+export interface DebitMandateParams {
+  providerMandateId: string;
+  amount: number; // kobo
+  reference: string;
+  narration?: string;
+  memberEmail?: string;
+  currency?: string;
+}
+
+export interface DebitResult {
+  ok: boolean;
+  providerRef?: string;
+  status?: string;
+  error?: string;
+}
+
+export interface CancelMandateParams {
+  providerMandateId: string;
+}
+
+/**
+ * Trigger a provider-side activation charge for an authorization that came back
+ * inactive. Paystack requires this before a direct-debit authorization can be
+ * debited (the `authorization_code` is not usable while `active` is false).
+ */
+export interface TriggerActivationChargeParams {
+  /** The resolved authorization code for the mandate. */
+  providerMandateId: string;
+  /**
+   * The provider's customer id, when the webhook exposed it. Paystack's
+   * activation endpoints are customer-scoped, so this is required for Paystack.
+   */
+  providerCustomerId?: string;
+}
+
+export interface MandateNotification {
+  providerMandateId: string;
+  status: "active" | "cancelled" | "failed" | "expired" | "pending";
+  provider: string;
+  /**
+   * Our deterministic provider reference, when the webhook can be joined back
+   * to it (Paystack derives this from `data.customer.email`). Used to match the
+   * authorization to the mandate before any providerMandateId is stored.
+   */
+  providerReference?: string;
+  /** The provider's customer id, when exposed (Paystack: `data.customer.code`). */
+  providerCustomerId?: string;
+  raw: unknown;
+}
+
+export interface DebitNotification {
+  reference: string;
+  status: "successful" | "failed";
+  providerTransactionId?: string;
+  reason?: string;
+  provider: string;
+  raw: unknown;
+}
+
 export interface ProviderAdapter {
   name: string;
   createVirtualAccount(params: CreateVirtualAccountParams): Promise<VirtualAccountData>;
@@ -81,6 +186,11 @@ export interface ProviderAdapter {
   payout?(params: PayoutParams): Promise<PayoutResult>;
   /** Resolve an account and return the registered account name */
   resolveAccount?(params: ResolveAccountParams): Promise<ResolveAccountResult>;
+  /**
+   * List the provider's supported banks (for the guided account-entry flow).
+   * `currency` lets a multi-currency provider return the matching bank set.
+   */
+  listBanks?(currency?: string): Promise<Bank[]>;
   /**
    * Validate an incoming webhook request. `rawBody` is the EXACT bytes the
    * provider sent (captured before JSON parsing) — signatures must be
@@ -90,11 +200,33 @@ export interface ProviderAdapter {
   /** Parse a raw webhook body into a PaymentNotification, or null if irrelevant */
   parseNotification(body: unknown): PaymentNotification | null;
   /**
+   * Parse a raw webhook body into a PayoutNotification (a transfer we
+   * initiated settling/failing), or null if the event is not a payout update.
+   */
+  parsePayoutNotification?(body: unknown): PayoutNotification | null;
+  /**
    * Ask the provider about a transfer we initiated (payout status polling).
    * Lets us settle or refund rows stuck in "processing" without waiting for
    * a webhook that may never arrive.
    */
   getTransferStatus?(reference: string): Promise<TransferStatus>;
+  /** Create a direct-debit mandate authorization; returns the consent link. */
+  createMandate?(params: CreateMandateParams): Promise<MandateResult>;
+  /** Pull a variable amount (≤ mandate cap) under an active mandate. */
+  debitMandate?(params: DebitMandateParams): Promise<DebitResult>;
+  /** Cancel an existing mandate at the provider. */
+  cancelMandate?(params: CancelMandateParams): Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Trigger a provider activation charge for an authorization that is not yet
+   * active (Paystack: `PUT /customer/{code}/directdebit-activation-charge`).
+   */
+  triggerActivationCharge?(
+    params: TriggerActivationChargeParams,
+  ): Promise<{ ok: boolean; error?: string }>;
+  /** Parse a mandate status webhook into a MandateNotification, or null if irrelevant. */
+  parseMandateNotification?(body: unknown): MandateNotification | null;
+  /** Parse a debit result webhook into a DebitNotification, or null if irrelevant. */
+  parseDebitNotification?(body: unknown): DebitNotification | null;
 }
 
 export interface TransferStatus {
@@ -106,7 +238,10 @@ export interface TransferStatus {
 import { timingSafeEqual } from "node:crypto";
 import { monnifyAdapter } from "./monnify.js";
 import { paystackAdapter } from "./paystack.js";
+import { flutterwaveAdapter } from "./flutterwave.js";
 import { RedisCircuitBreaker } from "../../lib/redis-mutex.js";
+import { BANK_CODES } from "../../lib/banks.js";
+import { providersForCurrency } from "../../lib/currency.js";
 
 /** Constant-time string comparison for signature checks (anti-timing-attack). */
 export function signaturesMatch(expected: string, received: string): boolean {
@@ -143,22 +278,114 @@ function adapterFor(name: string): ProviderAdapter | null {
       return paystackAdapter;
     case "monnify":
       return monnifyAdapter;
+    case "flutterwave":
+      return flutterwaveAdapter;
     default:
       return null;
   }
 }
 
-const ALL_PROVIDERS = ["monnify", "paystack"];
+const ALL_PROVIDERS = ["monnify", "paystack", "flutterwave"];
 
 /** Preferred provider first (env or explicit), then any healthy fallback. */
-export async function resolveProvider(preferred?: string): Promise<ProviderAdapter> {
+export async function resolveProvider(
+  preferred?: string,
+  currency?: string,
+): Promise<ProviderAdapter> {
+  const supported = currency ? providersForCurrency(currency) : ALL_PROVIDERS;
   const configured = (preferred ?? process.env.PAYMENT_PROVIDER ?? "monnify").toLowerCase();
-  const order = [configured, ...ALL_PROVIDERS.filter((p) => p !== configured)];
+  const first = supported.includes(configured) ? configured : supported[0];
+  const order = [first, ...supported.filter((p) => p !== first)];
   for (const name of order) {
     const adapter = adapterFor(name);
-    if (adapter && await isProviderAvailable(name)) return adapter;
+    if (adapter && (await isProviderAvailable(name))) return adapter;
   }
   // Everything is marked down — fall back to the configured one and let the
   // caller surface the error.
-  return adapterFor(configured) ?? monnifyAdapter;
+  return adapterFor(first) ?? monnifyAdapter;
+}
+
+// ===== Bank list (guided account entry) =====
+
+/** Pretty display names for the banks in the static BANK_CODES fallback. */
+const BANK_DISPLAY_NAMES: Record<string, string> = {
+  "044": "Access Bank",
+  "058": "GTBank",
+  "057": "Zenith Bank",
+  "033": "UBA",
+  "011": "First Bank",
+  "032": "Union Bank",
+  "070": "Fidelity Bank",
+  "214": "FCMB",
+  "221": "Stanbic IBTC",
+  "050": "Ecobank",
+  "232": "Sterling Bank",
+  "035": "Wema Bank",
+  "076": "Polaris Bank",
+  "082": "Keystone Bank",
+  "215": "Unity Bank",
+  "301": "Jaiz Bank",
+  "101": "Providus Bank",
+  "50211": "Kuda",
+  "50212": "OPay",
+  "999992": "PalmPay",
+  "50515": "Moniepoint",
+  "51318": "FairMoney",
+  "030": "Globus Bank",
+  "302": "Taj Bank",
+  "090": "XPension",
+  "100": "Paycom",
+};
+
+function titleCase(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+/**
+ * The static fallback bank list, built from the `BANK_CODES` name→code map,
+ * de-duplicated by code and given a human-readable name where we have one.
+ * Used whenever the provider's bank list cannot be fetched.
+ */
+export function staticBanks(): Bank[] {
+  const seen = new Set<string>();
+  const banks: Bank[] = [];
+  for (const [key, code] of Object.entries(BANK_CODES)) {
+    if (seen.has(code)) continue;
+    seen.add(code);
+    banks.push({ code, name: BANK_DISPLAY_NAMES[code] ?? titleCase(key) });
+  }
+  return banks;
+}
+
+const BANK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const bankCache = new Map<string, { at: number; banks: Bank[] }>();
+
+/** Drop the in-process bank-list cache (used by tests and diagnostics). */
+export function clearBankCache(): void {
+  bankCache.clear();
+}
+
+/**
+ * The bank list for the guided account-entry flow: the provider's live list
+ * (cached per currency for 24h), falling back to the static `BANK_CODES` map
+ * when the provider call fails or returns nothing. The cache is only populated
+ * on a successful provider response so a transient outage is not sticky, and is
+ * keyed by currency so a multi-currency deployment never serves one country's
+ * bank codes to another.
+ */
+export async function listBanks(provider?: ProviderAdapter, currency?: string): Promise<Bank[]> {
+  const key = currency ?? "default";
+  const cached = bankCache.get(key);
+  if (cached && Date.now() - cached.at < BANK_CACHE_TTL_MS) return cached.banks;
+  try {
+    const p = provider ?? (await resolveProvider(undefined, currency));
+    const banks = await p.listBanks?.(currency);
+    if (banks && banks.length) {
+      bankCache.set(key, { at: Date.now(), banks });
+      return banks;
+    }
+  } catch {
+    /* fall through to the static list */
+  }
+  return staticBanks();
 }

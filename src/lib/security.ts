@@ -80,3 +80,12 @@ export function verifyPinResetCode(code: string, stored: string): boolean {
   if (candidate.length !== expected.length) return false;
   return timingSafeEqual(candidate, expected);
 }
+
+/**
+ * Mask a phone number / account id for logs: keep only the last 4 characters.
+ * Never log a full phone or account number.
+ */
+export function maskId(value: unknown): string {
+  const s = String(value ?? "");
+  return s.length <= 4 ? "****" : `****${s.slice(-4)}`;
+}

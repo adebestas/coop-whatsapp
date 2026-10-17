@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx } from "../lib/prisma.js";
 
 export interface AuditEntry {
   cooperativeId: string;
@@ -21,41 +21,85 @@ function hashEntry(prevHash: string | null, payload: Record<string, unknown>): s
     .digest("hex");
 }
 
+function isPostgres(): boolean {
+  return (process.env.DATABASE_URL ?? "").startsWith("postgres");
+}
+
+/**
+ * In-process per-cooperative mutex. SQLite has no advisory locks, so this is
+ * what serializes the read-previous-hash + insert there. The tail is kept
+ * settled so a rejected write cannot poison the chain for later callers.
+ */
+const auditMutex = new Map<string, Promise<unknown>>();
+
+function withAuditMutex<T>(coopId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = auditMutex.get(coopId) ?? Promise.resolve();
+  const run = prev.then(() => fn());
+  auditMutex.set(
+    coopId,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
+}
+
+/**
+ * Serialize audit writes for one cooperative so the read-previous-hash + insert
+ * is atomic. Postgres uses a transaction-scoped advisory lock (correct across
+ * multiple instances); SQLite uses the in-process mutex.
+ */
+function withAuditSerialization<T>(coopId: string, fn: () => Promise<T>): Promise<T> {
+  if (isPostgres()) {
+    return withTx(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${coopId}))`;
+      return fn();
+    });
+  }
+  return withAuditMutex(coopId, fn);
+}
+
 /**
  * Append-only, hash-chained trail of every money/admin action. Each entry
  * carries the hash of the previous one — editing history breaks the chain
  * (checked nightly by the reconciliation job). Never throws.
  *
- * NOTE: Rare hash chain breaks from concurrent writes are detected by reconciliation.
+ * Writes are serialized per cooperative and ordered by a monotonic `seq`, so
+ * concurrent writes cannot fork the chain and verification is deterministic.
  */
 export async function audit(entry: AuditEntry): Promise<void> {
   try {
-    const last = await prisma.auditLog.findFirst({
-      where: { cooperativeId: entry.cooperativeId },
-      orderBy: { createdAt: "desc" },
-      select: { hash: true },
-    });
-    const payload = {
-      actorId: entry.actorId ?? null,
-      actorPhone: entry.actorPhone,
-      actorRole: entry.actorRole ?? null,
-      action: entry.action,
-      targetType: entry.targetType ?? null,
-      targetId: entry.targetId ?? null,
-      amount: entry.amount ?? null,
-      balanceBefore: entry.balanceBefore ?? null,
-      balanceAfter: entry.balanceAfter ?? null,
-      detail: entry.detail?.slice(0, 500) ?? null,
-    };
-    const prevHash = last?.hash ?? null;
-    await prisma.auditLog.create({
-      data: {
-        ...payload,
-        cooperativeId: entry.cooperativeId,
-        detail: entry.detail?.slice(0, 500),
-        prevHash,
-        hash: hashEntry(prevHash, payload),
-      },
+    await withAuditSerialization(entry.cooperativeId, async () => {
+      const last = await prisma.auditLog.findFirst({
+        where: { cooperativeId: entry.cooperativeId },
+        orderBy: { seq: "desc" },
+        select: { hash: true, seq: true },
+      });
+      const seq = (last?.seq ?? 0) + 1;
+      const prevHash = last?.hash ?? null;
+      const payload = {
+        actorId: entry.actorId ?? null,
+        actorPhone: entry.actorPhone,
+        actorRole: entry.actorRole ?? null,
+        action: entry.action,
+        targetType: entry.targetType ?? null,
+        targetId: entry.targetId ?? null,
+        amount: entry.amount ?? null,
+        balanceBefore: entry.balanceBefore ?? null,
+        balanceAfter: entry.balanceAfter ?? null,
+        detail: entry.detail?.slice(0, 500) ?? null,
+      };
+      await prisma.auditLog.create({
+        data: {
+          ...payload,
+          cooperativeId: entry.cooperativeId,
+          detail: entry.detail?.slice(0, 500),
+          prevHash,
+          hash: hashEntry(prevHash, payload),
+          seq,
+        },
+      });
     });
   } catch (err) {
     console.error("[audit] failed to record", entry.action, err);
@@ -66,7 +110,7 @@ export async function audit(entry: AuditEntry): Promise<void> {
 export async function recentAudit(cooperativeId: string, take = 15) {
   return prisma.auditLog.findMany({
     where: { cooperativeId },
-    orderBy: { createdAt: "desc" },
+    orderBy: { seq: "desc" },
     take,
   });
 }
@@ -75,7 +119,7 @@ export async function recentAudit(cooperativeId: string, take = 15) {
 export async function verifyAuditChain(cooperativeId: string) {
   const entries = await prisma.auditLog.findMany({
     where: { cooperativeId },
-    orderBy: { createdAt: "asc" },
+    orderBy: { seq: "asc" },
   });
   let prevHash: string | null = null;
   for (const e of entries) {

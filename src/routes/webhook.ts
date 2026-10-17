@@ -4,7 +4,8 @@ import { config, isAllowed } from "../config.js";
 import { handleMessage } from "../services/conversation.js";
 import { extractWhatsAppMessages } from "../lib/inbound.js";
 import { sendText } from "../lib/messaging.js";
-import { transcribeAudioMessage, transcriptionEnabled } from "../lib/transcribe.js";
+import { downloadMedia, extFromMime } from "../lib/whatsapp-media.js";
+import { handleDeductionUpload } from "../services/deduction-ingest.js";
 import { RedisMutex } from "../lib/redis-mutex.js";
 
 /**
@@ -20,13 +21,26 @@ async function withUserMutex<T>(phone: string, fn: () => Promise<T>): Promise<T>
 /**
  * Verify WhatsApp webhook signature (X-Hub-Signature-256).
  * Prevents attackers from injecting fake messages.
+ *
+ * Meta signs deliveries with the App Secret (Meta App Dashboard → Settings →
+ * Basic → App Secret), NOT the Cloud API access token. Fail-closed in
+ * production; in non-production a missing App Secret skips verification so the
+ * bot can be exercised locally before the secret is provisioned.
  */
-function verifyWhatsAppSignature(rawBody: string, signature: string | undefined): boolean {
-  if (!signature || !process.env.WHATSAPP_TOKEN) return false;
+export function verifyWhatsAppSignature(rawBody: string, signature: string | undefined): boolean {
+  const secret = config.whatsapp.appSecret;
+  if (!secret) {
+    if (process.env.NODE_ENV === "production") return false;
+    console.warn(
+      "[webhook] WHATSAPP_APP_SECRET not set — skipping signature verification (non-production only)",
+    );
+    return true;
+  }
+  if (!signature) return false;
   // Meta sends "sha256=<hex>"; strip the scheme prefix before comparing the
   // raw hex digest (otherwise timingSafeEqual throws on a length mismatch).
   const hex = signature.startsWith("sha256=") ? signature.slice("sha256=".length) : signature;
-  const expected = createHmac("sha256", process.env.WHATSAPP_TOKEN).update(rawBody).digest("hex");
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
   try {
     return timingSafeEqual(Buffer.from(expected), Buffer.from(hex));
   } catch {
@@ -53,7 +67,12 @@ export async function webhookRoutes(app: FastifyInstance) {
     // Reject outright when no verify token is configured (avoids the
     // misconfigured empty-default case where mode=subscribe&hub.verify_token=
     // could complete the handshake), and compare constant-time.
-    if (!config.whatsapp.verifyToken || mode !== "subscribe" || !token || !constantsEqual(token, config.whatsapp.verifyToken)) {
+    if (
+      !config.whatsapp.verifyToken ||
+      mode !== "subscribe" ||
+      !token ||
+      !constantsEqual(token, config.whatsapp.verifyToken)
+    ) {
       return reply.code(403).send("Verification failed");
     }
     return reply.type("text/plain").send(challenge);
@@ -79,21 +98,21 @@ export async function webhookRoutes(app: FastifyInstance) {
         for (const inbound of extractWhatsAppMessages(change?.value)) {
           if (!isAllowed(inbound.from)) continue;
 
-          // Voice notes are transcribed first (fail-closed: if transcription
-          // is unavailable, the audio is dropped rather than crashing ingest).
-          if (inbound.audio) {
-            if (!transcriptionEnabled()) continue;
-            const transcript = await transcribeAudioMessage(inbound.audio.mediaId);
-            if (!transcript) {
+          // Documents / photos: an admin uploading an employer deduction file.
+          if (inbound.document || inbound.image) {
+            const media = inbound.document ?? inbound.image!;
+            const dl = await downloadMedia(media.mediaId);
+            if (!dl) {
               sendText({
                 to: inbound.from,
-                text: "I couldn't read that voice note. Please type your message instead.",
-              }).catch((err) => {
-                app.log.error({ err, from: inbound.from }, "Failed to send transcription failure message");
-              });
+                text: "I couldn't download that file. Please try again.",
+              }).catch(() => {});
               continue;
             }
-            inbound.text = transcript;
+            const filename = inbound.document?.filename ?? `upload.${extFromMime(dl.mime)}`;
+            const result = await handleDeductionUpload(inbound.from, dl.data, filename);
+            await sendText({ to: inbound.from, text: result.message }).catch(() => {});
+            continue;
           }
 
           // Don't await — Meta needs a quick 200 and we don't want a
@@ -104,6 +123,7 @@ export async function webhookRoutes(app: FastifyInstance) {
             handleMessage(inbound.from, inbound.text, {
               flowToken: inbound.flowToken,
               ip: req.ip,
+              audioMediaId: inbound.audio?.mediaId,
             }),
           ).catch((err) => {
             app.log.error({ err, from: inbound.from }, "handleMessage failed");

@@ -41,9 +41,10 @@ RUN npm ci --omit=dev
 COPY prisma ./prisma/
 RUN npx prisma generate
 
-# Copy built application + dashboard
+# Copy built application + dashboard + boot scripts
 COPY --from=builder /app/dist ./dist
 COPY dashboard ./dashboard/
+COPY scripts ./scripts/
 
 # Create necessary directories
 RUN mkdir -p exports backups && \
@@ -61,6 +62,6 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Start application
 ENTRYPOINT ["dumb-init", "--"]
-# Run migrations at container startup, then boot the app.
-# This ensures schema is in sync before handling any traffic.
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]
+# Migrate at container startup (with safe baselining for the db-push-era prod DB),
+# then boot the app. See scripts/db-migrate.mjs for the exact rules.
+CMD ["sh", "-c", "node scripts/db-migrate.mjs && node dist/index.js"]

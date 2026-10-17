@@ -100,3 +100,178 @@ export function getLesson(id: number): Lesson | undefined {
 export function getTotalLessons(): number {
   return LESSONS.length;
 }
+
+export interface QuizQuestion {
+  id: number;
+  lessonId: number;
+  question: string;
+  options: string[];
+  answerIndex: number;
+}
+
+export const QUIZ_QUESTIONS: QuizQuestion[] = [
+  {
+    id: 1,
+    lessonId: 1,
+    question: "What is the minimum monthly contribution?",
+    options: ["₦1,000", "₦2,000", "₦5,000", "₦10,000"],
+    answerIndex: 1,
+  },
+  {
+    id: 2,
+    lessonId: 1,
+    question: "Why does regular saving matter most?",
+    options: [
+      "It grows your loan eligibility over time",
+      "It is only for emergencies",
+      "It replaces your salary",
+      "It has no real benefit",
+    ],
+    answerIndex: 0,
+  },
+  {
+    id: 3,
+    lessonId: 2,
+    question: "How much can you borrow at most?",
+    options: [
+      "Up to 1x your savings",
+      "Up to 2x your savings",
+      "Up to 5x your savings",
+      "There is no limit",
+    ],
+    answerIndex: 1,
+  },
+  {
+    id: 4,
+    lessonId: 2,
+    question: "How is loan interest calculated?",
+    options: [
+      "On the full amount forever",
+      "On the remaining balance only",
+      "On your savings only",
+      "It is always fixed",
+    ],
+    answerIndex: 1,
+  },
+  {
+    id: 5,
+    lessonId: 3,
+    question: "What is the Reserve Fund for?",
+    options: [
+      "The admin's personal account",
+      "A safety net that protects every member's savings",
+      "Paying staff bonuses",
+      "Outside bank investments",
+    ],
+    answerIndex: 1,
+  },
+  {
+    id: 6,
+    lessonId: 3,
+    question: "Who does the Reserve Fund belong to?",
+    options: [
+      "The cooperative as a whole",
+      "The super admin only",
+      "The richest member",
+      "The government",
+    ],
+    answerIndex: 0,
+  },
+  {
+    id: 7,
+    lessonId: 4,
+    question: "If you guarantee a loan and the borrower defaults, what can happen?",
+    options: [
+      "Nothing changes for you",
+      "You may become responsible for the outstanding balance",
+      "You get a bonus",
+      "Your loan limit increases",
+    ],
+    answerIndex: 1,
+  },
+  {
+    id: 8,
+    lessonId: 4,
+    question: "What happens to your savings while you guarantee an active loan?",
+    options: [
+      "They are doubled",
+      "They may be held and cannot be withdrawn",
+      "They are moved to another bank",
+      "Nothing",
+    ],
+    answerIndex: 1,
+  },
+  {
+    id: 9,
+    lessonId: 5,
+    question: "What should you do if you know a repayment will be late?",
+    options: [
+      "Wait until they call you",
+      "Message us before the due date",
+      "Borrow more to cover it",
+      "Ignore it",
+    ],
+    answerIndex: 1,
+  },
+  {
+    id: 10,
+    lessonId: 5,
+    question: "What is the best borrowing habit?",
+    options: [
+      "Always borrow the full 2x limit",
+      "Borrow what you actually need",
+      "Borrow as often as possible",
+      "Never repay on time",
+    ],
+    answerIndex: 1,
+  },
+  {
+    id: 11,
+    lessonId: 6,
+    question: "What does Loan Protection Insurance cover?",
+    options: [
+      "Your phone",
+      "Active loans if a member becomes incapacitated",
+      "Your transport costs",
+      "Nothing",
+    ],
+    answerIndex: 1,
+  },
+  {
+    id: 12,
+    lessonId: 6,
+    question: "How is the cooperative reserve fund partially funded?",
+    options: ["20% of dividends", "Member fines only", "Government grants", "Bank loans"],
+    answerIndex: 0,
+  },
+];
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function hashSeed(seed: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+export function getQuizQuestions(count: number, seed = "default"): QuizQuestion[] {
+  const pool = [...QUIZ_QUESTIONS];
+  const rand = mulberry32(hashSeed(seed));
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, Math.max(0, Math.min(count, pool.length)));
+}

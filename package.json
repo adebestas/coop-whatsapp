@@ -5,15 +5,18 @@
   "description": "WhatsApp cooperative banking platform — save, borrow, and manage cooperatives via chat (Xara-style, Nigeria-first)",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/prisma-generate.mjs",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "prisma:generate": "prisma generate",
-    "prisma:generate:local": "prisma generate --schema prisma/schema.local.prisma",
+    "db:migrate:deploy": "node scripts/db-migrate.mjs",
+    "prisma:generate": "node scripts/prisma-generate.mjs --prod",
+    "prisma:generate:local": "node scripts/prisma-generate.mjs --local",
     "prisma:migrate": "prisma migrate dev",
     "prisma:push": "prisma db push",
     "prisma:push:local": "prisma db push --schema prisma/schema.local.prisma",
     "typecheck": "tsc --noEmit",
+    "pretest": "node scripts/prisma-generate.mjs --local",
     "test": "vitest run",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
@@ -22,7 +25,8 @@
     "db:seed": "npx tsx src/scripts/seed-test.ts",
     "db:reset": "npx tsx src/scripts/db-reset.ts --confirm",
     "db:reset:seed": "npm run db:reset && npm run db:seed",
-    "db:migrate-codes": "npx tsx src/scripts/migrate-member-codes.ts"
+    "db:migrate-codes": "npx tsx src/scripts/migrate-member-codes.ts",
+    "seed:ombudsman": "npx tsx src/seed.ts --ombudsman"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
@@ -36,10 +40,12 @@
     "exceljs": "^4.4.0",
     "fastify": "^5.2.0",
     "ioredis": "^6.0.0",
-    "nodemailer": "^9.0.5",
+    "nodemailer": "^10.0.15",
+    "pdf-parse": "^1.1.1",
     "pdfkit": "^0.19.1",
     "pino": "^9.6.0",
     "prisma": "^6.2.1",
+    "tesseract.js": "^5.1.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -50,6 +56,7 @@
     "eslint": "^10.9.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.6",
+    "globals": "^17.13.0",
     "prettier": "^3.9.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

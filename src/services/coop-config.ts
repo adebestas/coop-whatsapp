@@ -21,6 +21,10 @@ export interface CoopConfig {
   pendingDividendRate: number | null;
   lastDividendRate: number | null;
   nextAGMDate: Date | null;
+  literacyCertificationEnabled: boolean;
+  literacyQuizPassMark: number;
+  literacyQuizQuestionCount: number;
+  certifiedLoanBoost: number;
 }
 
 export interface BrandingConfig {
@@ -56,6 +60,10 @@ const DEFAULT_CONFIG: CoopConfig = {
   pendingDividendRate: null,
   lastDividendRate: null,
   nextAGMDate: null,
+  literacyCertificationEnabled: true,
+  literacyQuizPassMark: 4,
+  literacyQuizQuestionCount: 6,
+  certifiedLoanBoost: 1,
 };
 
 export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> {
@@ -89,6 +97,13 @@ export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> 
     pendingDividendRate: (config as any).pendingDividendRate ?? null,
     lastDividendRate: (config as any).lastDividendRate ?? null,
     nextAGMDate: (config as any).nextAGMDate ?? null,
+    literacyCertificationEnabled:
+      (config as any).literacyCertificationEnabled ?? DEFAULT_CONFIG.literacyCertificationEnabled,
+    literacyQuizPassMark:
+      (config as any).literacyQuizPassMark ?? DEFAULT_CONFIG.literacyQuizPassMark,
+    literacyQuizQuestionCount:
+      (config as any).literacyQuizQuestionCount ?? DEFAULT_CONFIG.literacyQuizQuestionCount,
+    certifiedLoanBoost: (config as any).certifiedLoanBoost ?? DEFAULT_CONFIG.certifiedLoanBoost,
   };
 
   await cacheSet(cacheKey, result, CACHE_TTL);

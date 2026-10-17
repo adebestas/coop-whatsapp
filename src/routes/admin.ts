@@ -1,11 +1,21 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
+import { withCoopContext, resolveCoopByPhone } from "../lib/tenant-context.js";
 import { verifyPin } from "../lib/security.js";
 import { checkRateLimit } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 import { approveLoan } from "../services/loans.js";
+import { computePearls } from "../services/provisioning.js";
+import { audit } from "../services/audit.js";
 import { notifyMember } from "../lib/messaging.js";
-import { sign, revokeToken, isTokenRevoked, verifyAdminToken, requireLiveAdmin } from "../lib/admin-auth.js";
+import {
+  sign,
+  revokeToken,
+  isTokenRevoked,
+  verifyAdminToken,
+  requireLiveAdmin,
+  TOKEN_TTL_MS,
+} from "../lib/admin-auth.js";
 
 /**
  * Minimal admin auth for the dashboard: members log in with their WhatsApp
@@ -19,18 +29,74 @@ const LOGIN_WINDOW_SECONDS = 60; // 1 minute
 const MAX_ACCOUNT_ATTEMPTS = 10;
 const ACCOUNT_WINDOW_SECONDS = 15 * 60; // 15 minutes
 
-async function checkLoginRateLimit(ip: string, phone?: string): Promise<{ allowed: boolean; retryAfter?: number }> {
+async function checkLoginRateLimit(
+  ip: string,
+  phone?: string,
+): Promise<{ allowed: boolean; retryAfter?: number }> {
   // Per-IP limit
   const ipResult = await checkRateLimit(`login:ip:${ip}`, MAX_LOGIN_ATTEMPTS, LOGIN_WINDOW_SECONDS);
   if (!ipResult.allowed) return ipResult;
 
   // Per-account limit
   if (phone) {
-    const acctResult = await checkRateLimit(`login:acct:${phone}`, MAX_ACCOUNT_ATTEMPTS, ACCOUNT_WINDOW_SECONDS);
+    const acctResult = await checkRateLimit(
+      `login:acct:${phone}`,
+      MAX_ACCOUNT_ATTEMPTS,
+      ACCOUNT_WINDOW_SECONDS,
+    );
     if (!acctResult.allowed) return acctResult;
   }
 
   return { allowed: true };
+}
+
+/**
+ * Wrap an authenticated admin route handler so it runs inside the admin's
+ * cooperative RLS context. The preHandler auth hook has already resolved
+ * `req.adminCoopId` from the live DB row; every query in the handler is then
+ * scoped to that cooperative (no-op on SQLite).
+ */
+function withTenant(
+  handler: (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>,
+): (req: FastifyRequest, reply: FastifyReply) => Promise<unknown> {
+  return async (req, reply) => {
+    const coopId = req.adminCoopId;
+    if (!coopId) return handler(req, reply);
+    return withCoopContext(coopId, () => handler(req, reply));
+  };
+}
+
+const AUTH_COOKIE = "coop_token";
+
+/** Set the admin token as an httpOnly cookie (not readable by JS/XSS). */
+function setAuthCookie(reply: FastifyReply, token: string): void {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  reply.header(
+    "Set-Cookie",
+    `${AUTH_COOKIE}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${Math.floor(TOKEN_TTL_MS / 1000)}${secure}`,
+  );
+}
+
+function clearAuthCookie(reply: FastifyReply): void {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  reply.header(
+    "Set-Cookie",
+    `${AUTH_COOKIE}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${secure}`,
+  );
+}
+
+/** Read the admin token from the cookie (Bearer header still accepted). */
+function readAuthToken(req: FastifyRequest): string | null {
+  const auth = req.headers.authorization;
+  if (auth?.startsWith("Bearer ")) return auth.slice(7);
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === AUTH_COOKIE) return part.slice(idx + 1) || null;
+  }
+  return null;
 }
 
 export async function adminApiRoutes(app: FastifyInstance) {
@@ -52,10 +118,18 @@ export async function adminApiRoutes(app: FastifyInstance) {
     if (!phone || !pin) {
       return reply.code(400).send({ error: "phone and pin required" });
     }
-    const member = await prisma.member.findFirst({
-      where: { phone, role: { in: ["admin", "superadmin"] } },
-      include: { cooperative: true },
-    });
+    // Resolve the cooperative BEFORE reading the RLS-protected Member table
+    // (the SECURITY DEFINER resolver bypasses RLS). Ambiguous/unknown phone ->
+    // null -> invalid credentials (fail-closed).
+    const loginCoopId = await resolveCoopByPhone(phone);
+    const member = loginCoopId
+      ? await withCoopContext(loginCoopId, () =>
+          prisma.member.findFirst({
+            where: { phone, role: { in: ["admin", "superadmin"] } },
+            include: { cooperative: true },
+          }),
+        )
+      : null;
     if (!member || !member.pin || !verifyPin(pin, member.pin)) {
       // Record suspicious event for auto-freeze (playbook Attack 8)
       if (member) {
@@ -86,8 +160,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
     }
 
     const token = sign(phone, member.cooperative.id, member.role);
+    setAuthCookie(reply, token);
     return {
-      token,
       member: {
         id: member.id,
         name: member.name,
@@ -119,13 +193,12 @@ export async function adminApiRoutes(app: FastifyInstance) {
       }
     }
 
-    const auth = req.headers.authorization;
-    const rawToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+    const rawToken = readAuthToken(req);
     const payload = rawToken ? verifyAdminToken(rawToken) : null;
     if (!payload) {
       return reply.code(401).send({ error: "unauthorized" });
     }
-    if (rawToken && await isTokenRevoked(rawToken)) {
+    if (rawToken && (await isTokenRevoked(rawToken))) {
       return reply.code(401).send({ error: "token revoked" });
     }
 
@@ -141,130 +214,218 @@ export async function adminApiRoutes(app: FastifyInstance) {
     req.adminPhone = live.phone;
     req.adminCoopId = live.cooperativeId;
     req.adminRole = live.role;
-
-    // Set PostgreSQL session variable for Row-Level Security (RLS).
-    // This ensures all subsequent queries in this request are scoped to
-    // the admin's cooperative, enforcing tenant isolation at the database level.
-    await prisma.$executeRaw`SELECT set_config('app.current_cooperative_id', ${live.cooperativeId}, false)`;
   });
 
   app.post("/api/admin/logout", async (req, reply) => {
-    const auth = req.headers.authorization;
-    const rawToken = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+    const rawToken = readAuthToken(req);
     if (rawToken) {
       await revokeToken(rawToken);
     }
+    clearAuthCookie(reply);
     return reply.code(200).send({ ok: true });
   });
 
-  app.get("/api/admin/overview", async (req) => {
-    const coopId = req.adminCoopId!;
-    const [memberCount, contributions, contributionAgg, loans, walletAgg, payoutAgg] =
-      await Promise.all([
-        prisma.member.count({ where: { cooperativeId: coopId } }),
-        prisma.contribution.count({ where: { cooperativeId: coopId } }),
-        prisma.contribution.aggregate({
-          where: { cooperativeId: coopId, status: "confirmed" },
-          _sum: { amount: true },
-        }),
-        prisma.loan.count({ where: { cooperativeId: coopId, status: { in: ["approved", "disbursed"] } } }),
-        prisma.wallet.aggregate({ where: { member: { cooperativeId: coopId } }, _sum: { balance: true, totalSaved: true } }),
-        prisma.payout.count({ where: { cooperativeId: coopId } }),
-      ]);
-
-    return {
-      memberCount,
-      contributionCount: contributions,
-      totalSaved: contributionAgg._sum.amount ?? 0,
-      activeLoans: loans,
-      walletBalance: walletAgg._sum.balance ?? 0,
-      payoutCount: payoutAgg,
-    };
+  // Mint a fresh access token from a still-valid one. The preHandler has already
+  // verified the current token and re-checked the live role/status, so this only
+  // extends an active session — it cannot resurrect an expired or revoked one.
+  app.post("/api/admin/refresh", async (req, reply) => {
+    const token = sign(req.adminPhone!, req.adminCoopId!, req.adminRole!);
+    setAuthCookie(reply, token);
+    return { ok: true };
   });
 
-  app.get("/api/admin/members", async (req) => {
-    const coopId = req.adminCoopId!;
-    const query = req.query as { page?: string; limit?: string };
-    const page = Math.max(1, Number(query.page ?? 1));
-    const limit = Math.min(100, Number(query.limit ?? 20));
-    const skip = (page - 1) * limit;
-    const [members, total] = await Promise.all([
-      prisma.member.findMany({
+  app.get(
+    "/api/admin/shares",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const config = await prisma.cooperativeConfig.findUnique({
         where: { cooperativeId: coopId },
-        select: {
-          id: true, name: true, phone: true, email: true, code: true,
-          role: true, status: true, cooperativeId: true, createdAt: true,
-          wallet: true,
-        },
-        orderBy: { createdAt: "desc" },
-        skip,
-        take: limit,
-      }),
-      prisma.member.count({ where: { cooperativeId: coopId } }),
-    ]);
-    return { members, total, page, limit, totalPages: Math.ceil(total / limit) };
-  });
+      });
+      const sharePrice = config?.sharePrice ?? 100000;
+      const accounts = await prisma.shareAccount.findMany({
+        where: { cooperativeId: coopId },
+        include: { member: { select: { name: true } } },
+        orderBy: { shares: "desc" },
+      });
+      const totalShares = accounts.reduce((sum, a) => sum + a.shares, 0);
+      return {
+        ok: true,
+        sharePrice,
+        totalShares,
+        accounts: accounts.map((a) => ({
+          memberId: a.memberId,
+          name: a.member.name,
+          shares: a.shares,
+          totalPaid: a.totalPaid,
+          value: a.shares * sharePrice,
+        })),
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/overview",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const [memberCount, contributions, contributionAgg, loans, walletAgg, payoutAgg] =
+        await Promise.all([
+          prisma.member.count({ where: { cooperativeId: coopId } }),
+          prisma.contribution.count({ where: { cooperativeId: coopId } }),
+          prisma.contribution.aggregate({
+            where: { cooperativeId: coopId, status: "confirmed" },
+            _sum: { amount: true },
+          }),
+          prisma.loan.count({
+            where: { cooperativeId: coopId, status: { in: ["approved", "disbursed"] } },
+          }),
+          prisma.wallet.aggregate({
+            where: { member: { cooperativeId: coopId } },
+            _sum: { balance: true, totalSaved: true },
+          }),
+          prisma.payout.count({ where: { cooperativeId: coopId } }),
+        ]);
+
+      return {
+        memberCount,
+        contributionCount: contributions,
+        totalSaved: contributionAgg._sum.amount ?? 0,
+        activeLoans: loans,
+        walletBalance: walletAgg._sum.balance ?? 0,
+        payoutCount: payoutAgg,
+      };
+    }),
+  );
+
+  // WOCCU PEARLS financial-health ratios for the dashboard panel.
+  app.get(
+    "/api/admin/pearls",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const pearls = await computePearls(coopId);
+      return { ok: true, ...pearls };
+    }),
+  );
+
+  app.get(
+    "/api/admin/members",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const query = req.query as { page?: string; limit?: string };
+      const page = Math.max(1, Number(query.page ?? 1));
+      const limit = Math.min(100, Number(query.limit ?? 20));
+      const skip = (page - 1) * limit;
+      const [members, total] = await Promise.all([
+        prisma.member.findMany({
+          where: { cooperativeId: coopId },
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+            email: true,
+            code: true,
+            role: true,
+            status: true,
+            cooperativeId: true,
+            createdAt: true,
+            wallet: true,
+          },
+          orderBy: { createdAt: "desc" },
+          skip,
+          take: limit,
+        }),
+        prisma.member.count({ where: { cooperativeId: coopId } }),
+      ]);
+      return { members, total, page, limit, totalPages: Math.ceil(total / limit) };
+    }),
+  );
 
   // Send a broadcast / individual message to members via their messaging channel.
-  app.post("/api/admin/messages/send", async (req, reply) => {
-    const coopId = req.adminCoopId!;
-    const actorPhone = req.adminPhone!;
-    const actorRole = req.adminRole ?? "admin";
-    const { memberIds = [], toAll = false, subject = "", body } = (req.body || {}) as {
-      memberIds?: string[];
-      toAll?: boolean;
-      subject?: string;
-      body?: string;
-    };
+  app.post(
+    "/api/admin/messages/send",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const actorPhone = req.adminPhone!;
+      const actorRole = req.adminRole ?? "admin";
+      const {
+        memberIds = [],
+        toAll = false,
+        subject = "",
+        body,
+      } = (req.body || {}) as {
+        memberIds?: string[];
+        toAll?: boolean;
+        subject?: string;
+        body?: string;
+      };
 
-    const text = String(body ?? "").trim();
-    if (!text) {
-      return reply.code(400).send({ error: "message body is required" });
-    }
-
-    // Resolve the intended recipients within this cooperative only.
-    let targets: { id: string; code: string; phone: string; optedOut: boolean; altChannelId: string | null; preferredChannel: string | null }[];
-    if (toAll) {
-      targets = await prisma.member.findMany({
-        where: { cooperativeId: coopId, status: "active" },
-        select: { id: true, code: true, phone: true, optedOut: true, altChannelId: true, preferredChannel: true },
-      });
-    } else if (Array.isArray(memberIds) && memberIds.length > 0) {
-      targets = await prisma.member.findMany({
-        where: { id: { in: memberIds }, cooperativeId: coopId },
-        select: { id: true, code: true, phone: true, optedOut: true, altChannelId: true, preferredChannel: true },
-      });
-    } else {
-      return reply.code(400).send({ error: "select at least one member or broadcast to all" });
-    }
-
-    const full = subject?.trim() ? `*${subject.trim()}*\n\n${text}` : text;
-
-    let sent = 0;
-    let skipped = 0;
-    let failed = 0;
-    const failures: string[] = [];
-    for (const member of targets) {
-      if (member.optedOut) {
-        skipped += 1;
-        continue;
+      const text = String(body ?? "").trim();
+      if (!text) {
+        return reply.code(400).send({ error: "message body is required" });
       }
-      try {
-        const ok = await notifyMember(member, full);
-        if (ok) {
-          sent += 1;
-        } else {
+
+      // Resolve the intended recipients within this cooperative only.
+      let targets: {
+        id: string;
+        code: string;
+        phone: string;
+        optedOut: boolean;
+        altChannelId: string | null;
+        preferredChannel: string | null;
+      }[];
+      if (toAll) {
+        targets = await prisma.member.findMany({
+          where: { cooperativeId: coopId, status: "active" },
+          select: {
+            id: true,
+            code: true,
+            phone: true,
+            optedOut: true,
+            altChannelId: true,
+            preferredChannel: true,
+          },
+        });
+      } else if (Array.isArray(memberIds) && memberIds.length > 0) {
+        targets = await prisma.member.findMany({
+          where: { id: { in: memberIds }, cooperativeId: coopId },
+          select: {
+            id: true,
+            code: true,
+            phone: true,
+            optedOut: true,
+            altChannelId: true,
+            preferredChannel: true,
+          },
+        });
+      } else {
+        return reply.code(400).send({ error: "select at least one member or broadcast to all" });
+      }
+
+      const full = subject?.trim() ? `*${subject.trim()}*\n\n${text}` : text;
+
+      let sent = 0;
+      let skipped = 0;
+      let failed = 0;
+      const failures: string[] = [];
+      for (const member of targets) {
+        if (member.optedOut) {
+          skipped += 1;
+          continue;
+        }
+        try {
+          const ok = await notifyMember(member, full);
+          if (ok) {
+            sent += 1;
+          } else {
+            failed += 1;
+            failures.push(member.code);
+          }
+        } catch {
           failed += 1;
           failures.push(member.code);
         }
-      } catch {
-        failed += 1;
-        failures.push(member.code);
       }
-    }
 
-    await prisma.auditLog.create({
-      data: {
+      await audit({
         cooperativeId: coopId,
         actorId: "system",
         actorPhone,
@@ -272,102 +433,141 @@ export async function adminApiRoutes(app: FastifyInstance) {
         action: "broadcast.send",
         targetType: toAll ? "all-members" : "members",
         detail: `Broadcast sent: ${sent} delivered, ${skipped} opted-out, ${failed} failed (${targets.length} targeted)`,
-      },
-    });
+      });
 
-    return {
-      ok: true,
-      targeted: targets.length,
-      sent,
-      skipped,
-      failed,
-      failures,
-    };
-  });
+      return {
+        ok: true,
+        targeted: targets.length,
+        sent,
+        skipped,
+        failed,
+        failures,
+      };
+    }),
+  );
 
-  app.get("/api/admin/loans", async (req) => {
-    const coopId = req.adminCoopId!;
-    const status = (req.query as { status?: string }).status;
-    return prisma.loan.findMany({
-      where: { cooperativeId: coopId, ...(status ? { status } : {}) },
-      include: {
-        member: { select: { name: true, phone: true } },
-        guarantors: { include: { member: { select: { name: true, phone: true } } } },
-        repayments: true,
-      },
-      orderBy: { createdAt: "desc" },
-      take: 200,
-    });
-  });
+  app.get(
+    "/api/admin/loans",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const status = (req.query as { status?: string }).status;
+      return prisma.loan.findMany({
+        where: { cooperativeId: coopId, ...(status ? { status } : {}) },
+        include: {
+          member: { select: { name: true, phone: true } },
+          guarantors: { include: { member: { select: { name: true, phone: true } } } },
+          repayments: true,
+        },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      });
+    }),
+  );
 
-  app.post("/api/admin/loans/:id/approve", async (req, reply) => {
-    const coopId = req.adminCoopId!;
-    const phone = req.adminPhone!;
-    const { id } = req.params as { id: string };
+  app.post(
+    "/api/admin/loans/:id/approve",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const { id } = req.params as { id: string };
 
-    // Look up the admin member to get actorId and determine superadmin status
-    const actor = await prisma.member.findFirst({
-      where: { phone, cooperativeId: coopId },
-    });
-    if (!actor) return reply.code(401).send({ error: "actor not found" });
+      // Look up the admin member to get actorId and determine superadmin status
+      const actor = await prisma.member.findFirst({
+        where: { phone, cooperativeId: coopId },
+      });
+      if (!actor) return reply.code(401).send({ error: "actor not found" });
 
-    // Superadmin is role-based only — no adminPhone alias override (matches chat path).
-    const isSuper = actor.role === "superadmin";
+      // Superadmin is role-based only — no adminPhone alias override (matches chat path).
+      const isSuper = actor.role === "superadmin";
 
-    const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
-    if (!loan) return reply.code(404).send({ error: "loan not found in your cooperative" });
+      const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
+      if (!loan) return reply.code(404).send({ error: "loan not found in your cooperative" });
 
-    const result = await approveLoan(id, { superAdmin: isSuper, actorId: actor.id, cooperativeId: coopId });
-    if (!result.ok) {
-      return reply.code(400).send({ error: result.message });
-    }
-    return { ok: true, message: result.message };
-  });
+      const result = await approveLoan(id, {
+        superAdmin: isSuper,
+        actorId: actor.id,
+        cooperativeId: coopId,
+      });
+      if (!result.ok) {
+        return reply.code(400).send({ error: result.message });
+      }
+      return { ok: true, message: result.message };
+    }),
+  );
 
-  app.post("/api/admin/loans/:id/reject", async (req, reply) => {
-    const coopId = req.adminCoopId!;
-    const { id } = req.params as { id: string };
-    const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
-    if (!loan) return reply.code(404).send({ error: "loan not found" });
-    if (loan.status !== "pending") return reply.code(400).send({ error: `loan is ${loan.status}` });
-    return prisma.loan.update({ where: { id }, data: { status: "rejected" } });
-  });
+  app.post(
+    "/api/admin/loans/:id/reject",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const { id } = req.params as { id: string };
+      const loan = await prisma.loan.findFirst({ where: { id, cooperativeId: coopId } });
+      if (!loan) return reply.code(404).send({ error: "loan not found" });
+      if (loan.status !== "pending")
+        return reply.code(400).send({ error: `loan is ${loan.status}` });
+      return prisma.loan.update({ where: { id }, data: { status: "rejected" } });
+    }),
+  );
 
-  app.get("/api/admin/payouts", async (req) => {
-    const coopId = req.adminCoopId!;
-    return prisma.payout.findMany({
-      where: { cooperativeId: coopId },
-      include: { member: { select: { name: true, phone: true } } },
-      orderBy: { createdAt: "desc" },
-      take: 100,
-    });
-  });
+  app.get(
+    "/api/admin/payouts",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      return prisma.payout.findMany({
+        where: { cooperativeId: coopId },
+        include: { member: { select: { name: true, phone: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+      });
+    }),
+  );
 
-  app.get("/api/admin/contributions", async (req) => {
-    const coopId = req.adminCoopId!;
-    return prisma.contribution.findMany({
-      where: { cooperativeId: coopId },
-      include: { member: { select: { name: true, phone: true } } },
-      orderBy: { createdAt: "desc" },
-      take: 200,
-    });
-  });
+  app.get(
+    "/api/admin/contributions",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      return prisma.contribution.findMany({
+        where: { cooperativeId: coopId },
+        include: { member: { select: { name: true, phone: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      });
+    }),
+  );
 
-  app.get("/api/admin/annualreport/:year", async (req) => {
-    const coopId = req.adminCoopId!;
-    const year = Number((req.params as { year: string }).year);
-    const reportYear = Number.isFinite(year) && year > 2000 ? year : new Date().getFullYear();
-    const startOfYear = new Date(reportYear, 0, 1);
-    const endOfYear = new Date(reportYear + 1, 0, 1);
+  app.get(
+    "/api/admin/annualreport/:year",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const year = Number((req.params as { year: string }).year);
+      const reportYear = Number.isFinite(year) && year > 2000 ? year : new Date().getFullYear();
+      const startOfYear = new Date(reportYear, 0, 1);
+      const endOfYear = new Date(reportYear + 1, 0, 1);
 
-    const [contribAgg, loanAgg, repaymentAgg, dividendAgg, memberCount, reserve, eduAgg, devAgg, walletAgg] =
-      await Promise.all([
+      const [
+        contribAgg,
+        loanAgg,
+        repaymentAgg,
+        dividendAgg,
+        memberCount,
+        reserve,
+        eduAgg,
+        devAgg,
+        walletAgg,
+      ] = await Promise.all([
         prisma.contribution.aggregate({
-          where: { cooperativeId: coopId, status: "confirmed", createdAt: { gte: startOfYear, lt: endOfYear } },
+          where: {
+            cooperativeId: coopId,
+            status: "confirmed",
+            createdAt: { gte: startOfYear, lt: endOfYear },
+          },
           _sum: { amount: true },
         }),
         prisma.loan.aggregate({
-          where: { cooperativeId: coopId, status: { in: ["approved", "disbursed"] }, approvedAt: { gte: startOfYear, lt: endOfYear } },
+          where: {
+            cooperativeId: coopId,
+            status: { in: ["approved", "disbursed"] },
+            approvedAt: { gte: startOfYear, lt: endOfYear },
+          },
           _sum: { amount: true },
           _count: true,
         }),
@@ -381,129 +581,169 @@ export async function adminApiRoutes(app: FastifyInstance) {
           _count: true,
         }),
         prisma.member.count({ where: { cooperativeId: coopId, status: "active" } }),
-        prisma.cooperative.findUnique({ where: { id: coopId }, select: { reserveFundBalance: true } }),
-        prisma.educationFund.aggregate({ where: { cooperativeId: coopId }, _sum: { amount: true } }),
-        prisma.developmentFund.aggregate({ where: { cooperativeId: coopId }, _sum: { amount: true } }),
-        prisma.wallet.aggregate({ where: { member: { cooperativeId: coopId } }, _sum: { balance: true } }),
+        prisma.cooperative.findUnique({
+          where: { id: coopId },
+          select: { reserveFundBalance: true },
+        }),
+        prisma.educationFund.aggregate({
+          where: { cooperativeId: coopId },
+          _sum: { amount: true },
+        }),
+        prisma.developmentFund.aggregate({
+          where: { cooperativeId: coopId },
+          _sum: { amount: true },
+        }),
+        prisma.wallet.aggregate({
+          where: { member: { cooperativeId: coopId } },
+          _sum: { balance: true },
+        }),
       ]);
 
-    const totalDividends = dividendAgg._sum.totalPool ?? 0;
-    const perMember = memberCount > 0 ? Math.round(totalDividends / memberCount) : 0;
+      const totalDividends = dividendAgg._sum.totalPool ?? 0;
+      const perMember = memberCount > 0 ? Math.round(totalDividends / memberCount) : 0;
 
-    return {
-      year: reportYear,
-      memberCount,
-      totalContributions: contribAgg._sum.amount ?? 0,
-      totalLoans: loanAgg._sum.amount ?? 0,
-      loanCount: loanAgg._count,
-      totalRepayments: repaymentAgg._sum.amount ?? 0,
-      funds: {
-        reserve: reserve?.reserveFundBalance ?? 0,
-        education: eduAgg._sum.amount ?? 0,
-        development: devAgg._sum.amount ?? 0,
-      },
-      dividends: { total: totalDividends, perMember, count: dividendAgg._count },
-      walletBalance: walletAgg._sum.balance ?? 0,
-    };
-  });
-
-  app.get("/api/admin/withdrawals", async (req) => {
-    const coopId = req.adminCoopId!;
-    return prisma.withdrawalRequest.findMany({
-      where: { cooperativeId: coopId },
-      include: { member: { select: { name: true, phone: true } } },
-      orderBy: { createdAt: "desc" },
-      take: 100,
-    });
-  });
-
-  app.get("/api/admin/polls", async (req) => {
-    const coopId = req.adminCoopId!;
-    return prisma.purchasePoll.findMany({
-      where: { cooperativeId: coopId },
-      include: {
-        creator: { select: { name: true } },
-        options: {
-          orderBy: { createdAt: "asc" },
-          include: { _count: { select: { ballots: true } } },
+      return {
+        year: reportYear,
+        memberCount,
+        totalContributions: contribAgg._sum.amount ?? 0,
+        totalLoans: loanAgg._sum.amount ?? 0,
+        loanCount: loanAgg._count,
+        totalRepayments: repaymentAgg._sum.amount ?? 0,
+        funds: {
+          reserve: reserve?.reserveFundBalance ?? 0,
+          education: eduAgg._sum.amount ?? 0,
+          development: devAgg._sum.amount ?? 0,
         },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 20,
-    });
-  });
+        dividends: { total: totalDividends, perMember, count: dividendAgg._count },
+        walletBalance: walletAgg._sum.balance ?? 0,
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/withdrawals",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      return prisma.withdrawalRequest.findMany({
+        where: { cooperativeId: coopId },
+        include: { member: { select: { name: true, phone: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+      });
+    }),
+  );
+
+  app.get(
+    "/api/admin/polls",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      return prisma.purchasePoll.findMany({
+        where: { cooperativeId: coopId },
+        include: {
+          creator: { select: { name: true } },
+          options: {
+            orderBy: { createdAt: "asc" },
+            include: { _count: { select: { ballots: true } } },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+      });
+    }),
+  );
 
   // ---- Compliance (PL/AML): STR + PAYE ----
 
-  app.get("/api/admin/compliance/str", async (req) => {
-    const coopId = req.adminCoopId!;
-    return prisma.sTR.findMany({
-      where: { cooperativeId: coopId },
-      include: { member: { select: { name: true, phone: true, code: true } } },
-      orderBy: { createdAt: "desc" },
-      take: 200,
-    });
-  });
+  app.get(
+    "/api/admin/compliance/str",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      return prisma.sTR.findMany({
+        where: { cooperativeId: coopId },
+        include: { member: { select: { name: true, phone: true, code: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      });
+    }),
+  );
 
-  app.get("/api/admin/compliance/paye", async (req) => {
-    const coopId = req.adminCoopId!;
-    return prisma.pAYERecord.findMany({
-      where: { cooperativeId: coopId },
-      include: { member: { select: { name: true, phone: true, code: true } } },
-      orderBy: [{ year: "desc" }, { month: "desc" }],
-      take: 500,
-    });
-  });
+  app.get(
+    "/api/admin/compliance/paye",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      return prisma.pAYERecord.findMany({
+        where: { cooperativeId: coopId },
+        include: { member: { select: { name: true, phone: true, code: true } } },
+        orderBy: [{ year: "desc" }, { month: "desc" }],
+        take: 500,
+      });
+    }),
+  );
 
-  app.post("/api/admin/compliance/export/:kind", async (req, reply) => {
-    const coopId = req.adminCoopId!;
-    const kind = (req.params as { kind: string }).kind;
-    if (kind !== "str" && kind !== "paye") {
-      return reply.code(400).send({ error: "Unknown compliance export kind" });
-    }
-    const { runComplianceExport } = await import("../services/compliance-export.js");
-    const result = await runComplianceExport(coopId, kind);
-    if (!result.ok) return reply.code(400).send({ error: result.message });
-    return { ok: true, message: result.message, files: result.files ?? [] };
-  });
+  app.post(
+    "/api/admin/compliance/export/:kind",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const kind = (req.params as { kind: string }).kind;
+      if (kind !== "str" && kind !== "paye") {
+        return reply.code(400).send({ error: "Unknown compliance export kind" });
+      }
+      const { runComplianceExport } = await import("../services/compliance-export.js");
+      const result = await runComplianceExport(coopId, kind);
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, message: result.message, files: result.files ?? [] };
+    }),
+  );
 
   // ---- Bulk member import ----
 
-  app.post("/api/admin/members/import", async (req, reply) => {
-    const coopId = req.adminCoopId!;
-    const phone = req.adminPhone!;
-    const actorRole = req.adminRole ?? "admin";
-    const body = (req.body ?? {}) as { filename?: string; data?: string };
-    if (!body.filename || !body.data) {
-      return reply.code(400).send({ error: "filename and data (base64) are required" });
-    }
+  app.post(
+    "/api/admin/members/import",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const actorRole = req.adminRole ?? "admin";
+      const body = (req.body ?? {}) as { filename?: string; data?: string };
+      if (!body.filename || !body.data) {
+        return reply.code(400).send({ error: "filename and data (base64) are required" });
+      }
 
-    // Rate limit: max 3 imports per 10 minutes per cooperative
-    const rateKey = `import:${coopId}`;
-    const rl = await checkRateLimit(rateKey, 3, 600);
-    if (!rl.allowed) {
-      return reply.code(429).send({ error: "Too many import requests. Try again later.", retryAfter: rl.retryAfter });
-    }
+      // Only CSV/Excel uploads (extension allowlist; the body limit + the 5MB
+      // check below bound the byte size).
+      const ext = (body.filename.split(".").pop() ?? "").toLowerCase();
+      if (!["csv", "xlsx", "xls"].includes(ext)) {
+        return reply.code(400).send({ error: "Unsupported file type — use .csv, .xlsx or .xls" });
+      }
 
-    const buffer = Buffer.from(body.data, "base64");
-    if (buffer.length > 5 * 1024 * 1024) {
-      return reply.code(400).send({ error: "File too large (max 5MB)" });
-    }
+      // Rate limit: max 3 imports per 10 minutes per cooperative
+      const rateKey = `import:${coopId}`;
+      const rl = await checkRateLimit(rateKey, 3, 600);
+      if (!rl.allowed) {
+        return reply
+          .code(429)
+          .send({ error: "Too many import requests. Try again later.", retryAfter: rl.retryAfter });
+      }
 
-    // Enforce cooperative member limit (from Subscription record)
-    const sub = await prisma.subscription.findUnique({ where: { cooperativeId: coopId } });
-    const memberLimit = sub?.memberLimit ?? 20;
-    const currentCount = await prisma.member.count({ where: { cooperativeId: coopId } });
-    if (currentCount >= memberLimit) {
-      return reply.code(400).send({ error: `Member limit reached (${memberLimit}). Remove members or upgrade the plan.` });
-    }
+      const buffer = Buffer.from(body.data, "base64");
+      if (buffer.length > 5 * 1024 * 1024) {
+        return reply.code(400).send({ error: "File too large (max 5MB)" });
+      }
 
-    const { bulkImportMembers } = await import("../services/bulk-import.js");
-    const result = await bulkImportMembers(coopId, buffer, body.filename);
+      // Enforce cooperative member limit (from Subscription record)
+      const sub = await prisma.subscription.findUnique({ where: { cooperativeId: coopId } });
+      const memberLimit = sub?.memberLimit ?? 20;
+      const currentCount = await prisma.member.count({ where: { cooperativeId: coopId } });
+      if (currentCount >= memberLimit) {
+        return reply.code(400).send({
+          error: `Member limit reached (${memberLimit}). Remove members or upgrade the plan.`,
+        });
+      }
 
-    // Audit log the import attempt
-    await prisma.auditLog.create({
-      data: {
+      const { bulkImportMembers } = await import("../services/bulk-import.js");
+      const result = await bulkImportMembers(coopId, buffer, body.filename);
+
+      // Audit log the import attempt
+      await audit({
         cooperativeId: coopId,
         actorId: "system",
         actorPhone: phone,
@@ -511,59 +751,198 @@ export async function adminApiRoutes(app: FastifyInstance) {
         action: "members.import",
         targetType: "members",
         detail: `Bulk import "${body.filename}": ${result.imported} imported, ${result.skipped} skipped, ${result.errors.length} errors`,
-      },
-    });
+      });
 
-    return result;
-  });
+      return result;
+    }),
+  );
+
+  // ---- Employer deduction file ingestion ----
+
+  const DEDUCTION_EXTS = [
+    "csv",
+    "xlsx",
+    "xls",
+    "pdf",
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
+    "tif",
+    "tiff",
+    "bmp",
+  ];
+
+  app.post(
+    "/api/admin/deductions/parse",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const body = (req.body ?? {}) as { filename?: string; data?: string };
+      if (!body.filename || !body.data) {
+        return reply.code(400).send({ error: "filename and data (base64) are required" });
+      }
+      const ext = (body.filename.split(".").pop() ?? "").toLowerCase();
+      if (!DEDUCTION_EXTS.includes(ext)) {
+        return reply.code(400).send({ error: `Unsupported file type: .${ext}` });
+      }
+      const buffer = Buffer.from(body.data, "base64");
+      if (buffer.length > 10 * 1024 * 1024) {
+        return reply.code(400).send({ error: "File too large (max 10MB)" });
+      }
+      const { ingestDeductionFile } = await import("../services/deduction-ingest.js");
+      try {
+        return await ingestDeductionFile(coopId, buffer, body.filename);
+      } catch (err) {
+        return reply.code(400).send({ error: (err as Error).message });
+      }
+    }),
+  );
+
+  app.post(
+    "/api/admin/deductions/build",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const body = (req.body ?? {}) as { filename?: string; data?: string; note?: string };
+      if (!body.filename || !body.data) {
+        return reply.code(400).send({ error: "filename and data (base64) are required" });
+      }
+      const ext = (body.filename.split(".").pop() ?? "").toLowerCase();
+      if (!DEDUCTION_EXTS.includes(ext)) {
+        return reply.code(400).send({ error: `Unsupported file type: .${ext}` });
+      }
+      const buffer = Buffer.from(body.data, "base64");
+      if (buffer.length > 10 * 1024 * 1024) {
+        return reply.code(400).send({ error: "File too large (max 10MB)" });
+      }
+      const { ingestDeductionFile } = await import("../services/deduction-ingest.js");
+      const { buildBatchFromRows } = await import("../services/deductions.js");
+      const { uploadBufferToS3 } = await import("../lib/s3.js");
+      try {
+        const ingested = await ingestDeductionFile(coopId, buffer, body.filename);
+        const matched = ingested.rows
+          .filter((r) => r.matched && r.memberId)
+          .map((r) => ({ memberId: r.memberId as string, amount: r.amount }));
+        const safeName = body.filename.replace(/[^\w.-]/g, "_");
+        const key = `deductions/${coopId}/${Date.now()}-${safeName}`;
+        const uploaded = await uploadBufferToS3(buffer, key);
+        const result = await buildBatchFromRows(phone, matched, body.note, {
+          key: uploaded ? key : undefined,
+          name: body.filename,
+        });
+        if (!result.ok) return reply.code(400).send({ error: result.message });
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: phone,
+          actorRole: req.adminRole ?? "admin",
+          action: "deduction.batch.import",
+          targetType: "deductionBatch",
+          detail: `${body.filename}: ${matched.length} rows -> ${result.ref}`,
+        });
+        return {
+          ok: true,
+          ref: result.ref,
+          message: result.message,
+          warnings: ingested.warnings,
+          unmatched: ingested.unmatchedCount,
+        };
+      } catch (err) {
+        return reply.code(400).send({ error: (err as Error).message });
+      }
+    }),
+  );
+
+  app.post(
+    "/api/admin/deductions/reconcile-statement",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const body = (req.body ?? {}) as { filename?: string; data?: string };
+      if (!body.filename || !body.data) {
+        return reply.code(400).send({ error: "filename and data (base64) are required" });
+      }
+      const ext = (body.filename.split(".").pop() ?? "").toLowerCase();
+      if (!["csv", "xlsx", "xls", "pdf"].includes(ext)) {
+        return reply.code(400).send({ error: "Statement must be .csv, .xlsx, .xls or .pdf" });
+      }
+      const buffer = Buffer.from(body.data, "base64");
+      if (buffer.length > 10 * 1024 * 1024) {
+        return reply.code(400).send({ error: "File too large (max 10MB)" });
+      }
+      const { reconcileFromStatement } = await import("../services/deductions.js");
+      try {
+        const result = await reconcileFromStatement(coopId, buffer, body.filename);
+        await audit({
+          cooperativeId: coopId,
+          actorPhone: phone,
+          actorRole: req.adminRole ?? "admin",
+          action: "deduction.statement.reconcile",
+          targetType: "deductionBatch",
+          detail: `${body.filename}: ${result.reconciled.join(", ") || "no matches"}`,
+        });
+        if (!result.ok) return reply.code(400).send({ error: result.message });
+        return { ok: true, message: result.message, reconciled: result.reconciled };
+      } catch (err) {
+        return reply.code(400).send({ error: (err as Error).message });
+      }
+    }),
+  );
 
   // ---- Grievances (member complaints) ----
 
-  app.get("/api/admin/grievances", async (req) => {
-    const coopId = req.adminCoopId!;
-    return prisma.grievance.findMany({
-      where: { cooperativeId: coopId },
-      include: {
-        member: { select: { name: true, phone: true, code: true } },
-        resolvedBy: { select: { name: true } },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 200,
-    });
-  });
+  app.get(
+    "/api/admin/grievances",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      return prisma.grievance.findMany({
+        where: { cooperativeId: coopId },
+        include: {
+          member: { select: { name: true, phone: true, code: true } },
+          resolvedBy: { select: { name: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      });
+    }),
+  );
 
-  app.post("/api/admin/grievances/:id/resolve", async (req, reply) => {
-    const coopId = req.adminCoopId!;
-    const phone = req.adminPhone!;
-    const { id } = req.params as { id: string };
-    const body = (req.body ?? {}) as { response?: string };
-    const response = String(body.response ?? "").trim();
-    if (!response) return reply.code(400).send({ error: "A response message is required" });
+  app.post(
+    "/api/admin/grievances/:id/resolve",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const { id } = req.params as { id: string };
+      const body = (req.body ?? {}) as { response?: string };
+      const response = String(body.response ?? "").trim();
+      if (!response) return reply.code(400).send({ error: "A response message is required" });
 
-    const actor = await prisma.member.findFirst({ where: { phone, cooperativeId: coopId } });
-    if (!actor) return reply.code(401).send({ error: "actor not found" });
+      const actor = await prisma.member.findFirst({ where: { phone, cooperativeId: coopId } });
+      if (!actor) return reply.code(401).send({ error: "actor not found" });
 
-    const grievance = await prisma.grievance.findFirst({ where: { id, cooperativeId: coopId }, include: { member: true } });
-    if (!grievance) return reply.code(404).send({ error: "Grievance not found" });
-    if (grievance.status === "resolved") return reply.code(400).send({ error: "Grievance is already resolved" });
+      const grievance = await prisma.grievance.findFirst({
+        where: { id, cooperativeId: coopId },
+        include: { member: true },
+      });
+      if (!grievance) return reply.code(404).send({ error: "Grievance not found" });
+      if (grievance.status === "resolved")
+        return reply.code(400).send({ error: "Grievance is already resolved" });
 
-    await prisma.grievance.update({
-      where: { id: grievance.id },
-      data: {
-        status: "resolved",
-        response: response.slice(0, 500),
-        resolvedById: actor.id,
-        resolvedAt: new Date(),
-      },
-    });
+      await prisma.grievance.update({
+        where: { id: grievance.id },
+        data: {
+          status: "resolved",
+          response: response.slice(0, 500),
+          resolvedById: actor.id,
+          resolvedAt: new Date(),
+        },
+      });
 
-    await notifyMember(
-      grievance.member,
-      `✅ Your grievance *${grievance.id.slice(-6)}* has been resolved.\n\nResponse: ${response}`,
-    ).catch(() => {});
+      await notifyMember(
+        grievance.member,
+        `✅ Your grievance *${grievance.id.slice(-6)}* has been resolved.\n\nResponse: ${response}`,
+      ).catch(() => {});
 
-    await prisma.auditLog.create({
-      data: {
+      await audit({
         cooperativeId: coopId,
         actorId: actor.id,
         actorPhone: phone,
@@ -572,60 +951,71 @@ export async function adminApiRoutes(app: FastifyInstance) {
         targetType: "grievance",
         targetId: grievance.id,
         detail: `Resolved grievance from ${grievance.member.name}`,
-      },
-    });
+      });
 
-    return { ok: true, message: `Grievance *${grievance.id.slice(-6)}* resolved. ${grievance.member.name} notified.` };
-  });
+      return {
+        ok: true,
+        message: `Grievance *${grievance.id.slice(-6)}* resolved. ${grievance.member.name} notified.`,
+      };
+    }),
+  );
 
   // ---- Support Tickets ----
 
-  app.get("/api/admin/tickets", async (req) => {
-    const coopId = req.adminCoopId!;
-    const status = (req.query as { status?: string }).status;
-    return prisma.supportTicket.findMany({
-      where: { cooperativeId: coopId, ...(status ? { status } : {}) },
-      include: {
-        member: { select: { name: true, phone: true, code: true } },
-        assignedTo: { select: { name: true } },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 200,
-    });
-  });
+  app.get(
+    "/api/admin/tickets",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const status = (req.query as { status?: string }).status;
+      return prisma.supportTicket.findMany({
+        where: { cooperativeId: coopId, ...(status ? { status } : {}) },
+        include: {
+          member: { select: { name: true, phone: true, code: true } },
+          assignedTo: { select: { name: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      });
+    }),
+  );
 
-  app.post("/api/admin/tickets/:id/resolve", async (req, reply) => {
-    const coopId = req.adminCoopId!;
-    const phone = req.adminPhone!;
-    const { id } = req.params as { id: string };
-    const body = (req.body ?? {}) as { note?: string };
-    const note = String(body.note ?? "").trim();
+  app.post(
+    "/api/admin/tickets/:id/resolve",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const { id } = req.params as { id: string };
+      const body = (req.body ?? {}) as { note?: string };
+      const note = String(body.note ?? "").trim();
 
-    const actor = await prisma.member.findFirst({ where: { phone, cooperativeId: coopId } });
-    if (!actor) return reply.code(401).send({ error: "actor not found" });
+      const actor = await prisma.member.findFirst({ where: { phone, cooperativeId: coopId } });
+      if (!actor) return reply.code(401).send({ error: "actor not found" });
 
-    const ticket = await prisma.supportTicket.findFirst({ where: { id, cooperativeId: coopId }, include: { member: true } });
-    if (!ticket) return reply.code(404).send({ error: "Ticket not found" });
-    if (ticket.status === "resolved") return reply.code(400).send({ error: "Ticket is already resolved" });
+      const ticket = await prisma.supportTicket.findFirst({
+        where: { id, cooperativeId: coopId },
+        include: { member: true },
+      });
+      if (!ticket) return reply.code(404).send({ error: "Ticket not found" });
+      if (ticket.status === "resolved")
+        return reply.code(400).send({ error: "Ticket is already resolved" });
 
-    await prisma.supportTicket.update({
-      where: { id: ticket.id },
-      data: {
-        status: "resolved",
-        assignedToId: actor.id,
-        resolution: note.slice(0, 500) || null,
-        resolvedAt: new Date(),
-        firstResponseAt: ticket.firstResponseAt ?? new Date(),
-      },
-    });
+      await prisma.supportTicket.update({
+        where: { id: ticket.id },
+        data: {
+          status: "resolved",
+          assignedToId: actor.id,
+          resolution: note.slice(0, 500) || null,
+          resolvedAt: new Date(),
+          firstResponseAt: ticket.firstResponseAt ?? new Date(),
+        },
+      });
 
-    await notifyMember(
-      ticket.member,
-      `✅ Your ticket *${ticket.id.slice(-6)}* has been resolved.\n${note ? `Note: ${note}` : ""}`,
-    ).catch(() => {});
+      await notifyMember(
+        ticket.member,
+        `✅ Your ticket *${ticket.id.slice(-6)}* has been resolved.\n${note ? `Note: ${note}` : ""}`,
+      ).catch(() => {});
 
-    await prisma.auditLog.create({
-      data: {
+      await audit({
         cooperativeId: coopId,
         actorId: actor.id,
         actorPhone: phone,
@@ -634,49 +1024,57 @@ export async function adminApiRoutes(app: FastifyInstance) {
         targetType: "ticket",
         targetId: ticket.id,
         detail: `Resolved ticket from ${ticket.member.name}`,
-      },
-    });
+      });
 
-    return { ok: true, message: `Ticket *${ticket.id.slice(-6)}* resolved. ${ticket.member.name} notified.` };
-  });
+      return {
+        ok: true,
+        message: `Ticket *${ticket.id.slice(-6)}* resolved. ${ticket.member.name} notified.`,
+      };
+    }),
+  );
 
   // ---- Executive Posts (organogram) ----
 
-  app.get("/api/admin/posts", async (req) => {
-    const coopId = req.adminCoopId!;
-    return prisma.coopPost.findMany({
-      where: { cooperativeId: coopId },
-      include: {
-        incumbent: { select: { name: true, phone: true, code: true } },
-      },
-      orderBy: { title: "asc" },
-    });
-  });
+  app.get(
+    "/api/admin/posts",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      return prisma.coopPost.findMany({
+        where: { cooperativeId: coopId },
+        include: {
+          incumbent: { select: { name: true, phone: true, code: true } },
+        },
+        orderBy: { title: "asc" },
+      });
+    }),
+  );
 
-  app.post("/api/admin/posts", async (req, reply) => {
-    const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can create posts." });
-    const coopId = req.adminCoopId!;
-    const phone = req.adminPhone!;
-    const body = (req.body ?? {}) as { title?: string };
-    if (!body.title) return reply.code(400).send({ error: "Post title is required" });
+  app.post(
+    "/api/admin/posts",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can create posts." });
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const body = (req.body ?? {}) as { title?: string };
+      if (!body.title) return reply.code(400).send({ error: "Post title is required" });
 
-    const { normalizeTitle } = await import("../services/posts.js");
-    const title = normalizeTitle(String(body.title));
-    const existing = await prisma.coopPost.findFirst({ where: { cooperativeId: coopId, title } });
-    if (existing) return reply.code(400).send({ error: "A post with this title already exists" });
+      const { normalizeTitle } = await import("../services/posts.js");
+      const title = normalizeTitle(String(body.title));
+      const existing = await prisma.coopPost.findFirst({ where: { cooperativeId: coopId, title } });
+      if (existing) return reply.code(400).send({ error: "A post with this title already exists" });
 
-    const post = await prisma.coopPost.create({
-      data: {
-        cooperativeId: coopId,
-        title,
-        appointedById: superAuth.actorId,
-        appointedAt: new Date(),
-      },
-    });
+      const post = await prisma.coopPost.create({
+        data: {
+          cooperativeId: coopId,
+          title,
+          appointedById: superAuth.actorId,
+          appointedAt: new Date(),
+        },
+      });
 
-    await prisma.auditLog.create({
-      data: {
+      await audit({
         cooperativeId: coopId,
         actorId: superAuth.actorId,
         actorPhone: phone,
@@ -685,39 +1083,44 @@ export async function adminApiRoutes(app: FastifyInstance) {
         targetType: "post",
         targetId: post.id,
         detail: `Created post "${normalizeTitle(title)}"`,
-      },
-    });
+      });
 
-    return { ok: true, message: `Post "${normalizeTitle(title)}" created.` };
-  });
+      return { ok: true, message: `Post "${normalizeTitle(title)}" created.` };
+    }),
+  );
 
-  app.post("/api/admin/posts/:id/assign", async (req, reply) => {
-    const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can assign posts." });
-    const coopId = req.adminCoopId!;
-    const phone = req.adminPhone!;
-    const { id } = req.params as { id: string };
-    const body = (req.body ?? {}) as { memberCode?: string };
+  app.post(
+    "/api/admin/posts/:id/assign",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can assign posts." });
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const { id } = req.params as { id: string };
+      const body = (req.body ?? {}) as { memberCode?: string };
 
-    const post = await prisma.coopPost.findFirst({ where: { id, cooperativeId: coopId } });
-    if (!post) return reply.code(404).send({ error: "Post not found" });
+      const post = await prisma.coopPost.findFirst({ where: { id, cooperativeId: coopId } });
+      if (!post) return reply.code(404).send({ error: "Post not found" });
 
-    let incumbentId: string | null = null;
-    let memberName = "_vacant_";
-    if (body.memberCode) {
-      const member = await prisma.member.findFirst({ where: { code: body.memberCode, cooperativeId: coopId } });
-      if (!member) return reply.code(400).send({ error: `Member code ${body.memberCode} not found` });
-      incumbentId = member.id;
-      memberName = member.name;
-    }
+      let incumbentId: string | null = null;
+      let memberName = "_vacant_";
+      if (body.memberCode) {
+        const member = await prisma.member.findFirst({
+          where: { code: body.memberCode, cooperativeId: coopId },
+        });
+        if (!member)
+          return reply.code(400).send({ error: `Member code ${body.memberCode} not found` });
+        incumbentId = member.id;
+        memberName = member.name;
+      }
 
-    await prisma.coopPost.update({
-      where: { id: post.id },
-      data: { incumbentId, appointedById: superAuth.actorId, appointedAt: new Date() },
-    });
+      await prisma.coopPost.update({
+        where: { id: post.id },
+        data: { incumbentId, appointedById: superAuth.actorId, appointedAt: new Date() },
+      });
 
-    await prisma.auditLog.create({
-      data: {
+      await audit({
         cooperativeId: coopId,
         actorId: superAuth.actorId,
         actorPhone: phone,
@@ -726,127 +1129,178 @@ export async function adminApiRoutes(app: FastifyInstance) {
         targetType: "post",
         targetId: post.id,
         detail: `${body.memberCode ? `Assigned "${post.title}" to ${memberName}` : `Vacated "${post.title}"`}`,
-      },
-    });
+      });
 
-    return { ok: true, message: body.memberCode ? `"${post.title}" assigned to ${memberName}.` : `"${post.title}" is now vacant.` };
-  });
+      return {
+        ok: true,
+        message: body.memberCode
+          ? `"${post.title}" assigned to ${memberName}.`
+          : `"${post.title}" is now vacant.`,
+      };
+    }),
+  );
 
   // ---- Payroll ----
 
-  app.get("/api/admin/payroll", async (req) => {
-    const coopId = req.adminCoopId!;
-    const { payrollOverview } = await import("../services/payroll.js");
-    return { participants: await payrollOverview(coopId) };
-  });
+  app.get(
+    "/api/admin/payroll",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const { payrollOverview } = await import("../services/payroll.js");
+      return { participants: await payrollOverview(coopId) };
+    }),
+  );
 
-  app.post("/api/admin/payroll/set", async (req, reply) => {
-    const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can set salaries." });
-    const coopId = req.adminCoopId!;
-    const body = (req.body ?? {}) as { memberCode?: string; amount?: number | "off" };
-    if (!body.memberCode) return reply.code(400).send({ error: "memberCode is required" });
+  app.post(
+    "/api/admin/payroll/set",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can set salaries." });
+      const coopId = req.adminCoopId!;
+      const body = (req.body ?? {}) as { memberCode?: string; amount?: number | "off" };
+      if (!body.memberCode) return reply.code(400).send({ error: "memberCode is required" });
 
-    const actor = await prisma.member.findFirst({ where: { id: superAuth.actorId, cooperativeId: coopId } });
-    if (!actor) return reply.code(401).send({ error: "actor not found" });
+      const actor = await prisma.member.findFirst({
+        where: { id: superAuth.actorId, cooperativeId: coopId },
+      });
+      if (!actor) return reply.code(401).send({ error: "actor not found" });
 
-    const target = await prisma.member.findFirst({ where: { code: body.memberCode, cooperativeId: coopId } });
-    if (!target) return reply.code(400).send({ error: `Member code ${body.memberCode} not found` });
+      const target = await prisma.member.findFirst({
+        where: { code: body.memberCode, cooperativeId: coopId },
+      });
+      if (!target)
+        return reply.code(400).send({ error: `Member code ${body.memberCode} not found` });
 
-    const { setSalary } = await import("../services/payroll.js");
-    const result = await setSalary(actor, target.phone, body.amount === "off" ? "off" : Number(body.amount));
-    if (!result.ok) return reply.code(400).send({ error: result.message });
-    return { ok: true, message: result.message };
-  });
+      const { setSalary } = await import("../services/payroll.js");
+      const result = await setSalary(
+        actor,
+        target.phone,
+        body.amount === "off" ? "off" : Number(body.amount),
+      );
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, message: result.message };
+    }),
+  );
 
-  app.post("/api/admin/payroll/run", async (req, reply) => {
-    const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can run payroll." });
-    const coopId = req.adminCoopId!;
-    const actor = await prisma.member.findFirst({ where: { id: superAuth.actorId, cooperativeId: coopId } });
-    if (!actor) return reply.code(401).send({ error: "actor not found" });
+  app.post(
+    "/api/admin/payroll/run",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can run payroll." });
+      const coopId = req.adminCoopId!;
+      const actor = await prisma.member.findFirst({
+        where: { id: superAuth.actorId, cooperativeId: coopId },
+      });
+      if (!actor) return reply.code(401).send({ error: "actor not found" });
 
-    const body = (req.body ?? {}) as { narration?: string };
-    const narration = String(body.narration ?? "").trim();
-    if (!narration) return reply.code(400).send({ error: "A narration is required" });
+      const body = (req.body ?? {}) as { narration?: string };
+      const narration = String(body.narration ?? "").trim();
+      if (!narration) return reply.code(400).send({ error: "A narration is required" });
 
-    const { runPayroll } = await import("../services/payroll.js");
-    const result = await runPayroll(coopId, { id: actor.id, phone: actor.phone, role: actor.role }, narration);
-    return { ok: result.ok, message: result.message, paid: result.paid ?? 0, total: result.total ?? 0 };
-  });
+      const { runPayroll } = await import("../services/payroll.js");
+      const result = await runPayroll(
+        coopId,
+        { id: actor.id, phone: actor.phone, role: actor.role },
+        narration,
+      );
+      return {
+        ok: result.ok,
+        message: result.message,
+        paid: result.paid ?? 0,
+        total: result.total ?? 0,
+      };
+    }),
+  );
 
-  app.get("/api/admin/payroll/history", async (req) => {
-    const coopId = req.adminCoopId!;
-    const [paye, ledger] = await Promise.all([
-      prisma.pAYERecord.findMany({
-        where: { cooperativeId: coopId },
-        include: { member: { select: { name: true, code: true } } },
-        orderBy: [{ year: "desc" }, { month: "desc" }],
-        take: 200,
-      }),
-      prisma.ledgerEntry.findMany({
-        where: { cooperativeId: coopId, category: { in: ["salary", "stipend"] } },
-        orderBy: { createdAt: "desc" },
-        take: 100,
-      }),
-    ]);
-    return { paye, ledger };
-  });
+  app.get(
+    "/api/admin/payroll/history",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const [paye, ledger] = await Promise.all([
+        prisma.pAYERecord.findMany({
+          where: { cooperativeId: coopId },
+          include: { member: { select: { name: true, code: true } } },
+          orderBy: [{ year: "desc" }, { month: "desc" }],
+          take: 200,
+        }),
+        prisma.ledgerEntry.findMany({
+          where: { cooperativeId: coopId, category: { in: ["salary", "stipend"] } },
+          orderBy: { createdAt: "desc" },
+          take: 100,
+        }),
+      ]);
+      return { paye, ledger };
+    }),
+  );
 
   // ---- Reserves / Funds ----
 
-  app.get("/api/admin/funds", async (req) => {
-    const coopId = req.adminCoopId!;
-    const [coop, reserve, education, development] = await Promise.all([
-      prisma.cooperative.findUnique({ where: { id: coopId }, select: { reserveFundBalance: true } }),
-      prisma.reserveAllocation.findMany({
-        where: { cooperativeId: coopId },
-        orderBy: { createdAt: "desc" },
-        take: 50,
-      }),
-      prisma.educationFund.findMany({
-        where: { cooperativeId: coopId },
-        orderBy: { createdAt: "desc" },
-        take: 50,
-      }),
-      prisma.developmentFund.findMany({
-        where: { cooperativeId: coopId },
-        orderBy: { createdAt: "desc" },
-        take: 50,
-      }),
-    ]);
-    const sum = (rows: { amount: number }[]) => rows.reduce((a, r) => a + r.amount, 0);
-    return {
-      reserveBalance: coop?.reserveFundBalance ?? 0,
-      educationBalance: sum(education),
-      developmentBalance: sum(development),
-      allocations: reserve,
-      education: education,
-      development: development,
-    };
-  });
+  app.get(
+    "/api/admin/funds",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const [coop, reserve, education, development] = await Promise.all([
+        prisma.cooperative.findUnique({
+          where: { id: coopId },
+          select: { reserveFundBalance: true },
+        }),
+        prisma.reserveAllocation.findMany({
+          where: { cooperativeId: coopId },
+          orderBy: { createdAt: "desc" },
+          take: 50,
+        }),
+        prisma.educationFund.findMany({
+          where: { cooperativeId: coopId },
+          orderBy: { createdAt: "desc" },
+          take: 50,
+        }),
+        prisma.developmentFund.findMany({
+          where: { cooperativeId: coopId },
+          orderBy: { createdAt: "desc" },
+          take: 50,
+        }),
+      ]);
+      const sum = (rows: { amount: number }[]) => rows.reduce((a, r) => a + r.amount, 0);
+      return {
+        reserveBalance: coop?.reserveFundBalance ?? 0,
+        educationBalance: sum(education),
+        developmentBalance: sum(development),
+        allocations: reserve,
+        education: education,
+        development: development,
+      };
+    }),
+  );
 
   // ---- Elections (management) ----
 
-  app.get("/api/admin/votes", async (req) => {
-    const coopId = req.adminCoopId!;
-    return prisma.vote.findMany({
-      where: { cooperativeId: coopId },
-      include: {
-        candidates: {
-          include: {
-            member: { select: { name: true, code: true } },
-            _count: { select: { ballots: true } },
+  app.get(
+    "/api/admin/votes",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      return prisma.vote.findMany({
+        where: { cooperativeId: coopId },
+        include: {
+          candidates: {
+            include: {
+              member: { select: { name: true, code: true } },
+              _count: { select: { ballots: true } },
+            },
           },
+          _count: { select: { ballots: true } },
         },
-        _count: { select: { ballots: true } },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 50,
-    });
-  });
+        orderBy: { createdAt: "desc" },
+        take: 50,
+      });
+    }),
+  );
 
-  async function requireSuper(req: { adminCoopId?: string; adminPhone?: string }): Promise<{ ok: boolean; actorId?: string; phone?: string }> {
+  async function requireSuper(req: {
+    adminCoopId?: string;
+    adminPhone?: string;
+  }): Promise<{ ok: boolean; actorId?: string; phone?: string }> {
     const coopId = req.adminCoopId;
     const phone = req.adminPhone;
     if (!coopId || !phone) return { ok: false };
@@ -855,34 +1309,42 @@ export async function adminApiRoutes(app: FastifyInstance) {
     return { ok: true, actorId: actor.id, phone };
   }
 
-  app.post("/api/admin/funds/reserve/allocate", async (req, reply) => {
-    const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can allocate to the reserve fund." });
-    const coopId = req.adminCoopId!;
-    const phone = req.adminPhone!;
-    const body = (req.body ?? {}) as { amount?: number; note?: string };
-    const amount = Math.round(Number(body.amount ?? 0));
-    if (!(amount > 0)) return reply.code(400).send({ error: "A valid amount is required (in kobo)" });
-    const note = String(body.note ?? "").trim().slice(0, 200) || null;
+  app.post(
+    "/api/admin/funds/reserve/allocate",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply
+          .code(403)
+          .send({ error: "Only the super admin can allocate to the reserve fund." });
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const body = (req.body ?? {}) as { amount?: number; note?: string };
+      const amount = Math.round(Number(body.amount ?? 0));
+      if (!(amount > 0))
+        return reply.code(400).send({ error: "A valid amount is required (in kobo)" });
+      const note =
+        String(body.note ?? "")
+          .trim()
+          .slice(0, 200) || null;
 
-    const coop = await prisma.cooperative.findUnique({ where: { id: coopId } });
-    if (!coop) return reply.code(404).send({ error: "Cooperative not found" });
+      const coop = await prisma.cooperative.findUnique({ where: { id: coopId } });
+      if (!coop) return reply.code(404).send({ error: "Cooperative not found" });
 
-    await prisma.cooperative.update({
-      where: { id: coopId },
-      data: { reserveFundBalance: coop.reserveFundBalance + amount },
-    });
-    await prisma.reserveAllocation.create({
-      data: {
-        cooperativeId: coopId,
-        amount,
-        source: "manual",
-        note,
-      },
-    });
+      await prisma.cooperative.update({
+        where: { id: coopId },
+        data: { reserveFundBalance: coop.reserveFundBalance + amount },
+      });
+      await prisma.reserveAllocation.create({
+        data: {
+          cooperativeId: coopId,
+          amount,
+          source: "manual",
+          note,
+        },
+      });
 
-    await prisma.auditLog.create({
-      data: {
+      await audit({
         cooperativeId: coopId,
         actorId: superAuth.actorId,
         actorPhone: phone,
@@ -891,66 +1353,93 @@ export async function adminApiRoutes(app: FastifyInstance) {
         targetType: "cooperative",
         amount,
         detail: `Manual reserve allocation of ${amount} kobo${note ? " — " + note : ""}`,
-      },
-    });
+      });
 
-    return { ok: true, message: "Reserve fund allocation recorded and balance updated." };
-  });
+      return { ok: true, message: "Reserve fund allocation recorded and balance updated." };
+    }),
+  );
 
   // ---- Elections (management) ----
 
-  app.post("/api/admin/votes/start", async (req, reply) => {
-    const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can start an election." });
-    const body = (req.body ?? {}) as { kind?: string; scope?: string; title?: string };
-    const { startVote } = await import("../services/votes.js");
-    const result = await startVote(superAuth.phone!, body.kind ?? "", body.scope, body.title ?? "");
-    if (!result.ok) return reply.code(400).send({ error: result.message });
-    return { ok: true, message: result.message, voteId: result.voteId };
-  });
+  app.post(
+    "/api/admin/votes/start",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can start an election." });
+      const body = (req.body ?? {}) as { kind?: string; scope?: string; title?: string };
+      const { startVote } = await import("../services/votes.js");
+      const result = await startVote(
+        superAuth.phone!,
+        body.kind ?? "",
+        body.scope,
+        body.title ?? "",
+      );
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, message: result.message, voteId: result.voteId };
+    }),
+  );
 
-  app.post("/api/admin/votes/:id/candidate", async (req, reply) => {
-    const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can add candidates." });
-    const { id } = req.params as { id: string };
-    const body = (req.body ?? {}) as { memberCode?: string };
-    if (!body.memberCode) return reply.code(400).send({ error: "memberCode is required" });
-    const { addCandidate } = await import("../services/votes.js");
-    const result = await addCandidate(superAuth.phone!, id, body.memberCode);
-    if (!result.ok) return reply.code(400).send({ error: result.message });
-    return { ok: true, message: result.message };
-  });
+  app.post(
+    "/api/admin/votes/:id/candidate",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can add candidates." });
+      const { id } = req.params as { id: string };
+      const body = (req.body ?? {}) as { memberCode?: string };
+      if (!body.memberCode) return reply.code(400).send({ error: "memberCode is required" });
+      const { addCandidate } = await import("../services/votes.js");
+      const result = await addCandidate(superAuth.phone!, id, body.memberCode);
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, message: result.message };
+    }),
+  );
 
-  app.post("/api/admin/votes/:id/close", async (req, reply) => {
-    const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can close an election." });
-    const { id } = req.params as { id: string };
-    const { closeVote } = await import("../services/votes.js");
-    const result = await closeVote(superAuth.phone!, id);
-    if (!result.ok) return reply.code(400).send({ error: result.message });
-    return { ok: true, message: result.message };
-  });
+  app.post(
+    "/api/admin/votes/:id/close",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can close an election." });
+      const { id } = req.params as { id: string };
+      const { closeVote } = await import("../services/votes.js");
+      const result = await closeVote(superAuth.phone!, id);
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, message: result.message };
+    }),
+  );
 
-  app.get("/api/admin/votes/:id/results", async (req, reply) => {
-    const coopId = req.adminCoopId!;
-    const phone = req.adminPhone!;
-    const { id } = req.params as { id: string };
-    const vote = await prisma.vote.findFirst({ where: { id, cooperativeId: coopId }, select: { id: true } });
-    if (!vote) return reply.code(404).send({ error: "Election not found" });
-    const { showLiveResults } = await import("../services/votes.js");
-    const result = await showLiveResults(phone, id);
-    if (!result.ok) return reply.code(400).send({ error: result.message });
-    return { ok: true, results: result.message };
-  });
+  app.get(
+    "/api/admin/votes/:id/results",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const { id } = req.params as { id: string };
+      const vote = await prisma.vote.findFirst({
+        where: { id, cooperativeId: coopId },
+        select: { id: true },
+      });
+      if (!vote) return reply.code(404).send({ error: "Election not found" });
+      const { showLiveResults } = await import("../services/votes.js");
+      const result = await showLiveResults(phone, id);
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, results: result.message };
+    }),
+  );
 
-  app.post("/api/admin/votes/:id/export-pdf", async (req, reply) => {
-    const superAuth = await requireSuper(req);
-    if (!superAuth.ok) return reply.code(403).send({ error: "Only the super admin can export results." });
-    const coopId = req.adminCoopId!;
-    const { id } = req.params as { id: string };
-    const { exportElectionPdf } = await import("../services/election-export.js");
-    const result = await exportElectionPdf(coopId, id);
-    if (!result.ok) return reply.code(400).send({ error: result.message });
-    return { ok: true, message: result.message, files: result.file ? [result.file] : [] };
-  });
+  app.post(
+    "/api/admin/votes/:id/export-pdf",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can export results." });
+      const coopId = req.adminCoopId!;
+      const { id } = req.params as { id: string };
+      const { exportElectionPdf } = await import("../services/election-export.js");
+      const result = await exportElectionPdf(coopId, id);
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, message: result.message, files: result.file ? [result.file] : [] };
+    }),
+  );
 }

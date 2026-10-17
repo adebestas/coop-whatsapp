@@ -1,4 +1,4 @@
-import { Queue, Worker, Job } from "bullmq";
+import { Queue, Worker, Job, type JobsOptions, type KeepJobs } from "bullmq";
 import { getRedis } from "./cache.js";
 
 /**
@@ -6,6 +6,23 @@ import { getRedis } from "./cache.js";
  * Handles async tasks like sending notifications, processing payments, etc.
  * Gracefully degrades to synchronous when Redis is unavailable.
  */
+
+// ===== Retry policy =====
+// Retries are JOB options (`attempts`/`backoff` on BaseJobOptions), not Worker
+// options. The previous `maxStartedAttempts` key was not a BullMQ option at all,
+// so it was silently ignored and every failed job died on its first attempt
+// (default `attempts: 1` = no retry). This is the single source of truth for
+// retry + eviction, applied to jobs this module enqueues and kept as the
+// Worker-level keep defaults.
+export const DEFAULT_JOB_OPTIONS: Pick<JobsOptions, "attempts" | "backoff"> & {
+  removeOnComplete: KeepJobs;
+  removeOnFail: KeepJobs;
+} = {
+  attempts: 3,
+  backoff: { type: "exponential", delay: 5_000 },
+  removeOnComplete: { age: 3600, count: 1000 },
+  removeOnFail: { age: 86400, count: 5000 },
+};
 
 // ===== Queue Names =====
 
@@ -15,6 +32,7 @@ export const QUEUE_NAMES = {
   EXPORTS: "exports",
   BACKUPS: "backups",
   DIGEST: "digest",
+  SCHEDULER: "scheduler",
 } as const;
 
 // ===== Job Types =====
@@ -34,10 +52,7 @@ const workerMap: Map<string, Worker> = new Map();
 /**
  * Process a queue with a worker
  */
-export function processQueue<T>(
-  queueName: string,
-  handler: (job: Job<T>) => Promise<void>,
-): void {
+export function processQueue<T>(queueName: string, handler: (job: Job<T>) => Promise<void>): void {
   const redis = getRedis();
   if (!redis) {
     console.warn(`[Queue] Redis unavailable, worker not started: ${queueName}`);
@@ -64,11 +79,10 @@ export function processQueue<T>(
     {
       connection: redis,
       concurrency: 5,
-      // Retry configuration: max 3 attempts
-      maxStartedAttempts: 3,
-      // Remove completed jobs after 1 hour, failed after 24 hours
-      removeOnComplete: { age: 3600, count: 1000 },
-      removeOnFail: { age: 86400, count: 5000 },
+      // Worker-level keep/eviction defaults. Retry counts are NOT settable here —
+      // they are per-job via DEFAULT_JOB_OPTIONS.attempts.
+      removeOnComplete: DEFAULT_JOB_OPTIONS.removeOnComplete,
+      removeOnFail: DEFAULT_JOB_OPTIONS.removeOnFail,
     },
   );
 
@@ -115,10 +129,65 @@ export function initQueueProcessors(): void {
     await sendText({ to, text: message });
   });
 
+  // Scheduler queue — repeatable jobs registered by scheduleSchedulerJobs().
+  processQueue<{ job: string }>(QUEUE_NAMES.SCHEDULER, async (job) => {
+    const { runSchedulerJob } = await import("../services/scheduler.js");
+    await runSchedulerJob(job.data.job);
+  });
+
   // NOTE: Payments, exports, backups and digests are executed synchronously by
   // their own services (disbursement/status-poller, export routes, backup
   // scheduler, digest scheduler). No code enqueues to those queues, so they
   // have no processors.
 
   console.warn("[Queue] All processors initialized");
+}
+
+/**
+ * Register the scheduler's repeatable jobs in BullMQ.
+ *
+ * Repeatable jobs persist in Redis, so a process restart cannot miss a
+ * scheduled run, and BullMQ guarantees exactly one worker processes each job
+ * (no duplicate backups/digests across instances). No-op when Redis is down —
+ * the caller falls back to the in-process loops.
+ */
+export async function scheduleSchedulerJobs(): Promise<void> {
+  const redis = getRedis();
+  if (!redis) return;
+
+  const { transferPollIntervalMs } = await import("../services/statuspoller.js");
+  const pollMs = transferPollIntervalMs();
+
+  const jobs: Array<{ name: string; every: number }> = [
+    { name: "tick", every: 15 * 60 * 1000 },
+    { name: "backup", every: 24 * 60 * 60 * 1000 },
+    { name: "reconcile", every: 24 * 60 * 60 * 1000 },
+    { name: "digest", every: 15 * 60 * 1000 },
+  ];
+  if (pollMs > 0) jobs.push({ name: "poller", every: pollMs });
+
+  const queue = new Queue(QUEUE_NAMES.SCHEDULER, { connection: redis });
+  try {
+    for (const j of jobs) {
+      await queue.upsertJobScheduler(
+        `scheduler-${j.name}`,
+        { every: j.every },
+        {
+          name: j.name,
+          data: { job: j.name },
+          // Retry a failed scheduled run (e.g. a transient DB/Redis blip) with
+          // exponential backoff instead of losing the tick. Completed repeats are
+          // ephemeral; keep a few failures for inspection.
+          opts: {
+            attempts: DEFAULT_JOB_OPTIONS.attempts,
+            backoff: DEFAULT_JOB_OPTIONS.backoff,
+            removeOnComplete: true,
+            removeOnFail: 100,
+          },
+        },
+      );
+    }
+  } finally {
+    await queue.close();
+  }
 }

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
 import { prisma } from "./prisma.js";
+import { withCoopContext } from "./tenant-context.js";
 import { getRedis } from "./cache.js";
 
 /**
@@ -13,7 +14,7 @@ import { getRedis } from "./cache.js";
  * The `iat` lives inside the signed payload (not a separate part).
  */
 
-export const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
+export const TOKEN_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours (short-lived; refreshed while active)
 const TOKEN_BLACKLIST_PREFIX = "admin:token:blacklist:";
 const TOKEN_BLACKLIST_TTL_SECONDS = Math.ceil(TOKEN_TTL_MS / 1000);
 
@@ -31,7 +32,9 @@ function getSecret(): string {
 
 export function sign(phone: string, cooperativeId: string, role: string): string {
   const secret = getSecret();
-  const payload = Buffer.from(JSON.stringify({ phone, cooperativeId, role, iat: Date.now() })).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({ phone, cooperativeId, role, iat: Date.now() }),
+  ).toString("base64url");
   const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
   return `${payload}.${sig}`;
 }
@@ -110,15 +113,23 @@ export async function isTokenRevoked(token: string): Promise<boolean> {
  * Returns the live role + cooperativeId, or null when the caller is not a
  * currently-authorized admin.
  */
-export async function requireLiveAdmin(payload: AdminTokenPayload): Promise<{ phone: string; role: string; cooperativeId: string } | null> {
-  const live = await prisma.member.findFirst({
-    where: { phone: payload.phone, cooperativeId: payload.cooperativeId },
-    select: { phone: true, role: true, status: true, cooperativeId: true },
-  });
+export async function requireLiveAdmin(
+  payload: AdminTokenPayload,
+): Promise<{ phone: string; role: string; cooperativeId: string } | null> {
+  // The cooperativeId comes from the signed token, so it is trustworthy and can
+  // be used to open the RLS context BEFORE reading the RLS-protected Member
+  // table (otherwise the read would fail-closed under FORCE RLS).
+  const live = await withCoopContext(payload.cooperativeId, () =>
+    prisma.member.findFirst({
+      where: { phone: payload.phone, cooperativeId: payload.cooperativeId },
+      select: { phone: true, role: true, status: true, cooperativeId: true },
+    }),
+  );
   if (
     !live ||
     !["admin", "superadmin"].includes(live.role) ||
-    (live.status === "suspended" || live.status === "deceased")
+    live.status === "suspended" ||
+    live.status === "deceased"
   ) {
     return null;
   }

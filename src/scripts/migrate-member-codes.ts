@@ -42,7 +42,9 @@ async function main() {
     });
   }
 
-  console.log(`Done. Reviewed ${total} member(s) across ${coops.length} cooperative(s); rewrote ${updated} code(s).`);
+  console.log(
+    `Done. Reviewed ${total} member(s) across ${coops.length} cooperative(s); rewrote ${updated} code(s).`,
+  );
   await prisma.$disconnect();
 }
 

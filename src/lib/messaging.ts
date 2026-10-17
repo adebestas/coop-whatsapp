@@ -1,12 +1,24 @@
-import { sendText as sendWhatsApp, sendFlowMessage } from "./whatsapp.js";
-import { sendTelegramMessage, sendTelegramKeyboard, buildPinKeyboard } from "./telegram.js";
+import {
+  sendText as sendWhatsApp,
+  sendFlowMessage,
+  sendDocument as sendWhatsAppDocument,
+} from "./whatsapp.js";
+import {
+  sendTelegramMessage,
+  sendTelegramKeyboard,
+  buildPinKeyboard,
+  sendTelegramDocument,
+} from "./telegram.js";
 import { config } from "../config.js";
 import { prisma } from "./prisma.js";
+import { enqueueDeferredSend } from "./deferred.js";
 
 const WHATSAPP_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Human pacing before a WhatsApp send. Skipped under NODE_ENV=test so the suite stays fast. */
+const WHATSAPP_PACING_MS = process.env.NODE_ENV === "test" ? 0 : 1500;
 
 function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -17,8 +29,17 @@ function sleep(ms: number): Promise<void> {
  *   - Telegram: "tg:<chatId>", e.g. "tg:123456789"
  *
  * All bot services call sendText() and never need to know the channel.
+ *
+ * Inside a deferred-send scope (see src/lib/deferred.ts) the send is queued and
+ * flushed after the surrounding transaction commits, so the transaction never
+ * spans network I/O. Returns true optimistically in that case.
  */
 export async function sendText(params: { to: string; text: string }): Promise<boolean> {
+  if (enqueueDeferredSend(() => sendTextNow(params))) return true;
+  return sendTextNow(params);
+}
+
+async function sendTextNow(params: { to: string; text: string }): Promise<boolean> {
   const { to, text } = params;
 
   // WhatsApp 24-hour session window check
@@ -27,7 +48,10 @@ export async function sendText(params: { to: string; text: string }): Promise<bo
     if (session?.lastInboundAt) {
       const elapsed = Date.now() - session.lastInboundAt.getTime();
       if (elapsed > WHATSAPP_SESSION_WINDOW_MS) {
-        await sendWhatsApp({ to, text: "Hi! To receive messages from your cooperative, please send any message to re-activate." });
+        await sendWhatsApp({
+          to,
+          text: "Hi! To receive messages from your cooperative, please send any message to re-activate.",
+        });
         return false;
       }
     }
@@ -36,8 +60,33 @@ export async function sendText(params: { to: string; text: string }): Promise<bo
   if (to.startsWith("tg:")) {
     return sendTelegramMessage(to.slice(3), text);
   }
-  await sleep(1500);
+  if (WHATSAPP_PACING_MS > 0) await sleep(WHATSAPP_PACING_MS);
   return sendWhatsApp({ to, text });
+}
+
+export interface SendDocumentParams {
+  to: string;
+  filename: string;
+  mimeType: string;
+  data: Buffer;
+  caption?: string;
+}
+
+/**
+ * Channel-aware document sender (deferred-send aware, like sendText).
+ * WhatsApp: base64 document message. Telegram: multipart sendDocument.
+ */
+export async function sendDocument(params: SendDocumentParams): Promise<boolean> {
+  if (enqueueDeferredSend(() => sendDocumentNow(params))) return true;
+  return sendDocumentNow(params);
+}
+
+async function sendDocumentNow(params: SendDocumentParams): Promise<boolean> {
+  const { to, filename, mimeType, data, caption } = params;
+  if (to.startsWith("tg:")) {
+    return sendTelegramDocument({ chatId: to.slice(3), filename, data, caption });
+  }
+  return sendWhatsAppDocument({ to, filename, mimeType, data, caption });
 }
 
 /**
@@ -94,9 +143,15 @@ export async function notifyMember(
     phone: string;
     altChannelId?: string | null;
     preferredChannel?: string | null;
+    optedOut?: boolean | null;
   },
   text: string,
 ): Promise<boolean> {
+  // Consent (NDPR): a member who answered NO must not receive outbound messages.
+  // Inbound commands still work — the consent gate in conversation.ts only asks
+  // un-asked members (consentAt === null && !optedOut).
+  if (member.optedOut === true) return false;
+
   const preferred = member.preferredChannel ?? platformOf(member.phone);
   if (preferred !== platformOf(member.phone) && member.altChannelId) {
     return sendText({ to: member.altChannelId, text });
@@ -111,14 +166,14 @@ export async function notifyMember(
 export async function sendLongText(params: { to: string; text: string }): Promise<boolean> {
   const MAX_LEN = 3500;
   if (params.text.length <= MAX_LEN) return sendText(params);
-  const parts = params.text.split('\n\n');
-  let current = '';
+  const parts = params.text.split("\n\n");
+  let current = "";
   for (const part of parts) {
-    if ((current + '\n\n' + part).length > MAX_LEN) {
+    if ((current + "\n\n" + part).length > MAX_LEN) {
       await sendText({ to: params.to, text: current.trim() });
       current = part;
     } else {
-      current += (current ? '\n\n' : '') + part;
+      current += (current ? "\n\n" : "") + part;
     }
   }
   if (current.trim()) await sendText({ to: params.to, text: current.trim() });

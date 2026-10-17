@@ -1,19 +1,64 @@
 import { createHmac } from "node:crypto";
+import { z } from "zod";
 import type {
   ProviderAdapter,
   CreateVirtualAccountParams,
   VirtualAccountData,
   PaymentNotification,
+  PayoutNotification,
   ResolveAccountParams,
   ResolveAccountResult,
+  Bank,
   PayoutParams,
   PayoutResult,
   TransferStatus,
+  CreateMandateParams,
+  MandateResult,
+  DebitMandateParams,
+  DebitResult,
+  CancelMandateParams,
+  MandateNotification,
+  DebitNotification,
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
 import { forProvider } from "../../lib/money.js";
 
 const API_BASE = "https://api.paystack.co";
+
+/** Hard cap on any single Paystack HTTP call so a hung socket cannot hold a connection. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Shape contract for a charge.success webhook payload (amounts stay in kobo). */
+const PaystackChargeSchema = z
+  .object({
+    event: z.literal("charge.success"),
+    data: z
+      .object({
+        id: z.union([z.string(), z.number()]).optional(),
+        transaction_id: z.union([z.string(), z.number()]).optional(),
+        reference: z.string().optional(),
+        amount: z.coerce.number(),
+        status: z.string(),
+        account: z.object({ number: z.string().optional() }).passthrough().optional(),
+        currency: z.string().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+/** Shape contract for a transfer.* webhook (payout we initiated settling). */
+const PaystackTransferSchema = z
+  .object({
+    event: z.string(),
+    data: z
+      .object({
+        reference: z.string(),
+        transfer_code: z.string().optional(),
+        status: z.string().optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
 
 function getSecret(): string {
   const key = process.env.PAYSTACK_SECRET_KEY ?? "";
@@ -23,7 +68,11 @@ function getSecret(): string {
   return key;
 }
 
-async function api<T>(path: string, method: string, body?: unknown): Promise<T> {
+async function api<T>(
+  path: string,
+  method: "GET" | "POST" | "PUT" | "DELETE",
+  body?: unknown,
+): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: {
@@ -31,6 +80,7 @@ async function api<T>(path: string, method: string, body?: unknown): Promise<T> 
       Authorization: `Bearer ${getSecret()}`,
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const json = (await res.json()) as any;
   if (!res.ok || json.status !== true) {
@@ -60,20 +110,32 @@ export const paystackAdapter: ProviderAdapter = {
     }
   },
 
+  async listBanks(currency?: string): Promise<Bank[]> {
+    try {
+      const res = await api<any>(`/bank?currency=${currency ?? "NGN"}`, "GET");
+      if (!Array.isArray(res.data)) return [];
+      return res.data
+        .map((b: any) => ({ code: String(b.code ?? ""), name: String(b.name ?? "") }))
+        .filter((b: Bank) => b.code && b.name);
+    } catch {
+      return [];
+    }
+  },
+
   async payout(params: PayoutParams): Promise<PayoutResult> {
     try {
       // 1. Check for existing recipient to avoid duplicates
       let recipientCode: string | undefined;
       try {
         const listRes = await api<any>(
-          `/transferrecipient?account_number=${encodeURIComponent(params.bankAccountNumber)}&bank_code=${encodeURIComponent(params.bankCode)}&currency=NGN`,
+          `/transferrecipient?account_number=${encodeURIComponent(params.bankAccountNumber)}&bank_code=${encodeURIComponent(params.bankCode)}&currency=${params.currency ?? "NGN"}`,
           "GET",
         );
         const existing = listRes.data?.find(
           (r: any) =>
             r.account_number === params.bankAccountNumber &&
             r.bank_code === params.bankCode &&
-            r.currency === "NGN" &&
+            r.currency === (params.currency ?? "NGN") &&
             r.active,
         );
         if (existing?.recipient_code) {
@@ -90,7 +152,7 @@ export const paystackAdapter: ProviderAdapter = {
           name: params.recipientName || "Coop Member",
           account_number: params.bankAccountNumber,
           bank_code: params.bankCode,
-          currency: "NGN",
+          currency: params.currency ?? "NGN",
         });
         recipientCode = recipientRes.data?.recipient_code;
       }
@@ -165,16 +227,24 @@ export const paystackAdapter: ProviderAdapter = {
   },
 
   parseNotification(body: any): PaymentNotification | null {
-    if (!body || !body.data) return null;
-    const d = body.data;
-
-    // charge.success fires for transfers into dedicated accounts.
-    if (body.event !== "charge.success") return null;
+    // Fail-closed on shape drift: a charge.success whose payload doesn't match
+    // the expected schema is dropped rather than mis-credited.
+    const parsed = PaystackChargeSchema.safeParse(body);
+    if (!parsed.success) return null;
+    const d = parsed.data.data;
     if (d.status !== "success" && d.status !== "successful") return null;
 
     const amountKobo = Number(d.amount ?? 0);
+    // Idempotency needs a STABLE provider id: never fabricate one (a Date.now()
+    // fallback makes every replay a distinct event → duplicate credit). Use the
+    // charge id, else the merchant reference; drop the event (fail-closed) if
+    // neither is present.
+    const providerTxId = d.id ?? d.transaction_id ?? d.reference;
+    if (providerTxId === undefined || providerTxId === null || providerTxId === "") {
+      return null;
+    }
     return {
-      transactionId: String(d.id ?? d.transaction_id ?? Date.now()),
+      transactionId: String(providerTxId),
       reference: d.reference,
       accountNumber: String(d.account?.number ?? ""),
       amount: amountKobo, // Keep in kobo — wallet stores kobo
@@ -185,12 +255,33 @@ export const paystackAdapter: ProviderAdapter = {
     };
   },
 
+  parsePayoutNotification(body: any): PayoutNotification | null {
+    const parsed = PaystackTransferSchema.safeParse(body);
+    if (!parsed.success) return null;
+    const event = parsed.data.event.toLowerCase();
+    // Tolerate naming drift across API versions: transfer.success /
+    // transfer.successful, transfer.failed / transfer.reversed.
+    if (!event.includes("transfer")) return null;
+    const status: PayoutNotification["status"] | null = event.includes("success")
+      ? "successful"
+      : event.includes("fail") || event.includes("revers")
+        ? "failed"
+        : null;
+    if (!status) return null;
+    return {
+      reference: parsed.data.data.reference,
+      status,
+      providerRef: parsed.data.data.transfer_code,
+      provider: "paystack",
+      raw: body,
+    };
+  },
+
   async getTransferStatus(reference) {
     try {
-      const res = await api<{ data?: { status?: string; id?: number | string; transfer_code?: string } }>(
-        `/transfer/verify/${encodeURIComponent(reference)}`,
-        "GET",
-      );
+      const res = await api<{
+        data?: { status?: string; id?: number | string; transfer_code?: string };
+      }>(`/transfer/verify/${encodeURIComponent(reference)}`, "GET");
       const s = String(res.data?.status ?? "").toLowerCase();
       const status: TransferStatus["status"] =
         s === "success"
@@ -202,16 +293,152 @@ export const paystackAdapter: ProviderAdapter = {
               : "unknown";
       return {
         status,
-        providerRef: res.data?.transfer_code ?? (res.data?.id !== undefined ? String(res.data.id) : undefined),
+        providerRef:
+          res.data?.transfer_code ?? (res.data?.id !== undefined ? String(res.data.id) : undefined),
       };
     } catch (err: any) {
       // Unconfigured or HTTP error — treat as unknown, never guess.
       return { status: "unknown", error: String(err?.message ?? err) };
     }
   },
+
+  async createMandate(params: CreateMandateParams): Promise<MandateResult> {
+    try {
+      // The webhook (`direct_debit.authorization.created`) only echoes
+      // `data.customer.email`, so we pass a DETERMINISTIC email derived from our
+      // reference. The webhook handler derives the reference back from that email
+      // and joins the authorization to our mandate.
+      const res = await api<any>("/customer/authorization/initialize", "POST", {
+        email: `${params.reference}@coop.local`,
+        channel: "direct_debit",
+        callback_url: params.redirectUrl,
+      });
+      // No providerMandateId: the authorization_code only arrives on the
+      // webhook. The mandate stays fail-closed for debits until then.
+      return {
+        ok: true,
+        authorizationUrl: res.data?.redirect_url,
+        status: "pending",
+      };
+    } catch (err: any) {
+      return { ok: false, error: err.message ?? "mandate failed" };
+    }
+  },
+
+  async triggerActivationCharge(params) {
+    try {
+      const customerId = params.providerCustomerId;
+      if (!customerId) {
+        return { ok: false, error: "missing Paystack customer code for activation" };
+      }
+      // Paystack's activation endpoints are customer-scoped and take the numeric
+      // authorization_id, which we resolve from the mandate-authorizations list.
+      const list = await api<any>(
+        `/customer/${encodeURIComponent(customerId)}/directdebit-mandate-authorizations`,
+        "GET",
+      );
+      const entries: Array<{ authorization_id?: unknown; authorization_code?: string }> =
+        Array.isArray(list.data) ? list.data : [];
+      const match = entries.find((e) => e.authorization_code === params.providerMandateId);
+      if (!match?.authorization_id) {
+        return { ok: false, error: "authorization not found for activation charge" };
+      }
+      await api<any>(
+        `/customer/${encodeURIComponent(customerId)}/directdebit-activation-charge`,
+        "PUT",
+        { authorization_id: match.authorization_id },
+      );
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message ?? "activation charge failed" };
+    }
+  },
+
+  async debitMandate(params: DebitMandateParams): Promise<DebitResult> {
+    try {
+      // Fail-closed: a Paystack debit needs the resolved authorization_code. An
+      // empty id means the mandate never activated — never send it (a charge on
+      // the wrong key risks collecting the wrong authorization).
+      if (!params.providerMandateId?.trim()) {
+        return { ok: false, error: "mandate has no resolved authorization code" };
+      }
+      const res = await api<any>("/transaction/partial_debit", "POST", {
+        authorization_code: params.providerMandateId,
+        currency: params.currency ?? "NGN",
+        amount: forProvider(params.amount, "paystack"),
+        email: params.memberEmail ?? "member@coop.local",
+        // Our deterministic debit reference doubles as the idempotency key and
+        // is what the debit webhook echoes back, so settleDebit can match it.
+        reference: params.reference,
+      });
+      return { ok: true, providerRef: res.data?.reference, status: res.data?.status };
+    } catch (err: any) {
+      return { ok: false, error: err.message ?? "debit failed" };
+    }
+  },
+
+  async cancelMandate(params: CancelMandateParams): Promise<{ ok: boolean; error?: string }> {
+    try {
+      await api<any>(
+        `/customer/authorization/${encodeURIComponent(params.providerMandateId)}`,
+        "DELETE",
+      );
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message ?? "cancel failed" };
+    }
+  },
+
+  parseMandateNotification(body: unknown): MandateNotification | null {
+    const b: any = body;
+    if (b?.event !== "direct_debit.authorization.created") return null;
+    const code = b.data?.authorization_code;
+    if (!code) return null;
+    // Join key: the webhook echoes back the email we sent to initialize, which
+    // is `${our reference}@coop.local`. Derive our reference from it so the
+    // mandate can be matched before any authorization_code is stored. An email
+    // we did not mint leaves the reference unset (fail-closed downstream).
+    const email = typeof b.data?.customer?.email === "string" ? b.data.customer.email : "";
+    const suffix = "@coop.local";
+    const providerReference = email.endsWith(suffix) ? email.slice(0, -suffix.length) : undefined;
+    return {
+      providerMandateId: String(code),
+      // `active: false` is normal initially — Paystack then requires an
+      // activation charge, so this is a pending mandate, not a failure.
+      status: b.data?.active ? "active" : "pending",
+      providerReference,
+      providerCustomerId: b.data?.customer?.code ? String(b.data.customer.code) : undefined,
+      provider: "paystack",
+      raw: body,
+    };
+  },
+
+  parseDebitNotification(body: unknown): DebitNotification | null {
+    const b: any = body;
+    const event = String(b?.event ?? "").toLowerCase();
+    if (!event.includes("partial_debit") && !event.includes("charge")) return null;
+    const reference = b.data?.reference;
+    if (!reference) return null;
+    const status: DebitNotification["status"] | null = event.includes("success")
+      ? "successful"
+      : event.includes("fail")
+        ? "failed"
+        : null;
+    if (!status) return null;
+    return {
+      reference,
+      status,
+      providerTransactionId: b.data?.id !== undefined ? String(b.data.id) : undefined,
+      provider: "paystack",
+      raw: body,
+    };
+  },
 };
 
-function header(headers: Record<string, string | string[] | undefined>, name: string): string | undefined {
+function header(
+  headers: Record<string, string | string[] | undefined>,
+  name: string,
+): string | undefined {
   const v = headers[name] ?? headers[name.toLowerCase()];
   return Array.isArray(v) ? v[0] : v;
 }

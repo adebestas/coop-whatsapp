@@ -4,13 +4,6 @@ import { handleMessage } from "../src/services/conversation.js";
 import { sendText } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 
-vi.mock("../src/lib/messaging.js", () => ({
-  sendText: vi.fn().mockResolvedValue(true),
-  sendSecurePrompt: vi.fn().mockResolvedValue(true),
-  notifyMember: vi.fn().mockResolvedValue(true),
-  platformOf: (channelId: string) => (channelId.startsWith("tg:") ? "telegram" : "whatsapp"),
-}));
-
 const PHONE = "2348012345678";
 const ADMIN_PHONE = "2348099999999";
 const OTHER_MEMBER = "2348077777777";
@@ -19,11 +12,7 @@ async function makeCoop(code: string, name: string, adminPhone?: string) {
   return prisma.cooperative.create({ data: { name, code, adminPhone } });
 }
 
-async function makeMember(
-  phone: string,
-  coopId: string,
-  opts: { role?: string } = {},
-) {
+async function makeMember(phone: string, coopId: string, opts: { role?: string } = {}) {
   let code = generateMemberCode();
   while (await prisma.member.findUnique({ where: { code } })) {
     code = generateMemberCode();
@@ -37,6 +26,7 @@ async function makeMember(
       role: opts.role ?? "member",
       pin: hashPin("1234"),
       wallet: { create: {} },
+      consentAt: new Date(),
     },
   });
   return { ...m, code };
@@ -67,8 +57,8 @@ beforeEach(async () => {
   await prisma.loanRepayment.deleteMany();
   await prisma.guarantor.deleteMany();
   await prisma.loan.deleteMany();
-  await prisma.payout.deleteMany();
   await prisma.dividendEntry.deleteMany();
+  await prisma.payout.deleteMany();
   await prisma.dividend.deleteMany();
   await prisma.broadcast.deleteMany();
   await prisma.wallet.deleteMany();
@@ -126,7 +116,10 @@ describe("executive posts", () => {
 
     await handleMessage(ADMIN_PHONE, `setpost treasurer ${target.code}`);
     expect(
-      vi.mocked(sendText).mock.calls.map((c) => c[0].text).some((t) => t.includes("super admin")),
+      vi
+        .mocked(sendText)
+        .mock.calls.map((c) => c[0].text)
+        .some((t) => t.includes("super admin")),
     ).toBe(true);
   });
 
@@ -138,7 +131,10 @@ describe("executive posts", () => {
 
     expect(await prisma.coopPost.count({ where: { cooperativeId: coop.id } })).toBe(0);
     expect(
-      vi.mocked(sendText).mock.calls.map((c) => c[0].text).some((t) => t.includes("No member")),
+      vi
+        .mocked(sendText)
+        .mock.calls.map((c) => c[0].text)
+        .some((t) => t.includes("No member")),
     ).toBe(true);
   });
 

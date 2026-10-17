@@ -35,7 +35,12 @@ async function downloadAudio(mediaId: string): Promise<{ data: Buffer; mime: str
   }
 }
 
-async function transcribe(audio: Buffer, mime: string): Promise<string | null> {
+export interface Transcript {
+  text: string;
+  language: string | null;
+}
+
+async function transcribe(audio: Buffer, mime: string): Promise<Transcript | null> {
   if (!groqAvailable()) return null;
   const apiKey = process.env.GROQ_API_KEY!;
   try {
@@ -49,19 +54,15 @@ async function transcribe(audio: Buffer, mime: string): Promise<string | null> {
       body: form,
     });
     if (!res.ok) return null;
-    const body = (await res.json()) as { text?: string };
+    const body = (await res.json()) as { text?: string; language?: string };
     const text = body.text?.trim();
-    return text ? text : null;
+    return text ? { text, language: body.language ?? null } : null;
   } catch {
     return null;
   }
 }
 
-/**
- * Transcribe a WhatsApp audio message. Returns the transcript text, or null
- * when transcription is unavailable or fails (caller should drop the message).
- */
-export async function transcribeAudioMessage(mediaId: string): Promise<string | null> {
+export async function transcribeAudioMessage(mediaId: string): Promise<Transcript | null> {
   if (!transcriptionEnabled()) return null;
   const audio = await downloadAudio(mediaId);
   if (!audio) return null;

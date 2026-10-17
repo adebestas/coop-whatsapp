@@ -1,0 +1,93 @@
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
+import { clearMemberCache } from "../src/services/cooperative.js";
+import { handleAdminCommand } from "../src/services/admin.js";
+import { sendText } from "../src/lib/messaging.js";
+
+beforeEach(async () => {
+  vi.clearAllMocks();
+  clearMemberCache();
+  await cleanupDatabase();
+});
+
+afterAll(cleanupDatabase);
+
+describe("federation admin commands", () => {
+  it("creates a federation and adds a coop", async () => {
+    const coop = await createTestCoop("FEDC1");
+    const admin = await createTestMember(coop.id, { phone: "2348000090001", role: "superadmin" });
+
+    await handleAdminCommand(admin.phone, "federation", ["create", "WestAfrica", "NGN"]);
+    const fed = await prisma.federation.findFirst({ where: { name: "WestAfrica" } });
+    expect(fed).toBeTruthy();
+    expect(fed?.baseCurrency).toBe("NGN");
+
+    await handleAdminCommand(admin.phone, "federation", ["addcoop", coop.code]);
+    const membership = await prisma.federationMembership.findFirst({
+      where: { federationId: fed!.id, cooperativeId: coop.id },
+    });
+    expect(membership).toBeTruthy();
+    expect(membership?.status).toBe("active");
+  });
+
+  it("sets an FX rate", async () => {
+    const coop = await createTestCoop("FEDC2");
+    const admin = await createTestMember(coop.id, { phone: "2348000090011", role: "superadmin" });
+
+    await handleAdminCommand(admin.phone, "federation", ["create", "EcoFed", "NGN"]);
+    await handleAdminCommand(admin.phone, "federation", ["rate", "NGN", "GHS", "0.008"]);
+
+    const rate = await prisma.fxRate.findFirst({
+      where: { baseCurrency: "NGN", quoteCurrency: "GHS" },
+    });
+    expect(rate).toBeTruthy();
+    expect(rate?.rate).toBeCloseTo(0.008);
+  });
+
+  it("refuses a non-super admin from creating a federation", async () => {
+    const coop = await createTestCoop("FEDC3");
+    const admin = await createTestMember(coop.id, { phone: "2348000090021", role: "admin" });
+
+    await handleAdminCommand(admin.phone, "federation", ["create", "X", "NGN"]);
+
+    const fed = await prisma.federation.findFirst({ where: { name: "X" } });
+    expect(fed).toBeNull();
+
+    const texts = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
+    expect(texts).toMatch(/super admin/i);
+    expect(texts).toMatch(/federation/i);
+  });
+
+  it("targets an explicit federation via the `federation <code> <sub>` form", async () => {
+    const adminCoop = await createTestCoop("FEDC4");
+    const admin = await createTestMember(adminCoop.id, {
+      phone: "2348000090031",
+      role: "superadmin",
+    });
+    const target = await createTestCoop("FEDC5");
+
+    const older = await prisma.federation.create({
+      data: { name: "FedOne", code: `CODE-${Date.now()}-A`, baseCurrency: "NGN" },
+    });
+    await prisma.federation.create({
+      data: { name: "FedTwo", code: `CODE-${Date.now()}-B`, baseCurrency: "NGN" },
+    });
+
+    // Prefixing the (older) federation's code must target it, not the
+    // most-recently created FedTwo.
+    await handleAdminCommand(admin.phone, "federation", [older.code, "addcoop", target.code]);
+
+    const inOlder = await prisma.federationMembership.findFirst({
+      where: { federationId: older.id, cooperativeId: target.id },
+    });
+    expect(inOlder).toBeTruthy();
+    const fedTwo = await prisma.federation.findFirst({ where: { name: "FedTwo" } });
+    const inNewer = await prisma.federationMembership.findFirst({
+      where: { federationId: fedTwo!.id, cooperativeId: target.id },
+    });
+    expect(inNewer).toBeNull();
+  });
+});

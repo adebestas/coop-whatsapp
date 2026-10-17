@@ -37,7 +37,10 @@ export const BANK_CODES: Record<string, string> = {
 
 /** Resolve a bank code from a name (or accept a raw numeric code). */
 export function resolveBankCode(input: string): { code: string; name: string } | null {
-  const cleaned = input.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  const cleaned = input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
   if (!cleaned) return null;
   if (/^\d+$/.test(cleaned)) {
     return { code: cleaned, name: input.trim() };
