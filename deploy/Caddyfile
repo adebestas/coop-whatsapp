@@ -1,0 +1,13 @@
+# Caddy reverse proxy for coop-whatsapp.
+# $DOMAIN is provided by the environment (see docker-compose.yml; set it in .env).
+# Caddy automatically obtains and renews a Let's Encrypt certificate for the
+# domain, so the WhatsApp webhook is reachable over HTTPS at
+#   https://<DOMAIN>/webhook
+{$DOMAIN} {
+	encode gzip zstd
+	reverse_proxy app:3000
+	log {
+		output stdout
+		format console
+	}
+}

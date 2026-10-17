@@ -1,0 +1,22 @@
+#cloud-config
+#
+# Oracle Cloud "Always Free" VM — cloud-init user data.
+# Paste this into the instance's "Cloud-init script" / "User data" field at
+# creation time (Advanced options -> Management -> Cloud-init script), on an
+# Ubuntu 22.04/24.04 image. It clones the repo and runs deploy/bootstrap.sh,
+# which installs Docker and starts the stack.
+#
+# Afterwards, SSH in, edit /opt/coop-whatsapp/.env (DOMAIN + provider secrets),
+# and run:  cd /opt/coop-whatsapp && docker compose up -d
+#
+# For step-by-step instructions see the "Oracle Cloud Always Free" section in
+# DEPLOY.md.
+
+package_update: true
+packages:
+  - git
+  - curl
+
+runcmd:
+  - [bash, -lc, "git clone --depth 1 https://github.com/adebestas/coop-whatsapp.git /opt/coop-whatsapp || true"]
+  - [bash, -lc, "cd /opt/coop-whatsapp && bash deploy/bootstrap.sh"]

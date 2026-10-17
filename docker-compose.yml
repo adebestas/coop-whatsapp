@@ -4,22 +4,45 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    ports:
-      - "3000:3000"
+    # Not published to the host — Caddy terminates TLS and proxies to it.
+    expose:
+      - "3000"
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-coop}:${POSTGRES_PASSWORD:-coop}@postgres:5432/${POSTGRES_DB:-coop_db}
-      - SESSION_SECRET=${SESSION_SECRET}
-      - ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET}
-      - WHATSAPP_TOKEN=${WHATSAPP_TOKEN}
-      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
-      - WHATSAPP_VERIFY_TOKEN=${WHATSAPP_VERIFY_TOKEN}
-      - MONNIFY_API_KEY=${MONNIFY_API_KEY}
-      - MONNIFY_SECRET_KEY=${MONNIFY_SECRET_KEY}
-      - MONNIFY_CONTRACT_CODE=${MONNIFY_CONTRACT_CODE}
-      - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY}
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-coop}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-coop}?schema=public
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379
+      - SESSION_SECRET=${SESSION_SECRET:?set SESSION_SECRET in .env}
+      - ADMIN_JWT_SECRET=${ADMIN_JWT_SECRET:?set ADMIN_JWT_SECRET in .env}
+      # ---- WhatsApp Cloud API ----
+      - WHATSAPP_TOKEN=${WHATSAPP_TOKEN:-}
+      - WHATSAPP_APP_SECRET=${WHATSAPP_APP_SECRET:-}
+      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID:-}
+      - WHATSAPP_VERIFY_TOKEN=${WHATSAPP_VERIFY_TOKEN:-}
+      # ---- Payments ----
+      - PAYMENT_PROVIDER=${PAYMENT_PROVIDER:-monnify}
+      - MONNIFY_BASE_URL=${MONNIFY_BASE_URL:-https://api.monnify.com}
+      - MONNIFY_API_KEY=${MONNIFY_API_KEY:-}
+      - MONNIFY_SECRET_KEY=${MONNIFY_SECRET_KEY:-}
+      - MONNIFY_CONTRACT_CODE=${MONNIFY_CONTRACT_CODE:-}
+      - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY:-}
+      # ---- Optional integrations / tuning ----
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - DEFAULT_COOP_CODE=${DEFAULT_COOP_CODE:-}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-https://${DOMAIN:-localhost}}
+      - DASHBOARD_ORIGIN=${DASHBOARD_ORIGIN:-}
+      - WHATSAPP_PIN_FLOW_ID=${WHATSAPP_PIN_FLOW_ID:-}
+      - WHATSAPP_PIN_FLOW_MODE=${WHATSAPP_PIN_FLOW_MODE:-published}
+      - CUBECOVER_API_KEY=${CUBECOVER_API_KEY:-}
+      - CUBECOVER_BASE_URL=${CUBECOVER_BASE_URL:-https://api.cubecover.ai}
+      - CUBECOVER_WEBHOOK_SECRET=${CUBECOVER_WEBHOOK_SECRET:-}
+      - ALLOWED_TEST_NUMBERS=${ALLOWED_TEST_NUMBERS:-}
+      - DIGEST_HOUR=${DIGEST_HOUR:-20}
+      - TWO_FA_REQUIRED=${TWO_FA_REQUIRED:-1}
+      - NEW_BENEFICIARY_HOLD_HOURS=${NEW_BENEFICIARY_HOLD_HOURS:-24}
+      - REPIN_THRESHOLD_NGN=${REPIN_THRESHOLD_NGN:-50000}
+      - PILOT_FLOAT_CAP=${PILOT_FLOAT_CAP:-}
+      - TRANSFER_POLL_MINUTES=${TRANSFER_POLL_MINUTES:-10}
     depends_on:
       postgres:
         condition: service_healthy
@@ -33,40 +56,52 @@ services:
     image: postgres:16-alpine
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-coop}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-coop}
-      - POSTGRES_DB=${POSTGRES_DB:-coop_db}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=${POSTGRES_DB:-coop}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-coop} -d ${POSTGRES_DB:-coop_db}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-coop} -d ${POSTGRES_DB:-coop}"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
     restart: unless-stopped
     networks:
       - coop-network
 
   redis:
     image: redis:7-alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD:-changeme}
+    command:
+      ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}", "--appendonly", "yes"]
+    environment:
+      # redis-cli reads REDISCLI_AUTH automatically, so the healthcheck stays simple.
+      - REDISCLI_AUTH=${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme}", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
     restart: unless-stopped
     networks:
       - coop-network
 
-  # Admin dashboard (React)
-  web:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
+  # TLS termination + reverse proxy. Caddy fetches a Let's Encrypt certificate
+  # automatically for $DOMAIN (the DNS A record must point at this server).
+  caddy:
+    image: caddy:2-alpine
     ports:
       - "80:80"
+      - "443:443"
+    environment:
+      # Defaults to localhost so the stack can boot before DNS is set up;
+      # set DOMAIN in .env (a hostname whose A record points here) for real TLS.
+      - DOMAIN=${DOMAIN:-localhost}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
     depends_on:
       - app
     restart: unless-stopped
@@ -76,6 +111,8 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  caddy_data:
+  caddy_config:
 
 networks:
   coop-network:
