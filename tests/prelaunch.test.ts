@@ -480,7 +480,10 @@ describe("daily movement digest", () => {
     });
 
     const now = new Date();
-    now.setHours(20, 5, 0, 0); // default digest hour
+    // The digest fires on the configured hour in Africa/Lagos (WAT = UTC+1, no
+    // DST), not the runner's local time. Anchor to that instant so the test is
+    // timezone-independent (CI runs UTC).
+    now.setUTCHours(19, 5, 0, 0); // 20:05 Africa/Lagos
     const sent = await runDailyDigest(now);
     expect(sent).toBe(1);
 
@@ -501,7 +504,7 @@ describe("daily movement digest", () => {
     const coop = await makeCoop();
     await makeMember("2348090000208", coop.id, { role: "superadmin" });
     const now = new Date();
-    now.setHours(20, 0, 0, 0);
+    now.setUTCHours(19, 0, 0, 0); // 20:00 Africa/Lagos
     expect(await runDailyDigest(now)).toBe(1);
     expect(await runDailyDigest(now)).toBe(0);
   });

@@ -74,6 +74,10 @@ jobs:
         env:
           # Tests run on SQLite via prisma/schema.local.prisma (see vitest.config.ts)
           DATABASE_URL: "file:./dev.db"
+          # The app loads these from .env locally; on CI they must be supplied.
+          # Non-placeholder values so the startup weak-secret checks stay quiet.
+          ADMIN_JWT_SECRET: "ci-unit-test-admin-jwt-0123456789abcdef"
+          SESSION_SECRET: "ci-unit-test-session-secret-0123456789abcdef"
 
   # ---------- Security Tests ----------
   security-tests:
