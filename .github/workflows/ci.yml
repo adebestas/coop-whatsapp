@@ -64,6 +64,11 @@ jobs:
       - name: Generate Prisma Client (SQLite, matches `npm test`)
         run: npm run prisma:generate:local
 
+      - name: Create SQLite test schema
+        run: npx prisma db push --schema prisma/schema.local.prisma --skip-generate
+        env:
+          DATABASE_URL: "file:./dev.db"
+
       - name: Run unit tests
         run: npm test
         env:
@@ -89,6 +94,11 @@ jobs:
 
       - name: Generate Prisma Client (SQLite)
         run: npm run prisma:generate:local
+
+      - name: Create SQLite test schema
+        run: npx prisma db push --schema prisma/schema.local.prisma --skip-generate
+        env:
+          DATABASE_URL: "file:./dev.db"
 
       - name: Run security tests only
         run: npx vitest run tests/security.test.ts
