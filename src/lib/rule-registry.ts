@@ -1,0 +1,264 @@
+// src/lib/rule-registry.ts
+export type RuleType = "int" | "float" | "bool" | "money" | "enum" | "percent";
+export type RuleCategory =
+  | "loans"
+  | "savings"
+  | "withdrawals"
+  | "governance"
+  | "compliance"
+  | "literacy"
+  | "referral"
+  | "general";
+
+export interface RuleDef {
+  key: string;
+  label: string;
+  description: string;
+  category: RuleCategory;
+  type: RuleType;
+  unit?: string;
+  default: number | boolean | string;
+  min?: number;
+  max?: number;
+  coopEditable: boolean;
+  statutory?: string;
+}
+
+const R = (r: RuleDef): RuleDef => r;
+
+export const RULE_REGISTRY: Record<string, RuleDef> = Object.fromEntries(
+  [
+    R({
+      key: "loanInterestRate",
+      label: "Loan interest rate",
+      description: "Monthly interest % on loans",
+      category: "loans",
+      type: "percent",
+      unit: "%/mo",
+      default: 10,
+      min: 0,
+      max: 60,
+      coopEditable: true,
+      statutory: "Act s.11(3)",
+    }),
+    R({
+      key: "loanDurationMonths",
+      label: "Max loan duration",
+      description: "Maximum repayment period in months",
+      category: "loans",
+      type: "int",
+      unit: "months",
+      default: 12,
+      min: 1,
+      max: 60,
+      coopEditable: true,
+      statutory: "Act s.11(3)",
+    }),
+    R({
+      key: "minLoanTermMonths",
+      label: "Min loan term",
+      description: "Minimum repayment period in months",
+      category: "loans",
+      type: "int",
+      unit: "months",
+      default: 1,
+      min: 1,
+      max: 60,
+      coopEditable: true,
+    }),
+    R({
+      key: "maxLoanPerMember",
+      label: "Max loan per member",
+      description: "Maximum single loan (kobo); 0 = unlimited",
+      category: "loans",
+      type: "money",
+      unit: "kobo",
+      default: 0,
+      min: 0,
+      coopEditable: true,
+      statutory: "Act s.11(3)",
+    }),
+    R({
+      key: "maxLoanMultiplier",
+      label: "Loan-to-savings multiplier",
+      description: "Max loan as a multiple of savings",
+      category: "loans",
+      type: "int",
+      unit: "x",
+      default: 3,
+      min: 1,
+      max: 10,
+      coopEditable: true,
+    }),
+    R({
+      key: "minMembershipMonths",
+      label: "Min membership before loan",
+      description: "Months a member must belong before borrowing",
+      category: "loans",
+      type: "int",
+      unit: "months",
+      default: 0,
+      min: 0,
+      max: 60,
+      coopEditable: true,
+    }),
+    R({
+      key: "minGuarantors",
+      label: "Minimum guarantors",
+      description: "Guarantors required per loan",
+      category: "loans",
+      type: "int",
+      unit: "people",
+      default: 2,
+      min: 0,
+      max: 10,
+      coopEditable: true,
+    }),
+    R({
+      key: "requireGuarantors",
+      label: "Require guarantors",
+      description: "Require guarantors for loans",
+      category: "loans",
+      type: "bool",
+      default: true,
+      coopEditable: true,
+    }),
+    R({
+      key: "autoApproveLoans",
+      label: "Auto-approve loans",
+      description: "Approve loans without a committee",
+      category: "loans",
+      type: "bool",
+      default: false,
+      coopEditable: true,
+    }),
+    R({
+      key: "serviceChargePercent",
+      label: "Service charge %",
+      description: "Service charge on loans",
+      category: "loans",
+      type: "percent",
+      unit: "%",
+      default: 2,
+      min: 0,
+      max: 25,
+      coopEditable: true,
+    }),
+    R({
+      key: "lateFinePercent",
+      label: "Late fine %",
+      description: "Fine on overdue repayment",
+      category: "loans",
+      type: "percent",
+      unit: "%",
+      default: 5,
+      min: 0,
+      max: 25,
+      coopEditable: true,
+    }),
+    R({
+      key: "minContribution",
+      label: "Min contribution",
+      description: "Minimum contribution (kobo)",
+      category: "savings",
+      type: "money",
+      unit: "kobo",
+      default: 200000,
+      min: 0,
+      coopEditable: true,
+    }),
+    R({
+      key: "minSavings",
+      label: "Min savings",
+      description: "Minimum savings (kobo)",
+      category: "savings",
+      type: "money",
+      unit: "kobo",
+      default: 100000,
+      min: 0,
+      coopEditable: true,
+    }),
+    R({
+      key: "minWithdrawal",
+      label: "Min withdrawal",
+      description: "Minimum withdrawal (kobo)",
+      category: "withdrawals",
+      type: "money",
+      unit: "kobo",
+      default: 500000,
+      min: 0,
+      coopEditable: true,
+    }),
+    R({
+      key: "maxWithdrawal",
+      label: "Max withdrawal",
+      description: "Maximum withdrawal (kobo)",
+      category: "withdrawals",
+      type: "money",
+      unit: "kobo",
+      default: 5000000,
+      min: 0,
+      coopEditable: true,
+    }),
+    R({
+      key: "withdrawalCooldownMonths",
+      label: "Withdrawal cooldown",
+      description: "Months between withdrawals",
+      category: "withdrawals",
+      type: "int",
+      unit: "months",
+      default: 6,
+      min: 0,
+      max: 24,
+      coopEditable: true,
+    }),
+    R({
+      key: "literacyCertificationEnabled",
+      label: "Literacy certification",
+      description: "Enable literacy certification",
+      category: "literacy",
+      type: "bool",
+      default: true,
+      coopEditable: true,
+    }),
+    R({
+      key: "literacyQuizPassMark",
+      label: "Quiz pass mark",
+      description: "Correct answers to pass",
+      category: "literacy",
+      type: "int",
+      default: 4,
+      min: 1,
+      max: 12,
+      coopEditable: true,
+    }),
+    R({
+      key: "literacyQuizQuestionCount",
+      label: "Quiz length",
+      description: "Questions per quiz",
+      category: "literacy",
+      type: "int",
+      default: 6,
+      min: 1,
+      max: 12,
+      coopEditable: true,
+    }),
+    R({
+      key: "certifiedLoanBoost",
+      label: "Certified loan boost",
+      description: "Extra multiplier for certified members",
+      category: "literacy",
+      type: "int",
+      unit: "x",
+      default: 1,
+      min: 0,
+      max: 10,
+      coopEditable: true,
+    }),
+  ].map((r) => [r.key, r]),
+);
+
+export const RULE_KEYS = Object.keys(RULE_REGISTRY);
+export function getRule(key: string): RuleDef | undefined {
+  return RULE_REGISTRY[key];
+}
