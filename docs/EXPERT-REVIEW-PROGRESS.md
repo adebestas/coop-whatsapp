@@ -81,9 +81,21 @@ AI prompt still says ₦ (`ai-query.ts:153`); translation trigger ignores the re
 
 ## Resume
 
-1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `feb43cc`).
+1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `a6af6ee`).
 2. Read this file + `docs/EXPERT-REVIEW-2026-10-15.md` + `~/.config/opencode/memory.md`.
 3. All **Critical (A1–A17)**, the insurance + federation + topup Important items, **SEC-1…9**, **PERF-1…4** and **OPS-1…8** are done — the backlog is complete. Remaining work is non-code (rotate the Neon credential; open a PR once `gh` is authenticated).
+
+## Final regression pass (`a6af6ee`)
+
+The full suite after the backlog surfaced 10 failures: 9 were regressions from this track, 1 was a stale test fixture. All resolved:
+
+- `src/services/regulator-reporting.ts` (`nfiuPack`): the OPS-3 STR/CTR change collapsed the status summary — the NFIU sheet now groups by **filing status** with a separate **"Report type(s)"** column, so a CTR is never read as an STR and the status total is preserved.
+- `tests/federation-cross-currency.test.ts`: proration (`e6a650e`) meant an instant repayment accrued ~0 interest; the test now anchors the loan to the full 3-month term so the intended full-term interest (60,000) is charged.
+- `tests/ai-loan-flow.test.ts`: the seed now grants `aiConsentAt` — natural-language intake is (correctly) gated by AI consent.
+- `tests/prelaunch.test.ts`: the fixture now supplies `WHATSAPP_APP_SECRET`, which is `FATAL` for inbound webhook signature verification.
+- `npx prettier --write` on 22 pre-existing offenders — `npm run format:check` is now clean.
+
+Result: **895 tests, 0 failures (14 skipped)**; `tsc` clean; `eslint` 0 errors.
 
 > **A15 follow-up:** voice + translation are now consent-gated, but the natural-language
 > AI paths (`suggestCommand` in `lib/ai.ts`, `ai-query.ts`, `ai-insights.ts`) still send
