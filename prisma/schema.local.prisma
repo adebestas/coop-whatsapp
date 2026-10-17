@@ -33,6 +33,7 @@ model Cooperative {
   memberSeq          Int                 @default(0) // atomic per-coop member sequence used for file numbers (COOP/YYY/seq)
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
+  tokensValidAfter   DateTime?
   members            Member[]
   contributions      Contribution[]
   loans              Loan[]
@@ -1237,6 +1238,10 @@ model CooperativeConfig {
   literacyQuizPassMark         Int     @default(4)
   literacyQuizQuestionCount    Int     @default(6)
   certifiedLoanBoost           Int     @default(1)
+  loanDurationMonths           Int     @default(12)
+  minLoanTermMonths            Int     @default(1)
+  maxLoanPerMember             Int     @default(0) // kobo; 0 = unlimited
+  minMembershipMonths          Int     @default(0)
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
@@ -2108,5 +2113,48 @@ model FxRate {
   effectiveAt   DateTime @default(now())
   setBy         String
   @@index([federationId, baseCurrency, quoteCurrency, effectiveAt])
+}
+
+// ---- Platform console (cross-coop "developer" identities) ----
+model PlatformAdmin {
+  id               String    @id @default(cuid())
+  name             String
+  phone            String    @unique
+  role             String    @default("developer") // owner | developer | support
+  pin              String?   // hashed, "<salt>:<scrypthex>"
+  totpSecret       String?
+  totpEnabled      Boolean   @default(false)
+  active           Boolean   @default(true)
+  mustChangePin    Boolean   @default(true)
+  tokensValidAfter DateTime?
+  createdById      String?
+  lastLoginAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+model PlatformPolicy {
+  key         String   @id
+  value       String?  // JSON-encoded value
+  min         Float?
+  max         Float?
+  locked      Boolean  @default(false)
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+}
+
+model PlatformAuditLog {
+  id             String   @id @default(cuid())
+  actorId        String?
+  actorPhone     String
+  actorRole      String
+  action         String
+  cooperativeId  String?
+  targetType     String?
+  targetId       String?
+  detail         String?
+  createdAt      DateTime @default(now())
+  @@index([action])
+  @@index([cooperativeId, createdAt])
 }
 
