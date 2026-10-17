@@ -319,7 +319,8 @@ export async function contributeToGroup(
         },
         tx as never,
       );
-      if (!posted.posted) throw new Error(`group contribution journal not posted: ${posted.reason}`);
+      if (!posted.posted)
+        throw new Error(`group contribution journal not posted: ${posted.reason}`);
     });
   } catch (err) {
     if (err instanceof Error && err.message === "INSUFFICIENT_BALANCE") {
@@ -409,7 +410,9 @@ export async function closeGroupCycle(
             postings: [
               { account: potAccount(group.id), direction: "DEBIT", amount: pot },
               {
-                account: wallet ? `member_wallet:${wallet.id}` : payoutAccount(beneficiary.memberId),
+                account: wallet
+                  ? `member_wallet:${wallet.id}`
+                  : payoutAccount(beneficiary.memberId),
                 direction: "CREDIT",
                 amount: pot,
                 memberId: beneficiary.memberId,
@@ -471,7 +474,8 @@ export async function closeGroupCycle(
             },
             tx as never,
           );
-          if (!posted.posted) throw new Error(`vsla share-out journal not posted: ${posted.reason}`);
+          if (!posted.posted)
+            throw new Error(`vsla share-out journal not posted: ${posted.reason}`);
         }
         // VSLA members buy shares fresh each cycle, so redeem them now that the
         // pot has been shared out — otherwise cumulative shares would keep
@@ -528,7 +532,9 @@ export async function closeGroupCycle(
     ok: true,
     message:
       `✅ Closed cycle *${cycle.cycleNumber}* of *${group.name}*.\n\n${summary}` +
-      (hasNext ? `\n\nCycle *${cycle.cycleNumber + 1}* is now open.` : "\n\nThe group has completed all rounds."),
+      (hasNext
+        ? `\n\nCycle *${cycle.cycleNumber + 1}* is now open.`
+        : "\n\nThe group has completed all rounds."),
     cycleNumber: cycle.cycleNumber,
     payoutMemberId,
     shareOutAmount: pot,
@@ -577,7 +583,8 @@ export async function applyGroupLoan(
   ) {
     return {
       ok: false,
-      message: "Use the format *grouploan <group id> <amount> <months>*, e.g. *grouploan abc123 50000 3* (up to 12 months).",
+      message:
+        "Use the format *grouploan <group id> <amount> <months>*, e.g. *grouploan abc123 50000 3* (up to 12 months).",
     };
   }
   if (amount < LIMITS.MIN_LOAN) {
@@ -718,7 +725,9 @@ export async function myGroups(
   });
   return {
     ok: true,
-    message: memberships.length ? `${memberships.length} group(s).` : "You have not joined any group.",
+    message: memberships.length
+      ? `${memberships.length} group(s).`
+      : "You have not joined any group.",
     groups: memberships.map((m) => ({
       id: m.group.id,
       type: m.group.type,

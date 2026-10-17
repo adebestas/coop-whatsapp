@@ -36,7 +36,8 @@ export function verifyOtp(otp: string, stored: string): boolean {
   return timingSafeEqual(candidate, expected);
 }
 
-export function generateGuarantorCode(): string {  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export function generateGuarantorCode(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let s = "";
   for (let i = 0; i < 6; i++) s += chars[randomInt(chars.length)]; // ✅ Cryptographically secure
   return `GT-${s}`;

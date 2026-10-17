@@ -108,9 +108,17 @@ export async function renderCertificatePdf(
     doc.rect(0, 0, doc.page.width, 24).fill("#1a7f37");
     doc.rect(0, doc.page.height - 24, doc.page.width, 24).fill("#1a7f37");
 
-    doc.fillColor("#1a7f37").fontSize(28).font("Helvetica-Bold").text(coop.displayName, { align: "center" });
+    doc
+      .fillColor("#1a7f37")
+      .fontSize(28)
+      .font("Helvetica-Bold")
+      .text(coop.displayName, { align: "center" });
     doc.moveDown(0.5);
-    doc.fillColor("#111").fontSize(40).font("Helvetica-Bold").text("Certificate of Financial Literacy", { align: "center" });
+    doc
+      .fillColor("#111")
+      .fontSize(40)
+      .font("Helvetica-Bold")
+      .text("Certificate of Financial Literacy", { align: "center" });
     doc.moveDown(1.5);
 
     doc.fontSize(16).font("Helvetica").text("This certifies that", { align: "center" });
@@ -120,20 +128,26 @@ export async function renderCertificatePdf(
     doc.fontSize(14).font("Helvetica").text(`Member code: ${member.code}`, { align: "center" });
     doc.moveDown(1.5);
 
-    doc.fontSize(14).font("Helvetica").text(
-      `has successfully completed the cooperative's financial literacy programme, scoring ${cert.score} out of ${cert.totalQuestions}.`,
-      { align: "center", width: 600 },
-    );
+    doc
+      .fontSize(14)
+      .font("Helvetica")
+      .text(
+        `has successfully completed the cooperative's financial literacy programme, scoring ${cert.score} out of ${cert.totalQuestions}.`,
+        { align: "center", width: 600 },
+      );
     doc.moveDown(2);
 
     doc.fontSize(12).font("Helvetica").text(`Issued: ${issued}`, { align: "center" });
     doc.moveDown(0.5);
-    doc.fontSize(12).font("Helvetica").text(`Reference: ${cert.referenceCode}`, { align: "center" });
+    doc
+      .fontSize(12)
+      .font("Helvetica")
+      .text(`Reference: ${cert.referenceCode}`, { align: "center" });
     doc.moveDown(0.5);
-    doc.fontSize(10).font("Helvetica-Oblique").text(
-      "Verify this certificate with your cooperative.",
-      { align: "center" },
-    );
+    doc
+      .fontSize(10)
+      .font("Helvetica-Oblique")
+      .text("Verify this certificate with your cooperative.", { align: "center" });
 
     doc.end();
   });

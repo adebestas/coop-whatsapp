@@ -235,7 +235,10 @@ export async function escalateCase(
       return { ok: false, message: "Which grievance? Reply *escalate <grievance id> [reason]*." };
     }
     if (outcome.error === "not_found") {
-      return { ok: false, message: "We couldn't find that grievance. Reply *grievances* to list yours." };
+      return {
+        ok: false,
+        message: "We couldn't find that grievance. Reply *grievances* to list yours.",
+      };
     }
     return { ok: false, message: "This matter has already been escalated to the ombudsman." };
   }

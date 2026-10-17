@@ -572,6 +572,8 @@ describe("startup environment validation", () => {
       const report = validateEnvironment({
         WHATSAPP_TOKEN: "x",
         WHATSAPP_PHONE_NUMBER_ID: "y",
+        // Required to verify inbound webhook signatures (FATAL if missing).
+        WHATSAPP_APP_SECRET: "z",
         ADMIN_JWT_SECRET: "a-real-secret-key-that-is-not-a-placeholder-1234567890ab",
         // FATAL in production since the PostgreSQL migration.
         DATABASE_URL: "postgresql://user:pass@localhost:5432/coop",

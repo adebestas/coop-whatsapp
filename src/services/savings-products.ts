@@ -158,7 +158,10 @@ export async function createProduct(
     },
   });
   if (existing) {
-    return { ok: false, message: `A ${normalizedType} product named *${productName}* already exists.` };
+    return {
+      ok: false,
+      message: `A ${normalizedType} product named *${productName}* already exists.`,
+    };
   }
 
   const product = await withTx(async (tx) => {
@@ -310,7 +313,9 @@ export async function listProducts(
   }));
   return {
     ok: true,
-    message: products.length ? `${products.length} savings product(s).` : "No savings products yet.",
+    message: products.length
+      ? `${products.length} savings product(s).`
+      : "No savings products yet.",
     products,
   };
 }
@@ -332,7 +337,10 @@ export async function openProduct(
   let targetAmount: number | null = null;
   if (product.type === "goal") {
     if (!Number.isInteger(target) || (target as number) <= 0) {
-      return { ok: false, message: "A goal savings product needs a target amount, e.g. *openproduct <id> 50000*." };
+      return {
+        ok: false,
+        message: "A goal savings product needs a target amount, e.g. *openproduct <id> 50000*.",
+      };
     }
     targetAmount = roundMoney(target as number);
   } else if (Number.isInteger(target) && (target as number) > 0) {
@@ -510,11 +518,7 @@ export async function withdrawFromProduct(
   // Fixed/seasonal deposits are term-locked: they cannot be drained before
   // maturity. Goal, junior and open-ended products stay withdrawable.
   const isTermProduct = account.product.type === "fixed" || account.product.type === "seasonal";
-  if (
-    isTermProduct &&
-    account.maturesAt &&
-    Date.now() < account.maturesAt.getTime()
-  ) {
+  if (isTermProduct && account.maturesAt && Date.now() < account.maturesAt.getTime()) {
     return {
       ok: false,
       message: `This *${account.product.name}* deposit matures on *${account.maturesAt.toDateString()}*. It cannot be withdrawn before then.`,
@@ -546,7 +550,10 @@ export async function withdrawFromProduct(
         data: { accountId: account.id, memberId, amount, kind: "withdrawal" },
       });
       newBalance = account.balance - amount;
-      await tx.wallet.update({ where: { id: wallet.id }, data: { balance: { increment: amount } } });
+      await tx.wallet.update({
+        where: { id: wallet.id },
+        data: { balance: { increment: amount } },
+      });
       const posted = await postJournal(
         {
           cooperativeId: coopId,
@@ -559,7 +566,8 @@ export async function withdrawFromProduct(
         },
         tx as never,
       );
-      if (!posted.posted) throw new Error(`savings withdrawal journal not posted: ${posted.reason}`);
+      if (!posted.posted)
+        throw new Error(`savings withdrawal journal not posted: ${posted.reason}`);
     });
   } catch (err) {
     // A concurrent withdrawal drained the balance between our read and write —
@@ -646,7 +654,12 @@ export async function matureProduct(
       if (claimed.count === 0) throw new Error("ALREADY_MATURED");
       if (principal > 0) {
         await tx.savingsDeposit.create({
-          data: { accountId: account.id, memberId: holderId, amount: principal, kind: "withdrawal" },
+          data: {
+            accountId: account.id,
+            memberId: holderId,
+            amount: principal,
+            kind: "withdrawal",
+          },
         });
       }
       if (interest > 0) {
@@ -739,7 +752,9 @@ export async function listMemberProducts(
   }));
   return {
     ok: true,
-    message: accounts.length ? `${accounts.length} savings account(s).` : "You have no product savings yet.",
+    message: accounts.length
+      ? `${accounts.length} savings account(s).`
+      : "You have no product savings yet.",
     accounts,
   };
 }
@@ -750,7 +765,5 @@ async function loadNotifiable(memberId: string) {
     where: { id: memberId },
     select: { phone: true, optedOut: true, preferredChannel: true, altChannelId: true },
   });
-  return (
-    member ?? { phone: "", optedOut: false, preferredChannel: null, altChannelId: null }
-  );
+  return member ?? { phone: "", optedOut: false, preferredChannel: null, altChannelId: null };
 }

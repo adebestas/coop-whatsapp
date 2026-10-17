@@ -29,10 +29,7 @@ function median(nums: number[]): number {
  * Scan a cooperative's recent money movement for anomalies. Returns an empty
  * array when nothing looks unusual.
  */
-export async function detectAnomalies(
-  cooperativeId: string,
-  now = new Date(),
-): Promise<Anomaly[]> {
+export async function detectAnomalies(cooperativeId: string, now = new Date()): Promise<Anomaly[]> {
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
   const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);

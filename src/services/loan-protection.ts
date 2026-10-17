@@ -76,7 +76,12 @@ export async function writeOffProtection(
       });
 
       const postings = [
-        { account: "assets:loan_portfolio", direction: "CREDIT" as const, amount: outstanding, memberId },
+        {
+          account: "assets:loan_portfolio",
+          direction: "CREDIT" as const,
+          amount: outstanding,
+          memberId,
+        },
         ...(fromFund > 0
           ? [
               {

@@ -292,24 +292,32 @@ export async function nfiuPack(coopId: string, period: string): Promise<ReportSh
     }),
   ]);
 
-  // STR/CTR counts + total amount, grouped by report type then filing status.
-  const byStatus = new Map<string, { count: number; total: number }>();
+  // STR/CTR counts + total amount, grouped by filing status. The report type(s)
+  // present in each status group are shown in their own column so a CTR is
+  // never read as an STR (and vice versa) — they are distinct obligations.
+  const byStatus = new Map<string, { count: number; total: number; types: Set<string> }>();
   for (const str of strs) {
-    const key = `${str.reportType} / ${str.status}`;
-    const entry = byStatus.get(key) ?? { count: 0, total: 0 };
+    const entry = byStatus.get(str.status) ?? { count: 0, total: 0, types: new Set<string>() };
     entry.count += 1;
     entry.total += str.amount;
-    byStatus.set(key, entry);
+    entry.types.add(str.reportType);
+    byStatus.set(str.status, entry);
   }
-  const strRows: string[][] = [["Type / Status", "Count", "Total amount"]];
-  for (const key of [...byStatus.keys()].sort()) {
-    const entry = byStatus.get(key)!;
-    strRows.push([key, String(entry.count), formatBalance(entry.total)]);
+  const strRows: string[][] = [["Status", "Count", "Total amount", "Report type(s)"]];
+  for (const status of [...byStatus.keys()].sort()) {
+    const entry = byStatus.get(status)!;
+    strRows.push([
+      status,
+      String(entry.count),
+      formatBalance(entry.total),
+      [...entry.types].sort().join(", "),
+    ]);
   }
   strRows.push([
     "Total",
     String(strs.length),
     formatBalance(strs.reduce((sum, s) => sum + s.amount, 0)),
+    "",
   ]);
   const strSheet: ReportSheet = { name: "STR-CTR Summary", rows: strRows };
 

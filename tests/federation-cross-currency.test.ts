@@ -49,6 +49,14 @@ describe("federation cross-currency", () => {
     expect(loan.fxRateToBase).toBe(100);
     await approveLoan(loan.id);
 
+    // Interest now prorates over the outstanding period, so anchor the loan to
+    // the full 3-month term to charge the full-term interest below (otherwise an
+    // instant repayment would accrue ~0).
+    await prisma.federationLoan.update({
+      where: { id: loan.id },
+      data: { disbursedAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
+    });
+
     // Full principal repayment → simple interest 2,000,000 × 12% × 3/12 = 60,000.
     await repay(loan.id, 2_000_000, coop.id);
 

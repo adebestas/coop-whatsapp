@@ -241,12 +241,7 @@ export const QUIZ_QUESTIONS: QuizQuestion[] = [
     id: 12,
     lessonId: 6,
     question: "How is the cooperative reserve fund partially funded?",
-    options: [
-      "20% of dividends",
-      "Member fines only",
-      "Government grants",
-      "Bank loans",
-    ],
+    options: ["20% of dividends", "Member fines only", "Government grants", "Bank loans"],
     answerIndex: 0,
   },
 ];

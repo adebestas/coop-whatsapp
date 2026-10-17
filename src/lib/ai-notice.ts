@@ -12,7 +12,10 @@ import { groqAvailable, groqModel, GROQ_TIMEOUT_MS, groqFetch } from "./groq.js"
 
 /** Strip anything that could break out of the prompt or the message. */
 function sanitize(value: string, maxLen = 60): string {
-  return value.replace(/[<>\n\r]/g, " ").trim().slice(0, maxLen);
+  return value
+    .replace(/[<>\n\r]/g, " ")
+    .trim()
+    .slice(0, maxLen);
 }
 
 function fallback(memberName: string, accountName: string): string {

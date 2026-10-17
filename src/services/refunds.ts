@@ -53,7 +53,10 @@ export async function recommendRefund(
   actor: RefundActor,
 ): Promise<RefundResult> {
   if (!Number.isInteger(amount) || amount <= 0) {
-    return { ok: false, message: "Enter a positive refund amount, e.g. *recommendrefund MEM001 5000 double payment*." };
+    return {
+      ok: false,
+      message: "Enter a positive refund amount, e.g. *recommendrefund MEM001 5000 double payment*.",
+    };
   }
   const trimmed = (reason ?? "").trim();
   if (trimmed.length < 3) {

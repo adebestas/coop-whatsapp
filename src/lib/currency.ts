@@ -14,11 +14,41 @@ export interface CurrencyMeta {
 export const DEFAULT_CURRENCY = "NGN";
 
 export const SUPPORTED_CURRENCIES: Record<string, CurrencyMeta> = {
-  NGN: { code: "NGN", symbol: "₦", locale: "en-NG", decimals: 2, providers: ["monnify", "paystack", "flutterwave"] },
-  GHS: { code: "GHS", symbol: "₵", locale: "en-GH", decimals: 2, providers: ["paystack", "flutterwave"] },
-  KES: { code: "KES", symbol: "KSh", locale: "en-KE", decimals: 2, providers: ["paystack", "flutterwave"] },
-  ZAR: { code: "ZAR", symbol: "R", locale: "en-ZA", decimals: 2, providers: ["paystack", "flutterwave"] },
-  USD: { code: "USD", symbol: "$", locale: "en-US", decimals: 2, providers: ["paystack", "flutterwave"] },
+  NGN: {
+    code: "NGN",
+    symbol: "₦",
+    locale: "en-NG",
+    decimals: 2,
+    providers: ["monnify", "paystack", "flutterwave"],
+  },
+  GHS: {
+    code: "GHS",
+    symbol: "₵",
+    locale: "en-GH",
+    decimals: 2,
+    providers: ["paystack", "flutterwave"],
+  },
+  KES: {
+    code: "KES",
+    symbol: "KSh",
+    locale: "en-KE",
+    decimals: 2,
+    providers: ["paystack", "flutterwave"],
+  },
+  ZAR: {
+    code: "ZAR",
+    symbol: "R",
+    locale: "en-ZA",
+    decimals: 2,
+    providers: ["paystack", "flutterwave"],
+  },
+  USD: {
+    code: "USD",
+    symbol: "$",
+    locale: "en-US",
+    decimals: 2,
+    providers: ["paystack", "flutterwave"],
+  },
   UGX: { code: "UGX", symbol: "USh", locale: "en-UG", decimals: 2, providers: ["flutterwave"] },
   TZS: { code: "TZS", symbol: "TSh", locale: "en-TZ", decimals: 2, providers: ["flutterwave"] },
   RWF: { code: "RWF", symbol: "FRw", locale: "en-RW", decimals: 2, providers: ["flutterwave"] },
@@ -50,8 +80,17 @@ export function formatMoney(kobo: number, code: string): string {
 }
 
 export const COUNTRY_CURRENCY: Record<string, string> = {
-  NG: "NGN", GH: "GHS", KE: "KES", ZA: "ZAR", US: "USD",
-  UG: "UGX", TZ: "TZS", RW: "RWF", SN: "XOF", ZM: "ZMW", MW: "MWK",
+  NG: "NGN",
+  GH: "GHS",
+  KE: "KES",
+  ZA: "ZAR",
+  US: "USD",
+  UG: "UGX",
+  TZ: "TZS",
+  RW: "RWF",
+  SN: "XOF",
+  ZM: "ZMW",
+  MW: "MWK",
 };
 
 export function currencyForCountry(country: string): string {
@@ -65,15 +104,24 @@ export function countryForCurrency(currency: string): string {
 }
 
 const CALLING_CODE_COUNTRY: Array<[string, string]> = [
-  ["+234", "NG"], ["+233", "GH"], ["+254", "KE"], ["+27", "ZA"], ["+1", "US"],
-  ["+256", "UG"], ["+255", "TZ"], ["+250", "RW"], ["+221", "SN"], ["+260", "ZM"], ["+265", "MW"],
+  ["+234", "NG"],
+  ["+233", "GH"],
+  ["+254", "KE"],
+  ["+27", "ZA"],
+  ["+1", "US"],
+  ["+256", "UG"],
+  ["+255", "TZ"],
+  ["+250", "RW"],
+  ["+221", "SN"],
+  ["+260", "ZM"],
+  ["+265", "MW"],
 ];
 
 export function countryFromPhone(phone: string): string | null {
   const p = phone?.trim();
   if (!p || !p.startsWith("+")) return null;
-  const match = CALLING_CODE_COUNTRY
-    .filter(([cc]) => p.startsWith(cc))
-    .sort((a, b) => b[0].length - a[0].length)[0];
+  const match = CALLING_CODE_COUNTRY.filter(([cc]) => p.startsWith(cc)).sort(
+    (a, b) => b[0].length - a[0].length,
+  )[0];
   return match?.[1] ?? null;
 }

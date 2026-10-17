@@ -21,7 +21,10 @@ export async function postFederationJournal(
   const postings = opts.postings.map((p) => ({ ...p, amount: roundMoney(p.amount) }));
   if (postings.length < 2) return { posted: false, reason: "unbalanced" };
   const totals = postings.reduce(
-    (a, p) => (p.direction === "DEBIT" ? { ...a, d: roundMoney(a.d + p.amount) } : { ...a, c: roundMoney(a.c + p.amount) }),
+    (a, p) =>
+      p.direction === "DEBIT"
+        ? { ...a, d: roundMoney(a.d + p.amount) }
+        : { ...a, c: roundMoney(a.c + p.amount) },
     { d: 0, c: 0 },
   );
   if (totals.d !== totals.c || totals.d <= 0) return { posted: false, reason: "unbalanced" };

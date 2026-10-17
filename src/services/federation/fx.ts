@@ -13,11 +13,7 @@ export async function setRate(
   });
 }
 
-export async function getRate(
-  federationId: string,
-  from: string,
-  to: string,
-): Promise<number> {
+export async function getRate(federationId: string, from: string, to: string): Promise<number> {
   if (from === to) return 1;
   const direct = await prisma.fxRate.findFirst({
     where: { federationId, baseCurrency: from, quoteCurrency: to },

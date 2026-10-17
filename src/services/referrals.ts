@@ -78,14 +78,22 @@ export async function recordReferral(
         select: { id: true, name: true, code: true },
       });
       if (!referrer) {
-        return { ok: false, created: false, message: `No member found with referral code *${raw}*.` };
+        return {
+          ok: false,
+          created: false,
+          message: `No member found with referral code *${raw}*.`,
+        };
       }
       if (referrer.id === referredMemberId) {
         return { ok: false, created: false, message: "You cannot refer yourself." };
       }
       const existing = await tx.referral.findUnique({ where: { referredMemberId } });
       if (existing) {
-        return { ok: false, created: false, message: "A referral is already recorded for this member." };
+        return {
+          ok: false,
+          created: false,
+          message: "A referral is already recorded for this member.",
+        };
       }
       const referral = await tx.referral.create({
         data: {
@@ -504,10 +512,7 @@ class DefiniteWithdrawalError extends Error {}
  * The member's current withdrawable referral bonus (kobo). RLS-safe read via
  * `withTx` + `setCoopContext`.
  */
-export async function getReferralBonus(
-  coopId: string,
-  memberId: string,
-): Promise<ReferralBonus> {
+export async function getReferralBonus(coopId: string, memberId: string): Promise<ReferralBonus> {
   const member = await withTx(async (tx) => {
     await setCoopContext(tx as never, coopId);
     return tx.member.findFirst({
@@ -645,7 +650,11 @@ export async function withdrawReferralBonus(
       if (!provider) {
         throw new DefiniteWithdrawalError("Airtime withdrawals are not enabled yet.");
       }
-      const result = await provider.recharge({ phone: phone as string, amountKobo: amount, reference });
+      const result = await provider.recharge({
+        phone: phone as string,
+        amountKobo: amount,
+        reference,
+      });
       if (!result.ok) {
         if (result.unsure) {
           await markWithdrawalUnconfirmed(

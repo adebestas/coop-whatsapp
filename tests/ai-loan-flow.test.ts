@@ -44,6 +44,9 @@ async function seed(opts: { suspended?: boolean } = {}) {
       role: "member",
       status: opts.suspended ? "suspended" : "active",
       consentAt: new Date(),
+      // Natural-language loan intake sends the message to the LLM, so the
+      // member must have granted AI-processing consent (NDPR gate).
+      aiConsentAt: new Date(),
       wallet: { create: { balance: 20_000_000, totalSaved: 20_000_000 } },
     },
   });

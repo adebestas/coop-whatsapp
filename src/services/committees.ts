@@ -101,7 +101,10 @@ export async function createCommittee(
     select: { id: true },
   });
   if (existing) {
-    return { ok: false, message: `A *${cleanType}* committee already exists (${existing.id.slice(-6)}).` };
+    return {
+      ok: false,
+      message: `A *${cleanType}* committee already exists (${existing.id.slice(-6)}).`,
+    };
   }
 
   const committee = await prisma.committee.create({
@@ -445,7 +448,10 @@ export async function recordCommitteeVote(
     where: { committeeId: committee.id, active: true },
   });
   if (activeSeats === 0) {
-    return { ok: false, message: `The *${committee.name}* has no seated members, so it can't decide.` };
+    return {
+      ok: false,
+      message: `The *${committee.name}* has no seated members, so it can't decide.`,
+    };
   }
 
   await prisma.committeeVote.create({

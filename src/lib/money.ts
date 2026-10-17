@@ -34,7 +34,10 @@ export function formatBalance(kobo: number, currency?: string): string {
 /**
  * Format amount for provider APIs (Paystack expects kobo, Monnify/Flutterwave expect naira)
  */
-export function forProvider(amount: number, provider: "paystack" | "monnify" | "flutterwave"): number {
+export function forProvider(
+  amount: number,
+  provider: "paystack" | "monnify" | "flutterwave",
+): number {
   switch (provider) {
     case "paystack":
       return amount; // Already in kobo
