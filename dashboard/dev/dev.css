@@ -48,6 +48,12 @@
 .dev-console .nav-item.active { background: rgba(79, 70, 229, 0.35); }
 .dev-console .user-avatar { background: var(--dev-accent); }
 .dev-console .stat-card::before { background: linear-gradient(90deg, var(--dev-accent), #22D3EE); }
+.dev-console .stat-card.stat-indigo::before { background: linear-gradient(90deg, var(--dev-accent), #22D3EE); }
+.dev-console .stat-card.stat-green::before { background: linear-gradient(90deg, var(--green-500), #22D3EE); }
+.dev-console .stat-card.stat-gold::before { background: linear-gradient(90deg, var(--gold), #22D3EE); }
+.dev-console .stat-card.stat-purple::before { background: linear-gradient(90deg, #7C3AED, #22D3EE); }
+.dev-console .stat-card.stat-blue::before { background: linear-gradient(90deg, #2563EB, #22D3EE); }
+.dev-console .stat-card.stat-red::before { background: linear-gradient(90deg, #EF4444, #22D3EE); }
 .stat-icon.indigo { background: #E0E7FF; color: var(--dev-accent); }
 [data-theme="dark"] .stat-icon.indigo { background: rgba(79, 70, 229, 0.18); }
 

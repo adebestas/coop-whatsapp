@@ -25,16 +25,9 @@
   const loginBtn = document.getElementById('loginBtn');
   const changePinBtn = document.getElementById('changePinBtn');
 
-  // Already signed in? The server tells us (the cookie is unreadable here).
-  fetch(`${API_BASE}/me`, { credentials: 'same-origin' })
-    .then((res) => (res.ok ? res.json() : null))
-    .then((data) => {
-      if (data?.admin) {
-        localStorage.setItem(STORAGE_ADMIN, JSON.stringify(data.admin));
-        window.location.href = 'index.html';
-      }
-    })
-    .catch(() => {});
+  // A logged-in operator who opens this page simply sees the form; we do NOT
+  // auto-redirect to index.html (a temporary-PIN session would bounce back here
+  // in a loop and the change-PIN step would be unreachable on re-entry).
 
   toggle2fa.addEventListener('click', function () {
     const showing = !totpGroup.hidden;

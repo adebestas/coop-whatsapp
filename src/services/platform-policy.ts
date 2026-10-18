@@ -1,14 +1,31 @@
 // src/services/platform-policy.ts
 import { prisma } from "../lib/prisma.js";
-import { getRule } from "../lib/rule-registry.js";
+import { getRule, RULE_KEYS } from "../lib/rule-registry.js";
 import { getCoopConfig, type CoopConfig } from "./coop-config.js";
 import { loadPlatformPolicyRows, clearPlatformPolicyCache } from "./platform-policy-store.js";
 
 export { clearPlatformPolicyCache };
 
+/**
+ * The platform policy catalogue: EVERY registry rule, each merged with its
+ * override row when one exists and its registry defaults otherwise. Spec §8
+ * requires /policies to list platform rules (value/min/max/locked), not only
+ * the keys an operator has already overridden.
+ */
 export async function listPlatformPolicies() {
-  const eff = await loadPlatformPolicyRows();
-  return Object.keys(eff).map((k) => ({ key: k, ...(eff[k] as object), rule: getRule(k) }));
+  const overrides = await loadPlatformPolicyRows();
+  return RULE_KEYS.map((key) => {
+    const rule = getRule(key);
+    const row = overrides[key];
+    return {
+      key,
+      value: row?.value,
+      min: row?.min ?? rule?.min ?? null,
+      max: row?.max ?? rule?.max ?? null,
+      locked: row?.locked ?? false,
+      rule,
+    };
+  });
 }
 
 export function clamp(n: number, min?: number | null, max?: number | null): number {

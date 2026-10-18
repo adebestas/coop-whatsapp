@@ -17,6 +17,7 @@
   let me = null;
   let readOnly = false; // support role: GETs only
   let isOwner = false;
+  let needsPinChange = false; // temporary PIN: show the change-PIN view and stop navigating
   let currentPage = 'overview';
   let currentArg = null;
   let currentCoopTab = 'health';
@@ -123,7 +124,8 @@
       }
       const data = await res.json().catch(() => ({}));
       if (res.status === 403 && data.error === 'pin_change_required') {
-        window.location.href = 'dev-login.html';
+        needsPinChange = true;
+        showChangePinView();
         throw new Error('PIN change required');
       }
       if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
@@ -183,6 +185,7 @@
 
   // ---- Navigation ----
   window.navigateTo = function (page, arg) {
+    if (needsPinChange) return; // the change-PIN view owns #pageContent
     if (typeof arg !== 'string') arg = null;
     currentPage = page;
     currentArg = arg || null;
@@ -198,6 +201,7 @@
   };
 
   window.refreshPage = function () {
+    if (needsPinChange) return; // the change-PIN view owns #pageContent
     if (currentPage === 'coop') renderCoopDetail(currentArg);
     else renderPage(currentPage, currentArg);
   };
@@ -210,6 +214,7 @@
   };
 
   function renderPage(page, arg) {
+    if (needsPinChange) return; // the change-PIN view owns #pageContent
     const titles = {
       overview: 'Overview',
       coops: 'Cooperatives',
@@ -248,11 +253,51 @@
     el.innerHTML = `<div class="empty-state"><h3>Access denied</h3><p>You do not have permission to view this page.</p></div>`;
   }
 
+  // Temporary-PIN accounts are blocked from every non-auth endpoint, so instead
+  // of bouncing to dev-login.html we render the change-PIN form in place.
+  function showChangePinView() {
+    const content = document.getElementById('pageContent');
+    if (!content || content.dataset.pinChange === 'true') return;
+    content.dataset.pinChange = 'true';
+    setText('pageTitle', 'Change PIN');
+    content.innerHTML = `
+      <div class="card" style="max-width:480px;">
+        <div class="card-header"><span class="card-title">Set a new PIN</span></div>
+        <div class="card-body">
+          <p class="text-muted">Your account is still on a temporary PIN. Set a new 6-digit PIN to continue.</p>
+          <div class="form-field mt-4">
+            <label>New 6-digit PIN</label>
+            <input id="newPin" class="policy-input" inputmode="numeric" maxlength="6" autocomplete="off">
+          </div>
+          <div id="changePinResult" class="mt-4"></div>
+          <div class="flex gap-2 mt-4">
+            <button class="btn btn-primary" data-action="changePinSubmit">Set PIN &amp; Continue</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  window.changePinSubmit = async function () {
+    const input = document.getElementById('newPin');
+    const result = document.getElementById('changePinResult');
+    const newPin = (input?.value || '').trim();
+    if (!/^\d{6}$/.test(newPin)) {
+      if (result) result.innerHTML = '<span class="text-red">New PIN must be exactly 6 digits.</span>';
+      return;
+    }
+    try {
+      await api('/change-pin', { method: 'POST', body: { newPin } });
+      window.location.reload();
+    } catch (err) {
+      if (result) result.innerHTML = `<span class="text-red">${esc(err.message)}</span>`;
+    }
+  };
+
   // ============================================================
   //  Overview
   // ============================================================
   async function renderOverview(el) {
-    el.innerHTML = `<div class="stats-grid">${skeletonCards(8)}</div>
+    el.innerHTML = `<div class="stats-grid">${skeletonCards(12)}</div>
       <div class="card"><div class="card-header"><span class="card-title">Alerts</span></div>
       <div class="card-body flush"><div class="empty-state"><p class="text-muted">Loading…</p></div></div></div>`;
 
@@ -324,6 +369,19 @@
     try {
       const data = await api('/coops');
       coopsData = data.coops || [];
+      const alerts = data.alerts || [];
+      if (alerts.length) {
+        el.insertAdjacentHTML(
+          'afterbegin',
+          `<div class="card mb-6">
+            <div class="card-header">
+              <span class="card-title">Alerts</span>
+              <span class="badge badge-red">${alerts.length}</span>
+            </div>
+            <div class="card-body flush">${renderAlertList(alerts)}</div>
+          </div>`,
+        );
+      }
       renderCoopsTable(coopsData);
       const search = document.getElementById('coopSearch');
       search?.addEventListener('input', function () {
@@ -422,7 +480,7 @@
             <span class="card-title">${esc(coop.name || '—')}</span>
             <span class="dev-code">${esc(coop.code || '')}</span>
             ${coopStatusBadge(coop.status)}
-            <span class="badge badge-gray">${esc(coop.plan || 'free')}</span>
+            <span class="badge badge-gray">${esc((coopDetail.stats || {}).plan || '—')}</span>
           </div>
           <span class="text-muted text-xs font-mono">${esc(coop.id || '')}</span>
         </div>
@@ -488,7 +546,7 @@
           <table>
             <tbody>
               <tr><td class="text-muted">Status</td><td>${coopStatusBadge(coop.status)}</td></tr>
-              <tr><td class="text-muted">Plan</td><td>${esc(coop.plan || 'free')}</td></tr>
+              <tr><td class="text-muted">Plan</td><td>${esc((coopDetail.stats || {}).plan || '—')}</td></tr>
               <tr><td class="text-muted">State</td><td>${esc(coop.state || '—')}</td></tr>
               <tr><td class="text-muted">Created</td><td>${date(coop.createdAt)}</td></tr>
               <tr><td class="text-muted">Last activity</td><td>${date(s.lastActivityAt)}</td></tr>
@@ -547,7 +605,9 @@
   function renderRulesPanel() {
     const config = coopDetail.config || {};
     const meta = coopDetail.meta || {};
-    const keys = Object.keys(meta).length ? Object.keys(meta) : Object.keys(config);
+    // Always list every effective key from the resolved config; `meta` only holds
+    // platform-override keys, so it cannot drive the list once an override exists.
+    const keys = Object.keys(config);
     if (!keys.length) {
       return '<div class="card"><div class="empty-state"><h3>No rules</h3><p>No effective configuration is available for this cooperative.</p></div></div>';
     }
@@ -586,7 +646,7 @@
     const dis = readOnly ? 'disabled' : '';
     const table = admins.length
       ? `<div class="table-wrapper"><table>
-          <thead><tr><th>Name</th><th>Phone</th><th>Role</th><th>Status</th><th>Added</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Phone</th><th>Role</th><th>Status</th><th>Added</th><th>Contact</th></tr></thead>
           <tbody>
             ${admins
               .map(
@@ -792,16 +852,16 @@
       });
       if (!policiesData.length) {
         el.innerHTML = `<div class="card"><div class="empty-state">
-          <h3>No platform policy overrides</h3>
-          <p>No platform-level overrides exist yet; cooperatives use the registry defaults. Set an override via <span class="font-mono">PUT /api/developer/policies/:key</span>.</p>
+          <h3>No platform rules</h3>
+          <p>The rule registry is empty.</p>
         </div></div>`;
         return;
       }
       el.innerHTML = `
         <div class="card">
           <div class="card-header">
-            <span class="card-title">Platform policy overrides</span>
-            <span class="text-muted text-sm">${readOnly ? 'Support role is read-only.' : 'Values are platform-level; locked keys cannot be overridden by a coop.'}</span>
+            <span class="card-title">Platform rules</span>
+            <span class="text-muted text-sm">${readOnly ? 'Support role is read-only.' : 'Values are platform-level; locked keys cannot be overridden by a coop. Blank value uses the registry default.'}</span>
           </div>
           <div class="card-body flush">
             <div class="table-wrapper">
@@ -825,24 +885,30 @@
     let valueControl;
     if (rule.type === 'bool') {
       const v = p.value === undefined ? rule.default : p.value;
-      valueControl = `<select id="pol-val-${esc(p.key)}" class="toolbar-select" ${dis}>
+      valueControl = `<select id="pol-val-${p.key}" class="toolbar-select" ${dis}>
         <option value="true" ${v === true ? 'selected' : ''}>true</option>
         <option value="false" ${v === false ? 'selected' : ''}>false</option>
       </select>`;
     } else {
-      const v = p.value === undefined || p.value === null ? '' : p.value;
-      valueControl = `<input id="pol-val-${esc(p.key)}" class="policy-input" value="${esc(v)}" ${dis}>`;
+      const v =
+        p.value === undefined || p.value === null
+          ? rule.default === undefined || rule.default === null
+            ? ''
+            : rule.default
+          : p.value;
+      valueControl = `<input id="pol-val-${p.key}" class="policy-input" value="${esc(v)}" ${dis}>`;
     }
     const unit = rule.unit ? ` <span class="text-muted text-xs">${esc(rule.unit)}</span>` : '';
     return `<tr>
       <td class="font-bold">${esc(rule.label || p.key)}
         <div class="text-muted text-xs font-mono">${esc(p.key)}</div>
         <div class="text-muted text-xs">${esc(rule.category || '')}${rule.type ? ' · ' + esc(rule.type) : ''}</div>
+        <div class="text-muted text-xs">default: ${esc(rule.default === undefined ? '—' : rule.default)}</div>
       </td>
       <td>${valueControl}${unit}</td>
-      <td><input id="pol-min-${esc(p.key)}" class="policy-input" value="${p.min === null || p.min === undefined ? '' : esc(p.min)}" ${dis}></td>
-      <td><input id="pol-max-${esc(p.key)}" class="policy-input" value="${p.max === null || p.max === undefined ? '' : esc(p.max)}" ${dis}></td>
-      <td><label class="policy-switch"><input type="checkbox" id="pol-lock-${esc(p.key)}" ${p.locked ? 'checked' : ''} ${dis}> locked</label></td>
+      <td><input id="pol-min-${p.key}" class="policy-input" value="${p.min === null || p.min === undefined ? '' : esc(p.min)}" ${dis}></td>
+      <td><input id="pol-max-${p.key}" class="policy-input" value="${p.max === null || p.max === undefined ? '' : esc(p.max)}" ${dis}></td>
+      <td><label class="policy-switch"><input type="checkbox" id="pol-lock-${p.key}" ${p.locked ? 'checked' : ''} ${dis}> locked</label></td>
       <td><button class="btn btn-primary btn-xs" data-action="savePolicy" data-arg="${esc(p.key)}" ${dis}>Save</button></td>
     </tr>`;
   }
@@ -1011,7 +1077,7 @@
   //  Helpers
   // ============================================================
   function statCard(tone, label, value) {
-    return `<div class="stat-card">
+    return `<div class="stat-card stat-${esc(tone || 'indigo')}">
       <div class="stat-label">${esc(label)}</div>
       <div class="stat-value">${value}</div>
     </div>`;
