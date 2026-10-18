@@ -12,6 +12,25 @@ import {
   isPlatformTokenRevoked,
   requireLivePlatformAdmin,
 } from "../lib/platform-auth.js";
+import {
+  listCoops,
+  createCoop,
+  getCoopDetail,
+  setCoopStatus,
+  revokeCoopSessions,
+  addCoopAdminAndNotify,
+  setCoopAdminRole,
+  coopExists,
+  type PlatformActor,
+  type CreateCoopInput,
+} from "../services/platform-coops.js";
+import {
+  listPlatformAdmins,
+  createPlatformAdmin,
+  setPlatformAdmin,
+} from "../services/platform-admin.js";
+import { listPlatformPolicies, setPlatformPolicy } from "../services/platform-policy.js";
+import { writePlatformAudit } from "../services/platform-audit.js";
 
 const MAX_IP_ATTEMPTS = 5;
 const IP_WINDOW_SECONDS = 60;
@@ -49,6 +68,21 @@ function readPlatformToken(req: FastifyRequest): string | null {
 
 function platformOtpauthUri(secret: string, phone: string): string {
   return otpauthUri(secret, phone, "CoopPlatform");
+}
+
+/** Actor for the platform audit trail, taken from the authenticated preHandler. */
+function actorOf(req: FastifyRequest): PlatformActor {
+  const admin = req.platformAdmin!;
+  return { id: admin.id, phone: admin.phone, role: admin.role };
+}
+
+/** Platform-admin management is owner-only (spec §8). */
+function requireOwner(req: FastifyRequest, reply: FastifyReply): boolean {
+  if (req.platformAdmin?.role !== "owner") {
+    reply.code(403).send({ error: "owner role required" });
+    return false;
+  }
+  return true;
 }
 
 export async function developerApiRoutes(app: FastifyInstance) {
@@ -225,6 +259,174 @@ export async function developerApiRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: "unauthorized" });
     }
     return { admin: { id: admin.id, name: admin.name, phone: admin.phone, role: admin.role } };
+  });
+
+  // ---- Cooperative provisioning & control (developer/owner) ----
+
+  app.get("/api/developer/coops", async () => ({ coops: await listCoops() }));
+
+  app.post("/api/developer/coops", async (req, reply) => {
+    const body = (req.body ?? {}) as CreateCoopInput;
+    if (!body.name || !body.code) {
+      return reply.code(400).send({ error: "name and code required" });
+    }
+    const adminPhone = body.superAdmin?.phone ?? body.adminPhone;
+    if (!adminPhone) {
+      return reply.code(400).send({ error: "superAdmin.phone required" });
+    }
+    try {
+      const result = await createCoop(body, actorOf(req));
+      return reply.code(200).send(result);
+    } catch (err) {
+      if ((err as { code?: string }).code === "P2002") {
+        return reply.code(409).send({ error: "cooperative code already exists" });
+      }
+      req.log.error(err);
+      return reply.code(500).send({ error: "failed to create cooperative" });
+    }
+  });
+
+  app.get("/api/developer/coops/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const detail = await getCoopDetail(id);
+    if (!detail) return reply.code(404).send({ error: "not found" });
+    return detail;
+  });
+
+  app.post("/api/developer/coops/:id/admins", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { phone?: string; name?: string; role?: string };
+    const phone = body.phone?.replace(/\s/g, "");
+    if (!phone) return reply.code(400).send({ error: "phone required" });
+    const role = body.role === "superadmin" ? "superadmin" : "admin";
+    if (!(await coopExists(id))) {
+      return reply.code(404).send({ error: "cooperative not found" });
+    }
+    const result = await addCoopAdminAndNotify(id, { phone, name: body.name, role }, actorOf(req));
+    return reply.code(200).send(result);
+  });
+
+  app.patch("/api/developer/coops/:id/admins/:memberId", async (req, reply) => {
+    const { id, memberId } = req.params as { id: string; memberId: string };
+    const body = (req.body ?? {}) as { role?: string };
+    if (body.role !== "admin" && body.role !== "superadmin") {
+      return reply.code(400).send({ error: "role must be admin or superadmin" });
+    }
+    try {
+      await setCoopAdminRole(id, memberId, body.role, actorOf(req));
+    } catch (err) {
+      if ((err as { code?: string }).code === "P2025") {
+        return reply.code(404).send({ error: "member not found" });
+      }
+      throw err;
+    }
+    return { ok: true };
+  });
+
+  app.post("/api/developer/coops/:id/suspend", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) {
+      return reply.code(404).send({ error: "cooperative not found" });
+    }
+    await setCoopStatus(id, "suspended", actorOf(req));
+    return { ok: true, status: "suspended" };
+  });
+
+  app.post("/api/developer/coops/:id/reactivate", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) {
+      return reply.code(404).send({ error: "cooperative not found" });
+    }
+    await setCoopStatus(id, "active", actorOf(req));
+    return { ok: true, status: "active" };
+  });
+
+  app.post("/api/developer/coops/:id/revoke-sessions", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) {
+      return reply.code(404).send({ error: "cooperative not found" });
+    }
+    await revokeCoopSessions(id, actorOf(req));
+    return { ok: true };
+  });
+
+  // ---- Platform policies (developer/owner) ----
+
+  app.get("/api/developer/policies", async () => ({ policies: await listPlatformPolicies() }));
+
+  app.get("/api/developer/policies/:key", async (req, reply) => {
+    const { key } = req.params as { key: string };
+    const found = (await listPlatformPolicies()).find((p) => p.key === key);
+    if (!found) return reply.code(404).send({ error: "unknown policy" });
+    return found;
+  });
+
+  app.put("/api/developer/policies/:key", async (req, reply) => {
+    const { key } = req.params as { key: string };
+    const body = (req.body ?? {}) as {
+      value?: number | boolean | string;
+      min?: number;
+      max?: number;
+      locked?: boolean;
+    };
+    try {
+      await setPlatformPolicy(key, body);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+    const actor = actorOf(req);
+    await writePlatformAudit({
+      actorId: actor.id,
+      actorPhone: actor.phone,
+      actorRole: actor.role,
+      action: "policy.set",
+      targetType: "platform_policy",
+      targetId: key,
+      detail: JSON.stringify(body),
+    });
+    return { ok: true };
+  });
+
+  // ---- Platform admins (owner-only, spec §8) ----
+
+  app.get("/api/developer/admins", async (req, reply) => {
+    if (!requireOwner(req, reply)) return;
+    return { admins: await listPlatformAdmins() };
+  });
+
+  app.post("/api/developer/admins", async (req, reply) => {
+    if (!requireOwner(req, reply)) return;
+    const body = (req.body ?? {}) as { name?: string; phone?: string; role?: string };
+    const phone = body.phone?.replace(/\s/g, "");
+    if (!body.name || !phone) {
+      return reply.code(400).send({ error: "name and phone required" });
+    }
+    try {
+      const admin = await createPlatformAdmin(
+        { name: body.name, phone, role: body.role },
+        actorOf(req),
+      );
+      return reply.code(200).send(admin);
+    } catch (err) {
+      if ((err as { code?: string }).code === "P2002") {
+        return reply.code(409).send({ error: "phone already registered" });
+      }
+      req.log.error(err);
+      return reply.code(500).send({ error: "failed to create admin" });
+    }
+  });
+
+  app.patch("/api/developer/admins/:id", async (req, reply) => {
+    if (!requireOwner(req, reply)) return;
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { role?: string; active?: boolean };
+    try {
+      return await setPlatformAdmin(id, { role: body.role, active: body.active }, actorOf(req));
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === "P2025") return reply.code(404).send({ error: "admin not found" });
+      return reply.code(400).send({ error: (err as Error).message });
+    }
   });
 
   app.all("/api/developer/*", async (_req, reply) => {
