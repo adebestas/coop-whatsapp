@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { webhookRoutes } from "./routes/webhook.js";
 import { paymentWebhookRoutes } from "./routes/payments.js";
 import { adminApiRoutes } from "./routes/admin.js";
+import { developerApiRoutes } from "./routes/developer.js";
 import { serveExportFile } from "./routes/exports.js";
 import { certificateRoutes } from "./routes/certificate.js";
 import { prisma } from "./lib/prisma.js";
@@ -20,6 +21,7 @@ declare module "fastify" {
     adminPhone?: string;
     adminCoopId?: string;
     adminRole?: string;
+    platformAdmin?: { id: string; phone: string; role: string };
   }
 }
 
@@ -163,6 +165,7 @@ export function buildApp() {
   void app.register(webhookRoutes);
   void app.register(paymentWebhookRoutes);
   void app.register(adminApiRoutes);
+  void app.register(developerApiRoutes);
   void app.register(serveExportFile);
   void app.register(certificateRoutes);
 
