@@ -2472,6 +2472,7 @@ export async function handleAwaitingInput(
         code: coopCodeVal,
         state: coopStateVal,
         adminPhone,
+        sessionPhone: phone,
       });
 
       await prisma.session.upsert({

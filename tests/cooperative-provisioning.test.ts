@@ -34,4 +34,17 @@ describe("provisioning", () => {
     const m = await prisma.member.findUnique({ where: { id: added.memberId } });
     expect(m?.role).toBe("admin");
   });
+  it("keys the super-admin to the session phone but the coop to the typed phone", async () => {
+    const out = await provisionCooperative({
+      name: "Tg Coop",
+      code: `TG${Date.now()}`,
+      adminPhone: "2348044444444",
+      sessionPhone: "tg:123",
+    });
+    const coop = await prisma.cooperative.findUnique({ where: { id: out.cooperativeId } });
+    expect(coop?.adminPhone).toBe("2348044444444");
+    const admin = await prisma.member.findUnique({ where: { id: out.adminMemberId } });
+    expect(admin?.phone).toBe("tg:123");
+    expect(admin?.contactPhone).toBe("2348044444444");
+  });
 });

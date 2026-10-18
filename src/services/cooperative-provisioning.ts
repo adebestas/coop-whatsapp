@@ -12,6 +12,12 @@ export interface ProvisionCooperativeInput {
   country?: string;
   adminPhone: string;
   adminName?: string;
+  /**
+   * The channel the creator is on (the inbound session phone, e.g. `tg:<chatId>`).
+   * Used for the super-admin `Member.phone` and the welcome recipient. Defaults to
+   * `adminPhone` when the creator and the admin share one number.
+   */
+  sessionPhone?: string;
 }
 
 export interface ProvisionCooperativeResult {
@@ -57,6 +63,8 @@ export async function provisionCooperative(
     country: input.country,
   });
 
+  const sessionPhone = input.sessionPhone ?? input.adminPhone;
+
   const { adminMemberId, memberCode, tempPin } = await withCoopContext(coop.id, async () => {
     await prisma.cooperativeConfig.create({ data: { cooperativeId: coop.id } });
     await prisma.brandingConfig.create({
@@ -72,7 +80,7 @@ export async function provisionCooperative(
     // should change their PIN immediately after onboarding (setpin command).
     const member = await prisma.member.create({
       data: {
-        phone: input.adminPhone,
+        phone: sessionPhone,
         contactPhone: input.adminPhone,
         name: input.adminName ?? `${input.name} Admin`,
         code,
@@ -88,7 +96,7 @@ export async function provisionCooperative(
   });
 
   await sendText({
-    to: input.adminPhone,
+    to: sessionPhone,
     text:
       `🏦 *${input.name}* is live!\n\n` +
       `Your cooperative code: *${coop.code}*\n` +
