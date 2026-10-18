@@ -39,3 +39,28 @@ describe("platform policy resolution", () => {
     await expect(setPlatformPolicy("bogus", { value: 1 })).rejects.toThrow();
   });
 });
+
+describe("platform policy provenance", () => {
+  it("reports platform source when the coop has no stored value", async () => {
+    await setPlatformPolicy("loanInterestRate", { value: 7, locked: false });
+    const { config, meta } = await getEffectiveConfig(coopId);
+    expect(meta.loanInterestRate.source).toBe("platform");
+    expect(config.loanInterestRate).toBe(7);
+  });
+
+  it("reports coop source once the coop stores its own value", async () => {
+    await setPlatformPolicy("loanInterestRate", { value: 7, locked: false });
+    await updateCoopConfig(coopId, { loanInterestRate: 9 });
+    const { config, meta } = await getEffectiveConfig(coopId);
+    expect(meta.loanInterestRate.source).toBe("coop");
+    expect(config.loanInterestRate).toBe(9);
+  });
+
+  it("reports platform source for a locked rule even when the coop stored a value", async () => {
+    await setPlatformPolicy("loanInterestRate", { value: 7, locked: true });
+    await updateCoopConfig(coopId, { loanInterestRate: 9 });
+    const { config, meta } = await getEffectiveConfig(coopId);
+    expect(meta.loanInterestRate.source).toBe("platform");
+    expect(config.loanInterestRate).toBe(7);
+  });
+});

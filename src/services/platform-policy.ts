@@ -52,11 +52,16 @@ export async function getEffectiveConfig(coopId: string): Promise<{
   meta: Record<string, { source: "platform" | "coop"; locked: boolean }>;
 }> {
   const config = await getCoopConfig(coopId);
+  // Provenance comes from the coop's RAW stored row, not the resolved config:
+  // getCoopConfig fills every policy key, so a defined resolved value cannot
+  // signal whether the coop actually stored it.
+  const row = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coopId } });
+  const raw = row as unknown as Record<string, unknown> | null;
   const policies = await loadPlatformPolicyRows();
   const meta: Record<string, { source: "platform" | "coop"; locked: boolean }> = {};
   for (const [key, pol] of Object.entries(policies)) {
     if (!getRule(key)) continue;
-    const hasCoopValue = (config as unknown as Record<string, unknown>)[key] !== undefined;
+    const hasCoopValue = raw !== null && raw[key] !== undefined && raw[key] !== null;
     meta[key] = { source: !pol.locked && hasCoopValue ? "coop" : "platform", locked: pol.locked };
   }
   return { config, meta };
