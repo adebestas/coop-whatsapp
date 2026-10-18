@@ -13,7 +13,6 @@ import {
   requireLivePlatformAdmin,
 } from "../lib/platform-auth.js";
 import {
-  listCoops,
   createCoop,
   getCoopDetail,
   setCoopStatus,
@@ -24,6 +23,7 @@ import {
   type PlatformActor,
   type CreateCoopInput,
 } from "../services/platform-coops.js";
+import { coopStats, platformOverview, coopActivity } from "../services/platform-monitoring.js";
 import {
   listPlatformAdmins,
   createPlatformAdmin,
@@ -263,7 +263,12 @@ export async function developerApiRoutes(app: FastifyInstance) {
 
   // ---- Cooperative provisioning & control (developer/owner) ----
 
-  app.get("/api/developer/coops", async () => ({ coops: await listCoops() }));
+  app.get("/api/developer/overview", async () => platformOverview());
+
+  app.get("/api/developer/coops", async () => {
+    const { coops, alerts } = await platformOverview();
+    return { coops, alerts };
+  });
 
   app.post("/api/developer/coops", async (req, reply) => {
     const body = (req.body ?? {}) as CreateCoopInput;
@@ -290,7 +295,16 @@ export async function developerApiRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const detail = await getCoopDetail(id);
     if (!detail) return reply.code(404).send({ error: "not found" });
-    return detail;
+    return { ...detail, stats: await coopStats(id) };
+  });
+
+  app.get("/api/developer/coops/:id/activity", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { take } = req.query as { take?: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "not found" });
+    const parsed = Number.parseInt(take ?? "", 10);
+    const limit = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 100) : 15;
+    return { entries: await coopActivity(id, limit) };
   });
 
   app.post("/api/developer/coops/:id/admins", async (req, reply) => {
