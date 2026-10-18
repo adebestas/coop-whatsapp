@@ -3,6 +3,7 @@ import { prisma } from "./setup.js";
 import { buildApp } from "../src/app.js";
 import { hashPin } from "../src/lib/security.js";
 import { resetRateLimit } from "../src/lib/cache.js";
+import { ensurePlatformOwner } from "../src/services/platform-bootstrap.js";
 
 process.env.ADMIN_JWT_SECRET ||= "test-platform-secret-0123456789";
 const app = buildApp();
@@ -200,5 +201,21 @@ describe("platform auth", () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(res.statusCode).toBe(401);
+  });
+  it("seeds the first owner from PLATFORM_OWNER_PHONE once", async () => {
+    await prisma.platformAdmin.deleteMany();
+    process.env.PLATFORM_OWNER_PHONE = "2348099999999";
+    process.env.PLATFORM_OWNER_NAME = "Boss";
+    try {
+      await ensurePlatformOwner();
+      await ensurePlatformOwner();
+      const owners = await prisma.platformAdmin.findMany({ where: { role: "owner" } });
+      expect(owners.length).toBe(1);
+      expect(owners[0].phone).toBe("2348099999999");
+      expect(owners[0].mustChangePin).toBe(true);
+    } finally {
+      delete process.env.PLATFORM_OWNER_PHONE;
+      delete process.env.PLATFORM_OWNER_NAME;
+    }
   });
 });

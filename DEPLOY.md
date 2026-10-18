@@ -177,6 +177,36 @@ git push origin feature:xyz
 
 ---
 
+## Platform Console (Developer Dashboard)
+
+The platform console is the cross-cooperative control plane for platform staff.
+
+1. **Bootstrap the first owner.** Set `PLATFORM_OWNER_PHONE` (E.164, no `+`) —
+   and optionally `PLATFORM_OWNER_NAME` — in the service environment
+   (`deploy/.env` or the Render dashboard), then (re)start the app. On boot it
+   seeds exactly **one** owner with a random 6-digit temp PIN and logs it
+   **once**:
+
+   ```
+   [platform-bootstrap] Platform owner created for <phone>. Temp PIN: 123456 — change on first login …
+   ```
+
+   Capture that PIN from the boot logs immediately. It is never stored in
+   plaintext and never logged again. Leave the var unset to skip bootstrapping
+   (e.g. once the owner already exists).
+
+2. **First login.** Open `https://<DOMAIN>/dashboard/dev/` and sign in with the
+   owner phone + the temp PIN. Because `mustChangePin` is set, you are confined
+   to the change-pin flow — set a permanent PIN.
+
+3. **Enable 2FA.** Immediately after changing the PIN, enroll TOTP 2FA on the
+   owner account before doing anything else.
+
+A DB failure during bootstrap is logged but does not block startup; retry by
+restarting once the database is reachable.
+
+---
+
 ## Local Development
 
 Local development needs a PostgreSQL database. Options:
