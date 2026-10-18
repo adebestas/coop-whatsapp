@@ -68,10 +68,15 @@ export async function isPlatformTokenRevoked(token: string): Promise<boolean> {
 
 export async function requireLivePlatformAdmin(
   payload: PlatformTokenPayload,
-): Promise<{ id: string; phone: string; role: string } | null> {
+): Promise<{ id: string; phone: string; role: string; mustChangePin: boolean } | null> {
   const { prisma } = await import("./prisma.js");
   const admin = await prisma.platformAdmin.findUnique({ where: { id: payload.adminId } });
   if (!admin || !admin.active) return null;
   if (admin.tokensValidAfter && payload.iat < admin.tokensValidAfter.getTime()) return null;
-  return { id: admin.id, phone: admin.phone, role: admin.role };
+  return {
+    id: admin.id,
+    phone: admin.phone,
+    role: admin.role,
+    mustChangePin: admin.mustChangePin,
+  };
 }

@@ -92,6 +92,15 @@ export async function developerApiRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: "unauthorized" });
     }
 
+    if (live.mustChangePin) {
+      const isChangePin = method === "POST" && req.url === "/api/developer/change-pin";
+      const isLogout = method === "POST" && req.url === "/api/developer/logout";
+      const isMe = method === "GET" && req.url === "/api/developer/me";
+      if (!isChangePin && !isLogout && !isMe) {
+        return reply.code(403).send({ error: "pin_change_required" });
+      }
+    }
+
     if (live.role === "support" && method !== "GET" && method !== "HEAD") {
       return reply.code(403).send({ error: "support role is read-only" });
     }
@@ -139,7 +148,6 @@ export async function developerApiRoutes(app: FastifyInstance) {
       }
     }
 
-    await resetRateLimit(`devlogin:${ip}`);
     await resetRateLimit(`devacct:${phone}`);
     await prisma.platformAdmin.update({
       where: { id: admin.id },

@@ -59,6 +59,8 @@ export function verifyAdminToken(token: string): AdminTokenPayload | null {
   }
   try {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+    if (typeof data.cooperativeId !== "string") return null;
+    if (data.scope !== undefined) return null;
     if (Date.now() - data.iat > TOKEN_TTL_MS) return null;
     return { phone: data.phone, cooperativeId: data.cooperativeId, role: data.role };
   } catch {
