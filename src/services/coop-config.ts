@@ -27,6 +27,9 @@ export interface CoopConfig {
   literacyQuizPassMark: number;
   literacyQuizQuestionCount: number;
   certifiedLoanBoost: number;
+  reserveFundPercent: number;
+  educationFundPercent: number;
+  dividendCapPercent: number;
 }
 
 export interface BrandingConfig {
@@ -66,6 +69,9 @@ const DEFAULT_CONFIG: CoopConfig = {
   literacyQuizPassMark: 4,
   literacyQuizQuestionCount: 6,
   certifiedLoanBoost: 1,
+  reserveFundPercent: 25,
+  educationFundPercent: 10,
+  dividendCapPercent: 5,
 };
 
 export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> {
@@ -106,6 +112,10 @@ export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> 
         literacyQuizQuestionCount:
           (config as any).literacyQuizQuestionCount ?? DEFAULT_CONFIG.literacyQuizQuestionCount,
         certifiedLoanBoost: (config as any).certifiedLoanBoost ?? DEFAULT_CONFIG.certifiedLoanBoost,
+        reserveFundPercent: (config as any).reserveFundPercent ?? DEFAULT_CONFIG.reserveFundPercent,
+        educationFundPercent:
+          (config as any).educationFundPercent ?? DEFAULT_CONFIG.educationFundPercent,
+        dividendCapPercent: (config as any).dividendCapPercent ?? DEFAULT_CONFIG.dividendCapPercent,
       }
     : { ...DEFAULT_CONFIG };
 

@@ -1242,6 +1242,9 @@ model CooperativeConfig {
   minLoanTermMonths            Int     @default(1)
   maxLoanPerMember             Int     @default(0) // kobo; 0 = unlimited
   minMembershipMonths          Int     @default(0)
+  reserveFundPercent           Int     @default(25)
+  educationFundPercent         Int     @default(10)
+  dividendCapPercent           Int     @default(5)
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
 
