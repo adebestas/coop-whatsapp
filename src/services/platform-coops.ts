@@ -256,6 +256,64 @@ export async function addCoopAdminAndNotify(
   return result;
 }
 
+/**
+ * Nigeria compliance metadata that a platform admin may set on a coop. Every
+ * field is optional and nullable; only these keys are ever written (spec §4.8).
+ */
+export interface CoopComplianceInput {
+  registrationNumber?: string | null;
+  tin?: string | null;
+  cvn?: string | null;
+  scumlStatus?: string | null;
+  dpoName?: string | null;
+  dpoPhone?: string | null;
+  dpoEmail?: string | null;
+}
+
+const COMPLIANCE_FIELDS = [
+  "registrationNumber",
+  "tin",
+  "cvn",
+  "scumlStatus",
+  "dpoName",
+  "dpoPhone",
+  "dpoEmail",
+] as const satisfies ReadonlyArray<keyof CoopComplianceInput>;
+
+/**
+ * Update only the whitelisted compliance fields on a coop. Unknown keys are
+ * ignored; blank strings normalize to null. Audited.
+ */
+export async function setCoopCompliance(
+  id: string,
+  input: CoopComplianceInput,
+  actor?: PlatformActor,
+): Promise<void> {
+  const data: Record<string, string | null> = {};
+  for (const key of COMPLIANCE_FIELDS) {
+    if (key in input) {
+      const raw = input[key];
+      data[key] = raw === null || raw === undefined ? null : String(raw).trim() || null;
+    }
+  }
+  if (Object.keys(data).length === 0) {
+    throw new Error("no compliance fields provided");
+  }
+  await withCoopContext(id, () => prisma.cooperative.update({ where: { id }, data }));
+  if (actor) {
+    await writePlatformAudit({
+      actorId: actor.id,
+      actorPhone: actor.phone,
+      actorRole: actor.role,
+      action: "coop.compliance.set",
+      cooperativeId: id,
+      targetType: "cooperative",
+      targetId: id,
+      detail: JSON.stringify(data),
+    });
+  }
+}
+
 /** Change an existing coop member's admin role by member id. */
 export async function setCoopAdminRole(
   coopId: string,

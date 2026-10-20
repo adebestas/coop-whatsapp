@@ -333,6 +333,7 @@ export async function createCooperative(data: {
       code: data.code,
       adminPhone: data.adminPhone,
       state: data.state,
+      registrationNumber: data.registrationNumber,
       country,
       currency,
     },

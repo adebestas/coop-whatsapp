@@ -30,6 +30,13 @@ model Cooperative {
   federationFundBalance Int @default(0) // coop's own funds committed to a federation pool, in kobo
   loanLossProvisionBalance Int            @default(0) // accumulated loan-loss provision reserve in kobo
   memberSeq          Int                 @default(0) // atomic per-coop member sequence used for file numbers (COOP/YYY/seq)
+  registrationNumber String? // CAC/CAMA cooperative registration number
+  tin                String? // FIRS Tax Identification Number
+  cvn                String? // CAC Company Vetting Number
+  scumlStatus        String? // SCUML registration status (e.g. "registered")
+  dpoName            String? // NDPA Data Protection Officer — name
+  dpoPhone           String? // NDPA Data Protection Officer — phone
+  dpoEmail           String? // NDPA Data Protection Officer — email
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   tokensValidAfter   DateTime?

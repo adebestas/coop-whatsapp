@@ -518,6 +518,7 @@
   function renderHealthPanel() {
     const coop = coopDetail.cooperative || {};
     const s = coopDetail.stats || {};
+    const dis = readOnly ? 'disabled' : '';
     const control = readOnly
       ? '<span class="text-muted text-sm">Support role is read-only.</span>'
       : coop.status === 'suspended'
@@ -551,8 +552,29 @@
               <tr><td class="text-muted">Created</td><td>${date(coop.createdAt)}</td></tr>
               <tr><td class="text-muted">Last activity</td><td>${date(s.lastActivityAt)}</td></tr>
               <tr><td class="text-muted">Members by status</td><td>${renderMembersByStatus(s.membersByStatus)}</td></tr>
+              <tr><td class="text-muted">Reg. number</td><td>${esc(coop.registrationNumber || '—')}</td></tr>
+              <tr><td class="text-muted">TIN</td><td>${esc(coop.tin || '—')}</td></tr>
+              <tr><td class="text-muted">CVN</td><td>${esc(coop.cvn || '—')}</td></tr>
+              <tr><td class="text-muted">SCUML</td><td>${esc(coop.scumlStatus || '—')}</td></tr>
+              <tr><td class="text-muted">DPO</td><td>${esc([coop.dpoName, coop.dpoPhone, coop.dpoEmail].filter(Boolean).join(' · ') || '—')}</td></tr>
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <div class="card mb-6">
+        <div class="card-header"><span class="card-title">Compliance metadata</span></div>
+        <div class="card-body">
+          <div class="form-inline">
+            <div class="form-field"><label>Registration number</label><input id="cmpReg" value="${esc(coop.registrationNumber || '')}" ${dis}></div>
+            <div class="form-field"><label>TIN</label><input id="cmpTin" value="${esc(coop.tin || '')}" ${dis}></div>
+            <div class="form-field"><label>CVN</label><input id="cmpCvn" value="${esc(coop.cvn || '')}" ${dis}></div>
+            <div class="form-field"><label>SCUML status</label><input id="cmpScuml" value="${esc(coop.scumlStatus || '')}" ${dis}></div>
+            <div class="form-field"><label>DPO name</label><input id="cmpDpoName" value="${esc(coop.dpoName || '')}" ${dis}></div>
+            <div class="form-field"><label>DPO phone</label><input id="cmpDpoPhone" value="${esc(coop.dpoPhone || '')}" ${dis}></div>
+            <div class="form-field"><label>DPO email</label><input id="cmpDpoEmail" value="${esc(coop.dpoEmail || '')}" ${dis}></div>
+            ${readOnly ? '' : `<button class="btn btn-primary btn-sm" data-action="saveCoopCompliance" data-arg="${esc(coop.id)}">Save</button>`}
+          </div>
         </div>
       </div>
 
@@ -761,6 +783,31 @@
     try {
       await api(`/coops/${id}/revoke-sessions`, { method: 'POST' });
       toast('Sessions revoked', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+
+  window.saveCoopCompliance = async function (id) {
+    const val = (elId) => {
+      const v = (document.getElementById(elId)?.value || '').trim();
+      return v === '' ? null : v;
+    };
+    try {
+      await api(`/coops/${id}`, {
+        method: 'PATCH',
+        body: {
+          registrationNumber: val('cmpReg'),
+          tin: val('cmpTin'),
+          cvn: val('cmpCvn'),
+          scumlStatus: val('cmpScuml'),
+          dpoName: val('cmpDpoName'),
+          dpoPhone: val('cmpDpoPhone'),
+          dpoEmail: val('cmpDpoEmail'),
+        },
+      });
+      toast('Compliance metadata saved', 'success');
+      renderCoopDetail(id);
     } catch (err) {
       toast(err.message, 'error');
     }

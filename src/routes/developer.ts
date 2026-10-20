@@ -19,9 +19,11 @@ import {
   revokeCoopSessions,
   addCoopAdminAndNotify,
   setCoopAdminRole,
+  setCoopCompliance,
   coopExists,
   type PlatformActor,
   type CreateCoopInput,
+  type CoopComplianceInput,
 } from "../services/platform-coops.js";
 import { coopStats, platformOverview, coopActivity } from "../services/platform-monitoring.js";
 import {
@@ -305,6 +307,24 @@ export async function developerApiRoutes(app: FastifyInstance) {
     const parsed = Number.parseInt(take ?? "", 10);
     const limit = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 100) : 15;
     return { entries: await coopActivity(id, limit) };
+  });
+
+  // Nigeria compliance metadata (registration/CVN/TIN/SCUML/DPO) — whitelisted.
+  app.patch("/api/developer/coops/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) {
+      return reply.code(404).send({ error: "cooperative not found" });
+    }
+    const body = (req.body ?? {}) as CoopComplianceInput;
+    try {
+      await setCoopCompliance(id, body, actorOf(req));
+    } catch (err) {
+      if ((err as { code?: string }).code === "P2025") {
+        return reply.code(404).send({ error: "cooperative not found" });
+      }
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+    return { ok: true };
   });
 
   app.post("/api/developer/coops/:id/admins", async (req, reply) => {
