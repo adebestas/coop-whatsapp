@@ -40,6 +40,8 @@ export interface CreateCoopInput {
   adminPhone?: string;
   adminName?: string;
   sessionPhone?: string;
+  /** Optional CAC/CAMA registration number captured at creation time. */
+  registrationNumber?: string;
 }
 
 /**
@@ -88,6 +90,11 @@ export async function createCoop(
   const adminPhone = input.superAdmin?.phone ?? input.adminPhone;
   if (!adminPhone) throw new Error("an admin phone is required");
 
+  const registrationNumber = normalizeComplianceValue(
+    "registrationNumber",
+    input.registrationNumber,
+  );
+
   const result = await provisionCooperative({
     name: input.name,
     code: input.code,
@@ -96,6 +103,7 @@ export async function createCoop(
     adminPhone,
     adminName: input.superAdmin?.name ?? input.adminName,
     sessionPhone: input.sessionPhone,
+    registrationNumber: registrationNumber ?? undefined,
   });
 
   if (actor) {
@@ -280,6 +288,23 @@ const COMPLIANCE_FIELDS = [
   "dpoEmail",
 ] as const satisfies ReadonlyArray<keyof CoopComplianceInput>;
 
+/** A rejected compliance payload (bad type or no recognised field). Maps to 400. */
+export class ComplianceInputError extends Error {}
+
+/** Truncate an audit detail string to the platform log's cap. */
+const AUDIT_DETAIL_MAX = 500;
+
+/**
+ * Validate and normalise one compliance value: `string | null` only. Blank /
+ * whitespace-only strings become `null`; any other type is rejected so a nested
+ * object can never be persisted as `"[object Object]"` in a regulatory field.
+ */
+export function normalizeComplianceValue(key: string, raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "string") throw new ComplianceInputError(`${key} must be a string`);
+  return raw.trim() || null;
+}
+
 /**
  * Update only the whitelisted compliance fields on a coop. Unknown keys are
  * ignored; blank strings normalize to null. Audited.
@@ -292,15 +317,15 @@ export async function setCoopCompliance(
   const data: Record<string, string | null> = {};
   for (const key of COMPLIANCE_FIELDS) {
     if (key in input) {
-      const raw = input[key];
-      data[key] = raw === null || raw === undefined ? null : String(raw).trim() || null;
+      data[key] = normalizeComplianceValue(key, input[key]);
     }
   }
   if (Object.keys(data).length === 0) {
-    throw new Error("no compliance fields provided");
+    throw new ComplianceInputError("no compliance fields provided");
   }
   await withCoopContext(id, () => prisma.cooperative.update({ where: { id }, data }));
   if (actor) {
+    const detail = JSON.stringify(data);
     await writePlatformAudit({
       actorId: actor.id,
       actorPhone: actor.phone,
@@ -309,7 +334,7 @@ export async function setCoopCompliance(
       cooperativeId: id,
       targetType: "cooperative",
       targetId: id,
-      detail: JSON.stringify(data),
+      detail: detail.length > AUDIT_DETAIL_MAX ? detail.slice(0, AUDIT_DETAIL_MAX) : detail,
     });
   }
 }

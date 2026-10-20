@@ -825,6 +825,7 @@
             <div class="form-field" style="flex:1; min-width:220px;"><label>Cooperative name</label><input id="coopName" placeholder="e.g. Lagos Teachers Coop"></div>
             <div class="form-field"><label>Code</label><input id="coopCode" placeholder="e.g. LTC01" style="text-transform:uppercase;"></div>
             <div class="form-field"><label>State</label><input id="coopState" placeholder="e.g. Lagos"></div>
+            <div class="form-field"><label>Reg. number (optional)</label><input id="coopReg" placeholder="e.g. EK/12345"></div>
           </div>
           <h3 class="card-title mt-4 mb-4">Super-admin</h3>
           <div class="form-inline">
@@ -843,6 +844,7 @@
     const name = (document.getElementById('coopName')?.value || '').trim();
     const code = (document.getElementById('coopCode')?.value || '').trim().toUpperCase();
     const state = (document.getElementById('coopState')?.value || '').trim();
+    const registrationNumber = (document.getElementById('coopReg')?.value || '').trim();
     const saName = (document.getElementById('saName')?.value || '').trim();
     const saPhoneRaw = (document.getElementById('saPhone')?.value || '').replace(/[^0-9]/g, '');
     const result = document.getElementById('createCoopResult');
@@ -864,6 +866,7 @@
           name,
           code,
           state: state || undefined,
+          registrationNumber: registrationNumber || undefined,
           superAdmin: { name: saName || undefined, phone: saPhone },
         },
       });

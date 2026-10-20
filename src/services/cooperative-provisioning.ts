@@ -18,6 +18,8 @@ export interface ProvisionCooperativeInput {
    * `adminPhone` when the creator and the admin share one number.
    */
   sessionPhone?: string;
+  /** Optional CAC/CAMA registration number captured at creation time. */
+  registrationNumber?: string;
 }
 
 export interface ProvisionCooperativeResult {
@@ -61,6 +63,7 @@ export async function provisionCooperative(
     adminPhone: input.adminPhone,
     state: input.state,
     country: input.country,
+    registrationNumber: input.registrationNumber,
   });
 
   const sessionPhone = input.sessionPhone ?? input.adminPhone;

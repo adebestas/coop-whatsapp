@@ -20,6 +20,7 @@ import {
   addCoopAdminAndNotify,
   setCoopAdminRole,
   setCoopCompliance,
+  ComplianceInputError,
   coopExists,
   type PlatformActor,
   type CreateCoopInput,
@@ -288,6 +289,9 @@ export async function developerApiRoutes(app: FastifyInstance) {
       if ((err as { code?: string }).code === "P2002") {
         return reply.code(409).send({ error: "cooperative code already exists" });
       }
+      if (err instanceof ComplianceInputError) {
+        return reply.code(400).send({ error: err.message });
+      }
       req.log.error(err);
       return reply.code(500).send({ error: "failed to create cooperative" });
     }
@@ -322,7 +326,10 @@ export async function developerApiRoutes(app: FastifyInstance) {
       if ((err as { code?: string }).code === "P2025") {
         return reply.code(404).send({ error: "cooperative not found" });
       }
-      return reply.code(400).send({ error: (err as Error).message });
+      if (err instanceof ComplianceInputError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      throw err;
     }
     return { ok: true };
   });
