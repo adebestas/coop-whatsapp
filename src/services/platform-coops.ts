@@ -314,6 +314,9 @@ export async function setCoopCompliance(
   input: CoopComplianceInput,
   actor?: PlatformActor,
 ): Promise<void> {
+  if (typeof input !== "object" || input === null) {
+    throw new ComplianceInputError("invalid compliance payload");
+  }
   const data: Record<string, string | null> = {};
   for (const key of COMPLIANCE_FIELDS) {
     if (key in input) {

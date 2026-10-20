@@ -5,7 +5,6 @@ import { hashPin } from "../src/lib/security.js";
 import { signPlatformToken } from "../src/lib/platform-auth.js";
 import { provisionCooperative } from "../src/services/cooperative-provisioning.js";
 import { createCooperative } from "../src/services/cooperative.js";
-import { signPlatformToken } from "../src/lib/platform-auth.js";
 
 process.env.ADMIN_JWT_SECRET ||= "test-platform-secret-0123456789";
 
@@ -165,6 +164,21 @@ describe("PATCH /api/developer/coops/:id", () => {
   it("rejects a non-string compliance value", async () => {
     const coop = await makeCoop(`C${Date.now()}`);
     const res = await patch(coop.id, { tin: { nested: true } });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("rejects a non-object body", async () => {
+    const coop = await makeCoop(`C${Date.now()}`);
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/developer/coops/${coop.id}`,
+      payload: JSON.stringify("hello"),
+      headers: {
+        cookie,
+        "x-requested-with": "xmlhttprequest",
+        "content-type": "application/json",
+      },
+    });
     expect(res.statusCode).toBe(400);
   });
 
