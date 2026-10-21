@@ -1955,6 +1955,8 @@ model RegulatorProfile {
   contactEmail    String?
   monthlyDueDay   Int      @default(10)
   quarterlyDueDay Int      @default(15)
+  annualDueMonth  Int      @default(3) // 1-12
+  annualDueDay    Int      @default(31) // 1-31, clamped to the month's last day
   active          Boolean  @default(true)
   createdAt       DateTime @default(now())
 
@@ -1976,6 +1978,7 @@ model RegulatorReport {
   dueAt         DateTime?
   filedAt       DateTime?
   notes         String?
+  acknowledgementId String?
 
   @@unique([cooperativeId, period, periodType, packType])
   @@index([cooperativeId, status])

@@ -226,10 +226,20 @@ describe("reportPeriod", () => {
     expect(reportPeriod(new Date("2026-07-31"), "quarterly")).toBe("2026-09"); // Q3
     expect(reportPeriod(new Date("2026-11-30"), "quarterly")).toBe("2026-12"); // Q4
   });
+
+  it("returns the calendar year for an annual period", () => {
+    expect(reportPeriod(new Date("2026-01-01"), "annual")).toBe("2026");
+    expect(reportPeriod(new Date("2026-12-31"), "annual")).toBe("2026");
+  });
 });
 
 describe("periodDueAt", () => {
-  const profile = { monthlyDueDay: 10, quarterlyDueDay: 15 };
+  const profile = {
+    monthlyDueDay: 10,
+    quarterlyDueDay: 15,
+    annualDueMonth: 3,
+    annualDueDay: 31,
+  };
 
   it("is the due day of the month after a monthly period", () => {
     expect(periodDueAt("2026-03", "monthly", profile).toISOString().slice(0, 10)).toBe(
@@ -244,6 +254,17 @@ describe("periodDueAt", () => {
   it("is the quarterly due day of the month after a quarter-end", () => {
     expect(periodDueAt("2026-03", "quarterly", profile).toISOString().slice(0, 10)).toBe(
       "2026-04-15",
+    );
+  });
+
+  it("is the configured annual due date in the following year", () => {
+    expect(periodDueAt("2026", "annual", profile).toISOString().slice(0, 10)).toBe("2027-03-31");
+  });
+
+  it("clamps the annual due day to the last day of the month", () => {
+    const february = { ...profile, annualDueMonth: 2, annualDueDay: 31 };
+    expect(periodDueAt("2026", "annual", february).toISOString().slice(0, 10)).toBe(
+      "2027-02-28",
     );
   });
 });
@@ -884,6 +905,27 @@ describe("setRegulatorProfile", () => {
     );
     expect(res.ok).toBe(false);
     expect(await prisma.regulatorProfile.count({ where: { cooperativeId: coop.id } })).toBe(0);
+  });
+
+  it("stores and validates the annual due date", async () => {
+    const coop = await createTestCoop("REG40");
+    const admin = await createTestMember(coop.id, { phone: "2348000010050", role: "superadmin" });
+    const actor = { id: admin.id, phone: admin.phone };
+
+    const ok = await setRegulatorProfile(
+      coop.id,
+      { label: "Ministry", annualDueMonth: 4, annualDueDay: 30 },
+      actor,
+    );
+    expect(ok.ok).toBe(true);
+    const profile = await prisma.regulatorProfile.findFirst({ where: { cooperativeId: coop.id } });
+    expect(profile!.annualDueMonth).toBe(4);
+    expect(profile!.annualDueDay).toBe(30);
+
+    const badMonth = await setRegulatorProfile(coop.id, { annualDueMonth: 13 }, actor);
+    expect(badMonth.ok).toBe(false);
+    const badDay = await setRegulatorProfile(coop.id, { annualDueDay: 0 }, actor);
+    expect(badDay.ok).toBe(false);
   });
 
   it("requires a label when no profile exists yet", async () => {

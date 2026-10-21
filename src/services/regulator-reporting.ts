@@ -11,12 +11,14 @@ import { LARGE_TX_THRESHOLD } from "./aml.js";
 import { EXPORT_DIR, buildReportFiles, emailFiles, type ReportSheet } from "./exports.js";
 import { uploadToS3 } from "../lib/s3.js";
 
-export type PeriodType = "monthly" | "quarterly";
+export type PeriodType = "monthly" | "quarterly" | "annual";
 export type PackType = "statutory" | "nfiu" | "both";
 
 export interface RegulatorDueProfile {
   monthlyDueDay: number;
   quarterlyDueDay: number;
+  annualDueMonth: number;
+  annualDueDay: number;
 }
 
 export interface GenerateReportResult {
@@ -38,16 +40,22 @@ export interface GenerateReportDeps {
   sendEmail?: typeof emailFiles;
 }
 
-const DEFAULT_DUE: RegulatorDueProfile = { monthlyDueDay: 10, quarterlyDueDay: 15 };
+const DEFAULT_DUE: RegulatorDueProfile = {
+  monthlyDueDay: 10,
+  quarterlyDueDay: 15,
+  annualDueMonth: 3,
+  annualDueDay: 31,
+};
 
-/** `YYYY-MM` for the period a report generated at `now` covers. */
+/** `YYYY-MM`, quarter-end `YYYY-MM`, or calendar `YYYY` for the period at `now`. */
 export function reportPeriod(now: Date, periodType: PeriodType): string {
   const year = now.getUTCFullYear();
   const month = now.getUTCMonth(); // 0-11
+  if (periodType === "annual") return String(year);
   if (periodType === "monthly") {
     return `${year}-${String(month + 1).padStart(2, "0")}`;
   }
-  // Quarterly returns are named for the quarter-end month (Jan-Mar → 03).
+  // Quarterly returns are named for the quarter-end month (Jan-Mar -> 03).
   const quarterEndMonth = Math.ceil((month + 1) / 3) * 3;
   return `${year}-${String(quarterEndMonth).padStart(2, "0")}`;
 }
@@ -57,19 +65,35 @@ export function reportPeriod(now: Date, periodType: PeriodType): string {
  * period (monthly) or the quarter-end (quarterly). Built in UTC so the
  * calendar date survives any server timezone.
  */
+/** A UTC calendar date, clamped to the last day of the requested month. */
+function dueDateUtc(year: number, month1: number, day: number): Date {
+  const lastDay = new Date(Date.UTC(year, month1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month1 - 1, Math.min(day, lastDay)));
+}
+
 export function periodDueAt(
   period: string,
   periodType: PeriodType,
   profile: RegulatorDueProfile,
 ): Date {
+  if (periodType === "annual") {
+    return dueDateUtc(Number(period) + 1, profile.annualDueMonth, profile.annualDueDay);
+  }
   const [year, month] = period.split("-").map(Number);
   const dueDay = periodType === "monthly" ? profile.monthlyDueDay : profile.quarterlyDueDay;
   // `month` is 1-based (03 = March); Date.UTC's 0-based month rolls forward.
   return new Date(Date.UTC(year, month, dueDay));
 }
 
-/** UTC [start, end] bounds of a `YYYY-MM` period (first ms → last ms). */
+/** UTC [start, end] bounds of a `YYYY-MM` period or a calendar `YYYY` year. */
 function periodRange(period: string): { start: Date; end: Date } {
+  if (/^\d{4}$/.test(period)) {
+    const year = Number(period);
+    return {
+      start: new Date(Date.UTC(year, 0, 1, 0, 0, 0, 0)),
+      end: new Date(Date.UTC(year, 11, 31, 23, 59, 59, 999)),
+    };
+  }
   const [year, month] = period.split("-").map(Number);
   return {
     start: new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0)),
@@ -381,11 +405,19 @@ async function dueProfile(
   const profile = await prisma.regulatorProfile.findFirst({
     where: { cooperativeId: coopId, active: true },
     orderBy: { createdAt: "desc" },
-    select: { monthlyDueDay: true, quarterlyDueDay: true, contactEmail: true },
+    select: {
+      monthlyDueDay: true,
+      quarterlyDueDay: true,
+      annualDueMonth: true,
+      annualDueDay: true,
+      contactEmail: true,
+    },
   });
   return {
     monthlyDueDay: profile?.monthlyDueDay ?? DEFAULT_DUE.monthlyDueDay,
     quarterlyDueDay: profile?.quarterlyDueDay ?? DEFAULT_DUE.quarterlyDueDay,
+    annualDueMonth: profile?.annualDueMonth ?? DEFAULT_DUE.annualDueMonth,
+    annualDueDay: profile?.annualDueDay ?? DEFAULT_DUE.annualDueDay,
     contactEmail: profile?.contactEmail ?? null,
   };
 }
@@ -560,6 +592,8 @@ export async function setRegulatorProfile(
     contactEmail?: string;
     monthlyDueDay?: number;
     quarterlyDueDay?: number;
+    annualDueMonth?: number;
+    annualDueDay?: number;
   },
   actor: { id: string; phone: string },
 ): Promise<{ ok: boolean; message: string }> {
@@ -577,6 +611,20 @@ export async function setRegulatorProfile(
     if (day !== undefined && (!Number.isInteger(day) || day < 1 || day > 28)) {
       return { ok: false, message: `${label} due day must be between 1 and 28.` };
     }
+  }
+  if (
+    input.annualDueMonth !== undefined &&
+    (!Number.isInteger(input.annualDueMonth) ||
+      input.annualDueMonth < 1 ||
+      input.annualDueMonth > 12)
+  ) {
+    return { ok: false, message: "Annual due month must be between 1 and 12." };
+  }
+  if (
+    input.annualDueDay !== undefined &&
+    (!Number.isInteger(input.annualDueDay) || input.annualDueDay < 1 || input.annualDueDay > 31)
+  ) {
+    return { ok: false, message: "Annual due day must be between 1 and 31." };
   }
 
   const label = input.label?.trim();
@@ -605,6 +653,8 @@ export async function setRegulatorProfile(
           ...(input.quarterlyDueDay !== undefined
             ? { quarterlyDueDay: input.quarterlyDueDay }
             : {}),
+          ...(input.annualDueMonth !== undefined ? { annualDueMonth: input.annualDueMonth } : {}),
+          ...(input.annualDueDay !== undefined ? { annualDueDay: input.annualDueDay } : {}),
         },
       });
     }
@@ -616,6 +666,8 @@ export async function setRegulatorProfile(
         contactEmail: input.contactEmail || null,
         monthlyDueDay: input.monthlyDueDay ?? DEFAULT_DUE.monthlyDueDay,
         quarterlyDueDay: input.quarterlyDueDay ?? DEFAULT_DUE.quarterlyDueDay,
+        annualDueMonth: input.annualDueMonth ?? DEFAULT_DUE.annualDueMonth,
+        annualDueDay: input.annualDueDay ?? DEFAULT_DUE.annualDueDay,
       },
     });
   });
@@ -636,14 +688,14 @@ export async function setRegulatorProfile(
     action: "regulator.profile_set",
     targetType: "regulatorProfile",
     targetId: profile.id,
-    detail: `Regulator set to ${profile.label} (${profile.type}); monthly due ${profile.monthlyDueDay}, quarterly due ${profile.quarterlyDueDay}`,
+    detail: `Regulator set to ${profile.label} (${profile.type}); monthly due ${profile.monthlyDueDay}, quarterly due ${profile.quarterlyDueDay}, annual due ${profile.annualDueMonth}/${profile.annualDueDay}`,
   });
 
   return {
     ok: true,
     message:
       `✅ Regulator set to *${profile.label}* (${profile.type}).\n` +
-      `🗓️ Monthly returns due day *${profile.monthlyDueDay}*, quarterly due day *${profile.quarterlyDueDay}*. ` +
+      `🗓️ Monthly returns due day *${profile.monthlyDueDay}*, quarterly due day *${profile.quarterlyDueDay}*, annual due *${profile.annualDueMonth}/${profile.annualDueDay}*. ` +
       `Scheduled packs are now enabled.`,
   };
 }
