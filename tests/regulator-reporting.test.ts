@@ -472,6 +472,45 @@ describe("annualPack", () => {
     expect(governance.rows).toContainEqual(["Meetings in year", "1", ""]);
   });
 
+  it("counts an AGM scheduled the previous year but closed in year", async () => {
+    const coop = await createTestCoop("REG43");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010066",
+      role: "superadmin",
+    });
+    await prisma.meeting.create({
+      data: {
+        cooperativeId: coop.id,
+        type: "agm",
+        title: "2025 AGM",
+        status: "closed",
+        scheduledAt: new Date("2025-12-20T10:00:00Z"),
+        closedAt: new Date("2026-01-05T10:00:00Z"),
+        createdById: admin.id,
+      },
+    });
+
+    const sheets = await annualPack(coop.id, "2026");
+    const governance = sheets.find((s) => s.name === "Governance")!;
+    expect(governance.rows).toContainEqual(["AGM held in year", "Yes", ""]);
+    // The meeting list itself stays scoped to scheduledAt in-year.
+    expect(governance.rows).toContainEqual(["Meetings in year", "0", ""]);
+  });
+
+  it("reconciles members whose status is outside the known set", async () => {
+    const coop = await createTestCoop("REG44");
+    const member = await createTestMember(coop.id, { phone: "2348000010067" });
+    await prisma.member.update({ where: { id: member.id }, data: { status: "inactive" } });
+
+    const sheets = await annualPack(coop.id, "2026");
+    const movement = sheets.find((s) => s.name === "Membership Movement")!;
+    expect(movement.rows).toContainEqual(["Active (as of generation)", "0"]);
+    expect(movement.rows).toContainEqual(["Pending (as of generation)", "0"]);
+    expect(movement.rows).toContainEqual(["Suspended (as of generation)", "0"]);
+    expect(movement.rows).toContainEqual(["Deceased (as of generation)", "0"]);
+    expect(movement.rows).toContainEqual(["Other statuses (as of generation)", "1"]);
+  });
+
   it("adds financial statements, statutory funds, dividends and governance", async () => {
     const coop = await createTestCoop("REG31");
     const admin = await createTestMember(coop.id, {

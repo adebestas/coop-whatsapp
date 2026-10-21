@@ -67,10 +67,11 @@ function dueDateUtc(year: number, month1: number, day: number): Date {
 }
 
 /**
- * The filing due date for a period: the due day of the month *after* the
- * period (monthly) or the quarter-end (quarterly). Built in UTC so the
- * calendar date survives any server timezone. Annual returns are due in the
- * following year on the configured month/day, clamped to the month's last day.
+ * The filing due date for a period: monthly returns are due on the due day of
+ * the following month; quarterly returns on the due day of the month after the
+ * quarter-end month. Built in UTC so the calendar date survives any server
+ * timezone. Annual returns are due in the following year on the configured
+ * month/day, clamped to the month's last day.
  */
 export function periodDueAt(
   period: string,
@@ -332,11 +333,15 @@ export async function annualPack(coopId: string, period: string): Promise<Report
     ],
   };
 
-  const knownStatusTotal =
-    (statusRows.get("active") ?? 0) +
-    (statusRows.get("pending") ?? 0) +
-    (statusRows.get("suspended") ?? 0) +
-    (statusRows.get("deceased") ?? 0);
+  const knownStatuses = ["active", "pending", "suspended", "deceased"];
+  const knownStatusRows = knownStatuses.map((status) => [
+    `${status.charAt(0).toUpperCase()}${status.slice(1)} (as of generation)`,
+    String(statusRows.get(status) ?? 0),
+  ]);
+  const knownStatusTotal = knownStatuses.reduce(
+    (sum, status) => sum + (statusRows.get(status) ?? 0),
+    0,
+  );
 
   const movement: ReportSheet = {
     name: "Membership Movement",
@@ -345,10 +350,7 @@ export async function annualPack(coopId: string, period: string): Promise<Report
       ["Opening members (1 Jan)", String(opening)],
       ["Joined during year", String(joined)],
       ["Closing members (31 Dec)", String(closing)],
-      ["Active (as of generation)", String(statusRows.get("active") ?? 0)],
-      ["Pending (as of generation)", String(statusRows.get("pending") ?? 0)],
-      ["Suspended (as of generation)", String(statusRows.get("suspended") ?? 0)],
-      ["Deceased (as of generation)", String(statusRows.get("deceased") ?? 0)],
+      ...knownStatusRows,
       ["Other statuses (as of generation)", String(Math.max(0, current - knownStatusTotal))],
       ["Note", "Exit dates are not stored; status breakdowns reflect the current member record."],
     ],
@@ -356,64 +358,79 @@ export async function annualPack(coopId: string, period: string): Promise<Report
 
   const financial = financialAll.filter((sheet) => sheet.name !== "Membership");
 
-  const [reserveYear, educationYear, developmentYear, dividends, settledYear, balances, meetings] =
-    await Promise.all([
-      prisma.reserveAllocation.aggregate({
-        where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
-        _sum: { amount: true },
-      }),
-      prisma.educationFund.aggregate({
-        where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
-        _sum: { amount: true },
-      }),
-      prisma.developmentFund.aggregate({
-        where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
-        _sum: { amount: true },
-      }),
-      prisma.dividend.findMany({
-        where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
-        select: {
-          reference: true,
-          rate: true,
-          basis: true,
-          totalPool: true,
-          status: true,
-          distributedAt: true,
-        },
-        orderBy: { createdAt: "asc" },
-      }),
-      prisma.dividendEntry.aggregate({
-        where: {
-          status: "settled",
-          paidAt: { gte: start, lte: end },
-          dividend: { cooperativeId: coopId },
-        },
-        _sum: { amount: true },
-      }),
-      prisma.cooperative.findUnique({
-        where: { id: coopId },
-        select: {
-          reserveFundBalance: true,
-          protectionFundBalance: true,
-          federationFundBalance: true,
-          loanLossProvisionBalance: true,
-        },
-      }),
-      prisma.meeting.findMany({
-        where: { cooperativeId: coopId, scheduledAt: { gte: start, lte: end } },
-        select: {
-          type: true,
-          title: true,
-          status: true,
-          scheduledAt: true,
-          closedAt: true,
-          quorumPercent: true,
-          attendance: { select: { present: true } },
-          _count: { select: { motions: true } },
-        },
-        orderBy: { scheduledAt: "asc" },
-      }),
-    ]);
+  const [
+    reserveYear,
+    educationYear,
+    developmentYear,
+    dividends,
+    settledYear,
+    balances,
+    meetings,
+    agmCount,
+  ] = await Promise.all([
+    prisma.reserveAllocation.aggregate({
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.educationFund.aggregate({
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.developmentFund.aggregate({
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.dividend.findMany({
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      select: {
+        reference: true,
+        rate: true,
+        basis: true,
+        totalPool: true,
+        status: true,
+        distributedAt: true,
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.dividendEntry.aggregate({
+      where: {
+        status: "settled",
+        paidAt: { gte: start, lte: end },
+        dividend: { cooperativeId: coopId },
+      },
+      _sum: { amount: true },
+    }),
+    prisma.cooperative.findUnique({
+      where: { id: coopId },
+      select: {
+        reserveFundBalance: true,
+        protectionFundBalance: true,
+        federationFundBalance: true,
+        loanLossProvisionBalance: true,
+      },
+    }),
+    prisma.meeting.findMany({
+      where: { cooperativeId: coopId, scheduledAt: { gte: start, lte: end } },
+      select: {
+        type: true,
+        title: true,
+        status: true,
+        scheduledAt: true,
+        quorumPercent: true,
+        attendance: { select: { present: true } },
+        _count: { select: { motions: true } },
+      },
+      orderBy: { scheduledAt: "asc" },
+    }),
+    prisma.meeting.count({
+      where: {
+        cooperativeId: coopId,
+        type: "agm",
+        status: "closed",
+        closedAt: { gte: start, lte: end },
+      },
+    }),
+  ]);
 
   const reserveTotal = reserveYear._sum.amount ?? 0;
   const educationTotal = educationYear._sum.amount ?? 0;
@@ -445,14 +462,7 @@ export async function annualPack(coopId: string, period: string): Promise<Report
     ],
   };
 
-  const agmHeld = meetings.some(
-    (m) =>
-      m.type === "agm" &&
-      m.status === "closed" &&
-      m.closedAt !== null &&
-      m.closedAt >= start &&
-      m.closedAt <= end,
-  );
+  const agmHeld = agmCount > 0;
   const governance: ReportSheet = {
     name: "Governance",
     rows: [
