@@ -672,6 +672,14 @@ export async function generateReport(
     };
   }
 
+  const periodPattern = periodType === "annual" ? /^\d{4}$/ : /^\d{4}-(0[1-9]|1[0-2])$/;
+  if (!periodPattern.test(period)) {
+    return {
+      ok: false,
+      message: `Invalid *${periodType}* period *${period}*.`,
+    };
+  }
+
   const buildFiles = deps.buildFiles ?? buildReportFiles;
   const upload = deps.upload ?? uploadToS3;
   const sendEmail = deps.sendEmail ?? emailFiles;
@@ -685,7 +693,11 @@ export async function generateReport(
     ]);
     const sheets: ReportSheet[] = [];
     if (packType === "statutory" || packType === "both") {
-      sheets.push(...(await statutoryPack(coopId, period)));
+      sheets.push(
+        ...(periodType === "annual"
+          ? await annualPack(coopId, period)
+          : await statutoryPack(coopId, period)),
+      );
     }
     if (packType === "nfiu" || packType === "both") {
       sheets.push(...(await nfiuPack(coopId, period)));

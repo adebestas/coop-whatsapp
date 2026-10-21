@@ -985,6 +985,55 @@ describe("generateReport", () => {
       delete process.env.SMTP_HOST;
     }
   });
+
+  it("generates an idempotent annual pack with the following-year due date", async () => {
+    const coop = await createTestCoop("REG32");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010045",
+      role: "superadmin",
+    });
+    const member = await createTestMember(coop.id, { phone: "2348000010046" });
+    await makeLedger(coop.id, "income", "interest", 25000, new Date("2026-03-15T12:00:00Z"));
+    await makeContrib(coop.id, member.id, 100000);
+
+    const first = await generateReport(coop.id, "2026", "annual", "statutory", admin.id);
+    expect(first.ok).toBe(true);
+    const second = await generateReport(coop.id, "2026", "annual", "statutory", admin.id);
+    expect(second.ok).toBe(true);
+    expect(second.reportId).toBe(first.reportId);
+
+    const csv = await readFile(first.files!.csv, "utf8");
+    expect(csv).toContain("# Annual Return\n");
+    expect(csv).not.toMatch(/^# Membership$/m);
+
+    const rows = await prisma.regulatorReport.findMany({
+      where: { cooperativeId: coop.id, period: "2026", periodType: "annual" },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dueAt?.toISOString().slice(0, 10)).toBe("2027-03-31");
+  });
+
+  it("rejects a malformed annual period", async () => {
+    const coop = await createTestCoop("REG33");
+    const buildFiles = vi.fn(async (...args: Parameters<typeof buildReportFiles>) =>
+      buildReportFiles(...args),
+    );
+    const res = await generateReport(coop.id, "2026-03", "annual", "statutory", undefined, {
+      buildFiles,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.message).toBe("Invalid *annual* period *2026-03*.");
+    expect(buildFiles).not.toHaveBeenCalled();
+    expect(await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } })).toBe(0);
+  });
+
+  it("returns the exact validation message for an invalid monthly period", async () => {
+    const coop = await createTestCoop("REG33b");
+    const res = await generateReport(coop.id, "invalid", "monthly", "statutory");
+    expect(res.ok).toBe(false);
+    expect(res.message).toBe("Invalid *monthly* period *invalid*.");
+    expect(await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } })).toBe(0);
+  });
 });
 
 describe("runRegulatorReports", () => {
