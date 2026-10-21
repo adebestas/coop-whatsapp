@@ -416,6 +416,117 @@ describe("annualPack", () => {
     expect(movement.rows).toContainEqual(["Closing members (31 Dec)", "2"]);
     expect(movement.rows).toContainEqual(["Suspended (as of generation)", "1"]);
   });
+
+  it("adds financial statements, statutory funds, dividends and governance", async () => {
+    const coop = await createTestCoop("REG31");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010043",
+      role: "superadmin",
+    });
+    const member = await createTestMember(coop.id, { phone: "2348000010044" });
+
+    await makeLedger(coop.id, "income", "interest", 50000, new Date("2026-03-15T12:00:00Z"));
+    await makeLedger(coop.id, "expense", "salary", 10000, new Date("2026-03-20T12:00:00Z"));
+    await makeContrib(coop.id, member.id, 400000);
+    await makeLoan(coop.id, member.id, 200000, 45);
+
+    await prisma.reserveAllocation.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 250000,
+        source: "dividend_declaration",
+        createdAt: new Date("2026-04-01T10:00:00Z"),
+      },
+    });
+    await prisma.educationFund.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 100000,
+        source: "dividend_declaration",
+        createdAt: new Date("2026-04-01T10:00:00Z"),
+      },
+    });
+    await prisma.developmentFund.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 50000,
+        source: "dividend_declaration",
+        createdAt: new Date("2026-04-01T10:00:00Z"),
+      },
+    });
+    const dividend = await prisma.dividend.create({
+      data: {
+        cooperativeId: coop.id,
+        reference: "DIV-2026-1",
+        rate: 5,
+        basis: "savings",
+        totalPool: 300000,
+        status: "distributed",
+        createdAt: new Date("2026-05-01T10:00:00Z"),
+        distributedAt: new Date("2026-05-02T10:00:00Z"),
+      },
+    });
+    await prisma.dividendEntry.create({
+      data: {
+        dividendId: dividend.id,
+        memberId: member.id,
+        amount: 120000,
+        status: "settled",
+        paidAt: new Date("2026-05-02T10:00:00Z"),
+      },
+    });
+    // Settled in the following year: excluded from the 2026 "settled in year" total.
+    await prisma.dividendEntry.create({
+      data: {
+        dividendId: dividend.id,
+        memberId: admin.id,
+        amount: 80000,
+        status: "settled",
+        paidAt: new Date("2027-01-01T10:00:00Z"),
+      },
+    });
+    const meeting = await prisma.meeting.create({
+      data: {
+        cooperativeId: coop.id,
+        type: "agm",
+        title: "2026 AGM",
+        status: "closed",
+        scheduledAt: new Date("2026-06-15T10:00:00Z"),
+        closedAt: new Date("2026-06-15T12:00:00Z"),
+        createdById: admin.id,
+      },
+    });
+    await prisma.meetingAttendance.create({
+      data: { meetingId: meeting.id, memberId: member.id, present: true },
+    });
+
+    const sheets = await annualPack(coop.id, "2026");
+    expect(sheets.map((s) => s.name)).toEqual([
+      "Annual Return",
+      "Membership Movement",
+      "Balance Sheet",
+      "Profit & Loss",
+      "PAR Aging",
+      "PEARLS",
+      "Savings",
+      "Loans",
+      "Statutory Funds & Dividends",
+      "Governance",
+    ]);
+
+    const funds = sheets.find((s) => s.name === "Statutory Funds & Dividends")!;
+    expect(funds.rows).toContainEqual(["Reserve allocated in year", formatBalance(250000)]);
+    expect(funds.rows).toContainEqual(["Education allocated in year", formatBalance(100000)]);
+    expect(funds.rows).toContainEqual(["Development allocated in year", formatBalance(50000)]);
+    expect(funds.rows).toContainEqual(["Dividends declared in year", formatBalance(300000)]);
+    expect(funds.rows).toContainEqual(["Dividends settled in year", formatBalance(120000)]);
+
+    const governance = sheets.find((s) => s.name === "Governance")!;
+    expect(governance.rows).toContainEqual(["AGM held in year", "Yes"]);
+    expect(
+      governance.rows.some((row) => row[0] === "AGM" && row[2].includes("present 1")),
+    ).toBe(true);
+  });
 });
 
 describe("nfiuPack", () => {

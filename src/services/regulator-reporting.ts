@@ -341,7 +341,114 @@ export async function annualPack(coopId: string, period: string): Promise<Report
     ],
   };
 
-  return [identity, movement];
+  const financial = (await statutoryPack(coopId, period)).filter(
+    (sheet) => sheet.name !== "Membership",
+  );
+
+  const [reserveYear, educationYear, developmentYear, dividends, settledYear, balances, meetings] =
+    await Promise.all([
+      prisma.reserveAllocation.aggregate({
+        where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+        _sum: { amount: true },
+      }),
+      prisma.educationFund.aggregate({
+        where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+        _sum: { amount: true },
+      }),
+      prisma.developmentFund.aggregate({
+        where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+        _sum: { amount: true },
+      }),
+      prisma.dividend.findMany({
+        where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+        select: {
+          reference: true,
+          rate: true,
+          basis: true,
+          totalPool: true,
+          status: true,
+          distributedAt: true,
+        },
+        orderBy: { createdAt: "asc" },
+      }),
+      prisma.dividendEntry.aggregate({
+        where: {
+          status: "settled",
+          paidAt: { gte: start, lte: end },
+          dividend: { cooperativeId: coopId },
+        },
+        _sum: { amount: true },
+      }),
+      prisma.cooperative.findUnique({
+        where: { id: coopId },
+        select: {
+          reserveFundBalance: true,
+          protectionFundBalance: true,
+          federationFundBalance: true,
+          loanLossProvisionBalance: true,
+        },
+      }),
+      prisma.meeting.findMany({
+        where: { cooperativeId: coopId, scheduledAt: { gte: start, lte: end } },
+        select: {
+          type: true,
+          title: true,
+          status: true,
+          scheduledAt: true,
+          quorumPercent: true,
+          attendance: { select: { present: true } },
+          _count: { select: { motions: true } },
+        },
+        orderBy: { scheduledAt: "asc" },
+      }),
+    ]);
+
+  const reserveTotal = reserveYear._sum.amount ?? 0;
+  const educationTotal = educationYear._sum.amount ?? 0;
+  const developmentTotal = developmentYear._sum.amount ?? 0;
+  const declaredTotal = dividends.reduce((sum, row) => sum + row.totalPool, 0);
+  const settledTotal = settledYear._sum.amount ?? 0;
+
+  const funds: ReportSheet = {
+    name: "Statutory Funds & Dividends",
+    rows: [
+      ["Item", "Amount"],
+      ["Reserve allocated in year", formatBalance(reserveTotal)],
+      ["Education allocated in year", formatBalance(educationTotal)],
+      ["Development allocated in year", formatBalance(developmentTotal)],
+      ["Dividends declared in year", formatBalance(declaredTotal)],
+      ["Dividends settled in year", formatBalance(settledTotal)],
+      ["Reserve fund balance", formatBalance(balances?.reserveFundBalance ?? 0)],
+      ["Protection fund balance", formatBalance(balances?.protectionFundBalance ?? 0)],
+      ["Federation fund balance", formatBalance(balances?.federationFundBalance ?? 0)],
+      ["Loan-loss provision balance", formatBalance(balances?.loanLossProvisionBalance ?? 0)],
+      ["", ""],
+      ["Dividend run", "Rate | Basis | Pool | Status | Distributed"],
+      ...dividends.map((d) => [
+        d.reference,
+        `${d.rate}% | ${d.basis} | ${formatBalance(d.totalPool)} | ${d.status} | ${
+          d.distributedAt ? d.distributedAt.toISOString().slice(0, 10) : "-"
+        }`,
+      ]),
+    ],
+  };
+
+  const agmHeld = meetings.some((m) => m.type === "agm" && m.status === "closed");
+  const governance: ReportSheet = {
+    name: "Governance",
+    rows: [
+      ["Item", "Value", "Detail"],
+      ["AGM held in year", agmHeld ? "Yes" : "No"],
+      ["Meetings in year", String(meetings.length)],
+      ...meetings.map((m) => [
+        m.type.toUpperCase(),
+        m.scheduledAt.toISOString().slice(0, 10),
+        `${m.title} | ${m.status} | present ${m.attendance.filter((a) => a.present).length} | quorum required ${m.quorumPercent}% | motions ${m._count.motions}`,
+      ]),
+    ],
+  };
+
+  return [identity, movement, ...financial, funds, governance];
 }
 
 /**
