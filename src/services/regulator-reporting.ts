@@ -60,23 +60,27 @@ export function reportPeriod(now: Date, periodType: PeriodType): string {
   return `${year}-${String(quarterEndMonth).padStart(2, "0")}`;
 }
 
-/**
- * The filing due date for a period: the due day of the month *after* the
- * period (monthly) or the quarter-end (quarterly). Built in UTC so the
- * calendar date survives any server timezone.
- */
 /** A UTC calendar date, clamped to the last day of the requested month. */
 function dueDateUtc(year: number, month1: number, day: number): Date {
   const lastDay = new Date(Date.UTC(year, month1, 0)).getUTCDate();
   return new Date(Date.UTC(year, month1 - 1, Math.min(day, lastDay)));
 }
 
+/**
+ * The filing due date for a period: the due day of the month *after* the
+ * period (monthly) or the quarter-end (quarterly). Built in UTC so the
+ * calendar date survives any server timezone. Annual returns are due in the
+ * following year on the configured month/day, clamped to the month's last day.
+ */
 export function periodDueAt(
   period: string,
   periodType: PeriodType,
   profile: RegulatorDueProfile,
 ): Date {
   if (periodType === "annual") {
+    if (!/^\d{4}$/.test(period)) {
+      throw new Error(`Invalid annual period: ${period}`);
+    }
     return dueDateUtc(Number(period) + 1, profile.annualDueMonth, profile.annualDueDay);
   }
   const [year, month] = period.split("-").map(Number);
@@ -260,7 +264,8 @@ export async function statutoryPack(coopId: string, period: string): Promise<Rep
  */
 export async function annualPack(coopId: string, period: string): Promise<ReportSheet[]> {
   const { start, end } = periodRange(period);
-  const [coop, profile, opening, joined, closing, byStatus] = await Promise.all([
+  const [financialAll, coop, profile, opening, joined, closing, byStatus] = await Promise.all([
+    statutoryPack(coopId, period),
     prisma.cooperative.findUnique({
       where: { id: coopId },
       select: {
@@ -297,6 +302,7 @@ export async function annualPack(coopId: string, period: string): Promise<Report
   const current = byStatus.reduce((sum, row) => sum + row._count._all, 0);
   const statusRows = new Map(byStatus.map((row) => [row.status, row._count._all]));
   const warnings: string[] = [];
+  if (!coop) warnings.push("Cooperative record not found");
   if (!coop?.registrationNumber) warnings.push("Registration number is missing");
   if (!coop?.tin) warnings.push("TIN is missing");
   if (!coop?.scumlStatus) warnings.push("SCUML status is missing");
@@ -326,6 +332,12 @@ export async function annualPack(coopId: string, period: string): Promise<Report
     ],
   };
 
+  const knownStatusTotal =
+    (statusRows.get("active") ?? 0) +
+    (statusRows.get("pending") ?? 0) +
+    (statusRows.get("suspended") ?? 0) +
+    (statusRows.get("deceased") ?? 0);
+
   const movement: ReportSheet = {
     name: "Membership Movement",
     rows: [
@@ -337,13 +349,12 @@ export async function annualPack(coopId: string, period: string): Promise<Report
       ["Pending (as of generation)", String(statusRows.get("pending") ?? 0)],
       ["Suspended (as of generation)", String(statusRows.get("suspended") ?? 0)],
       ["Deceased (as of generation)", String(statusRows.get("deceased") ?? 0)],
+      ["Other statuses (as of generation)", String(Math.max(0, current - knownStatusTotal))],
       ["Note", "Exit dates are not stored; status breakdowns reflect the current member record."],
     ],
   };
 
-  const financial = (await statutoryPack(coopId, period)).filter(
-    (sheet) => sheet.name !== "Membership",
-  );
+  const financial = financialAll.filter((sheet) => sheet.name !== "Membership");
 
   const [reserveYear, educationYear, developmentYear, dividends, settledYear, balances, meetings] =
     await Promise.all([
@@ -395,6 +406,7 @@ export async function annualPack(coopId: string, period: string): Promise<Report
           title: true,
           status: true,
           scheduledAt: true,
+          closedAt: true,
           quorumPercent: true,
           attendance: { select: { present: true } },
           _count: { select: { motions: true } },
@@ -433,13 +445,20 @@ export async function annualPack(coopId: string, period: string): Promise<Report
     ],
   };
 
-  const agmHeld = meetings.some((m) => m.type === "agm" && m.status === "closed");
+  const agmHeld = meetings.some(
+    (m) =>
+      m.type === "agm" &&
+      m.status === "closed" &&
+      m.closedAt !== null &&
+      m.closedAt >= start &&
+      m.closedAt <= end,
+  );
   const governance: ReportSheet = {
     name: "Governance",
     rows: [
       ["Item", "Value", "Detail"],
-      ["AGM held in year", agmHeld ? "Yes" : "No"],
-      ["Meetings in year", String(meetings.length)],
+      ["AGM held in year", agmHeld ? "Yes" : "No", ""],
+      ["Meetings in year", String(meetings.length), ""],
       ...meetings.map((m) => [
         m.type.toUpperCase(),
         m.scheduledAt.toISOString().slice(0, 10),

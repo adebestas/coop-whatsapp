@@ -1969,8 +1969,8 @@ model RegulatorReport {
   id            String    @id @default(cuid())
   cooperativeId String
   cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
-  period        String // YYYY-MM
-  periodType    String // monthly | quarterly
+  period        String // YYYY-MM or YYYY (annual)
+  periodType    String // monthly | quarterly | annual
   packType      String // statutory | nfiu | both
   status        String    @default("generated") // generated | filed
   generatedAt   DateTime  @default(now())
