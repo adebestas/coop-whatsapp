@@ -183,11 +183,38 @@ export async function listCooperativeIds(): Promise<string[]> {
 }
 
 /**
+ * Whether a cooperative is currently suspended (platform-level stop).
+ * A missing row is treated as suspended (fail-closed).
+ */
+export async function isCoopSuspended(coopId: string): Promise<boolean> {
+  const coop = await prisma.cooperative.findUnique({
+    where: { id: coopId },
+    select: { status: true },
+  });
+  return !coop || coop.status !== "active";
+}
+
+/**
+ * Only the cooperatives a background job should process. Suspended coops are
+ * excluded so platform suspension actually stops scheduled money movement.
+ */
+export async function listActiveCooperativeIds(): Promise<string[]> {
+  const ids = await listCooperativeIds();
+  const active: string[] = [];
+  for (const id of ids) {
+    const suspended = await withCoopContext(id, () => isCoopSuspended(id));
+    if (!suspended) active.push(id);
+  }
+  return active;
+}
+
+/**
  * Run `fn` once per cooperative, each inside that cooperative's RLS context.
- * For schedulers that must process every tenant.
+ * For schedulers that must process every tenant. Suspended cooperatives are
+ * skipped: platform suspension must stop scheduled work, not just the UI.
  */
 export async function forEachCoop<T>(fn: (coopId: string) => Promise<T>): Promise<void> {
-  const ids = await listCooperativeIds();
+  const ids = await listActiveCooperativeIds();
   for (const id of ids) {
     await withCoopContext(id, () => fn(id));
   }

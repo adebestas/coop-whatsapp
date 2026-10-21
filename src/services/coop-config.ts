@@ -15,6 +15,10 @@ export interface CoopConfig {
   withdrawalCooldownMonths: number;
   lateFinePercent: number;
   maxLoanMultiplier: number;
+  loanDurationMonths: number;
+  minLoanTermMonths: number;
+  maxLoanPerMember: number;
+  minMembershipMonths: number;
   autoApproveLoans: boolean;
   requireGuarantors: boolean;
   minGuarantors: number;
@@ -57,6 +61,10 @@ const DEFAULT_CONFIG: CoopConfig = {
   withdrawalCooldownMonths: 6,
   lateFinePercent: 5,
   maxLoanMultiplier: 3,
+  loanDurationMonths: 12,
+  minLoanTermMonths: 1,
+  maxLoanPerMember: 0,
+  minMembershipMonths: 0,
   autoApproveLoans: false,
   requireGuarantors: true,
   minGuarantors: 2,
@@ -96,6 +104,10 @@ export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> 
         withdrawalCooldownMonths: config.withdrawalCooldownMonths,
         lateFinePercent: config.lateFinePercent,
         maxLoanMultiplier: config.maxLoanMultiplier,
+        loanDurationMonths: config.loanDurationMonths ?? DEFAULT_CONFIG.loanDurationMonths,
+        minLoanTermMonths: config.minLoanTermMonths ?? DEFAULT_CONFIG.minLoanTermMonths,
+        maxLoanPerMember: config.maxLoanPerMember ?? DEFAULT_CONFIG.maxLoanPerMember,
+        minMembershipMonths: config.minMembershipMonths ?? DEFAULT_CONFIG.minMembershipMonths,
         autoApproveLoans: config.autoApproveLoans,
         requireGuarantors: config.requireGuarantors,
         minGuarantors: config.minGuarantors,

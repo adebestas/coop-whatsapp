@@ -1,5 +1,10 @@
 import { prisma } from "../lib/prisma.js";
-import { resolveCoopsByPhone, resolveCoopByCode, withCoopContext } from "../lib/tenant-context.js";
+import {
+  resolveCoopsByPhone,
+  resolveCoopByCode,
+  withCoopContext,
+  isCoopSuspended,
+} from "../lib/tenant-context.js";
 import { sendText, platformOf } from "../lib/messaging.js";
 import {
   MESSAGE_CONSENT_PROMPT,
@@ -559,6 +564,21 @@ async function requireAiConsent(
  * Unregistered senders (no cooperative yet — the join flow) run without a
  * context; the join flow resolves its cooperative from the code it is given.
  */
+/**
+ * Platform suspension is a hard stop for member traffic. Reply with a neutral
+ * notice and short-circuit BEFORE any AI call or state mutation.
+ */
+async function blockSuspendedCoop(phone: string, coopId: string): Promise<boolean> {
+  if (!(await isCoopSuspended(coopId))) return false;
+  await sendText({
+    to: phone,
+    text:
+      "⏸️ This cooperative is temporarily unavailable.\n\n" +
+      "Your savings are safe. Please contact your cooperative admin.",
+  });
+  return true;
+}
+
 export async function handleMessage(
   phone: string,
   text: string,
@@ -571,6 +591,7 @@ export async function handleMessage(
     const coopId = coops[0]?.id ?? null;
     if (coopId) {
       return withCoopContext(coopId, async () => {
+        if (await blockSuspendedCoop(phone, coopId)) return;
         const member = await getMemberByPhone(phone, coopId);
         // AI-first text handling (transcribe/translate) runs only after the
         // member + AI consent are resolved — never before, and never for a
@@ -590,7 +611,10 @@ export async function handleMessage(
     if (joinCode) {
       const joinCoopId = await resolveCoopByCode(joinCode);
       if (joinCoopId) {
-        return withCoopContext(joinCoopId, () => handleMessageInner(phone, text, meta, joinCoopId));
+        return withCoopContext(joinCoopId, async () => {
+          if (await blockSuspendedCoop(phone, joinCoopId)) return;
+          return handleMessageInner(phone, text, meta, joinCoopId);
+        });
       }
     }
     return handleMessageInner(phone, text, meta);
@@ -602,6 +626,7 @@ export async function handleMessage(
   const selected = session?.selectedCoopId ?? null;
   if (selected && coops.some((c) => c.id === selected)) {
     return withCoopContext(selected, async () => {
+      if (await blockSuspendedCoop(phone, selected)) return;
       const member = await getMemberByPhone(phone, selected);
       const ai = await resolveAiText(phone, member, text, meta);
       if (!ai.ok) return;

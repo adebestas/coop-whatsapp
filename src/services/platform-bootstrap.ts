@@ -1,6 +1,7 @@
 import { randomInt } from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { hashPin } from "../lib/security.js";
+import { normalizePhone } from "../lib/phones.js";
 
 /**
  * Seed the first platform owner from PLATFORM_OWNER_PHONE on boot.
@@ -15,8 +16,15 @@ import { hashPin } from "../lib/security.js";
  * printed exactly once here — it is never persisted.
  */
 export async function ensurePlatformOwner(): Promise<void> {
-  const phone = process.env.PLATFORM_OWNER_PHONE?.trim();
-  if (!phone) return;
+  const raw = process.env.PLATFORM_OWNER_PHONE?.trim();
+  if (!raw) return;
+  const phone = normalizePhone(raw);
+  if (!phone) {
+    console.error(
+      `[platform-bootstrap] PLATFORM_OWNER_PHONE is not a valid phone number; owner not created.`,
+    );
+    return;
+  }
 
   const existing = await prisma.platformAdmin.findFirst({ where: { role: "owner" } });
   if (existing) return;

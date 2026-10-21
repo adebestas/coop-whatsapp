@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { hashPin, verifyPin } from "../lib/security.js";
 import { checkRateLimit, resetRateLimit } from "../lib/cache.js";
+import { normalizePhone } from "../lib/phones.js";
 import { verifyTotp, otpauthUri } from "../lib/totp.js";
 import {
   PLATFORM_COOKIE,
@@ -147,7 +148,7 @@ export async function developerApiRoutes(app: FastifyInstance) {
 
   app.post("/api/developer/login", async (req, reply) => {
     const body = req.body as { phone?: string; pin?: string; totp?: string };
-    const phone = body.phone?.replace(/[^0-9]/g, "");
+    const phone = body.phone ? normalizePhone(body.phone) : null;
     const pin = body.pin;
     const ip = req.ip;
 
@@ -278,12 +279,24 @@ export async function developerApiRoutes(app: FastifyInstance) {
     if (!body.name || !body.code) {
       return reply.code(400).send({ error: "name and code required" });
     }
-    const adminPhone = body.superAdmin?.phone ?? body.adminPhone;
+    const adminPhone = normalizePhone(body.superAdmin?.phone ?? body.adminPhone ?? "");
     if (!adminPhone) {
-      return reply.code(400).send({ error: "superAdmin.phone required" });
+      return reply.code(400).send({ error: "a valid superAdmin.phone is required" });
     }
+    // The creator's channel phone is NOT client-supplied: provisioning uses the
+    // admin phone as the member identity, so a body field must not be able to
+    // point the super-admin row at an unrelated session.
+    const { sessionPhone, ...safeBody } = body as CreateCoopInput & { sessionPhone?: unknown };
+    void sessionPhone;
     try {
-      const result = await createCoop(body, actorOf(req));
+      const result = await createCoop(
+        {
+          ...safeBody,
+          adminPhone,
+          superAdmin: body.superAdmin ? { ...body.superAdmin, phone: adminPhone } : undefined,
+        },
+        actorOf(req),
+      );
       return reply.code(200).send(result);
     } catch (err) {
       if ((err as { code?: string }).code === "P2002") {
@@ -337,8 +350,8 @@ export async function developerApiRoutes(app: FastifyInstance) {
   app.post("/api/developer/coops/:id/admins", async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { phone?: string; name?: string; role?: string };
-    const phone = body.phone?.replace(/\s/g, "");
-    if (!phone) return reply.code(400).send({ error: "phone required" });
+    const phone = normalizePhone(body.phone ?? "");
+    if (!phone) return reply.code(400).send({ error: "a valid phone is required" });
     const role = body.role === "superadmin" ? "superadmin" : "admin";
     if (!(await coopExists(id))) {
       return reply.code(404).send({ error: "cooperative not found" });
@@ -438,9 +451,9 @@ export async function developerApiRoutes(app: FastifyInstance) {
   app.post("/api/developer/admins", async (req, reply) => {
     if (!requireOwner(req, reply)) return;
     const body = (req.body ?? {}) as { name?: string; phone?: string; role?: string };
-    const phone = body.phone?.replace(/\s/g, "");
+    const phone = normalizePhone(body.phone ?? "");
     if (!body.name || !phone) {
-      return reply.code(400).send({ error: "name and phone required" });
+      return reply.code(400).send({ error: "name and a valid phone are required" });
     }
     try {
       const admin = await createPlatformAdmin(

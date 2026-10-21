@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import { prisma } from "../lib/prisma.js";
+import { prisma, withTx } from "../lib/prisma.js";
 import { hashPin } from "../lib/security.js";
 import { sendText } from "../lib/messaging.js";
 import { withCoopContext } from "../lib/tenant-context.js";
@@ -57,59 +57,71 @@ function generateTempPin(): string {
 export async function provisionCooperative(
   input: ProvisionCooperativeInput,
 ): Promise<ProvisionCooperativeResult> {
-  const coop = await createCooperative({
-    name: input.name,
-    code: input.code,
-    adminPhone: input.adminPhone,
-    state: input.state,
-    country: input.country,
-    registrationNumber: input.registrationNumber,
-  });
-
   const sessionPhone = input.sessionPhone ?? input.adminPhone;
 
-  const { adminMemberId, memberCode, tempPin } = await withCoopContext(coop.id, async () => {
-    await prisma.cooperativeConfig.create({ data: { cooperativeId: coop.id } });
-    await prisma.brandingConfig.create({
-      data: { cooperativeId: coop.id, displayName: input.name },
-    });
-    await prisma.subscription.create({ data: { cooperativeId: coop.id } });
-
-    const code = await generateMemberFileNumber(coop.id, coop.code);
-    const pin = generateTempPin();
-
-    // NOTE: Admin PIN is sent in plaintext over WhatsApp.
-    // This is acceptable due to WhatsApp's end-to-end encryption, but the admin
-    // should change their PIN immediately after onboarding (setpin command).
-    const member = await prisma.member.create({
-      data: {
-        phone: sessionPhone,
-        contactPhone: input.adminPhone,
-        name: input.adminName ?? `${input.name} Admin`,
-        code,
-        pin: hashPin(pin),
-        cooperativeId: coop.id,
-        role: "superadmin",
-        nameVerified: true,
-        wallet: { create: {} },
-      },
+  // All-or-nothing: a failure halfway through must not leave a cooperative
+  // without config/branding/subscription or without its first superadmin.
+  const { coop, adminMemberId, memberCode, tempPin } = await withTx(async () => {
+    const coop = await createCooperative({
+      name: input.name,
+      code: input.code,
+      adminPhone: input.adminPhone,
+      state: input.state,
+      country: input.country,
+      registrationNumber: input.registrationNumber,
     });
 
-    return { adminMemberId: member.id, memberCode: code, tempPin: pin };
+    const created = await withCoopContext(coop.id, async () => {
+      await prisma.cooperativeConfig.create({ data: { cooperativeId: coop.id } });
+      await prisma.brandingConfig.create({
+        data: { cooperativeId: coop.id, displayName: input.name },
+      });
+      await prisma.subscription.create({ data: { cooperativeId: coop.id } });
+
+      const code = await generateMemberFileNumber(coop.id, coop.code);
+      const pin = generateTempPin();
+
+      // NOTE: Admin PIN is sent in plaintext over WhatsApp.
+      // This is acceptable due to WhatsApp's end-to-end encryption, but the admin
+      // should change their PIN immediately after onboarding (setpin command).
+      const member = await prisma.member.create({
+        data: {
+          phone: sessionPhone,
+          contactPhone: input.adminPhone,
+          name: input.adminName ?? `${input.name} Admin`,
+          code,
+          pin: hashPin(pin),
+          cooperativeId: coop.id,
+          role: "superadmin",
+          nameVerified: true,
+          wallet: { create: {} },
+        },
+      });
+
+      return { adminMemberId: member.id, memberCode: code, tempPin: pin };
+    });
+
+    return { coop, ...created };
   });
 
-  await sendText({
-    to: sessionPhone,
-    text:
-      `🏦 *${input.name}* is live!\n\n` +
-      `Your cooperative code: *${coop.code}*\n` +
-      `Your role: *superadmin*\n` +
-      `Your member code: *${memberCode}*\n` +
-      `Your temporary PIN: *${tempPin}*\n\n` +
-      `⚠️ *Change your PIN immediately* by replying: *setpin ${tempPin} <new pin>*\n\n` +
-      `Members can join by sending: *join ${coop.code}*\n\n` +
-      `Reply *menu* to see all admin commands.`,
-  });
+  // Best-effort delivery AFTER the commit: the cooperative exists even if the
+  // messaging channel is down, and the console can resend the PIN.
+  try {
+    await sendText({
+      to: sessionPhone,
+      text:
+        `🏦 *${input.name}* is live!\n\n` +
+        `Your cooperative code: *${coop.code}*\n` +
+        `Your role: *superadmin*\n` +
+        `Your member code: *${memberCode}*\n` +
+        `Your temporary PIN: *${tempPin}*\n\n` +
+        `⚠️ *Change your PIN immediately* by replying: *setpin ${tempPin} <new pin>*\n\n` +
+        `Members can join by sending: *join ${coop.code}*\n\n` +
+        `Reply *menu* to see all admin commands.`,
+    });
+  } catch (err) {
+    console.error(`[provision] welcome message failed for coop ${coop.id}`, err);
+  }
 
   return {
     cooperativeId: coop.id,

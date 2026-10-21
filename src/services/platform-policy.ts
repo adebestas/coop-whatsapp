@@ -34,16 +34,53 @@ export function clamp(n: number, min?: number | null, max?: number | null): numb
   return n;
 }
 
+const isFiniteNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
 export async function setPlatformPolicy(
   key: string,
   input: { value?: number | boolean | string; min?: number; max?: number; locked?: boolean },
 ): Promise<void> {
   const rule = getRule(key);
   if (!rule) throw new Error(`unknown rule: ${key}`);
+
+  // The registry is the statutory floor/ceiling. A platform override may
+  // tighten policy WITHIN those bounds, never weaken them (e.g. it must not be
+  // able to drop the statutory 25% reserve floor or raise a legal cap).
+  if (input.min !== undefined) {
+    if (!isFiniteNumber(input.min)) throw new Error(`min must be a finite number for ${key}`);
+    if (rule.min !== undefined && input.min < rule.min) {
+      throw new Error(`${key} min cannot be below the statutory minimum (${rule.min})`);
+    }
+  }
+  if (input.max !== undefined) {
+    if (!isFiniteNumber(input.max)) throw new Error(`max must be a finite number for ${key}`);
+    if (rule.max !== undefined && input.max > rule.max) {
+      throw new Error(`${key} max cannot exceed the statutory maximum (${rule.max})`);
+    }
+  }
+
   const min = input.min ?? rule.min ?? null;
   const max = input.max ?? rule.max ?? null;
   if (min !== null && min !== undefined && max !== null && max !== undefined && min > max)
     throw new Error(`min > max for ${key}`);
+
+  // Type-check the override itself. A string (or a non-finite number) would be
+  // persisted and then silently ignored by the config reader, making the
+  // console look like it changed something it didn't.
+  if (input.value !== undefined) {
+    if (rule.type === "bool") {
+      if (typeof input.value !== "boolean") throw new Error(`${key} must be a boolean`);
+    } else {
+      if (!isFiniteNumber(input.value)) throw new Error(`${key} must be a finite number`);
+      if (min !== null && min !== undefined && input.value < min) {
+        throw new Error(`${key} must be at least ${min}`);
+      }
+      if (max !== null && max !== undefined && input.value > max) {
+        throw new Error(`${key} must be at most ${max}`);
+      }
+    }
+  }
+
   await prisma.platformPolicy.upsert({
     where: { key },
     create: {

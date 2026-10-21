@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { listCooperativeIds, withCoopContext } from "../lib/tenant-context.js";
 import { sendText } from "../lib/messaging.js";
+import { normalizePhone } from "../lib/phones.js";
 import {
   provisionCooperative,
   addCoopAdmin,
@@ -39,7 +40,6 @@ export interface CreateCoopInput {
   /** Provisioning shape (chat flow parity). */
   adminPhone?: string;
   adminName?: string;
-  sessionPhone?: string;
   /** Optional CAC/CAMA registration number captured at creation time. */
   registrationNumber?: string;
 }
@@ -87,8 +87,8 @@ export async function createCoop(
   input: CreateCoopInput,
   actor?: PlatformActor,
 ): Promise<ProvisionCooperativeResult> {
-  const adminPhone = input.superAdmin?.phone ?? input.adminPhone;
-  if (!adminPhone) throw new Error("an admin phone is required");
+  const adminPhone = normalizePhone(input.superAdmin?.phone ?? input.adminPhone ?? "");
+  if (!adminPhone) throw new Error("a valid admin phone is required");
 
   const registrationNumber = normalizeComplianceValue(
     "registrationNumber",
@@ -102,7 +102,6 @@ export async function createCoop(
     country: input.country,
     adminPhone,
     adminName: input.superAdmin?.name ?? input.adminName,
-    sessionPhone: input.sessionPhone,
     registrationNumber: registrationNumber ?? undefined,
   });
 

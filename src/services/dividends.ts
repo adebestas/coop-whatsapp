@@ -9,7 +9,7 @@ import {
 } from "../lib/tenant-context.js";
 import { sendToBank } from "./disbursements.js";
 import { roundMoney } from "./money.js";
-import { updateCoopConfig } from "./coop-config.js";
+import { getCoopConfig, updateCoopConfig } from "./coop-config.js";
 import { notifyMember } from "../lib/messaging.js";
 import { notifySuperAdmins } from "./withdrawals.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
@@ -40,10 +40,27 @@ import { audit } from "./audit.js";
 // ---------------------------------------------------------------------------
 
 // Nigerian cooperative statutory deductions, applied to NET PROFIT.
-const RESERVE_FUND_RATE = 0.2; // 20%
-const EDUCATION_FUND_RATE = 0.02; // 2%
+// Reserve and education percentages are per-coop config (registry-backed, with
+// statutory floors/ceilings enforced at the platform layer) — never hardcoded.
+// The development fund has no registry key and stays at 5%.
 const DEVELOPMENT_FUND_RATE = 0.05; // 5%
 const MAX_DIVIDEND_RATE = 25; // per Nigerian Cooperative Societies Act
+
+/**
+ * Effective statutory rates for a cooperative. `dividendCapPercent` is NOT
+ * applied here: it caps dividend on share par value, whereas the run `rate` is
+ * a percentage of distributable profit — a different base.
+ */
+async function getStatutoryRates(
+  cooperativeId: string,
+): Promise<{ reserve: number; education: number; development: number }> {
+  const config = await getCoopConfig(cooperativeId);
+  return {
+    reserve: config.reserveFundPercent / 100,
+    education: config.educationFundPercent / 100,
+    development: DEVELOPMENT_FUND_RATE,
+  };
+}
 
 /** Maximum number of bank payouts a single run may initiate (drain guard). */
 export const DIVIDEND_MAX_PAYOUTS_PER_RUN = Math.max(
@@ -95,7 +112,7 @@ function currentPeriodStart(now = new Date()): Date {
 
 interface DividendBase {
   netProfit: number;
-  /** Statutory 20/2/5% already appropriated this period, in kobo. */
+  /** Statutory appropriation already taken this period, in kobo. */
   statutoryTakenThisPeriod: number;
   /** Dividend pools already declared this period, in kobo. */
   priorPoolsThisPeriod: number;
@@ -221,9 +238,10 @@ export async function computeDividendPreview(
     where: { cooperativeId: member.cooperativeId },
     select: { id: true, name: true, wallet: { select: { totalSaved: true, balance: true } } },
   });
-  const reserveAmount = Math.floor(pnl.netProfit * RESERVE_FUND_RATE);
-  const educationAmount = Math.floor(pnl.netProfit * EDUCATION_FUND_RATE);
-  const developmentAmount = Math.floor(pnl.netProfit * DEVELOPMENT_FUND_RATE);
+  const rates = await getStatutoryRates(member.cooperativeId);
+  const reserveAmount = Math.floor(pnl.netProfit * rates.reserve);
+  const educationAmount = Math.floor(pnl.netProfit * rates.education);
+  const developmentAmount = Math.floor(pnl.netProfit * rates.development);
   const totalDeductions = reserveAmount + educationAmount + developmentAmount;
   const distributableProfit = Math.max(0, pnl.netProfit - totalDeductions);
   const pool = Math.max(0, Math.round(distributableProfit * (rate / 100)));
@@ -239,9 +257,9 @@ export async function computeDividendPreview(
     `Dividend pool: *${formatBalance(pool)}*`,
     ``,
     `*Statutory Deductions (Nigerian Cooperative Standard):*`,
-    `• Reserve Fund (20%): *${formatBalance(reserveAmount)}*`,
-    `• Education Fund (2%): *${formatBalance(educationAmount)}*`,
-    `• Development Fund (5%): *${formatBalance(developmentAmount)}*`,
+    `• Reserve Fund (${rates.reserve * 100}%): *${formatBalance(reserveAmount)}*`,
+    `• Education Fund (${rates.education * 100}%): *${formatBalance(educationAmount)}*`,
+    `• Development Fund (${rates.development * 100}%): *${formatBalance(developmentAmount)}*`,
     `• Total deductions: *${formatBalance(totalDeductions)}*`,
     ``,
     `Member pool: *${formatBalance(pool)}*`,
@@ -342,14 +360,15 @@ export async function previewDividendRun(
     };
   }
 
-  // Statutory 20/2/5% is appropriated at most ONCE per period; a later run in
+  // Statutory appropriation is taken at most ONCE per period; a later run in
   // the same period shares the same profit base and takes no statutory again.
   const takeStatutory = base.statutoryTakenThisPeriod === 0;
+  const rates = await getStatutoryRates(admin.cooperativeId);
   const statutoryAmount = takeStatutory
     ? roundMoney(
-        Math.floor(base.netProfit * RESERVE_FUND_RATE) +
-          Math.floor(base.netProfit * EDUCATION_FUND_RATE) +
-          Math.floor(base.netProfit * DEVELOPMENT_FUND_RATE),
+        Math.floor(base.netProfit * rates.reserve) +
+          Math.floor(base.netProfit * rates.education) +
+          Math.floor(base.netProfit * rates.development),
       )
     : 0;
   const distributable = Math.max(0, roundMoney(base.remaining - statutoryAmount));
@@ -487,11 +506,13 @@ export async function distributeDividend(
     };
   }
 
-  // Statutory 20/2/5% is appropriated at most ONCE per period.
+  // Statutory appropriation (reserve/education from coop config) is taken at
+  // most ONCE per period.
   const takeStatutory = base.statutoryTakenThisPeriod === 0;
-  const reserveAmount = takeStatutory ? Math.floor(base.netProfit * RESERVE_FUND_RATE) : 0;
-  const educationAmount = takeStatutory ? Math.floor(base.netProfit * EDUCATION_FUND_RATE) : 0;
-  const developmentAmount = takeStatutory ? Math.floor(base.netProfit * DEVELOPMENT_FUND_RATE) : 0;
+  const rates = await getStatutoryRates(admin.cooperativeId);
+  const reserveAmount = takeStatutory ? Math.floor(base.netProfit * rates.reserve) : 0;
+  const educationAmount = takeStatutory ? Math.floor(base.netProfit * rates.education) : 0;
+  const developmentAmount = takeStatutory ? Math.floor(base.netProfit * rates.development) : 0;
   const totalDeductions = roundMoney(reserveAmount + educationAmount + developmentAmount);
   const distributableProfit = Math.max(0, roundMoney(base.remaining - totalDeductions));
   const pool = Math.max(0, Math.round(distributableProfit * (rate / 100)));

@@ -7,7 +7,7 @@ import { showHistory } from "./statements.js";
 import { runAllAlerts } from "../lib/ai-alerts.js";
 import { alertSupers, AlertSeverity, withMoneyPathAlert } from "../lib/alerting.js";
 import { getRedis, claimOnce } from "../lib/cache.js";
-import { forEachCoop, withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
+import { forEachCoop, withCoopContext, listActiveCooperativeIds } from "../lib/tenant-context.js";
 import { getCurrency } from "../lib/runtime-context.js";
 import { log } from "../lib/logger.js";
 import { maskId } from "../lib/security.js";
@@ -764,7 +764,7 @@ export async function runDailyDigest(now = new Date()): Promise<number> {
   const targetHour = Number(process.env.DIGEST_HOUR ?? 20); // 8pm default
   if (hour !== targetHour) return 0;
 
-  const coopIds = await listCooperativeIds();
+  const coopIds = await listActiveCooperativeIds();
   const redis = getRedis();
   let sent = 0;
   for (const coopId of coopIds) {
@@ -873,7 +873,7 @@ export async function runBackupVerificationJob(now = new Date()): Promise<number
   // Run on the 2nd of each month (after monthly statements)
   if (now.getDate() !== 2) return 0;
 
-  const coopIds = await listCooperativeIds();
+  const coopIds = await listActiveCooperativeIds();
   let ran = 0;
   for (const coopId of coopIds) {
     const key = `${coopId}:${now.getFullYear()}-${now.getMonth()}`;
@@ -901,7 +901,7 @@ export async function runBackupVerificationJob(now = new Date()): Promise<number
 export async function runProactiveAlerts(now = new Date()): Promise<number> {
   if (now.getDate() !== 1) return 0;
 
-  const coopIds = await listCooperativeIds();
+  const coopIds = await listActiveCooperativeIds();
   let ran = 0;
   for (const coopId of coopIds) {
     const key = `${coopId}:${now.getFullYear()}-${now.getMonth()}`;
@@ -1160,7 +1160,7 @@ export async function runRegulatorReports(
   // Deliberately NOT forEachCoop: `generateReport` builds ExcelJS/PDFKit files
   // and uploads to S3, which must not run inside a per-coop transaction. Each
   // DB-touching step opens its own short RLS-scoped context instead.
-  const coopIds = await listCooperativeIds();
+  const coopIds = await listActiveCooperativeIds();
   for (const coopId of coopIds) {
     try {
       const have = await withCoopContext(coopId, async () => {

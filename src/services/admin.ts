@@ -3234,7 +3234,9 @@ export async function handleAdminCommand(
               "Usage: *setconfig <key> <value>*\n\n" +
               "Keys: loanInterestRate, serviceChargePercent, minContribution, minSavings, " +
               "minWithdrawal, maxWithdrawal, withdrawalCooldownMonths, lateFinePercent, " +
-              "maxLoanMultiplier, autoApproveLoans, requireGuarantors, minGuarantors, " +
+              "maxLoanMultiplier, loanDurationMonths, minLoanTermMonths, maxLoanPerMember, " +
+              "minMembershipMonths, autoApproveLoans, requireGuarantors, minGuarantors, " +
+              "reserveFundPercent, educationFundPercent, dividendCapPercent, " +
               "literacyCertificationEnabled, literacyQuizPassMark, literacyQuizQuestionCount, " +
               "certifiedLoanBoost, language",
           });
@@ -3301,6 +3303,13 @@ export async function handleAdminCommand(
         const rule = getRule(key);
         if (!rule) {
           await sendText({ to: phone, text: `Unknown config key: *${key}*.` });
+          return true;
+        }
+        if (!rule.coopEditable) {
+          await sendText({
+            to: phone,
+            text: `*${key}* is set by the platform and can't be changed here.`,
+          });
           return true;
         }
         const policies = await loadPlatformPolicyRows();

@@ -106,8 +106,8 @@ describe("minimum contribution", () => {
   });
 });
 
-describe("reserve fund statutory deductions (20/2/5)", () => {
-  it("deducts 20% reserve, 2% education, 5% development from net profit before dividends", async () => {
+describe("reserve fund statutory deductions (25/10/5)", () => {
+  it("deducts 25% reserve, 10% education, 5% development from net profit before dividends", async () => {
     const coop = await makeCoop("RESV01");
     await makeMember(PHONE, coop.id, { totalSaved: 1000000, balance: 1000000 });
     const superAdmin = await makeMember("2348098888888", coop.id, {
@@ -134,17 +134,17 @@ describe("reserve fund statutory deductions (20/2/5)", () => {
     const result = await distributeDividend(superAdmin.phone, 10); // 10% of distributable profit
     expect(result.ok).toBe(true);
 
-    // 20% × 1,000,000 = 200,000  |  2% = 20,000  |  5% = 50,000.
+    // 25% = 250,000  |  10% = 100,000  |  5% = 50,000 (config defaults).
     const coopAfter = await prisma.cooperative.findUnique({ where: { id: coop.id } });
-    expect(coopAfter!.reserveFundBalance).toBe(200000);
+    expect(coopAfter!.reserveFundBalance).toBe(250000);
 
     const reserve = await prisma.reserveAllocation.findFirst({ where: { cooperativeId: coop.id } });
     const education = await prisma.educationFund.findFirst({ where: { cooperativeId: coop.id } });
     const development = await prisma.developmentFund.findFirst({
       where: { cooperativeId: coop.id },
     });
-    expect(reserve!.amount).toBe(200000);
-    expect(education!.amount).toBe(20000);
+    expect(reserve!.amount).toBe(250000);
+    expect(education!.amount).toBe(100000);
     expect(development!.amount).toBe(50000);
   });
 });

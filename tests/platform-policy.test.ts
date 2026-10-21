@@ -1,5 +1,5 @@
 // tests/platform-policy.test.ts
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { prisma } from "./setup.js";
 import {
   setPlatformPolicy,
@@ -37,6 +37,45 @@ describe("platform policy resolution", () => {
   });
   it("rejects an unknown rule key", async () => {
     await expect(setPlatformPolicy("bogus", { value: 1 })).rejects.toThrow();
+  });
+});
+
+describe("platform policy bounds", () => {
+  afterEach(async () => {
+    await prisma.platformPolicy.deleteMany({
+      where: { key: { in: ["reserveFundPercent", "dividendCapPercent"] } },
+    });
+    clearPlatformPolicyCache();
+  });
+
+  it("rejects a minimum below the statutory floor", async () => {
+    await expect(setPlatformPolicy("reserveFundPercent", { min: 10 })).rejects.toThrow(
+      /statutory minimum/,
+    );
+  });
+
+  it("rejects a value below the statutory floor", async () => {
+    await expect(setPlatformPolicy("reserveFundPercent", { value: 10 })).rejects.toThrow(
+      /at least 25/,
+    );
+  });
+
+  it("rejects a maximum above the statutory ceiling", async () => {
+    await expect(setPlatformPolicy("dividendCapPercent", { max: 50 })).rejects.toThrow(
+      /statutory maximum/,
+    );
+  });
+
+  it("rejects a non-numeric value for a numeric rule", async () => {
+    await expect(
+      setPlatformPolicy("reserveFundPercent", { value: "30" as unknown as number }),
+    ).rejects.toThrow(/finite number/);
+  });
+
+  it("applies an in-bounds override", async () => {
+    await setPlatformPolicy("reserveFundPercent", { value: 30, locked: true });
+    const { config } = await getEffectiveConfig(coopId);
+    expect(config.reserveFundPercent).toBe(30);
   });
 });
 

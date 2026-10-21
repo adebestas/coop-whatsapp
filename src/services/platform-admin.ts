@@ -1,6 +1,7 @@
 import { randomInt } from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { hashPin } from "../lib/security.js";
+import { normalizePhone } from "../lib/phones.js";
 import { writePlatformAudit } from "./platform-audit.js";
 import type { PlatformActor } from "./platform-coops.js";
 
@@ -65,11 +66,13 @@ export async function createPlatformAdmin(
   actor?: PlatformActor,
 ): Promise<CreatePlatformAdminResult> {
   const role = input.role && ROLES.has(input.role) ? input.role : "developer";
+  const phone = normalizePhone(input.phone);
+  if (!phone) throw new Error("invalid phone number");
   const tempPin = String(randomInt(1000, 9000));
   const admin = await prisma.platformAdmin.create({
     data: {
       name: input.name,
-      phone: input.phone,
+      phone,
       role,
       pin: hashPin(tempPin),
       mustChangePin: true,
