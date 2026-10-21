@@ -6,6 +6,7 @@ import {
   reportPeriod,
   periodDueAt,
   statutoryPack,
+  annualPack,
   nfiuPack,
   generateReport,
   setRegulatorProfile,
@@ -366,6 +367,54 @@ describe("statutoryPack", () => {
     expect(flatten([savingsSheet])).toContain(formatBalance(800000));
     const bs = sheet(pack, /balance/i)!;
     expect(flatten([bs])).toContain(formatBalance(500000));
+  });
+});
+
+describe("annualPack", () => {
+  it("includes identity particulars and membership movement for the year", async () => {
+    const coop = await createTestCoop("REG30");
+    await prisma.cooperative.update({
+      where: { id: coop.id },
+      data: {
+        registrationNumber: "LS/CS/2020/001",
+        tin: "12345678-0001",
+        scumlStatus: "registered",
+        dpoEmail: "dpo@example.com",
+      },
+    });
+    await prisma.regulatorProfile.create({
+      data: { cooperativeId: coop.id, label: "Lagos Ministry", type: "ministry" },
+    });
+
+    const before = await createTestMember(coop.id, { phone: "2348000010040" });
+    await prisma.member.update({
+      where: { id: before.id },
+      data: { createdAt: new Date("2025-06-01T10:00:00Z") },
+    });
+    const joined = await createTestMember(coop.id, { phone: "2348000010041" });
+    await prisma.member.update({
+      where: { id: joined.id },
+      data: { createdAt: new Date("2026-05-01T10:00:00Z") },
+    });
+    await prisma.member.update({ where: { id: joined.id }, data: { status: "suspended" } });
+    await createTestMember(coop.id, { phone: "2348000010042" });
+    await prisma.member.updateMany({
+      where: { cooperativeId: coop.id, phone: "2348000010042" },
+      data: { createdAt: new Date("2027-01-05T10:00:00Z") },
+    });
+
+    const sheets = await annualPack(coop.id, "2026");
+    const identity = sheets.find((s) => s.name === "Annual Return")!;
+    const movement = sheets.find((s) => s.name === "Membership Movement")!;
+
+    expect(identity.rows).toContainEqual(["Registration number", "LS/CS/2020/001"]);
+    expect(identity.rows).toContainEqual(["Regulator", "Lagos Ministry (ministry)"]);
+    expect(identity.rows).toContainEqual(["Members (current)", "3"]);
+
+    expect(movement.rows).toContainEqual(["Opening members (1 Jan)", "1"]);
+    expect(movement.rows).toContainEqual(["Joined during year", "1"]);
+    expect(movement.rows).toContainEqual(["Closing members (31 Dec)", "2"]);
+    expect(movement.rows).toContainEqual(["Suspended (as of generation)", "1"]);
   });
 });
 

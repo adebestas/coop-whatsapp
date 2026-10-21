@@ -254,6 +254,97 @@ export async function statutoryPack(coopId: string, period: string): Promise<Rep
 }
 
 /**
+ * Build the annual registrar return for a calendar year. READ-ONLY: identity and
+ * compliance particulars, membership movement, statutory financial statements,
+ * fund appropriations/dividends, and governance/AGM evidence.
+ */
+export async function annualPack(coopId: string, period: string): Promise<ReportSheet[]> {
+  const { start, end } = periodRange(period);
+  const [coop, profile, opening, joined, closing, byStatus] = await Promise.all([
+    prisma.cooperative.findUnique({
+      where: { id: coopId },
+      select: {
+        name: true,
+        code: true,
+        state: true,
+        country: true,
+        registrationNumber: true,
+        tin: true,
+        cvn: true,
+        scumlStatus: true,
+        dpoName: true,
+        dpoPhone: true,
+        dpoEmail: true,
+      },
+    }),
+    prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coopId, active: true },
+      orderBy: { createdAt: "desc" },
+      select: { label: true, type: true },
+    }),
+    prisma.member.count({ where: { cooperativeId: coopId, createdAt: { lt: start } } }),
+    prisma.member.count({
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+    }),
+    prisma.member.count({ where: { cooperativeId: coopId, createdAt: { lte: end } } }),
+    prisma.member.groupBy({
+      by: ["status"],
+      where: { cooperativeId: coopId },
+      _count: { _all: true },
+    }),
+  ]);
+
+  const current = byStatus.reduce((sum, row) => sum + row._count._all, 0);
+  const statusRows = new Map(byStatus.map((row) => [row.status, row._count._all]));
+  const warnings: string[] = [];
+  if (!coop?.registrationNumber) warnings.push("Registration number is missing");
+  if (!coop?.tin) warnings.push("TIN is missing");
+  if (!coop?.scumlStatus) warnings.push("SCUML status is missing");
+  if (!coop?.dpoEmail) warnings.push("DPO email is missing");
+
+  const identity: ReportSheet = {
+    name: "Annual Return",
+    rows: [
+      ["Item", "Value"],
+      ["Cooperative", coop?.name ?? ""],
+      ["Code", coop?.code ?? ""],
+      ["State", coop?.state ?? ""],
+      ["Country", coop?.country ?? ""],
+      ["Regulator", profile ? `${profile.label} (${profile.type})` : "Not configured"],
+      ["Period (calendar year)", period],
+      ["Registration number", coop?.registrationNumber ?? ""],
+      ["TIN", coop?.tin ?? ""],
+      ["CVN", coop?.cvn ?? ""],
+      ["SCUML status", coop?.scumlStatus ?? ""],
+      ["DPO name", coop?.dpoName ?? ""],
+      ["DPO phone", coop?.dpoPhone ?? ""],
+      ["DPO email", coop?.dpoEmail ?? ""],
+      ["Members (current)", String(current)],
+      ["Generated at (UTC)", new Date().toISOString()],
+      ["Warnings", warnings.length ? warnings.join("; ") : "None"],
+      ["Note", "Calendar-year return. Money in NGN. Member status is as of generation time."],
+    ],
+  };
+
+  const movement: ReportSheet = {
+    name: "Membership Movement",
+    rows: [
+      ["Metric", "Members"],
+      ["Opening members (1 Jan)", String(opening)],
+      ["Joined during year", String(joined)],
+      ["Closing members (31 Dec)", String(closing)],
+      ["Active (as of generation)", String(statusRows.get("active") ?? 0)],
+      ["Pending (as of generation)", String(statusRows.get("pending") ?? 0)],
+      ["Suspended (as of generation)", String(statusRows.get("suspended") ?? 0)],
+      ["Deceased (as of generation)", String(statusRows.get("deceased") ?? 0)],
+      ["Note", "Exit dates are not stored; status breakdowns reflect the current member record."],
+    ],
+  };
+
+  return [identity, movement];
+}
+
+/**
  * Build the NFIU AML summaries pack for a cooperative and period, READ-ONLY:
  * STR/SAR counts grouped by status, and the large-transaction (≥ ₦5M) list —
  * all directions, matching the direction-agnostic AML large-transaction rule
