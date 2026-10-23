@@ -649,6 +649,36 @@ async function dueProfile(
   };
 }
 
+/** The active regulator profile (and its due days) for the console. */
+export interface RegulatorProfileView {
+  id: string;
+  label: string;
+  type: string;
+  contactEmail: string | null;
+  monthlyDueDay: number;
+  quarterlyDueDay: number;
+  annualDueMonth: number;
+  annualDueDay: number;
+}
+
+/** The active regulator profile for the console, or null when unconfigured. */
+export async function getRegulatorProfile(coopId: string): Promise<RegulatorProfileView | null> {
+  return prisma.regulatorProfile.findFirst({
+    where: { cooperativeId: coopId, active: true },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      label: true,
+      type: true,
+      contactEmail: true,
+      monthlyDueDay: true,
+      quarterlyDueDay: true,
+      annualDueMonth: true,
+      annualDueDay: true,
+    },
+  });
+}
+
 /**
  * Generate a regulator report pack for a coop and period. DB reads run in a
  * short read transaction; the file build + object-storage upload + email then
@@ -813,6 +843,8 @@ export interface ReportSummary {
   status: string;
   dueAt: Date | null;
   filedAt: Date | null;
+  acknowledgementId: string | null;
+  notes: string | null;
   files: { xlsx: string; pdf: string; csv: string } | null;
 }
 
@@ -942,15 +974,32 @@ export async function setRegulatorProfile(
 /**
  * Mark a generated regulator pack as filed. `reportId` may be a full id or a
  * unique suffix (matching the shorter ids shown in chat). Coop-scoped write via
- * `withTx` + `setCoopContext`, audited as `regulator.report_filed`.
+ * `withTx` + `setCoopContext`, audited as `regulator.report_filed` (or
+ * `regulator.report_acknowledged` when a filed pack gains/updates its receipt).
+ * An optional acknowledgement and filing note are trimmed; a whitespace-only
+ * acknowledgement clears a previously recorded one.
  */
 export async function markFiled(
   coopId: string,
   reportId: string,
   actor: { id: string; phone: string },
+  filing: { acknowledgementId?: string; note?: string } = {},
 ): Promise<{ ok: boolean; message: string }> {
   const ref = reportId?.trim();
   if (!ref) return { ok: false, message: "Usage: *regreport filed <report id>*." };
+
+  const acknowledgementProvided = filing.acknowledgementId !== undefined;
+  const acknowledgementId = filing.acknowledgementId?.trim() || null;
+  const note = filing.note?.trim() || null;
+  if (acknowledgementId && acknowledgementId.length > 80) {
+    return { ok: false, message: "Acknowledgement must be 80 characters or fewer." };
+  }
+  if (acknowledgementId && !/^[A-Za-z0-9]/.test(acknowledgementId)) {
+    return { ok: false, message: "Acknowledgement must start with a letter or digit." };
+  }
+  if (note && note.length > 500) {
+    return { ok: false, message: "Filing note must be 500 characters or fewer." };
+  }
 
   const report = await prisma.regulatorReport.findFirst({
     where: { cooperativeId: coopId, id: { endsWith: ref } },
@@ -959,10 +1008,11 @@ export async function markFiled(
   if (!report) {
     return { ok: false, message: `No regulator report matching *${ref}* in your cooperative.` };
   }
-  if (report.status === "filed") {
+
+  if (report.status === "filed" && !acknowledgementId && !note && !acknowledgementProvided) {
     return {
       ok: true,
-      message: `ℹ️ The *${report.period}* ${report.periodType} pack is already marked filed.`,
+      message: `The *${report.period}* ${report.periodType} pack is already marked filed.`,
     };
   }
 
@@ -971,7 +1021,12 @@ export async function markFiled(
     await setCoopContext(tx as never, coopId);
     await tx.regulatorReport.update({
       where: { id: report.id },
-      data: { status: "filed", filedAt },
+      data: {
+        status: "filed",
+        filedAt: report.filedAt ?? filedAt,
+        ...(acknowledgementProvided ? { acknowledgementId } : {}),
+        ...(note ? { notes: note } : {}),
+      },
     });
   });
 
@@ -980,15 +1035,20 @@ export async function markFiled(
     actorPhone: actor.phone,
     actorId: actor.id,
     actorRole: "admin",
-    action: "regulator.report_filed",
+    action: report.status === "filed" ? "regulator.report_acknowledged" : "regulator.report_filed",
     targetType: "regulatorReport",
     targetId: report.id,
-    detail: `${report.periodType} ${report.packType} pack for ${report.period} marked filed`,
+    detail:
+      `${report.periodType} ${report.packType} pack for ${report.period} marked filed` +
+      (acknowledgementId ? ` (ack ${acknowledgementId})` : ""),
   });
 
   return {
     ok: true,
-    message: `✅ *${report.period}* ${report.periodType} regulator pack marked *filed*.`,
+    message:
+      `*${report.period}* ${report.periodType} regulator pack marked *filed*` +
+      (acknowledgementId ? ` with acknowledgement *${acknowledgementId}*` : "") +
+      ".",
   };
 }
 
@@ -1019,6 +1079,8 @@ export async function listReports(
       status: r.status,
       dueAt: r.dueAt,
       filedAt: r.filedAt,
+      acknowledgementId: r.acknowledgementId,
+      notes: r.notes,
       files,
     };
   });

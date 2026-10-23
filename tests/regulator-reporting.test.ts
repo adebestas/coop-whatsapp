@@ -10,6 +10,7 @@ import {
   nfiuPack,
   generateReport,
   setRegulatorProfile,
+  getRegulatorProfile,
   markFiled,
   listReports,
   type PackType,
@@ -1360,6 +1361,192 @@ describe("markFiled", () => {
     const res = await markFiled(coop.id, "does-not-exist", { id: admin.id, phone: admin.phone });
     expect(res.ok).toBe(false);
   });
+
+  it("persists an acknowledgement and note, and audits the filing", async () => {
+    const coop = await createTestCoop("REG41");
+    const admin = await createTestMember(coop.id, { phone: "2348000010051", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "generated",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      {
+        acknowledgementId: " LSCS/AR/2026/0042 ",
+        note: "Delivered by hand",
+      },
+    );
+    expect(res.ok).toBe(true);
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.status).toBe("filed");
+    expect(saved!.acknowledgementId).toBe("LSCS/AR/2026/0042");
+    expect(saved!.notes).toBe("Delivered by hand");
+    expect(saved!.filedAt).toBeInstanceOf(Date);
+
+    const audited = await prisma.auditLog.findFirst({
+      where: { cooperativeId: coop.id, action: "regulator.report_filed", targetId: report.id },
+    });
+    expect(audited!.detail).toContain("LSCS/AR/2026/0042");
+  });
+
+  it("rejects an over-length acknowledgement", async () => {
+    const coop = await createTestCoop("REG42");
+    const admin = await createTestMember(coop.id, { phone: "2348000010052", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+      },
+    });
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      {
+        acknowledgementId: "x".repeat(81),
+      },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.message).toBe("Acknowledgement must be 80 characters or fewer.");
+    expect(
+      (await prisma.regulatorReport.findUnique({ where: { id: report.id } }))!.acknowledgementId,
+    ).toBeNull();
+  });
+
+  it("rejects an acknowledgement that does not start with a letter or digit", async () => {
+    const coop = await createTestCoop("REG45");
+    const admin = await createTestMember(coop.id, { phone: "2348000010054", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "generated",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      {
+        acknowledgementId: "/ACK/2026",
+      },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/letter or digit/i);
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.acknowledgementId).toBeNull();
+    expect(saved!.status).toBe("generated");
+  });
+
+  it("clears an acknowledgement when only whitespace is submitted", async () => {
+    const coop = await createTestCoop("REG46");
+    const admin = await createTestMember(coop.id, { phone: "2348000010055", role: "superadmin" });
+    const filedAt = new Date("2026-04-02T00:00:00Z");
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        filedAt,
+        acknowledgementId: "ACK-OLD",
+        notes: "Received",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      {
+        acknowledgementId: "   ",
+      },
+    );
+    expect(res.ok).toBe(true);
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.acknowledgementId).toBeNull();
+    expect(saved!.notes).toBe("Received");
+    expect(saved!.status).toBe("filed");
+    expect(saved!.filedAt!.toISOString()).toBe(filedAt.toISOString());
+
+    const audited = await prisma.auditLog.findFirst({
+      where: {
+        cooperativeId: coop.id,
+        action: "regulator.report_acknowledged",
+        targetId: report.id,
+      },
+    });
+    expect(audited).not.toBeNull();
+  });
+
+  it("rejects an over-length filing note", async () => {
+    const coop = await createTestCoop("REG47");
+    const admin = await createTestMember(coop.id, { phone: "2348000010056", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "generated",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      {
+        note: "x".repeat(501),
+      },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.message).toBe("Filing note must be 500 characters or fewer.");
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.notes).toBeNull();
+    expect(saved!.status).toBe("generated");
+  });
+
+  it("reports success and audits the filing when no acknowledgement or note is supplied", async () => {
+    const coop = await createTestCoop("REG48");
+    const admin = await createTestMember(coop.id, { phone: "2348000010057", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "generated",
+      },
+    });
+
+    const res = await markFiled(coop.id, report.id, { id: admin.id, phone: admin.phone });
+    expect(res.ok).toBe(true);
+    expect(res.message).toBe("*2026* annual regulator pack marked *filed*.");
+
+    const audited = await prisma.auditLog.findFirst({
+      where: { cooperativeId: coop.id, action: "regulator.report_filed", targetId: report.id },
+    });
+    expect(audited!.detail).toContain("annual statutory pack for 2026 marked filed");
+  });
 });
 
 describe("listReports", () => {
@@ -1398,6 +1585,108 @@ describe("listReports", () => {
     const res = await listReports(coop.id);
     expect(res.ok).toBe(true);
     expect(res.reports).toEqual([]);
+  });
+
+  it("returns the acknowledgement and filing note", async () => {
+    const coop = await createTestCoop("REG43");
+    const dueAt = new Date("2027-03-31T00:00:00Z");
+    await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        filedAt: new Date(),
+        dueAt,
+        acknowledgementId: "ACK-1",
+        notes: "Received",
+      },
+    });
+    const res = await listReports(coop.id);
+    expect(res.reports![0].acknowledgementId).toBe("ACK-1");
+    expect(res.reports![0].notes).toBe("Received");
+    expect(res.reports![0].dueAt!.toISOString()).toBe(dueAt.toISOString());
+  });
+});
+
+describe("getRegulatorProfile", () => {
+  it("returns the active profile with annual due fields, or null", async () => {
+    const coop = await createTestCoop("REG44");
+    expect(await getRegulatorProfile(coop.id)).toBeNull();
+    const created = await prisma.regulatorProfile.create({
+      data: {
+        cooperativeId: coop.id,
+        label: "Lagos Ministry",
+        type: "ministry",
+        monthlyDueDay: 15,
+        quarterlyDueDay: 15,
+        annualDueMonth: 4,
+        annualDueDay: 30,
+      },
+    });
+    const view = await getRegulatorProfile(coop.id);
+    expect(view).toEqual({
+      id: created.id,
+      label: "Lagos Ministry",
+      type: "ministry",
+      contactEmail: null,
+      monthlyDueDay: 15,
+      quarterlyDueDay: 15,
+      annualDueMonth: 4,
+      annualDueDay: 30,
+    });
+  });
+
+  it("returns only the active profile when several exist", async () => {
+    const coop = await createTestCoop("REG49");
+    await prisma.regulatorProfile.create({
+      data: {
+        cooperativeId: coop.id,
+        label: "Old Ministry",
+        type: "custom",
+        monthlyDueDay: 5,
+        quarterlyDueDay: 6,
+        annualDueMonth: 7,
+        annualDueDay: 8,
+        active: false,
+      },
+    });
+    const active = await prisma.regulatorProfile.create({
+      data: {
+        cooperativeId: coop.id,
+        label: "Current Ministry",
+        type: "ministry",
+        monthlyDueDay: 10,
+        quarterlyDueDay: 15,
+        annualDueMonth: 4,
+        annualDueDay: 30,
+        active: true,
+      },
+    });
+
+    const view = await getRegulatorProfile(coop.id);
+    expect(view).toEqual({
+      id: active.id,
+      label: "Current Ministry",
+      type: "ministry",
+      contactEmail: null,
+      monthlyDueDay: 10,
+      quarterlyDueDay: 15,
+      annualDueMonth: 4,
+      annualDueDay: 30,
+    });
+
+    const inactiveOnly = await createTestCoop("REG50");
+    await prisma.regulatorProfile.create({
+      data: {
+        cooperativeId: inactiveOnly.id,
+        label: "Retired Ministry",
+        type: "custom",
+        active: false,
+      },
+    });
+    expect(await getRegulatorProfile(inactiveOnly.id)).toBeNull();
   });
 });
 
