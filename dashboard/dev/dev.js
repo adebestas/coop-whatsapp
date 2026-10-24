@@ -22,6 +22,7 @@
   let currentArg = null;
   let currentCoopTab = 'health';
   let coopDetail = null;
+  let coopRegulator = { profile: null, reports: [] };
   let coopActivityEntries = [];
   let coopsData = [];
   let policiesData = [];
@@ -34,7 +35,12 @@
   // ---- Delegated handlers (CSP: no inline scripts) ----
   function runAction(el, event) {
     const fn = window[el.dataset.action];
-    if (typeof fn === 'function') fn(el.dataset.arg, event, el);
+    if (typeof fn !== 'function') return;
+    if (el.dataset.arg1 !== undefined || el.dataset.arg2 !== undefined) {
+      fn(el.dataset.arg1, el.dataset.arg2, event, el);
+    } else {
+      fn(el.dataset.arg, event, el);
+    }
   }
   document.addEventListener('click', (e) => {
     const el = e.target.closest('[data-action]');
@@ -460,6 +466,11 @@
       } catch {
         /* activity is optional */
       }
+      try {
+        coopRegulator = await api(`/coops/${id}/regulator-reports`);
+      } catch {
+        coopRegulator = { profile: null, reports: [] };
+      }
       renderCoopShell();
     } catch (err) {
       el.innerHTML = `<div class="empty-state"><h3>Failed to load cooperative</h3><p>${esc(err.message)}</p></div>`;
@@ -578,6 +589,10 @@
         </div>
       </div>
 
+      <div class="card mb-6" id="regulatorCard">
+        ${renderRegulatorCard(coop)}
+      </div>
+
       <div class="card">
         <div class="card-header"><span class="card-title">Controls</span></div>
         <div class="card-body">
@@ -592,6 +607,73 @@
     return entries
       .map(([k, v]) => `<span class="badge badge-gray">${esc(k)}: ${fmt(v)}</span>`)
       .join(' ');
+  }
+
+  function renderRegulatorCard(coop) {
+    const profile = coopRegulator.profile;
+    const reports = coopRegulator.reports || [];
+    const thisYear = new Date().getUTCFullYear();
+    const years = [thisYear, thisYear - 1, thisYear - 2]
+      .map((y) => `<option value="${y}">${y}</option>`)
+      .join('');
+    const due = profile
+      ? `Monthly day ${profile.monthlyDueDay} | Quarterly day ${profile.quarterlyDueDay} | Annual ${profile.annualDueMonth}/${profile.annualDueDay}`
+      : 'No regulator configured (set it with the chat command regulatorconfig)';
+    const rows = reports.length
+      ? reports
+          .map(
+            (r) => `
+        <tr>
+          <td>${esc(r.period)}</td>
+          <td>${esc(r.periodType)}</td>
+          <td>${statusBadge(r.status)}</td>
+          <td>${r.dueAt ? date(r.dueAt) : '-'}</td>
+          <td>${r.filedAt ? date(r.filedAt) : '-'}</td>
+          <td>${esc(r.acknowledgementId || '-')}</td>
+          <td>
+            ${r.files ? `<a href="${API_BASE}/coops/${esc(coop.id)}/regulator-reports/${esc(r.id)}/download/xlsx" target="_blank" rel="noopener">XLSX</a> | <a href="${API_BASE}/coops/${esc(coop.id)}/regulator-reports/${esc(r.id)}/download/pdf" target="_blank" rel="noopener">PDF</a> | <a href="${API_BASE}/coops/${esc(coop.id)}/regulator-reports/${esc(r.id)}/download/csv" target="_blank" rel="noopener">CSV</a>` : '-'}
+          </td>
+          <td>
+            ${
+              readOnly || r.status === 'filed'
+                ? ''
+                : `<button class="btn btn-secondary btn-sm" data-action="fileRegulatorReport" data-arg1="${esc(coop.id)}" data-arg2="${esc(r.id)}">Mark filed</button>`
+            }
+          </td>
+        </tr>`,
+          )
+          .join('')
+      : '<tr><td colspan="8" class="text-muted">No annual returns generated yet.</td></tr>';
+
+    return `
+      <div class="card-header">
+        <span class="card-title">Regulator returns</span>
+        <span class="text-muted text-xs">${esc(profile ? profile.label : 'Not configured')}</span>
+      </div>
+      <div class="card-body">
+        <p class="text-muted text-sm mb-4">${esc(due)}</p>
+        ${
+          readOnly
+            ? ''
+            : `<div class="form-inline mb-4">
+                 <div class="form-field"><label for="regYear">Year</label><select id="regYear">${years}</select></div>
+                 <div class="form-field"><label for="regPack">Pack</label>
+                   <select id="regPack">
+                     <option value="statutory">Statutory</option>
+                     <option value="both">Statutory + NFIU</option>
+                     <option value="nfiu">NFIU</option>
+                   </select>
+                 </div>
+                 <button class="btn btn-primary btn-sm" data-action="generateAnnualReport" data-arg="${esc(coop.id)}">Generate annual pack</button>
+               </div>`
+        }
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Period</th><th>Type</th><th>Status</th><th>Due</th><th>Filed</th><th>Ack</th><th>Files</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
   }
 
   function renderActivityPanel() {
@@ -808,6 +890,40 @@
       });
       toast('Compliance metadata saved', 'success');
       renderCoopDetail(id);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+
+  window.generateAnnualReport = async function (id) {
+    const year = Number(document.getElementById('regYear')?.value);
+    const packType = document.getElementById('regPack')?.value || 'statutory';
+    try {
+      const res = await api(`/coops/${id}/regulator-reports`, {
+        method: 'POST',
+        body: { year, packType },
+      });
+      toast('Annual pack generated');
+      coopRegulator = await api(`/coops/${id}/regulator-reports`);
+      renderCoopShell();
+      return res;
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+
+  window.fileRegulatorReport = async function (coopId, reportId) {
+    const id = coopId;
+    const acknowledgementId = window.prompt('Registrar acknowledgement number (optional):') || '';
+    const note = window.prompt('Filing note (optional):') || '';
+    try {
+      await api(`/coops/${id}/regulator-reports/${reportId}/file`, {
+        method: 'POST',
+        body: { acknowledgementId, note },
+      });
+      toast('Marked filed');
+      coopRegulator = await api(`/coops/${id}/regulator-reports`);
+      renderCoopShell();
     } catch (err) {
       toast(err.message, 'error');
     }
@@ -1151,6 +1267,7 @@
   function statusBadge(status) {
     const s = status || 'unknown';
     if (s === 'active') return '<span class="badge badge-green">active</span>';
+    if (s === 'filed') return '<span class="badge badge-green">filed</span>';
     if (s === 'suspended' || s === 'inactive') return '<span class="badge badge-red">' + esc(s) + '</span>';
     return `<span class="badge badge-gray">${esc(s)}</span>`;
   }

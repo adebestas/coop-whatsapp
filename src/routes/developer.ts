@@ -1,3 +1,6 @@
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { hashPin, verifyPin } from "../lib/security.js";
@@ -393,6 +396,67 @@ export async function developerApiRoutes(app: FastifyInstance) {
     if (!result.ok) return reply.code(400).send({ error: result.message });
     return result;
   });
+
+  app.get(
+    "/api/developer/coops/:id/regulator-reports/:reportId/download/:kind",
+    async (req, reply) => {
+      const { id, reportId, kind } = req.params as {
+        id: string;
+        reportId: string;
+        kind: string;
+      };
+      if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+      if (kind !== "xlsx" && kind !== "pdf" && kind !== "csv") {
+        return reply.code(400).send({ error: "kind must be xlsx, pdf or csv" });
+      }
+
+      const report = await withCoopContext(id, () =>
+        prisma.regulatorReport.findFirst({ where: { id: reportId, cooperativeId: id } }),
+      );
+      if (!report?.files) return reply.code(404).send({ error: "report not found" });
+
+      let stored: string | undefined;
+      if (typeof report.files === "string") {
+        try {
+          const parsed = JSON.parse(report.files) as Record<string, unknown> | null;
+          const candidate = parsed?.[kind];
+          stored = typeof candidate === "string" ? candidate : undefined;
+        } catch {
+          stored = undefined;
+        }
+      } else if (report.files && typeof report.files === "object") {
+        const candidate = (report.files as Record<string, unknown>)[kind];
+        stored = typeof candidate === "string" ? candidate : undefined;
+      }
+      if (!stored) return reply.code(404).send({ error: "file not found" });
+
+      // Stored paths are relative to the export directory (e.g. `exports/x.xlsx`).
+      // Resolve to an absolute path and reject anything that escapes that root.
+      const root = resolve(process.cwd(), process.env.EXPORT_DIR ?? "exports");
+      const absolute = resolve(process.cwd(), stored);
+      const rel = relative(root, absolute);
+      if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+        return reply.code(404).send({ error: "file not found" });
+      }
+
+      try {
+        await stat(absolute);
+      } catch {
+        return reply.code(404).send({ error: "file not found" });
+      }
+
+      const mime =
+        kind === "xlsx"
+          ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          : kind === "pdf"
+            ? "application/pdf"
+            : "text/csv";
+      return reply
+        .header("Content-Type", mime)
+        .header("Content-Disposition", `attachment; filename="${basename(absolute)}"`)
+        .send(createReadStream(absolute));
+    },
+  );
 
   app.post("/api/developer/coops/:id/regulator-reports/:reportId/file", async (req, reply) => {
     const { id, reportId } = req.params as { id: string; reportId: string };

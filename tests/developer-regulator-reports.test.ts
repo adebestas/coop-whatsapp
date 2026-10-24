@@ -191,4 +191,99 @@ describe("developer regulator reports", () => {
     expect(writeRes.statusCode).toBe(403);
     expect(JSON.parse(writeRes.body).error).toMatch(/read-only|forbidden/i);
   });
+
+  it("downloads generated xlsx and pdf artifacts", async () => {
+    const coop = await createTestCoop("DEVREGD1");
+    const cookie = await login("2348000000201", "owner");
+
+    const gen = await app.inject({
+      method: "POST",
+      url: `/api/developer/coops/${coop.id}/regulator-reports`,
+      headers: write(cookie),
+      payload: { year: 2026, packType: "statutory" },
+    });
+    expect(gen.statusCode).toBe(200);
+    const generated = JSON.parse(gen.body);
+    createdFiles.push(generated.files.xlsx, generated.files.pdf, generated.files.csv);
+
+    const xlsx = await app.inject({
+      method: "GET",
+      url: `/api/developer/coops/${coop.id}/regulator-reports/${generated.reportId}/download/xlsx`,
+      headers: { cookie },
+    });
+    expect(xlsx.statusCode).toBe(200);
+    expect(xlsx.headers["content-type"]).toBe(
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    expect(xlsx.rawPayload.length).toBeGreaterThan(0);
+
+    const pdf = await app.inject({
+      method: "GET",
+      url: `/api/developer/coops/${coop.id}/regulator-reports/${generated.reportId}/download/pdf`,
+      headers: { cookie },
+    });
+    expect(pdf.statusCode).toBe(200);
+    expect(pdf.headers["content-type"]).toBe("application/pdf");
+    expect(pdf.rawPayload.length).toBeGreaterThan(0);
+  });
+
+  it("rejects an unknown download kind", async () => {
+    const coop = await createTestCoop("DEVREGD2");
+    const cookie = await login("2348000000202", "owner");
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/developer/coops/${coop.id}/regulator-reports/nope/download/docx`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/kind/);
+  });
+
+  it("does not serve another coop's report", async () => {
+    const owner = await createTestCoop("DEVREGD3");
+    const other = await createTestCoop("DEVREGD4");
+    const cookie = await login("2348000000203", "owner");
+
+    const gen = await app.inject({
+      method: "POST",
+      url: `/api/developer/coops/${owner.id}/regulator-reports`,
+      headers: write(cookie),
+      payload: { year: 2026, packType: "statutory" },
+    });
+    expect(gen.statusCode).toBe(200);
+    const generated = JSON.parse(gen.body);
+    createdFiles.push(generated.files.xlsx, generated.files.pdf, generated.files.csv);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/developer/coops/${other.id}/regulator-reports/${generated.reportId}/download/xlsx`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("lets the support role download reports", async () => {
+    const coop = await createTestCoop("DEVREGD5");
+    const ownerCookie = await login("2348000000204", "owner");
+
+    const gen = await app.inject({
+      method: "POST",
+      url: `/api/developer/coops/${coop.id}/regulator-reports`,
+      headers: write(ownerCookie),
+      payload: { year: 2026, packType: "statutory" },
+    });
+    expect(gen.statusCode).toBe(200);
+    const generated = JSON.parse(gen.body);
+    createdFiles.push(generated.files.xlsx, generated.files.pdf, generated.files.csv);
+
+    const supportCookie = await login("2348000000205", "support");
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/developer/coops/${coop.id}/regulator-reports/${generated.reportId}/download/xlsx`,
+      headers: { cookie: supportCookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.rawPayload.length).toBeGreaterThan(0);
+  });
 });
