@@ -3,6 +3,7 @@ import { prisma } from "../lib/prisma.js";
 import { hashPin, verifyPin } from "../lib/security.js";
 import { checkRateLimit, resetRateLimit } from "../lib/cache.js";
 import { normalizePhone } from "../lib/phones.js";
+import { withCoopContext } from "../lib/tenant-context.js";
 import { verifyTotp, otpauthUri } from "../lib/totp.js";
 import {
   PLATFORM_COOKIE,
@@ -35,6 +36,12 @@ import {
 } from "../services/platform-admin.js";
 import { listPlatformPolicies, setPlatformPolicy } from "../services/platform-policy.js";
 import { writePlatformAudit } from "../services/platform-audit.js";
+import {
+  generateReport,
+  listReports,
+  markFiled,
+  getRegulatorProfile,
+} from "../services/regulator-reporting.js";
 
 const MAX_IP_ATTEMPTS = 5;
 const IP_WINDOW_SECONDS = 60;
@@ -345,6 +352,74 @@ export async function developerApiRoutes(app: FastifyInstance) {
       throw err;
     }
     return { ok: true };
+  });
+
+  // ---- Regulator returns (developer/owner) ----
+
+  app.get("/api/developer/coops/:id/regulator-reports", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    const data = await withCoopContext(id, async () => {
+      const [profile, listed] = await Promise.all([getRegulatorProfile(id), listReports(id)]);
+      return { profile, reports: listed.reports ?? [] };
+    });
+    return data;
+  });
+
+  app.post("/api/developer/coops/:id/regulator-reports", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+
+    const body = (req.body ?? {}) as { year?: number | string; packType?: string };
+    const rawYear = body.year;
+    const year =
+      typeof rawYear === "number"
+        ? rawYear
+        : typeof rawYear === "string" && /^\d{4}$/.test(rawYear.trim())
+          ? Number(rawYear.trim())
+          : NaN;
+    const currentYear = new Date().getUTCFullYear();
+    if (!Number.isInteger(year) || year < 2000 || year > currentYear) {
+      return reply
+        .code(400)
+        .send({ error: "year must be a four-digit year up to the current year" });
+    }
+    const packType = body.packType ?? "statutory";
+    if (packType !== "statutory" && packType !== "nfiu" && packType !== "both") {
+      return reply.code(400).send({ error: "packType must be statutory, nfiu or both" });
+    }
+
+    const result = await generateReport(id, String(year), "annual", packType, actorOf(req).id);
+    if (!result.ok) return reply.code(400).send({ error: result.message });
+    return result;
+  });
+
+  app.post("/api/developer/coops/:id/regulator-reports/:reportId/file", async (req, reply) => {
+    const { id, reportId } = req.params as { id: string; reportId: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+
+    const body = (req.body ?? {}) as { acknowledgementId?: string; note?: string };
+    if (body.acknowledgementId !== undefined && typeof body.acknowledgementId !== "string") {
+      return reply.code(400).send({ error: "acknowledgementId must be a string" });
+    }
+    if (body.note !== undefined && typeof body.note !== "string") {
+      return reply.code(400).send({ error: "note must be a string" });
+    }
+
+    const actor = actorOf(req);
+    const result = await withCoopContext(id, () =>
+      markFiled(
+        id,
+        reportId,
+        { id: actor.id, phone: actor.phone },
+        { acknowledgementId: body.acknowledgementId, note: body.note },
+      ),
+    );
+    if (!result.ok) {
+      const notFound = result.message.startsWith("No regulator report matching");
+      return reply.code(notFound ? 404 : 400).send({ error: result.message });
+    }
+    return { ok: true, message: result.message };
   });
 
   app.post("/api/developer/coops/:id/admins", async (req, reply) => {
