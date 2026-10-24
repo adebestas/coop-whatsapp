@@ -1544,6 +1544,7 @@ describe("markFiled", () => {
       },
     );
     expect(res.ok).toBe(true);
+    expect(res.message).toContain("acknowledgement cleared");
 
     const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
     expect(saved!.acknowledgementId).toBeNull();
@@ -1559,6 +1560,46 @@ describe("markFiled", () => {
       },
     });
     expect(audited).not.toBeNull();
+  });
+
+  it("updates the acknowledgement without rewriting an unchanged note", async () => {
+    const coop = await createTestCoop("REG46e");
+    const admin = await createTestMember(coop.id, { phone: "2348000010061", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        acknowledgementId: "ACK-OLD",
+        notes: "Received",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      { acknowledgementId: "ACK-NEW", note: "Received" },
+    );
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("ACK-NEW");
+    expect(res.message).not.toContain("note");
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.acknowledgementId).toBe("ACK-NEW");
+    expect(saved!.notes).toBe("Received");
+
+    const audited = await prisma.auditLog.findFirst({
+      where: {
+        cooperativeId: coop.id,
+        targetId: report.id,
+        action: "regulator.report_acknowledged",
+      },
+    });
+    expect(audited!.detail).toContain("acknowledgement updated");
+    expect(audited!.detail).not.toContain("note");
   });
 
   it("updates only the filing note on a filed pack and audits the note change", async () => {

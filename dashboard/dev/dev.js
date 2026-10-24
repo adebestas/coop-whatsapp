@@ -1389,7 +1389,8 @@
     if (!container) return;
     const t = document.createElement('div');
     t.className = `toast ${type}`;
-    t.textContent = msg;
+    // Service messages use WhatsApp *bold* markers; the console renders plain text.
+    t.textContent = String(msg).replace(/\*([^*]+)\*/g, '$1');
     container.appendChild(t);
     setTimeout(() => t.remove(), 3500);
   }

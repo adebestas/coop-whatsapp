@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { symlink, unlink } from "node:fs/promises";
+import { mkdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { prisma, createTestCoop } from "./setup.js";
 import { buildApp } from "../src/app.js";
 import { hashPin } from "../src/lib/security.js";
@@ -337,6 +337,34 @@ describe("developer regulator reports", () => {
     });
     expect(res.statusCode).toBe(404);
     expect(res.body).not.toContain("coop-whatsapp");
+  });
+
+  it("serves a file whose name starts with .. when it stays inside the export directory", async () => {
+    const coop = await createTestCoop("DEVREGD8");
+    const cookie = await login("2348000000208", "owner");
+    const exportDir = join(process.cwd(), process.env.EXPORT_DIR ?? "exports");
+    await mkdir(exportDir, { recursive: true });
+    const file = join(exportDir, `..dotdot-${Date.now()}.csv`);
+    await writeFile(file, "period,value\n2026,1\n");
+    createdFiles.push(file);
+    const stored = relative(process.cwd(), file).replaceAll("\\", "/");
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        files: JSON.stringify({ xlsx: "", pdf: "", csv: stored }),
+      },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/developer/coops/${coop.id}/regulator-reports/${report.id}/download/csv`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain("period,value");
   });
 
   it("rejects a symlink inside the export directory that points outside", async (ctx) => {

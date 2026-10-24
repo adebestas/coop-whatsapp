@@ -1122,8 +1122,10 @@ export async function markFiled(
     ok: true,
     message: wasFiled
       ? `*${report.period}* ${report.periodType} regulator pack filing updated` +
-        (acknowledgementChanged && acknowledgementId
-          ? ` with acknowledgement *${acknowledgementId}*`
+        (acknowledgementChanged
+          ? acknowledgementId
+            ? ` with acknowledgement *${acknowledgementId}*`
+            : " with the acknowledgement cleared"
           : "") +
         (noteChanged ? ` and note ${note ? "updated" : "cleared"}` : "") +
         "."
