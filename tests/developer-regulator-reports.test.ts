@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { unlink } from "node:fs/promises";
+import { symlink, unlink } from "node:fs/promises";
 import { prisma, createTestCoop } from "./setup.js";
 import { buildApp } from "../src/app.js";
 import { hashPin } from "../src/lib/security.js";
 import { resetRateLimit } from "../src/lib/cache.js";
+import { join, relative } from "node:path";
 
 process.env.ADMIN_JWT_SECRET ||= "test-platform-secret-0123456789";
 const app = buildApp();
@@ -326,6 +327,45 @@ describe("developer regulator reports", () => {
         periodType: "annual",
         packType: "statutory",
         files: JSON.stringify({ xlsx: "../package.json", pdf: "", csv: "" }),
+      },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/developer/coops/${coop.id}/regulator-reports/${report.id}/download/xlsx`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.body).not.toContain("coop-whatsapp");
+  });
+
+  it("rejects a symlink inside the export directory that points outside", async (ctx) => {
+    const coop = await createTestCoop("DEVREGD7");
+    const cookie = await login("2348000000207", "owner");
+    const link = join(
+      process.cwd(),
+      process.env.EXPORT_DIR ?? "exports",
+      `escape-${Date.now()}.xlsx`,
+    );
+    try {
+      await symlink(join(process.cwd(), "package.json"), link);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "EACCES" || code === "ENOSYS" || code === "EINVAL") {
+        ctx.skip();
+        return;
+      }
+      throw err;
+    }
+    createdFiles.push(link);
+    const stored = relative(process.cwd(), link).replaceAll("\\", "/");
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        files: JSON.stringify({ xlsx: stored, pdf: "", csv: "" }),
       },
     });
 

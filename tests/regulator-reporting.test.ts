@@ -533,6 +533,24 @@ describe("annualPack", () => {
         createdAt: new Date("2026-04-01T10:00:00Z"),
       },
     });
+    // Prior-year allocation: counts in lifetime-to-date but not in the year total.
+    await prisma.reserveAllocation.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 100000,
+        source: "manual",
+        createdAt: new Date("2025-06-01T10:00:00Z"),
+      },
+    });
+    // A second in-year source must appear as its own line.
+    await prisma.reserveAllocation.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 50000,
+        source: "profit_sharing",
+        createdAt: new Date("2026-05-01T10:00:00Z"),
+      },
+    });
     // Allocated in the following year: excluded from the 2026 in-year total.
     await prisma.reserveAllocation.create({
       data: {
@@ -620,13 +638,14 @@ describe("annualPack", () => {
 
     const funds = sheets.find((s) => s.name === "Statutory Funds & Dividends")!;
     // The 2027 allocation must not leak into the 2026 in-year total.
-    expect(funds.rows).toContainEqual(["Reserve allocated in year", formatBalance(250000)]);
+    expect(funds.rows).toContainEqual(["Reserve allocated in year", formatBalance(300000)]);
     expect(funds.rows).toContainEqual(["Education allocated in year", formatBalance(100000)]);
     expect(funds.rows).toContainEqual(["Development allocated in year", formatBalance(50000)]);
     expect(funds.rows).toContainEqual([
       "Reserve - dividend_declaration (in year)",
       formatBalance(250000),
     ]);
+    expect(funds.rows).toContainEqual(["Reserve - profit_sharing (in year)", formatBalance(50000)]);
     expect(funds.rows).toContainEqual([
       "Education - dividend_declaration (in year)",
       formatBalance(100000),
@@ -635,8 +654,8 @@ describe("annualPack", () => {
       "Development - dividend_declaration (in year)",
       formatBalance(50000),
     ]);
-    // Lifetime-to-date includes the 2027 allocation; the in-year row above excludes it.
-    expect(funds.rows).toContainEqual(["Reserve allocated to date", formatBalance(1240000)]);
+    // Lifetime-to-date includes prior years but stops at the period end (no 2027 data).
+    expect(funds.rows).toContainEqual(["Reserve allocated to date", formatBalance(400000)]);
     expect(funds.rows).toContainEqual(["Education allocated to date", formatBalance(100000)]);
     expect(funds.rows).toContainEqual(["Development allocated to date", formatBalance(50000)]);
     expect(funds.rows).toContainEqual(["Dividends declared in year", formatBalance(300000)]);
@@ -1579,6 +1598,43 @@ describe("markFiled", () => {
       },
     });
     expect(audited!.detail).toContain("filing note updated");
+  });
+
+  it("treats an unchanged resubmission as already filed without a new audit row", async () => {
+    const coop = await createTestCoop("REG46d");
+    const admin = await createTestMember(coop.id, { phone: "2348000010060", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        acknowledgementId: "ACK-SAME",
+        notes: "Received",
+      },
+    });
+    const before = await prisma.auditLog.count({
+      where: { cooperativeId: coop.id, targetId: report.id },
+    });
+
+    // The console always posts both fields, even when the operator changed nothing.
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      { acknowledgementId: "ACK-SAME", note: "Received" },
+    );
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("already marked filed");
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.acknowledgementId).toBe("ACK-SAME");
+    expect(saved!.notes).toBe("Received");
+    const after = await prisma.auditLog.count({
+      where: { cooperativeId: coop.id, targetId: report.id },
+    });
+    expect(after).toBe(before);
   });
 
   it("clears a filing note when an empty note is submitted", async () => {

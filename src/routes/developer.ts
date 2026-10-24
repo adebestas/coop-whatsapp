@@ -1,6 +1,6 @@
 import { createReadStream } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { hashPin, verifyPin } from "../lib/security.js";
@@ -447,7 +447,7 @@ export async function developerApiRoutes(app: FastifyInstance) {
         return reply.code(404).send({ error: "file not found" });
       }
       const rel = relative(realRoot, realFile);
-      if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+      if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
         return reply.code(404).send({ error: "file not found" });
       }
 

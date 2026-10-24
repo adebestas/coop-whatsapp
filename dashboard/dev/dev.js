@@ -24,6 +24,7 @@
   let coopDetail = null;
   let coopRegulator = { profile: null, reports: [] };
   let regulatorFileTarget = null;
+  let regulatorFilingDraft = null;
   let coopActivityEntries = [];
   let coopsData = [];
   let policiesData = [];
@@ -50,6 +51,13 @@
   document.addEventListener('change', (e) => {
     const el = e.target.closest('[data-action-change]');
     if (el) runAction(el, e);
+  });
+  document.addEventListener('input', (e) => {
+    const id = e.target.id;
+    if (regulatorFilingDraft && (id === 'regAck' || id === 'regNote')) {
+      if (id === 'regAck') regulatorFilingDraft.ack = e.target.value;
+      else regulatorFilingDraft.note = e.target.value;
+    }
   });
 
   async function init() {
@@ -468,6 +476,7 @@
         /* activity is optional */
       }
       regulatorFileTarget = null;
+      regulatorFilingDraft = null;
       try {
         coopRegulator = await api(`/coops/${id}/regulator-reports`);
       } catch {
@@ -615,6 +624,10 @@
     const profile = coopRegulator.profile;
     const reports = coopRegulator.reports || [];
     const filing = reports.find((r) => r.id === regulatorFileTarget);
+    const draft =
+      filing && regulatorFilingDraft && regulatorFilingDraft.reportId === filing.id
+        ? regulatorFilingDraft
+        : null;
     const thisYear = new Date().getUTCFullYear();
     const due = profile
       ? `Monthly day ${profile.monthlyDueDay} | Quarterly day ${profile.quarterlyDueDay} | Annual ${profile.annualDueMonth}/${profile.annualDueDay}`
@@ -677,10 +690,10 @@
           filing
             ? `<div class="form-inline mt-4" id="regulatorFileForm">
                  <div class="form-field"><label for="regAck">Acknowledgement</label>
-                   <input id="regAck" maxlength="80" value="${esc(filing.acknowledgementId || '')}" placeholder="Optional, max 80">
+                   <input id="regAck" maxlength="80" value="${esc(draft ? draft.ack : filing.acknowledgementId || '')}" placeholder="Optional, max 80">
                  </div>
                  <div class="form-field"><label for="regNote">Note</label>
-                   <input id="regNote" maxlength="500" value="${esc(filing.notes || '')}" placeholder="Optional, max 500">
+                   <input id="regNote" maxlength="500" value="${esc(draft ? draft.note : filing.notes || '')}" placeholder="Optional, max 500">
                  </div>
                  <button class="btn btn-primary btn-sm" data-action="fileRegulatorReport" data-arg1="${esc(coop.id)}" data-arg2="${esc(filing.id)}">Save filing</button>
                  <button class="btn btn-secondary btn-sm" data-action="cancelRegulatorFile">Cancel</button>
@@ -917,7 +930,7 @@
         method: 'POST',
         body: { year, packType },
       });
-      toast('Annual pack generated');
+      toast('Regulator pack generated');
       coopRegulator = await api(`/coops/${id}/regulator-reports`);
       renderCoopShell();
       return res;
@@ -927,12 +940,24 @@
   };
 
   window.toggleRegulatorFile = function (reportId) {
-    regulatorFileTarget = regulatorFileTarget === reportId ? null : reportId;
+    if (regulatorFileTarget === reportId) {
+      regulatorFileTarget = null;
+      regulatorFilingDraft = null;
+    } else {
+      const report = (coopRegulator.reports || []).find((r) => r.id === reportId);
+      regulatorFileTarget = reportId;
+      regulatorFilingDraft = {
+        reportId,
+        ack: report?.acknowledgementId || '',
+        note: report?.notes || '',
+      };
+    }
     renderCoopShell();
   };
 
   window.cancelRegulatorFile = function () {
     regulatorFileTarget = null;
+    regulatorFilingDraft = null;
     renderCoopShell();
   };
 
@@ -941,12 +966,13 @@
     const acknowledgementId = document.getElementById('regAck')?.value || '';
     const note = document.getElementById('regNote')?.value || '';
     try {
-      await api(`/coops/${id}/regulator-reports/${reportId}/file`, {
+      const res = await api(`/coops/${id}/regulator-reports/${reportId}/file`, {
         method: 'POST',
         body: { acknowledgementId, note },
       });
-      toast('Marked filed');
+      toast(res.message || 'Filing saved');
       regulatorFileTarget = null;
+      regulatorFilingDraft = null;
       coopRegulator = await api(`/coops/${id}/regulator-reports`);
       renderCoopShell();
     } catch (err) {

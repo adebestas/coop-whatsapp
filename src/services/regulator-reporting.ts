@@ -360,9 +360,6 @@ export async function annualPack(coopId: string, period: string): Promise<Report
   const financial = financialAll.filter((sheet) => sheet.name !== "Membership");
 
   const [
-    reserveYear,
-    educationYear,
-    developmentYear,
     reserveBySource,
     educationBySource,
     developmentBySource,
@@ -375,18 +372,6 @@ export async function annualPack(coopId: string, period: string): Promise<Report
     meetings,
     agmCount,
   ] = await Promise.all([
-    prisma.reserveAllocation.aggregate({
-      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
-      _sum: { amount: true },
-    }),
-    prisma.educationFund.aggregate({
-      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
-      _sum: { amount: true },
-    }),
-    prisma.developmentFund.aggregate({
-      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
-      _sum: { amount: true },
-    }),
     prisma.reserveAllocation.groupBy({
       by: ["source"],
       where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
@@ -406,15 +391,15 @@ export async function annualPack(coopId: string, period: string): Promise<Report
       orderBy: { source: "asc" },
     }),
     prisma.reserveAllocation.aggregate({
-      where: { cooperativeId: coopId },
+      where: { cooperativeId: coopId, createdAt: { lte: end } },
       _sum: { amount: true },
     }),
     prisma.educationFund.aggregate({
-      where: { cooperativeId: coopId },
+      where: { cooperativeId: coopId, createdAt: { lte: end } },
       _sum: { amount: true },
     }),
     prisma.developmentFund.aggregate({
-      where: { cooperativeId: coopId },
+      where: { cooperativeId: coopId, createdAt: { lte: end } },
       _sum: { amount: true },
     }),
     prisma.dividend.findMany({
@@ -469,9 +454,11 @@ export async function annualPack(coopId: string, period: string): Promise<Report
     }),
   ]);
 
-  const reserveTotal = reserveYear._sum.amount ?? 0;
-  const educationTotal = educationYear._sum.amount ?? 0;
-  const developmentTotal = developmentYear._sum.amount ?? 0;
+  const sumSources = (rows: { _sum: { amount: number | null } }[]): number =>
+    rows.reduce((sum, row) => sum + (row._sum.amount ?? 0), 0);
+  const reserveTotal = sumSources(reserveBySource);
+  const educationTotal = sumSources(educationBySource);
+  const developmentTotal = sumSources(developmentBySource);
   const declaredTotal = dividends.reduce((sum, row) => sum + row.totalPool, 0);
   const settledTotal = settledYear._sum.amount ?? 0;
 
@@ -1042,9 +1029,10 @@ export async function setRegulatorProfile(
  * Mark a generated regulator pack as filed. `reportId` may be a full id or a
  * unique suffix (matching the shorter ids shown in chat). Coop-scoped write via
  * `withTx` + `setCoopContext`, audited as `regulator.report_filed` (or
- * `regulator.report_acknowledged` when a filed pack gains/updates its receipt).
+ * `regulator.report_acknowledged` when a filed pack's receipt or note changes).
  * An optional acknowledgement and filing note are trimmed; a whitespace-only
- * acknowledgement clears a previously recorded one.
+ * acknowledgement or note clears the previously recorded value. Values are
+ * compared with what is stored, so resubmitting an unchanged filing is a no-op.
  */
 export async function markFiled(
   coopId: string,
@@ -1077,13 +1065,14 @@ export async function markFiled(
     return { ok: false, message: `No regulator report matching *${ref}* in your cooperative.` };
   }
 
-  if (
-    report.status === "filed" &&
-    !acknowledgementId &&
-    !note &&
-    !acknowledgementProvided &&
-    !noteProvided
-  ) {
+  const wasFiled = report.status === "filed";
+  // Compare against what is stored so a client that posts both fields (the console
+  // always does) does not fabricate an "acknowledgement cleared/updated" audit row.
+  const acknowledgementChanged =
+    acknowledgementProvided && acknowledgementId !== report.acknowledgementId;
+  const noteChanged = noteProvided && note !== report.notes;
+
+  if (wasFiled && !acknowledgementChanged && !noteChanged) {
     return {
       ok: true,
       message: `The *${report.period}* ${report.periodType} pack is already marked filed.`,
@@ -1098,20 +1087,23 @@ export async function markFiled(
       data: {
         status: "filed",
         filedAt: report.filedAt ?? filedAt,
-        ...(acknowledgementProvided ? { acknowledgementId } : {}),
-        ...(noteProvided ? { notes: note } : {}),
+        ...(acknowledgementChanged ? { acknowledgementId } : {}),
+        ...(noteChanged ? { notes: note } : {}),
       },
     });
   });
 
-  const wasFiled = report.status === "filed";
+  const changes: string[] = [];
+  if (acknowledgementChanged) {
+    changes.push(
+      acknowledgementId
+        ? `acknowledgement updated (ack ${acknowledgementId})`
+        : "acknowledgement cleared",
+    );
+  }
+  if (noteChanged) changes.push(note ? "note updated" : "note cleared");
   const detail = wasFiled
-    ? `${report.periodType} ${report.packType} pack for ${report.period} filing ` +
-      (acknowledgementProvided
-        ? acknowledgementId
-          ? `acknowledgement updated (ack ${acknowledgementId})`
-          : "acknowledgement cleared"
-        : "note updated")
+    ? `${report.periodType} ${report.packType} pack for ${report.period} filing ${changes.join(" and ")}`
     : `${report.periodType} ${report.packType} pack for ${report.period} marked filed` +
       (acknowledgementId ? ` (ack ${acknowledgementId})` : "");
 
@@ -1130,9 +1122,10 @@ export async function markFiled(
     ok: true,
     message: wasFiled
       ? `*${report.period}* ${report.periodType} regulator pack filing updated` +
-        (acknowledgementProvided && acknowledgementId
+        (acknowledgementChanged && acknowledgementId
           ? ` with acknowledgement *${acknowledgementId}*`
           : "") +
+        (noteChanged ? ` and note ${note ? "updated" : "cleared"}` : "") +
         "."
       : `*${report.period}* ${report.periodType} regulator pack marked *filed*` +
         (acknowledgementId ? ` with acknowledgement *${acknowledgementId}*` : "") +
