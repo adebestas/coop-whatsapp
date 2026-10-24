@@ -25,6 +25,7 @@ export interface GenerateReportResult {
   ok: boolean;
   message: string;
   reportId?: string;
+  dueAt?: Date;
   files?: { xlsx: string; pdf: string; csv: string };
   links?: { xlsx: string; pdf: string };
 }
@@ -362,6 +363,12 @@ export async function annualPack(coopId: string, period: string): Promise<Report
     reserveYear,
     educationYear,
     developmentYear,
+    reserveBySource,
+    educationBySource,
+    developmentBySource,
+    reserveLifetime,
+    educationLifetime,
+    developmentLifetime,
     dividends,
     settledYear,
     balances,
@@ -378,6 +385,36 @@ export async function annualPack(coopId: string, period: string): Promise<Report
     }),
     prisma.developmentFund.aggregate({
       where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.reserveAllocation.groupBy({
+      by: ["source"],
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+      orderBy: { source: "asc" },
+    }),
+    prisma.educationFund.groupBy({
+      by: ["source"],
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+      orderBy: { source: "asc" },
+    }),
+    prisma.developmentFund.groupBy({
+      by: ["source"],
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+      orderBy: { source: "asc" },
+    }),
+    prisma.reserveAllocation.aggregate({
+      where: { cooperativeId: coopId },
+      _sum: { amount: true },
+    }),
+    prisma.educationFund.aggregate({
+      where: { cooperativeId: coopId },
+      _sum: { amount: true },
+    }),
+    prisma.developmentFund.aggregate({
+      where: { cooperativeId: coopId },
       _sum: { amount: true },
     }),
     prisma.dividend.findMany({
@@ -438,13 +475,42 @@ export async function annualPack(coopId: string, period: string): Promise<Report
   const declaredTotal = dividends.reduce((sum, row) => sum + row.totalPool, 0);
   const settledTotal = settledYear._sum.amount ?? 0;
 
+  const fundRows = (
+    label: string,
+    yearTotal: number,
+    bySource: { source: string; amount: number }[],
+    lifetimeTotal: number,
+  ): [string, string][] => [
+    [`${label} allocated in year`, formatBalance(yearTotal)],
+    ...bySource.map((row): [string, string] => [
+      `${label} - ${row.source} (in year)`,
+      formatBalance(row.amount),
+    ]),
+    [`${label} allocated to date`, formatBalance(lifetimeTotal)],
+  ];
+
   const funds: ReportSheet = {
     name: "Statutory Funds & Dividends",
     rows: [
       ["Item", "Amount"],
-      ["Reserve allocated in year", formatBalance(reserveTotal)],
-      ["Education allocated in year", formatBalance(educationTotal)],
-      ["Development allocated in year", formatBalance(developmentTotal)],
+      ...fundRows(
+        "Reserve",
+        reserveTotal,
+        reserveBySource.map((row) => ({ source: row.source, amount: row._sum.amount ?? 0 })),
+        reserveLifetime._sum.amount ?? 0,
+      ),
+      ...fundRows(
+        "Education",
+        educationTotal,
+        educationBySource.map((row) => ({ source: row.source, amount: row._sum.amount ?? 0 })),
+        educationLifetime._sum.amount ?? 0,
+      ),
+      ...fundRows(
+        "Development",
+        developmentTotal,
+        developmentBySource.map((row) => ({ source: row.source, amount: row._sum.amount ?? 0 })),
+        developmentLifetime._sum.amount ?? 0,
+      ),
       ["Dividends declared in year", formatBalance(declaredTotal)],
       ["Dividends settled in year", formatBalance(settledTotal)],
       ["Reserve fund balance", formatBalance(balances?.reserveFundBalance ?? 0)],
@@ -826,6 +892,7 @@ export async function generateReport(
       `📊 Excel: ${links.xlsx}\n📄 PDF: ${links.pdf}\n` +
       `🗓️ Filing due: ${dueAt.toISOString().slice(0, 10)}${emailNote}`,
     reportId: report.id,
+    dueAt,
     files,
     links,
   };
@@ -990,6 +1057,7 @@ export async function markFiled(
 
   const acknowledgementProvided = filing.acknowledgementId !== undefined;
   const acknowledgementId = filing.acknowledgementId?.trim() || null;
+  const noteProvided = filing.note !== undefined;
   const note = filing.note?.trim() || null;
   if (acknowledgementId && acknowledgementId.length > 80) {
     return { ok: false, message: "Acknowledgement must be 80 characters or fewer." };
@@ -1009,7 +1077,13 @@ export async function markFiled(
     return { ok: false, message: `No regulator report matching *${ref}* in your cooperative.` };
   }
 
-  if (report.status === "filed" && !acknowledgementId && !note && !acknowledgementProvided) {
+  if (
+    report.status === "filed" &&
+    !acknowledgementId &&
+    !note &&
+    !acknowledgementProvided &&
+    !noteProvided
+  ) {
     return {
       ok: true,
       message: `The *${report.period}* ${report.periodType} pack is already marked filed.`,
@@ -1025,30 +1099,44 @@ export async function markFiled(
         status: "filed",
         filedAt: report.filedAt ?? filedAt,
         ...(acknowledgementProvided ? { acknowledgementId } : {}),
-        ...(note ? { notes: note } : {}),
+        ...(noteProvided ? { notes: note } : {}),
       },
     });
   });
+
+  const wasFiled = report.status === "filed";
+  const detail = wasFiled
+    ? `${report.periodType} ${report.packType} pack for ${report.period} filing ` +
+      (acknowledgementProvided
+        ? acknowledgementId
+          ? `acknowledgement updated (ack ${acknowledgementId})`
+          : "acknowledgement cleared"
+        : "note updated")
+    : `${report.periodType} ${report.packType} pack for ${report.period} marked filed` +
+      (acknowledgementId ? ` (ack ${acknowledgementId})` : "");
 
   await audit({
     cooperativeId: coopId,
     actorPhone: actor.phone,
     actorId: actor.id,
     actorRole: "admin",
-    action: report.status === "filed" ? "regulator.report_acknowledged" : "regulator.report_filed",
+    action: wasFiled ? "regulator.report_acknowledged" : "regulator.report_filed",
     targetType: "regulatorReport",
     targetId: report.id,
-    detail:
-      `${report.periodType} ${report.packType} pack for ${report.period} marked filed` +
-      (acknowledgementId ? ` (ack ${acknowledgementId})` : ""),
+    detail,
   });
 
   return {
     ok: true,
-    message:
-      `*${report.period}* ${report.periodType} regulator pack marked *filed*` +
-      (acknowledgementId ? ` with acknowledgement *${acknowledgementId}*` : "") +
-      ".",
+    message: wasFiled
+      ? `*${report.period}* ${report.periodType} regulator pack filing updated` +
+        (acknowledgementProvided && acknowledgementId
+          ? ` with acknowledgement *${acknowledgementId}*`
+          : "") +
+        "."
+      : `*${report.period}* ${report.periodType} regulator pack marked *filed*` +
+        (acknowledgementId ? ` with acknowledgement *${acknowledgementId}*` : "") +
+        ".",
   };
 }
 

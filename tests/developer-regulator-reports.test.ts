@@ -75,6 +75,7 @@ describe("developer regulator reports", () => {
     const okBody = JSON.parse(ok.body);
     expect(okBody.reportId).toBeTruthy();
     expect(okBody.ok).toBe(true);
+    expect(okBody.dueAt).toBe("2027-03-31T00:00:00.000Z");
     createdFiles.push(okBody.files.xlsx, okBody.files.pdf, okBody.files.csv);
     expect(okBody.files.xlsx).toBeTruthy();
     expect(okBody.files.pdf).toBeTruthy();
@@ -112,6 +113,23 @@ describe("developer regulator reports", () => {
     });
     expect(stringYear.statusCode).toBe(400);
     expect(JSON.parse(stringYear.body).error).toMatch(/four-digit year/);
+
+    const tooEarly = await app.inject({
+      method: "POST",
+      url: `/api/developer/coops/${coop.id}/regulator-reports`,
+      headers: write(cookie),
+      payload: { year: 1999 },
+    });
+    expect(tooEarly.statusCode).toBe(400);
+    expect(JSON.parse(tooEarly.body).error).toMatch(/four-digit year/);
+
+    const noCsrf = await app.inject({
+      method: "POST",
+      url: `/api/developer/coops/${coop.id}/regulator-reports`,
+      headers: { cookie },
+      payload: { year: 2026 },
+    });
+    expect(noCsrf.statusCode).toBe(403);
 
     const coercedYear = await app.inject({
       method: "POST",
@@ -169,6 +187,24 @@ describe("developer regulator reports", () => {
       payload: {},
     });
     expect(unknown.statusCode).toBe(404);
+
+    const longAck = await app.inject({
+      method: "POST",
+      url: `/api/developer/coops/${coop.id}/regulator-reports/${report.id}/file`,
+      headers: write(cookie),
+      payload: { acknowledgementId: "A".repeat(81) },
+    });
+    expect(longAck.statusCode).toBe(400);
+    expect(JSON.parse(longAck.body).error).toMatch(/80/);
+
+    const longNote = await app.inject({
+      method: "POST",
+      url: `/api/developer/coops/${coop.id}/regulator-reports/${report.id}/file`,
+      headers: write(cookie),
+      payload: { note: "n".repeat(501) },
+    });
+    expect(longNote.statusCode).toBe(400);
+    expect(JSON.parse(longNote.body).error).toMatch(/500/);
   });
 
   it("keeps support role read-only", async () => {
@@ -225,6 +261,15 @@ describe("developer regulator reports", () => {
     expect(pdf.statusCode).toBe(200);
     expect(pdf.headers["content-type"]).toBe("application/pdf");
     expect(pdf.rawPayload.length).toBeGreaterThan(0);
+
+    const csv = await app.inject({
+      method: "GET",
+      url: `/api/developer/coops/${coop.id}/regulator-reports/${generated.reportId}/download/csv`,
+      headers: { cookie },
+    });
+    expect(csv.statusCode).toBe(200);
+    expect(csv.headers["content-type"]).toBe("text/csv");
+    expect(csv.body).toContain("# Annual Return");
   });
 
   it("rejects an unknown download kind", async () => {
@@ -261,6 +306,36 @@ describe("developer regulator reports", () => {
       headers: { cookie },
     });
     expect(res.statusCode).toBe(404);
+
+    const list = await app.inject({
+      method: "GET",
+      url: `/api/developer/coops/${other.id}/regulator-reports`,
+      headers: { cookie },
+    });
+    expect(list.statusCode).toBe(200);
+    expect(JSON.parse(list.body).reports).toEqual([]);
+  });
+
+  it("does not serve a stored path outside the export directory", async () => {
+    const coop = await createTestCoop("DEVREGD6");
+    const cookie = await login("2348000000206", "owner");
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        files: JSON.stringify({ xlsx: "../package.json", pdf: "", csv: "" }),
+      },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/developer/coops/${coop.id}/regulator-reports/${report.id}/download/xlsx`,
+      headers: { cookie },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.body).not.toContain("coop-whatsapp");
   });
 
   it("lets the support role download reports", async () => {

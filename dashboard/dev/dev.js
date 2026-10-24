@@ -23,6 +23,7 @@
   let currentCoopTab = 'health';
   let coopDetail = null;
   let coopRegulator = { profile: null, reports: [] };
+  let regulatorFileTarget = null;
   let coopActivityEntries = [];
   let coopsData = [];
   let policiesData = [];
@@ -466,6 +467,7 @@
       } catch {
         /* activity is optional */
       }
+      regulatorFileTarget = null;
       try {
         coopRegulator = await api(`/coops/${id}/regulator-reports`);
       } catch {
@@ -612,10 +614,8 @@
   function renderRegulatorCard(coop) {
     const profile = coopRegulator.profile;
     const reports = coopRegulator.reports || [];
+    const filing = reports.find((r) => r.id === regulatorFileTarget);
     const thisYear = new Date().getUTCFullYear();
-    const years = [thisYear, thisYear - 1, thisYear - 2]
-      .map((y) => `<option value="${y}">${y}</option>`)
-      .join('');
     const due = profile
       ? `Monthly day ${profile.monthlyDueDay} | Quarterly day ${profile.quarterlyDueDay} | Annual ${profile.annualDueMonth}/${profile.annualDueDay}`
       : 'No regulator configured (set it with the chat command regulatorconfig)';
@@ -635,15 +635,15 @@
           </td>
           <td>
             ${
-              readOnly || r.status === 'filed'
+              readOnly
                 ? ''
-                : `<button class="btn btn-secondary btn-sm" data-action="fileRegulatorReport" data-arg1="${esc(coop.id)}" data-arg2="${esc(r.id)}">Mark filed</button>`
+                : `<button class="btn btn-secondary btn-sm" data-action="toggleRegulatorFile" data-arg="${esc(r.id)}">${r.status === 'filed' ? 'Update filing' : 'Mark filed'}</button>`
             }
           </td>
         </tr>`,
           )
           .join('')
-      : '<tr><td colspan="8" class="text-muted">No annual returns generated yet.</td></tr>';
+      : '<tr><td colspan="8" class="text-muted">No regulator returns generated yet.</td></tr>';
 
     return `
       <div class="card-header">
@@ -656,7 +656,7 @@
           readOnly
             ? ''
             : `<div class="form-inline mb-4">
-                 <div class="form-field"><label for="regYear">Year</label><select id="regYear">${years}</select></div>
+                 <div class="form-field"><label for="regYear">Year</label><input type="number" id="regYear" min="2000" max="${thisYear}" value="${thisYear}"></div>
                  <div class="form-field"><label for="regPack">Pack</label>
                    <select id="regPack">
                      <option value="statutory">Statutory</option>
@@ -673,6 +673,20 @@
             <tbody>${rows}</tbody>
           </table>
         </div>
+        ${
+          filing
+            ? `<div class="form-inline mt-4" id="regulatorFileForm">
+                 <div class="form-field"><label for="regAck">Acknowledgement</label>
+                   <input id="regAck" maxlength="80" value="${esc(filing.acknowledgementId || '')}" placeholder="Optional, max 80">
+                 </div>
+                 <div class="form-field"><label for="regNote">Note</label>
+                   <input id="regNote" maxlength="500" value="${esc(filing.notes || '')}" placeholder="Optional, max 500">
+                 </div>
+                 <button class="btn btn-primary btn-sm" data-action="fileRegulatorReport" data-arg1="${esc(coop.id)}" data-arg2="${esc(filing.id)}">Save filing</button>
+                 <button class="btn btn-secondary btn-sm" data-action="cancelRegulatorFile">Cancel</button>
+               </div>`
+            : ''
+        }
       </div>`;
   }
 
@@ -912,16 +926,27 @@
     }
   };
 
+  window.toggleRegulatorFile = function (reportId) {
+    regulatorFileTarget = regulatorFileTarget === reportId ? null : reportId;
+    renderCoopShell();
+  };
+
+  window.cancelRegulatorFile = function () {
+    regulatorFileTarget = null;
+    renderCoopShell();
+  };
+
   window.fileRegulatorReport = async function (coopId, reportId) {
     const id = coopId;
-    const acknowledgementId = window.prompt('Registrar acknowledgement number (optional):') || '';
-    const note = window.prompt('Filing note (optional):') || '';
+    const acknowledgementId = document.getElementById('regAck')?.value || '';
+    const note = document.getElementById('regNote')?.value || '';
     try {
       await api(`/coops/${id}/regulator-reports/${reportId}/file`, {
         method: 'POST',
         body: { acknowledgementId, note },
       });
       toast('Marked filed');
+      regulatorFileTarget = null;
       coopRegulator = await api(`/coops/${id}/regulator-reports`);
       renderCoopShell();
     } catch (err) {

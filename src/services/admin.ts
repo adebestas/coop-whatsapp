@@ -1373,14 +1373,27 @@ export async function handleAdminCommand(
 
       case "regulatorconfig": {
         // regulatorconfig [label...] [type] [email] [monthlyDueDay] [quarterlyDueDay]
+        // [annual=MM/DD]
         const cfg: {
           label?: string;
           type?: string;
           contactEmail?: string;
           monthlyDueDay?: number;
           quarterlyDueDay?: number;
+          annualDueMonth?: number;
+          annualDueDay?: number;
         } = {};
         const rest = [...args];
+        const annualIdx = rest.findIndex((t) => /^annual=\d{1,2}\/\d{1,2}$/i.test(t));
+        if (annualIdx !== -1) {
+          const [month, day] = rest[annualIdx]
+            .split("=")[1]
+            .split("/")
+            .map((n) => Number(n));
+          cfg.annualDueMonth = month;
+          cfg.annualDueDay = day;
+          rest.splice(annualIdx, 1);
+        }
         const isDueDay = (s: string | undefined): boolean => s !== undefined && /^\d{1,2}$/.test(s);
         if (
           rest.length >= 2 &&

@@ -623,6 +623,22 @@ describe("annualPack", () => {
     expect(funds.rows).toContainEqual(["Reserve allocated in year", formatBalance(250000)]);
     expect(funds.rows).toContainEqual(["Education allocated in year", formatBalance(100000)]);
     expect(funds.rows).toContainEqual(["Development allocated in year", formatBalance(50000)]);
+    expect(funds.rows).toContainEqual([
+      "Reserve - dividend_declaration (in year)",
+      formatBalance(250000),
+    ]);
+    expect(funds.rows).toContainEqual([
+      "Education - dividend_declaration (in year)",
+      formatBalance(100000),
+    ]);
+    expect(funds.rows).toContainEqual([
+      "Development - dividend_declaration (in year)",
+      formatBalance(50000),
+    ]);
+    // Lifetime-to-date includes the 2027 allocation; the in-year row above excludes it.
+    expect(funds.rows).toContainEqual(["Reserve allocated to date", formatBalance(1240000)]);
+    expect(funds.rows).toContainEqual(["Education allocated to date", formatBalance(100000)]);
+    expect(funds.rows).toContainEqual(["Development allocated to date", formatBalance(50000)]);
     expect(funds.rows).toContainEqual(["Dividends declared in year", formatBalance(300000)]);
     expect(funds.rows).toContainEqual(["Dividends settled in year", formatBalance(120000)]);
     expect(funds.rows).toContainEqual(["Reserve fund balance", formatBalance(0)]);
@@ -937,6 +953,35 @@ describe("generateReport", () => {
     expect(updated!.filedAt?.toISOString()).toBe(filedAt!.toISOString());
   });
 
+  it("preserves an annual acknowledgement when regenerated", async () => {
+    const coop = await createTestCoop("REG34c");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010037",
+      role: "superadmin",
+    });
+    const first = await generateReport(coop.id, "2026", "annual", "statutory", admin.id);
+    await markFiled(
+      coop.id,
+      first.reportId!,
+      { id: admin.id, phone: admin.phone },
+      {
+        acknowledgementId: "ACK-ANNUAL-1",
+        note: "Filed at the ministry desk",
+      },
+    );
+    const before = (await prisma.regulatorReport.findUnique({ where: { id: first.reportId! } }))!;
+    expect(before.status).toBe("filed");
+    expect(before.acknowledgementId).toBe("ACK-ANNUAL-1");
+
+    const again = await generateReport(coop.id, "2026", "annual", "statutory", admin.id);
+    expect(again.reportId).toBe(first.reportId);
+    const after = (await prisma.regulatorReport.findUnique({ where: { id: first.reportId! } }))!;
+    expect(after.status).toBe("filed");
+    expect(after.filedAt?.toISOString()).toBe(before.filedAt?.toISOString());
+    expect(after.acknowledgementId).toBe("ACK-ANNUAL-1");
+    expect(after.notes).toBe("Filed at the ministry desk");
+  });
+
   it("returns download links, uploads to S3 under the coop prefix, and matches the export route", async () => {
     const coop = await createTestCoop("REG35b");
     const admin = await createTestMember(coop.id, {
@@ -999,6 +1044,7 @@ describe("generateReport", () => {
 
     const first = await generateReport(coop.id, "2026", "annual", "statutory", admin.id);
     expect(first.ok).toBe(true);
+    expect(first.dueAt?.toISOString()).toBe("2027-03-31T00:00:00.000Z");
     const second = await generateReport(coop.id, "2026", "annual", "statutory", admin.id);
     expect(second.ok).toBe(true);
     expect(second.reportId).toBe(first.reportId);
@@ -1496,6 +1542,72 @@ describe("markFiled", () => {
     expect(audited).not.toBeNull();
   });
 
+  it("updates only the filing note on a filed pack and audits the note change", async () => {
+    const coop = await createTestCoop("REG46b");
+    const admin = await createTestMember(coop.id, { phone: "2348000010058", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        filedAt: new Date("2026-04-02T00:00:00Z"),
+        acknowledgementId: "ACK-KEEP",
+        notes: "Old note",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      { note: "New note" },
+    );
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("filing updated");
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.acknowledgementId).toBe("ACK-KEEP");
+    expect(saved!.notes).toBe("New note");
+
+    const audited = await prisma.auditLog.findFirst({
+      where: {
+        cooperativeId: coop.id,
+        action: "regulator.report_acknowledged",
+        targetId: report.id,
+      },
+    });
+    expect(audited!.detail).toContain("filing note updated");
+  });
+
+  it("clears a filing note when an empty note is submitted", async () => {
+    const coop = await createTestCoop("REG46c");
+    const admin = await createTestMember(coop.id, { phone: "2348000010059", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        acknowledgementId: "ACK-KEEP",
+        notes: "Remove me",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      { note: "" },
+    );
+    expect(res.ok).toBe(true);
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.notes).toBeNull();
+    expect(saved!.acknowledgementId).toBe("ACK-KEEP");
+  });
+
   it("rejects an over-length filing note", async () => {
     const coop = await createTestCoop("REG47");
     const admin = await createTestMember(coop.id, { phone: "2348000010056", role: "superadmin" });
@@ -1733,6 +1845,38 @@ describe("regulator admin commands", () => {
     await handleAdminCommand(admin.phone, "regreport", ["filed", report.id.slice(-6)]);
     const updated = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
     expect(updated!.status).toBe("filed");
+  });
+
+  it("configures the annual due date via the annual=MM/DD token", async () => {
+    const coop = await createTestCoop("REG29b");
+    const admin = await createTestMember(coop.id, { phone: "2348000010047", role: "superadmin" });
+
+    await handleAdminCommand(admin.phone, "regulatorconfig", [
+      "Lagos",
+      "Ministry",
+      "ministry",
+      "annual=9/30",
+    ]);
+    const profile = await prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coop.id, active: true },
+    });
+    expect(profile?.label).toBe("Lagos Ministry");
+    expect(profile?.annualDueMonth).toBe(9);
+    expect(profile?.annualDueDay).toBe(30);
+    // The annual token must not be swallowed as the regulator label.
+    expect(profile?.label).not.toContain("annual");
+
+    vi.clearAllMocks();
+    await handleAdminCommand(admin.phone, "regulatorconfig", ["Lagos", "ministry", "annual=13/40"]);
+    const text = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => String(c[0].text))
+      .join("\n");
+    expect(text).toMatch(/Annual due month must be between 1 and 12/);
+    const unchanged = await prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coop.id, active: true },
+    });
+    expect(unchanged?.annualDueMonth).toBe(9);
   });
 
   it("does not handle regulator commands for ordinary members", async () => {

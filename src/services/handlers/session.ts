@@ -253,7 +253,7 @@ export function buildAdminMenu(): string {
     `• *par* — portfolio-at-risk aging report\n` +
     `• *provisionrates* — loan-loss provision rates\n` +
     `• *provision* — run the monthly loan-loss provision (super admin)\n` +
-    `• *regulatorconfig <label> [type] [email] [monthlyDue] [quarterlyDue]* — set the regulator to file with\n` +
+    `• *regulatorconfig <label> [type] [email] [monthlyDue] [quarterlyDue] [annual=MM/DD]* — set the regulator to file with\n` +
     `• *regreport <YYYY-MM> <statutory\\|nfiu\\|both> [monthly\\|quarterly]* — generate a regulator pack\n` +
     `• *regreportstatus* — view generated/filed regulator packs\n` +
     `• *regreport filed <id>* — mark a regulator pack filed\n` +

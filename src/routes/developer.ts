@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
@@ -392,9 +392,14 @@ export async function developerApiRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "packType must be statutory, nfiu or both" });
     }
 
-    const result = await generateReport(id, String(year), "annual", packType, actorOf(req).id);
-    if (!result.ok) return reply.code(400).send({ error: result.message });
-    return result;
+    try {
+      const result = await generateReport(id, String(year), "annual", packType, actorOf(req).id);
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return result;
+    } catch (err) {
+      req.log.error(err);
+      return reply.code(500).send({ error: "failed to generate regulator pack" });
+    }
   });
 
   app.get(
@@ -431,16 +436,24 @@ export async function developerApiRoutes(app: FastifyInstance) {
       if (!stored) return reply.code(404).send({ error: "file not found" });
 
       // Stored paths are relative to the export directory (e.g. `exports/x.xlsx`).
-      // Resolve to an absolute path and reject anything that escapes that root.
+      // Resolve real paths (following symlinks) and reject anything outside that root.
       const root = resolve(process.cwd(), process.env.EXPORT_DIR ?? "exports");
       const absolute = resolve(process.cwd(), stored);
-      const rel = relative(root, absolute);
+      let realRoot: string;
+      let realFile: string;
+      try {
+        [realRoot, realFile] = await Promise.all([realpath(root), realpath(absolute)]);
+      } catch {
+        return reply.code(404).send({ error: "file not found" });
+      }
+      const rel = relative(realRoot, realFile);
       if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
         return reply.code(404).send({ error: "file not found" });
       }
 
       try {
-        await stat(absolute);
+        const info = await stat(realFile);
+        if (!info.isFile()) return reply.code(404).send({ error: "file not found" });
       } catch {
         return reply.code(404).send({ error: "file not found" });
       }
@@ -453,8 +466,8 @@ export async function developerApiRoutes(app: FastifyInstance) {
             : "text/csv";
       return reply
         .header("Content-Type", mime)
-        .header("Content-Disposition", `attachment; filename="${basename(absolute)}"`)
-        .send(createReadStream(absolute));
+        .header("Content-Disposition", `attachment; filename="${basename(realFile)}"`)
+        .send(createReadStream(realFile));
     },
   );
 
