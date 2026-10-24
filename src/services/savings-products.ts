@@ -619,7 +619,13 @@ export async function matureProduct(
     return { ok: false, message: "This savings account does not belong to you." };
   }
   if (account.status !== "active") {
-    return { ok: false, message: "This savings account is no longer active." };
+    return {
+      ok: false,
+      message:
+        account.status === "matured"
+          ? "This savings account has already been matured."
+          : "This savings account is no longer active.",
+    };
   }
 
   const isTermProduct = account.product.type === "fixed" || account.product.type === "seasonal";
