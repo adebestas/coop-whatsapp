@@ -466,6 +466,19 @@ describe("daily movement digest", () => {
     const superA = await makeMember("2348090000206", coop.id, { role: "superadmin" });
     const member = await makeMember("2348010000207", coop.id);
 
+    const now = new Date();
+    // The digest fires on the configured hour in Africa/Lagos (WAT = UTC+1, no
+    // DST), not the runner's local time. Anchor to that instant so the test is
+    // timezone-independent (CI runs UTC).
+    now.setUTCHours(19, 5, 0, 0); // 20:05 Africa/Lagos
+    // Place the payout at midday "yesterday" relative to the anchored instant.
+    // Using the real clock here made the test flake when it ran across the
+    // machine's day rollover: 24h before the real now could land in today's
+    // digest window instead of yesterday's.
+    const yesterdayNoon = new Date(now);
+    yesterdayNoon.setDate(yesterdayNoon.getDate() - 1);
+    yesterdayNoon.setHours(12, 0, 0, 0);
+
     await prisma.payout.create({
       data: {
         amount: 300000,
@@ -475,15 +488,10 @@ describe("daily movement digest", () => {
         note: "Member withdrawal (finalized by super admin)",
         memberId: member.id,
         cooperativeId: coop.id,
-        createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        createdAt: yesterdayNoon,
       },
     });
 
-    const now = new Date();
-    // The digest fires on the configured hour in Africa/Lagos (WAT = UTC+1, no
-    // DST), not the runner's local time. Anchor to that instant so the test is
-    // timezone-independent (CI runs UTC).
-    now.setUTCHours(19, 5, 0, 0); // 20:05 Africa/Lagos
     const sent = await runDailyDigest(now);
     expect(sent).toBe(1);
 

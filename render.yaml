@@ -111,6 +111,12 @@ services:
         sync: false
       - key: BACKUP_REGION
         value: "eu-west-1"
+      # ---- Platform Console bootstrap (optional) ----
+      # Seeds the first platform owner on boot; leave unset to skip.
+      - key: PLATFORM_OWNER_PHONE
+        sync: false
+      - key: PLATFORM_OWNER_NAME
+        sync: false
 
   - type: web
     name: coop-bot
@@ -198,3 +204,9 @@ services:
         sync: false # optional: S3 endpoint for non-AWS providers (e.g. Cloudflare R2)
       - key: BACKUP_REGION
         value: "eu-west-1" # default region; override for non-AWS S3
+      # ---- Platform Console bootstrap (optional) ----
+      # Seeds the first platform owner on boot; leave unset to skip.
+      - key: PLATFORM_OWNER_PHONE
+        sync: false
+      - key: PLATFORM_OWNER_NAME
+        sync: false

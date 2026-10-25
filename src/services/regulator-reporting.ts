@@ -11,18 +11,21 @@ import { LARGE_TX_THRESHOLD } from "./aml.js";
 import { EXPORT_DIR, buildReportFiles, emailFiles, type ReportSheet } from "./exports.js";
 import { uploadToS3 } from "../lib/s3.js";
 
-export type PeriodType = "monthly" | "quarterly";
+export type PeriodType = "monthly" | "quarterly" | "annual";
 export type PackType = "statutory" | "nfiu" | "both";
 
 export interface RegulatorDueProfile {
   monthlyDueDay: number;
   quarterlyDueDay: number;
+  annualDueMonth: number;
+  annualDueDay: number;
 }
 
 export interface GenerateReportResult {
   ok: boolean;
   message: string;
   reportId?: string;
+  dueAt?: Date;
   files?: { xlsx: string; pdf: string; csv: string };
   links?: { xlsx: string; pdf: string };
 }
@@ -38,38 +41,65 @@ export interface GenerateReportDeps {
   sendEmail?: typeof emailFiles;
 }
 
-const DEFAULT_DUE: RegulatorDueProfile = { monthlyDueDay: 10, quarterlyDueDay: 15 };
+const DEFAULT_DUE: RegulatorDueProfile = {
+  monthlyDueDay: 10,
+  quarterlyDueDay: 15,
+  annualDueMonth: 3,
+  annualDueDay: 31,
+};
 
-/** `YYYY-MM` for the period a report generated at `now` covers. */
+/** `YYYY-MM`, quarter-end `YYYY-MM`, or calendar `YYYY` for the period at `now`. */
 export function reportPeriod(now: Date, periodType: PeriodType): string {
   const year = now.getUTCFullYear();
   const month = now.getUTCMonth(); // 0-11
+  if (periodType === "annual") return String(year);
   if (periodType === "monthly") {
     return `${year}-${String(month + 1).padStart(2, "0")}`;
   }
-  // Quarterly returns are named for the quarter-end month (Jan-Mar → 03).
+  // Quarterly returns are named for the quarter-end month (Jan-Mar -> 03).
   const quarterEndMonth = Math.ceil((month + 1) / 3) * 3;
   return `${year}-${String(quarterEndMonth).padStart(2, "0")}`;
 }
 
+/** A UTC calendar date, clamped to the last day of the requested month. */
+function dueDateUtc(year: number, month1: number, day: number): Date {
+  const lastDay = new Date(Date.UTC(year, month1, 0)).getUTCDate();
+  return new Date(Date.UTC(year, month1 - 1, Math.min(day, lastDay)));
+}
+
 /**
- * The filing due date for a period: the due day of the month *after* the
- * period (monthly) or the quarter-end (quarterly). Built in UTC so the
- * calendar date survives any server timezone.
+ * The filing due date for a period: monthly returns are due on the due day of
+ * the following month; quarterly returns on the due day of the month after the
+ * quarter-end month. Built in UTC so the calendar date survives any server
+ * timezone. Annual returns are due in the following year on the configured
+ * month/day, clamped to the month's last day.
  */
 export function periodDueAt(
   period: string,
   periodType: PeriodType,
   profile: RegulatorDueProfile,
 ): Date {
+  if (periodType === "annual") {
+    if (!/^\d{4}$/.test(period)) {
+      throw new Error(`Invalid annual period: ${period}`);
+    }
+    return dueDateUtc(Number(period) + 1, profile.annualDueMonth, profile.annualDueDay);
+  }
   const [year, month] = period.split("-").map(Number);
   const dueDay = periodType === "monthly" ? profile.monthlyDueDay : profile.quarterlyDueDay;
   // `month` is 1-based (03 = March); Date.UTC's 0-based month rolls forward.
   return new Date(Date.UTC(year, month, dueDay));
 }
 
-/** UTC [start, end] bounds of a `YYYY-MM` period (first ms → last ms). */
+/** UTC [start, end] bounds of a `YYYY-MM` period or a calendar `YYYY` year. */
 function periodRange(period: string): { start: Date; end: Date } {
+  if (/^\d{4}$/.test(period)) {
+    const year = Number(period);
+    return {
+      start: new Date(Date.UTC(year, 0, 1, 0, 0, 0, 0)),
+      end: new Date(Date.UTC(year, 11, 31, 23, 59, 59, 999)),
+    };
+  }
   const [year, month] = period.split("-").map(Number);
   return {
     start: new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0)),
@@ -230,6 +260,280 @@ export async function statutoryPack(coopId: string, period: string): Promise<Rep
 }
 
 /**
+ * Build the annual registrar return for a calendar year. READ-ONLY: identity and
+ * compliance particulars, membership movement, statutory financial statements,
+ * fund appropriations/dividends, and governance/AGM evidence.
+ */
+export async function annualPack(coopId: string, period: string): Promise<ReportSheet[]> {
+  const { start, end } = periodRange(period);
+  const [financialAll, coop, profile, opening, joined, closing, byStatus] = await Promise.all([
+    statutoryPack(coopId, period),
+    prisma.cooperative.findUnique({
+      where: { id: coopId },
+      select: {
+        name: true,
+        code: true,
+        state: true,
+        country: true,
+        registrationNumber: true,
+        tin: true,
+        cvn: true,
+        scumlStatus: true,
+        dpoName: true,
+        dpoPhone: true,
+        dpoEmail: true,
+      },
+    }),
+    prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coopId, active: true },
+      orderBy: { createdAt: "desc" },
+      select: { label: true, type: true },
+    }),
+    prisma.member.count({ where: { cooperativeId: coopId, createdAt: { lt: start } } }),
+    prisma.member.count({
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+    }),
+    prisma.member.count({ where: { cooperativeId: coopId, createdAt: { lte: end } } }),
+    prisma.member.groupBy({
+      by: ["status"],
+      where: { cooperativeId: coopId },
+      _count: { _all: true },
+    }),
+  ]);
+
+  const current = byStatus.reduce((sum, row) => sum + row._count._all, 0);
+  const statusRows = new Map(byStatus.map((row) => [row.status, row._count._all]));
+  const warnings: string[] = [];
+  if (!coop) warnings.push("Cooperative record not found");
+  if (!coop?.registrationNumber) warnings.push("Registration number is missing");
+  if (!coop?.tin) warnings.push("TIN is missing");
+  if (!coop?.scumlStatus) warnings.push("SCUML status is missing");
+  if (!coop?.dpoEmail) warnings.push("DPO email is missing");
+
+  const identity: ReportSheet = {
+    name: "Annual Return",
+    rows: [
+      ["Item", "Value"],
+      ["Cooperative", coop?.name ?? ""],
+      ["Code", coop?.code ?? ""],
+      ["State", coop?.state ?? ""],
+      ["Country", coop?.country ?? ""],
+      ["Regulator", profile ? `${profile.label} (${profile.type})` : "Not configured"],
+      ["Period (calendar year)", period],
+      ["Registration number", coop?.registrationNumber ?? ""],
+      ["TIN", coop?.tin ?? ""],
+      ["CVN", coop?.cvn ?? ""],
+      ["SCUML status", coop?.scumlStatus ?? ""],
+      ["DPO name", coop?.dpoName ?? ""],
+      ["DPO phone", coop?.dpoPhone ?? ""],
+      ["DPO email", coop?.dpoEmail ?? ""],
+      ["Members (current)", String(current)],
+      ["Generated at (UTC)", new Date().toISOString()],
+      ["Warnings", warnings.length ? warnings.join("; ") : "None"],
+      ["Note", "Calendar-year return. Money in NGN. Member status is as of generation time."],
+    ],
+  };
+
+  const knownStatuses = ["active", "pending", "suspended", "deceased"];
+  const knownStatusRows = knownStatuses.map((status) => [
+    `${status.charAt(0).toUpperCase()}${status.slice(1)} (as of generation)`,
+    String(statusRows.get(status) ?? 0),
+  ]);
+  const knownStatusTotal = knownStatuses.reduce(
+    (sum, status) => sum + (statusRows.get(status) ?? 0),
+    0,
+  );
+
+  const movement: ReportSheet = {
+    name: "Membership Movement",
+    rows: [
+      ["Metric", "Members"],
+      ["Opening members (1 Jan)", String(opening)],
+      ["Joined during year", String(joined)],
+      ["Closing members (31 Dec)", String(closing)],
+      ...knownStatusRows,
+      ["Other statuses (as of generation)", String(Math.max(0, current - knownStatusTotal))],
+      ["Note", "Exit dates are not stored; status breakdowns reflect the current member record."],
+    ],
+  };
+
+  const financial = financialAll.filter((sheet) => sheet.name !== "Membership");
+
+  const [
+    reserveBySource,
+    educationBySource,
+    developmentBySource,
+    reserveLifetime,
+    educationLifetime,
+    developmentLifetime,
+    dividends,
+    settledYear,
+    balances,
+    meetings,
+    agmCount,
+  ] = await Promise.all([
+    prisma.reserveAllocation.groupBy({
+      by: ["source"],
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+      orderBy: { source: "asc" },
+    }),
+    prisma.educationFund.groupBy({
+      by: ["source"],
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+      orderBy: { source: "asc" },
+    }),
+    prisma.developmentFund.groupBy({
+      by: ["source"],
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      _sum: { amount: true },
+      orderBy: { source: "asc" },
+    }),
+    prisma.reserveAllocation.aggregate({
+      where: { cooperativeId: coopId, createdAt: { lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.educationFund.aggregate({
+      where: { cooperativeId: coopId, createdAt: { lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.developmentFund.aggregate({
+      where: { cooperativeId: coopId, createdAt: { lte: end } },
+      _sum: { amount: true },
+    }),
+    prisma.dividend.findMany({
+      where: { cooperativeId: coopId, createdAt: { gte: start, lte: end } },
+      select: {
+        reference: true,
+        rate: true,
+        basis: true,
+        totalPool: true,
+        status: true,
+        distributedAt: true,
+      },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.dividendEntry.aggregate({
+      where: {
+        status: "settled",
+        paidAt: { gte: start, lte: end },
+        dividend: { cooperativeId: coopId },
+      },
+      _sum: { amount: true },
+    }),
+    prisma.cooperative.findUnique({
+      where: { id: coopId },
+      select: {
+        reserveFundBalance: true,
+        protectionFundBalance: true,
+        federationFundBalance: true,
+        loanLossProvisionBalance: true,
+      },
+    }),
+    prisma.meeting.findMany({
+      where: { cooperativeId: coopId, scheduledAt: { gte: start, lte: end } },
+      select: {
+        type: true,
+        title: true,
+        status: true,
+        scheduledAt: true,
+        quorumPercent: true,
+        attendance: { select: { present: true } },
+        _count: { select: { motions: true } },
+      },
+      orderBy: { scheduledAt: "asc" },
+    }),
+    prisma.meeting.count({
+      where: {
+        cooperativeId: coopId,
+        type: "agm",
+        status: "closed",
+        closedAt: { gte: start, lte: end },
+      },
+    }),
+  ]);
+
+  const sumSources = (rows: { _sum: { amount: number | null } }[]): number =>
+    rows.reduce((sum, row) => sum + (row._sum.amount ?? 0), 0);
+  const reserveTotal = sumSources(reserveBySource);
+  const educationTotal = sumSources(educationBySource);
+  const developmentTotal = sumSources(developmentBySource);
+  const declaredTotal = dividends.reduce((sum, row) => sum + row.totalPool, 0);
+  const settledTotal = settledYear._sum.amount ?? 0;
+
+  const fundRows = (
+    label: string,
+    yearTotal: number,
+    bySource: { source: string; amount: number }[],
+    lifetimeTotal: number,
+  ): [string, string][] => [
+    [`${label} allocated in year`, formatBalance(yearTotal)],
+    ...bySource.map((row): [string, string] => [
+      `${label} - ${row.source} (in year)`,
+      formatBalance(row.amount),
+    ]),
+    [`${label} allocated to date`, formatBalance(lifetimeTotal)],
+  ];
+
+  const funds: ReportSheet = {
+    name: "Statutory Funds & Dividends",
+    rows: [
+      ["Item", "Amount"],
+      ...fundRows(
+        "Reserve",
+        reserveTotal,
+        reserveBySource.map((row) => ({ source: row.source, amount: row._sum.amount ?? 0 })),
+        reserveLifetime._sum.amount ?? 0,
+      ),
+      ...fundRows(
+        "Education",
+        educationTotal,
+        educationBySource.map((row) => ({ source: row.source, amount: row._sum.amount ?? 0 })),
+        educationLifetime._sum.amount ?? 0,
+      ),
+      ...fundRows(
+        "Development",
+        developmentTotal,
+        developmentBySource.map((row) => ({ source: row.source, amount: row._sum.amount ?? 0 })),
+        developmentLifetime._sum.amount ?? 0,
+      ),
+      ["Dividends declared in year", formatBalance(declaredTotal)],
+      ["Dividends settled in year", formatBalance(settledTotal)],
+      ["Reserve fund balance", formatBalance(balances?.reserveFundBalance ?? 0)],
+      ["Protection fund balance", formatBalance(balances?.protectionFundBalance ?? 0)],
+      ["Federation fund balance", formatBalance(balances?.federationFundBalance ?? 0)],
+      ["Loan-loss provision balance", formatBalance(balances?.loanLossProvisionBalance ?? 0)],
+      ["", ""],
+      ["Dividend run", "Rate | Basis | Pool | Status | Distributed"],
+      ...dividends.map((d) => [
+        d.reference,
+        `${d.rate}% | ${d.basis} | ${formatBalance(d.totalPool)} | ${d.status} | ${
+          d.distributedAt ? d.distributedAt.toISOString().slice(0, 10) : "-"
+        }`,
+      ]),
+    ],
+  };
+
+  const agmHeld = agmCount > 0;
+  const governance: ReportSheet = {
+    name: "Governance",
+    rows: [
+      ["Item", "Value", "Detail"],
+      ["AGM held in year", agmHeld ? "Yes" : "No", ""],
+      ["Meetings in year", String(meetings.length), ""],
+      ...meetings.map((m) => [
+        m.type.toUpperCase(),
+        m.scheduledAt.toISOString().slice(0, 10),
+        `${m.title} | ${m.status} | present ${m.attendance.filter((a) => a.present).length} | quorum required ${m.quorumPercent}% | motions ${m._count.motions}`,
+      ]),
+    ],
+  };
+
+  return [identity, movement, ...financial, funds, governance];
+}
+
+/**
  * Build the NFIU AML summaries pack for a cooperative and period, READ-ONLY:
  * STR/SAR counts grouped by status, and the large-transaction (≥ ₦5M) list —
  * all directions, matching the direction-agnostic AML large-transaction rule
@@ -381,13 +685,51 @@ async function dueProfile(
   const profile = await prisma.regulatorProfile.findFirst({
     where: { cooperativeId: coopId, active: true },
     orderBy: { createdAt: "desc" },
-    select: { monthlyDueDay: true, quarterlyDueDay: true, contactEmail: true },
+    select: {
+      monthlyDueDay: true,
+      quarterlyDueDay: true,
+      annualDueMonth: true,
+      annualDueDay: true,
+      contactEmail: true,
+    },
   });
   return {
     monthlyDueDay: profile?.monthlyDueDay ?? DEFAULT_DUE.monthlyDueDay,
     quarterlyDueDay: profile?.quarterlyDueDay ?? DEFAULT_DUE.quarterlyDueDay,
+    annualDueMonth: profile?.annualDueMonth ?? DEFAULT_DUE.annualDueMonth,
+    annualDueDay: profile?.annualDueDay ?? DEFAULT_DUE.annualDueDay,
     contactEmail: profile?.contactEmail ?? null,
   };
+}
+
+/** The active regulator profile (and its due days) for the console. */
+export interface RegulatorProfileView {
+  id: string;
+  label: string;
+  type: string;
+  contactEmail: string | null;
+  monthlyDueDay: number;
+  quarterlyDueDay: number;
+  annualDueMonth: number;
+  annualDueDay: number;
+}
+
+/** The active regulator profile for the console, or null when unconfigured. */
+export async function getRegulatorProfile(coopId: string): Promise<RegulatorProfileView | null> {
+  return prisma.regulatorProfile.findFirst({
+    where: { cooperativeId: coopId, active: true },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      label: true,
+      type: true,
+      contactEmail: true,
+      monthlyDueDay: true,
+      quarterlyDueDay: true,
+      annualDueMonth: true,
+      annualDueDay: true,
+    },
+  });
 }
 
 /**
@@ -413,6 +755,14 @@ export async function generateReport(
     };
   }
 
+  const periodPattern = periodType === "annual" ? /^\d{4}$/ : /^\d{4}-(0[1-9]|1[0-2])$/;
+  if (!periodPattern.test(period)) {
+    return {
+      ok: false,
+      message: `Invalid *${periodType}* period *${period}*.`,
+    };
+  }
+
   const buildFiles = deps.buildFiles ?? buildReportFiles;
   const upload = deps.upload ?? uploadToS3;
   const sendEmail = deps.sendEmail ?? emailFiles;
@@ -426,7 +776,11 @@ export async function generateReport(
     ]);
     const sheets: ReportSheet[] = [];
     if (packType === "statutory" || packType === "both") {
-      sheets.push(...(await statutoryPack(coopId, period)));
+      sheets.push(
+        ...(periodType === "annual"
+          ? await annualPack(coopId, period)
+          : await statutoryPack(coopId, period)),
+      );
     }
     if (packType === "nfiu" || packType === "both") {
       sheets.push(...(await nfiuPack(coopId, period)));
@@ -525,6 +879,7 @@ export async function generateReport(
       `📊 Excel: ${links.xlsx}\n📄 PDF: ${links.pdf}\n` +
       `🗓️ Filing due: ${dueAt.toISOString().slice(0, 10)}${emailNote}`,
     reportId: report.id,
+    dueAt,
     files,
     links,
   };
@@ -542,6 +897,8 @@ export interface ReportSummary {
   status: string;
   dueAt: Date | null;
   filedAt: Date | null;
+  acknowledgementId: string | null;
+  notes: string | null;
   files: { xlsx: string; pdf: string; csv: string } | null;
 }
 
@@ -560,6 +917,8 @@ export async function setRegulatorProfile(
     contactEmail?: string;
     monthlyDueDay?: number;
     quarterlyDueDay?: number;
+    annualDueMonth?: number;
+    annualDueDay?: number;
   },
   actor: { id: string; phone: string },
 ): Promise<{ ok: boolean; message: string }> {
@@ -577,6 +936,20 @@ export async function setRegulatorProfile(
     if (day !== undefined && (!Number.isInteger(day) || day < 1 || day > 28)) {
       return { ok: false, message: `${label} due day must be between 1 and 28.` };
     }
+  }
+  if (
+    input.annualDueMonth !== undefined &&
+    (!Number.isInteger(input.annualDueMonth) ||
+      input.annualDueMonth < 1 ||
+      input.annualDueMonth > 12)
+  ) {
+    return { ok: false, message: "Annual due month must be between 1 and 12." };
+  }
+  if (
+    input.annualDueDay !== undefined &&
+    (!Number.isInteger(input.annualDueDay) || input.annualDueDay < 1 || input.annualDueDay > 31)
+  ) {
+    return { ok: false, message: "Annual due day must be between 1 and 31." };
   }
 
   const label = input.label?.trim();
@@ -605,6 +978,8 @@ export async function setRegulatorProfile(
           ...(input.quarterlyDueDay !== undefined
             ? { quarterlyDueDay: input.quarterlyDueDay }
             : {}),
+          ...(input.annualDueMonth !== undefined ? { annualDueMonth: input.annualDueMonth } : {}),
+          ...(input.annualDueDay !== undefined ? { annualDueDay: input.annualDueDay } : {}),
         },
       });
     }
@@ -616,6 +991,8 @@ export async function setRegulatorProfile(
         contactEmail: input.contactEmail || null,
         monthlyDueDay: input.monthlyDueDay ?? DEFAULT_DUE.monthlyDueDay,
         quarterlyDueDay: input.quarterlyDueDay ?? DEFAULT_DUE.quarterlyDueDay,
+        annualDueMonth: input.annualDueMonth ?? DEFAULT_DUE.annualDueMonth,
+        annualDueDay: input.annualDueDay ?? DEFAULT_DUE.annualDueDay,
       },
     });
   });
@@ -636,14 +1013,14 @@ export async function setRegulatorProfile(
     action: "regulator.profile_set",
     targetType: "regulatorProfile",
     targetId: profile.id,
-    detail: `Regulator set to ${profile.label} (${profile.type}); monthly due ${profile.monthlyDueDay}, quarterly due ${profile.quarterlyDueDay}`,
+    detail: `Regulator set to ${profile.label} (${profile.type}); monthly due ${profile.monthlyDueDay}, quarterly due ${profile.quarterlyDueDay}, annual due ${profile.annualDueMonth}/${profile.annualDueDay}`,
   });
 
   return {
     ok: true,
     message:
       `✅ Regulator set to *${profile.label}* (${profile.type}).\n` +
-      `🗓️ Monthly returns due day *${profile.monthlyDueDay}*, quarterly due day *${profile.quarterlyDueDay}*. ` +
+      `🗓️ Monthly returns due day *${profile.monthlyDueDay}*, quarterly due day *${profile.quarterlyDueDay}*, annual due *${profile.annualDueMonth}/${profile.annualDueDay}*. ` +
       `Scheduled packs are now enabled.`,
   };
 }
@@ -651,15 +1028,34 @@ export async function setRegulatorProfile(
 /**
  * Mark a generated regulator pack as filed. `reportId` may be a full id or a
  * unique suffix (matching the shorter ids shown in chat). Coop-scoped write via
- * `withTx` + `setCoopContext`, audited as `regulator.report_filed`.
+ * `withTx` + `setCoopContext`, audited as `regulator.report_filed` (or
+ * `regulator.report_acknowledged` when a filed pack's receipt or note changes).
+ * An optional acknowledgement and filing note are trimmed; a whitespace-only
+ * acknowledgement or note clears the previously recorded value. Values are
+ * compared with what is stored, so resubmitting an unchanged filing is a no-op.
  */
 export async function markFiled(
   coopId: string,
   reportId: string,
   actor: { id: string; phone: string },
+  filing: { acknowledgementId?: string; note?: string } = {},
 ): Promise<{ ok: boolean; message: string }> {
   const ref = reportId?.trim();
   if (!ref) return { ok: false, message: "Usage: *regreport filed <report id>*." };
+
+  const acknowledgementProvided = filing.acknowledgementId !== undefined;
+  const acknowledgementId = filing.acknowledgementId?.trim() || null;
+  const noteProvided = filing.note !== undefined;
+  const note = filing.note?.trim() || null;
+  if (acknowledgementId && acknowledgementId.length > 80) {
+    return { ok: false, message: "Acknowledgement must be 80 characters or fewer." };
+  }
+  if (acknowledgementId && !/^[A-Za-z0-9]/.test(acknowledgementId)) {
+    return { ok: false, message: "Acknowledgement must start with a letter or digit." };
+  }
+  if (note && note.length > 500) {
+    return { ok: false, message: "Filing note must be 500 characters or fewer." };
+  }
 
   const report = await prisma.regulatorReport.findFirst({
     where: { cooperativeId: coopId, id: { endsWith: ref } },
@@ -668,10 +1064,18 @@ export async function markFiled(
   if (!report) {
     return { ok: false, message: `No regulator report matching *${ref}* in your cooperative.` };
   }
-  if (report.status === "filed") {
+
+  const wasFiled = report.status === "filed";
+  // Compare against what is stored so a client that posts both fields (the console
+  // always does) does not fabricate an "acknowledgement cleared/updated" audit row.
+  const acknowledgementChanged =
+    acknowledgementProvided && acknowledgementId !== report.acknowledgementId;
+  const noteChanged = noteProvided && note !== report.notes;
+
+  if (wasFiled && !acknowledgementChanged && !noteChanged) {
     return {
       ok: true,
-      message: `ℹ️ The *${report.period}* ${report.periodType} pack is already marked filed.`,
+      message: `The *${report.period}* ${report.periodType} pack is already marked filed.`,
     };
   }
 
@@ -680,24 +1084,54 @@ export async function markFiled(
     await setCoopContext(tx as never, coopId);
     await tx.regulatorReport.update({
       where: { id: report.id },
-      data: { status: "filed", filedAt },
+      data: {
+        status: "filed",
+        filedAt: report.filedAt ?? filedAt,
+        ...(acknowledgementChanged ? { acknowledgementId } : {}),
+        ...(noteChanged ? { notes: note } : {}),
+      },
     });
   });
+
+  const changes: string[] = [];
+  if (acknowledgementChanged) {
+    changes.push(
+      acknowledgementId
+        ? `acknowledgement updated (ack ${acknowledgementId})`
+        : "acknowledgement cleared",
+    );
+  }
+  if (noteChanged) changes.push(note ? "note updated" : "note cleared");
+  const detail = wasFiled
+    ? `${report.periodType} ${report.packType} pack for ${report.period} filing ${changes.join(" and ")}`
+    : `${report.periodType} ${report.packType} pack for ${report.period} marked filed` +
+      (acknowledgementId ? ` (ack ${acknowledgementId})` : "");
 
   await audit({
     cooperativeId: coopId,
     actorPhone: actor.phone,
     actorId: actor.id,
     actorRole: "admin",
-    action: "regulator.report_filed",
+    action: wasFiled ? "regulator.report_acknowledged" : "regulator.report_filed",
     targetType: "regulatorReport",
     targetId: report.id,
-    detail: `${report.periodType} ${report.packType} pack for ${report.period} marked filed`,
+    detail,
   });
 
   return {
     ok: true,
-    message: `✅ *${report.period}* ${report.periodType} regulator pack marked *filed*.`,
+    message: wasFiled
+      ? `*${report.period}* ${report.periodType} regulator pack filing updated` +
+        (acknowledgementChanged
+          ? acknowledgementId
+            ? ` with acknowledgement *${acknowledgementId}*`
+            : " with the acknowledgement cleared"
+          : "") +
+        (noteChanged ? ` and note ${note ? "updated" : "cleared"}` : "") +
+        "."
+      : `*${report.period}* ${report.periodType} regulator pack marked *filed*` +
+        (acknowledgementId ? ` with acknowledgement *${acknowledgementId}*` : "") +
+        ".",
   };
 }
 
@@ -728,6 +1162,8 @@ export async function listReports(
       status: r.status,
       dueAt: r.dueAt,
       filedAt: r.filedAt,
+      acknowledgementId: r.acknowledgementId,
+      notes: r.notes,
       files,
     };
   });

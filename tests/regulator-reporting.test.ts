@@ -6,9 +6,11 @@ import {
   reportPeriod,
   periodDueAt,
   statutoryPack,
+  annualPack,
   nfiuPack,
   generateReport,
   setRegulatorProfile,
+  getRegulatorProfile,
   markFiled,
   listReports,
   type PackType,
@@ -61,12 +63,7 @@ async function makeLedger(
   });
 }
 
-async function makeLoan(
-  coopId: string,
-  memberId: string,
-  balance: number,
-  daysOverdue: number,
-) {
+async function makeLoan(coopId: string, memberId: string, balance: number, daysOverdue: number) {
   const dueDate = new Date();
   dueDate.setDate(dueDate.getDate() - daysOverdue);
   return prisma.loan.create({
@@ -167,12 +164,7 @@ function parseAmount(value: string): number {
   return Math.round(Number(value.replace(/[^\d.-]/g, "")) * 100);
 }
 
-async function makeLoanDue(
-  coopId: string,
-  memberId: string,
-  balance: number,
-  dueDate: Date,
-) {
+async function makeLoanDue(coopId: string, memberId: string, balance: number, dueDate: Date) {
   return prisma.loan.create({
     data: {
       amount: balance,
@@ -226,10 +218,20 @@ describe("reportPeriod", () => {
     expect(reportPeriod(new Date("2026-07-31"), "quarterly")).toBe("2026-09"); // Q3
     expect(reportPeriod(new Date("2026-11-30"), "quarterly")).toBe("2026-12"); // Q4
   });
+
+  it("returns the calendar year for an annual period", () => {
+    expect(reportPeriod(new Date("2026-01-01"), "annual")).toBe("2026");
+    expect(reportPeriod(new Date("2026-12-31"), "annual")).toBe("2026");
+  });
 });
 
 describe("periodDueAt", () => {
-  const profile = { monthlyDueDay: 10, quarterlyDueDay: 15 };
+  const profile = {
+    monthlyDueDay: 10,
+    quarterlyDueDay: 15,
+    annualDueMonth: 3,
+    annualDueDay: 31,
+  };
 
   it("is the due day of the month after a monthly period", () => {
     expect(periodDueAt("2026-03", "monthly", profile).toISOString().slice(0, 10)).toBe(
@@ -245,6 +247,24 @@ describe("periodDueAt", () => {
     expect(periodDueAt("2026-03", "quarterly", profile).toISOString().slice(0, 10)).toBe(
       "2026-04-15",
     );
+  });
+
+  it("is the configured annual due date in the following year", () => {
+    expect(periodDueAt("2026", "annual", profile).toISOString().slice(0, 10)).toBe("2027-03-31");
+  });
+
+  it("clamps the annual due day to the last day of the month", () => {
+    const february = { ...profile, annualDueMonth: 2, annualDueDay: 31 };
+    expect(periodDueAt("2026", "annual", february).toISOString().slice(0, 10)).toBe("2027-02-28");
+  });
+
+  it("rejects a malformed annual period", () => {
+    expect(() => periodDueAt("2026-03", "annual", profile)).toThrow(/Invalid annual period/);
+  });
+
+  it("clamps a leap-year annual due date to 29 February", () => {
+    const february = { ...profile, annualDueMonth: 2, annualDueDay: 31 };
+    expect(periodDueAt("2027", "annual", february).toISOString().slice(0, 10)).toBe("2028-02-29");
   });
 });
 
@@ -302,9 +322,7 @@ describe("statutoryPack", () => {
 
     const pack = await statutoryPack(coop.id, "2026-03");
     const parSheet = sheet(pack, /par/i)!;
-    const pastDue = parseAmount(
-      parSheet.rows.find((r) => /total past due/i.test(r[0]))![1],
-    );
+    const pastDue = parseAmount(parSheet.rows.find((r) => /total past due/i.test(r[0]))![1]);
     // Only the March-due loan is past due at the period end (100000), never both.
     // At generation time (long after the period) both would show as past due.
     expect(pastDue).toBe(100000);
@@ -322,8 +340,7 @@ describe("statutoryPack", () => {
 
     const pack = await statutoryPack(coop.id, "2026-03");
     const bs = sheet(pack, /balance/i)!;
-    const amountOf = (re: RegExp) =>
-      parseAmount(bs.rows.find((r) => re.test(r[0]))?.[1] ?? "₦0");
+    const amountOf = (re: RegExp) => parseAmount(bs.rows.find((r) => re.test(r[0]))?.[1] ?? "₦0");
     const totalAssets = amountOf(/total assets/i);
     const totalLiabilities = amountOf(/total liabilities/i);
     const netCapital = amountOf(/net capital/i);
@@ -348,6 +365,315 @@ describe("statutoryPack", () => {
   });
 });
 
+describe("annualPack", () => {
+  it("includes identity particulars and membership movement for the year", async () => {
+    const coop = await createTestCoop("REG30");
+    await prisma.cooperative.update({
+      where: { id: coop.id },
+      data: {
+        registrationNumber: "LS/CS/2020/001",
+        tin: "12345678-0001",
+        scumlStatus: "registered",
+        dpoEmail: "dpo@example.com",
+      },
+    });
+    await prisma.regulatorProfile.create({
+      data: { cooperativeId: coop.id, label: "Lagos Ministry", type: "ministry" },
+    });
+
+    const before = await createTestMember(coop.id, { phone: "2348000010040" });
+    await prisma.member.update({
+      where: { id: before.id },
+      data: { createdAt: new Date("2025-06-01T10:00:00Z") },
+    });
+    const joined = await createTestMember(coop.id, { phone: "2348000010041" });
+    await prisma.member.update({
+      where: { id: joined.id },
+      data: { createdAt: new Date("2026-05-01T10:00:00Z") },
+    });
+    await prisma.member.update({ where: { id: joined.id }, data: { status: "suspended" } });
+    await createTestMember(coop.id, { phone: "2348000010042" });
+    await prisma.member.updateMany({
+      where: { cooperativeId: coop.id, phone: "2348000010042" },
+      data: { createdAt: new Date("2027-01-05T10:00:00Z") },
+    });
+
+    const sheets = await annualPack(coop.id, "2026");
+    const identity = sheets.find((s) => s.name === "Annual Return")!;
+    const movement = sheets.find((s) => s.name === "Membership Movement")!;
+
+    expect(identity.rows).toContainEqual(["Registration number", "LS/CS/2020/001"]);
+    expect(identity.rows).toContainEqual(["Regulator", "Lagos Ministry (ministry)"]);
+    expect(identity.rows).toContainEqual(["Members (current)", "3"]);
+
+    expect(movement.rows).toContainEqual(["Opening members (1 Jan)", "1"]);
+    expect(movement.rows).toContainEqual(["Joined during year", "1"]);
+    expect(movement.rows).toContainEqual(["Closing members (31 Dec)", "2"]);
+    expect(movement.rows).toContainEqual(["Suspended (as of generation)", "1"]);
+  });
+
+  it("counts members at the exact year edges and excludes the next year", async () => {
+    const coop = await createTestCoop("REG41");
+    const opening = await createTestMember(coop.id, { phone: "2348000010061" });
+    await prisma.member.update({
+      where: { id: opening.id },
+      data: { createdAt: new Date("2025-12-31T23:59:59.999Z") },
+    });
+    const firstJoined = await createTestMember(coop.id, { phone: "2348000010062" });
+    await prisma.member.update({
+      where: { id: firstJoined.id },
+      data: { createdAt: new Date("2026-01-01T00:00:00.000Z") },
+    });
+    const lastJoined = await createTestMember(coop.id, { phone: "2348000010063" });
+    await prisma.member.update({
+      where: { id: lastJoined.id },
+      data: { createdAt: new Date("2026-12-31T23:59:59.999Z") },
+    });
+    const outside = await createTestMember(coop.id, { phone: "2348000010064" });
+    await prisma.member.update({
+      where: { id: outside.id },
+      data: { createdAt: new Date("2027-01-01T00:00:00.000Z") },
+    });
+
+    const sheets = await annualPack(coop.id, "2026");
+    const movement = sheets.find((s) => s.name === "Membership Movement")!;
+    expect(movement.rows).toContainEqual(["Opening members (1 Jan)", "1"]);
+    expect(movement.rows).toContainEqual(["Joined during year", "2"]);
+    expect(movement.rows).toContainEqual(["Closing members (31 Dec)", "3"]);
+  });
+
+  it("warns when the cooperative record is missing", async () => {
+    const sheets = await annualPack("does-not-exist", "2026");
+    const identity = sheets.find((s) => s.name === "Annual Return")!;
+    const warnings = identity.rows.find((row) => row[0] === "Warnings")![1];
+    expect(warnings).toContain("Cooperative record not found");
+  });
+
+  it("does not count an AGM closed outside the year", async () => {
+    const coop = await createTestCoop("REG42");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010065",
+      role: "superadmin",
+    });
+    await prisma.meeting.create({
+      data: {
+        cooperativeId: coop.id,
+        type: "agm",
+        title: "2026 AGM",
+        status: "closed",
+        scheduledAt: new Date("2026-12-20T10:00:00Z"),
+        closedAt: new Date("2027-01-05T10:00:00Z"),
+        createdById: admin.id,
+      },
+    });
+
+    const sheets = await annualPack(coop.id, "2026");
+    const governance = sheets.find((s) => s.name === "Governance")!;
+    expect(governance.rows).toContainEqual(["AGM held in year", "No", ""]);
+    expect(governance.rows).toContainEqual(["Meetings in year", "1", ""]);
+  });
+
+  it("counts an AGM scheduled the previous year but closed in year", async () => {
+    const coop = await createTestCoop("REG43");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010066",
+      role: "superadmin",
+    });
+    await prisma.meeting.create({
+      data: {
+        cooperativeId: coop.id,
+        type: "agm",
+        title: "2025 AGM",
+        status: "closed",
+        scheduledAt: new Date("2025-12-20T10:00:00Z"),
+        closedAt: new Date("2026-01-05T10:00:00Z"),
+        createdById: admin.id,
+      },
+    });
+
+    const sheets = await annualPack(coop.id, "2026");
+    const governance = sheets.find((s) => s.name === "Governance")!;
+    expect(governance.rows).toContainEqual(["AGM held in year", "Yes", ""]);
+    // The meeting list itself stays scoped to scheduledAt in-year.
+    expect(governance.rows).toContainEqual(["Meetings in year", "0", ""]);
+  });
+
+  it("reconciles members whose status is outside the known set", async () => {
+    const coop = await createTestCoop("REG44");
+    const member = await createTestMember(coop.id, { phone: "2348000010067" });
+    await prisma.member.update({ where: { id: member.id }, data: { status: "inactive" } });
+
+    const sheets = await annualPack(coop.id, "2026");
+    const movement = sheets.find((s) => s.name === "Membership Movement")!;
+    expect(movement.rows).toContainEqual(["Active (as of generation)", "0"]);
+    expect(movement.rows).toContainEqual(["Pending (as of generation)", "0"]);
+    expect(movement.rows).toContainEqual(["Suspended (as of generation)", "0"]);
+    expect(movement.rows).toContainEqual(["Deceased (as of generation)", "0"]);
+    expect(movement.rows).toContainEqual(["Other statuses (as of generation)", "1"]);
+  });
+
+  it("adds financial statements, statutory funds, dividends and governance", async () => {
+    const coop = await createTestCoop("REG31");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010043",
+      role: "superadmin",
+    });
+    const member = await createTestMember(coop.id, { phone: "2348000010044" });
+
+    await makeLedger(coop.id, "income", "interest", 50000, new Date("2026-03-15T12:00:00Z"));
+    await makeLedger(coop.id, "expense", "salary", 10000, new Date("2026-03-20T12:00:00Z"));
+    await makeContrib(coop.id, member.id, 400000);
+    await makeLoan(coop.id, member.id, 200000, 45);
+
+    await prisma.reserveAllocation.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 250000,
+        source: "dividend_declaration",
+        createdAt: new Date("2026-04-01T10:00:00Z"),
+      },
+    });
+    // Prior-year allocation: counts in lifetime-to-date but not in the year total.
+    await prisma.reserveAllocation.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 100000,
+        source: "manual",
+        createdAt: new Date("2025-06-01T10:00:00Z"),
+      },
+    });
+    // A second in-year source must appear as its own line.
+    await prisma.reserveAllocation.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 50000,
+        source: "profit_sharing",
+        createdAt: new Date("2026-05-01T10:00:00Z"),
+      },
+    });
+    // Allocated in the following year: excluded from the 2026 in-year total.
+    await prisma.reserveAllocation.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 990000,
+        source: "dividend_declaration",
+        createdAt: new Date("2027-01-02T10:00:00Z"),
+      },
+    });
+    await prisma.educationFund.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 100000,
+        source: "dividend_declaration",
+        createdAt: new Date("2026-04-01T10:00:00Z"),
+      },
+    });
+    await prisma.developmentFund.create({
+      data: {
+        cooperativeId: coop.id,
+        amount: 50000,
+        source: "dividend_declaration",
+        createdAt: new Date("2026-04-01T10:00:00Z"),
+      },
+    });
+    const dividend = await prisma.dividend.create({
+      data: {
+        cooperativeId: coop.id,
+        reference: "DIV-2026-1",
+        rate: 5,
+        basis: "savings",
+        totalPool: 300000,
+        status: "distributed",
+        createdAt: new Date("2026-05-01T10:00:00Z"),
+        distributedAt: new Date("2026-05-02T10:00:00Z"),
+      },
+    });
+    await prisma.dividendEntry.create({
+      data: {
+        dividendId: dividend.id,
+        memberId: member.id,
+        amount: 120000,
+        status: "settled",
+        paidAt: new Date("2026-05-02T10:00:00Z"),
+      },
+    });
+    // Settled in the following year: excluded from the 2026 "settled in year" total.
+    await prisma.dividendEntry.create({
+      data: {
+        dividendId: dividend.id,
+        memberId: admin.id,
+        amount: 80000,
+        status: "settled",
+        paidAt: new Date("2027-01-01T10:00:00Z"),
+      },
+    });
+    const meeting = await prisma.meeting.create({
+      data: {
+        cooperativeId: coop.id,
+        type: "agm",
+        title: "2026 AGM",
+        status: "closed",
+        scheduledAt: new Date("2026-06-15T10:00:00Z"),
+        closedAt: new Date("2026-06-15T12:00:00Z"),
+        createdById: admin.id,
+      },
+    });
+    await prisma.meetingAttendance.create({
+      data: { meetingId: meeting.id, memberId: member.id, present: true },
+    });
+
+    const sheets = await annualPack(coop.id, "2026");
+    expect(sheets.map((s) => s.name)).toEqual([
+      "Annual Return",
+      "Membership Movement",
+      "Balance Sheet",
+      "Profit & Loss",
+      "PAR Aging",
+      "PEARLS",
+      "Savings",
+      "Loans",
+      "Statutory Funds & Dividends",
+      "Governance",
+    ]);
+
+    const funds = sheets.find((s) => s.name === "Statutory Funds & Dividends")!;
+    // The 2027 allocation must not leak into the 2026 in-year total.
+    expect(funds.rows).toContainEqual(["Reserve allocated in year", formatBalance(300000)]);
+    expect(funds.rows).toContainEqual(["Education allocated in year", formatBalance(100000)]);
+    expect(funds.rows).toContainEqual(["Development allocated in year", formatBalance(50000)]);
+    expect(funds.rows).toContainEqual([
+      "Reserve - dividend_declaration (in year)",
+      formatBalance(250000),
+    ]);
+    expect(funds.rows).toContainEqual(["Reserve - profit_sharing (in year)", formatBalance(50000)]);
+    expect(funds.rows).toContainEqual([
+      "Education - dividend_declaration (in year)",
+      formatBalance(100000),
+    ]);
+    expect(funds.rows).toContainEqual([
+      "Development - dividend_declaration (in year)",
+      formatBalance(50000),
+    ]);
+    // Lifetime-to-date includes prior years but stops at the period end (no 2027 data).
+    expect(funds.rows).toContainEqual(["Reserve allocated to date", formatBalance(400000)]);
+    expect(funds.rows).toContainEqual(["Education allocated to date", formatBalance(100000)]);
+    expect(funds.rows).toContainEqual(["Development allocated to date", formatBalance(50000)]);
+    expect(funds.rows).toContainEqual(["Dividends declared in year", formatBalance(300000)]);
+    expect(funds.rows).toContainEqual(["Dividends settled in year", formatBalance(120000)]);
+    expect(funds.rows).toContainEqual(["Reserve fund balance", formatBalance(0)]);
+
+    const governance = sheets.find((s) => s.name === "Governance")!;
+    expect(governance.rows).toContainEqual(["AGM held in year", "Yes", ""]);
+    expect(governance.rows).toContainEqual(["Meetings in year", "1", ""]);
+    const agmRow = governance.rows.find((row) => row[0] === "AGM")!;
+    expect(agmRow[2]).toContain("2026 AGM");
+    expect(agmRow[2]).toContain("closed");
+    expect(agmRow[2]).toContain("present 1");
+    expect(agmRow[2]).toContain("quorum required 25%");
+    expect(agmRow[2]).toContain("motions 0");
+  });
+});
+
 describe("nfiuPack", () => {
   it("summarises STR counts by status and lists large transactions for the period", async () => {
     const coop = await createTestCoop("REG5");
@@ -361,11 +687,29 @@ describe("nfiuPack", () => {
 
     // Large (≥ ₦5M) money-out within the period: one withdrawal + one payout.
     await makeWithdrawal(coop.id, member.id, 500_000_000, "paid", new Date("2026-03-10T10:00:00Z"));
-    await makePayout(coop.id, member.id, 900_000_000, "successful", new Date("2026-03-20T10:00:00Z"));
+    await makePayout(
+      coop.id,
+      member.id,
+      900_000_000,
+      "successful",
+      new Date("2026-03-20T10:00:00Z"),
+    );
     // Excluded: below threshold, wrong status, and out-of-period.
     await makeWithdrawal(coop.id, member.id, 400_000_000, "paid", new Date("2026-03-11T10:00:00Z"));
-    await makeWithdrawal(coop.id, member.id, 500_000_000, "pending", new Date("2026-03-12T10:00:00Z"));
-    await makePayout(coop.id, member.id, 600_000_000, "successful", new Date("2026-04-10T10:00:00Z"));
+    await makeWithdrawal(
+      coop.id,
+      member.id,
+      500_000_000,
+      "pending",
+      new Date("2026-03-12T10:00:00Z"),
+    );
+    await makePayout(
+      coop.id,
+      member.id,
+      600_000_000,
+      "successful",
+      new Date("2026-04-10T10:00:00Z"),
+    );
 
     const pack = await nfiuPack(coop.id, "2026-03");
 
@@ -618,15 +962,43 @@ describe("generateReport", () => {
     });
     const first = await generateReport(coop.id, "2026-03", "monthly", "statutory", admin.id);
     await markFiled(coop.id, first.reportId!, { id: admin.id, phone: admin.phone });
-    const filedAt = (
-      await prisma.regulatorReport.findUnique({ where: { id: first.reportId! } })
-    )!.filedAt;
+    const filedAt = (await prisma.regulatorReport.findUnique({ where: { id: first.reportId! } }))!
+      .filedAt;
 
     const again = await generateReport(coop.id, "2026-03", "monthly", "statutory", admin.id);
     expect(again.reportId).toBe(first.reportId);
     const updated = await prisma.regulatorReport.findUnique({ where: { id: first.reportId! } });
     expect(updated!.status).toBe("filed");
     expect(updated!.filedAt?.toISOString()).toBe(filedAt!.toISOString());
+  });
+
+  it("preserves an annual acknowledgement when regenerated", async () => {
+    const coop = await createTestCoop("REG34c");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010037",
+      role: "superadmin",
+    });
+    const first = await generateReport(coop.id, "2026", "annual", "statutory", admin.id);
+    await markFiled(
+      coop.id,
+      first.reportId!,
+      { id: admin.id, phone: admin.phone },
+      {
+        acknowledgementId: "ACK-ANNUAL-1",
+        note: "Filed at the ministry desk",
+      },
+    );
+    const before = (await prisma.regulatorReport.findUnique({ where: { id: first.reportId! } }))!;
+    expect(before.status).toBe("filed");
+    expect(before.acknowledgementId).toBe("ACK-ANNUAL-1");
+
+    const again = await generateReport(coop.id, "2026", "annual", "statutory", admin.id);
+    expect(again.reportId).toBe(first.reportId);
+    const after = (await prisma.regulatorReport.findUnique({ where: { id: first.reportId! } }))!;
+    expect(after.status).toBe("filed");
+    expect(after.filedAt?.toISOString()).toBe(before.filedAt?.toISOString());
+    expect(after.acknowledgementId).toBe("ACK-ANNUAL-1");
+    expect(after.notes).toBe("Filed at the ministry desk");
   });
 
   it("returns download links, uploads to S3 under the coop prefix, and matches the export route", async () => {
@@ -677,6 +1049,56 @@ describe("generateReport", () => {
     } finally {
       delete process.env.SMTP_HOST;
     }
+  });
+
+  it("generates an idempotent annual pack with the following-year due date", async () => {
+    const coop = await createTestCoop("REG32");
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000010045",
+      role: "superadmin",
+    });
+    const member = await createTestMember(coop.id, { phone: "2348000010046" });
+    await makeLedger(coop.id, "income", "interest", 25000, new Date("2026-03-15T12:00:00Z"));
+    await makeContrib(coop.id, member.id, 100000);
+
+    const first = await generateReport(coop.id, "2026", "annual", "statutory", admin.id);
+    expect(first.ok).toBe(true);
+    expect(first.dueAt?.toISOString()).toBe("2027-03-31T00:00:00.000Z");
+    const second = await generateReport(coop.id, "2026", "annual", "statutory", admin.id);
+    expect(second.ok).toBe(true);
+    expect(second.reportId).toBe(first.reportId);
+
+    const csv = await readFile(first.files!.csv, "utf8");
+    expect(csv).toContain("# Annual Return\n");
+    expect(csv).not.toMatch(/^# Membership$/m);
+
+    const rows = await prisma.regulatorReport.findMany({
+      where: { cooperativeId: coop.id, period: "2026", periodType: "annual" },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].dueAt?.toISOString().slice(0, 10)).toBe("2027-03-31");
+  });
+
+  it("rejects a malformed annual period", async () => {
+    const coop = await createTestCoop("REG33");
+    const buildFiles = vi.fn(async (...args: Parameters<typeof buildReportFiles>) =>
+      buildReportFiles(...args),
+    );
+    const res = await generateReport(coop.id, "2026-03", "annual", "statutory", undefined, {
+      buildFiles,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.message).toBe("Invalid *annual* period *2026-03*.");
+    expect(buildFiles).not.toHaveBeenCalled();
+    expect(await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } })).toBe(0);
+  });
+
+  it("returns the exact validation message for an invalid monthly period", async () => {
+    const coop = await createTestCoop("REG33b");
+    const res = await generateReport(coop.id, "invalid", "monthly", "statutory");
+    expect(res.ok).toBe(false);
+    expect(res.message).toBe("Invalid *monthly* period *invalid*.");
+    expect(await prisma.regulatorReport.count({ where: { cooperativeId: coop.id } })).toBe(0);
   });
 });
 
@@ -886,6 +1308,50 @@ describe("setRegulatorProfile", () => {
     expect(await prisma.regulatorProfile.count({ where: { cooperativeId: coop.id } })).toBe(0);
   });
 
+  it("stores and validates the annual due date", async () => {
+    const coop = await createTestCoop("REG40");
+    const admin = await createTestMember(coop.id, { phone: "2348000010050", role: "superadmin" });
+    const actor = { id: admin.id, phone: admin.phone };
+
+    const ok = await setRegulatorProfile(
+      coop.id,
+      { label: "Ministry", annualDueMonth: 4, annualDueDay: 30 },
+      actor,
+    );
+    expect(ok.ok).toBe(true);
+    const profile = await prisma.regulatorProfile.findFirst({ where: { cooperativeId: coop.id } });
+    expect(profile!.annualDueMonth).toBe(4);
+    expect(profile!.annualDueDay).toBe(30);
+
+    const badMonth = await setRegulatorProfile(coop.id, { annualDueMonth: 13 }, actor);
+    expect(badMonth.ok).toBe(false);
+    const badDay = await setRegulatorProfile(coop.id, { annualDueDay: 0 }, actor);
+    expect(badDay.ok).toBe(false);
+
+    const unchanged = await prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coop.id },
+    });
+    expect({
+      annualDueMonth: unchanged!.annualDueMonth,
+      annualDueDay: unchanged!.annualDueDay,
+    }).toEqual({ annualDueMonth: 4, annualDueDay: 30 });
+
+    const firstOfYear = await setRegulatorProfile(
+      coop.id,
+      { annualDueMonth: 1, annualDueDay: 1 },
+      actor,
+    );
+    expect(firstOfYear.ok).toBe(true);
+    const lastOfYear = await setRegulatorProfile(
+      coop.id,
+      { annualDueMonth: 12, annualDueDay: 31 },
+      actor,
+    );
+    expect(lastOfYear.ok).toBe(true);
+    const fractionalMonth = await setRegulatorProfile(coop.id, { annualDueMonth: 3.5 }, actor);
+    expect(fractionalMonth.ok).toBe(false);
+  });
+
   it("requires a label when no profile exists yet", async () => {
     const coop = await createTestCoop("REG23");
     const admin = await createTestMember(coop.id, { phone: "2348000010033", role: "superadmin" });
@@ -960,6 +1426,336 @@ describe("markFiled", () => {
     const res = await markFiled(coop.id, "does-not-exist", { id: admin.id, phone: admin.phone });
     expect(res.ok).toBe(false);
   });
+
+  it("persists an acknowledgement and note, and audits the filing", async () => {
+    const coop = await createTestCoop("REG41");
+    const admin = await createTestMember(coop.id, { phone: "2348000010051", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "generated",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      {
+        acknowledgementId: " LSCS/AR/2026/0042 ",
+        note: "Delivered by hand",
+      },
+    );
+    expect(res.ok).toBe(true);
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.status).toBe("filed");
+    expect(saved!.acknowledgementId).toBe("LSCS/AR/2026/0042");
+    expect(saved!.notes).toBe("Delivered by hand");
+    expect(saved!.filedAt).toBeInstanceOf(Date);
+
+    const audited = await prisma.auditLog.findFirst({
+      where: { cooperativeId: coop.id, action: "regulator.report_filed", targetId: report.id },
+    });
+    expect(audited!.detail).toContain("LSCS/AR/2026/0042");
+  });
+
+  it("rejects an over-length acknowledgement", async () => {
+    const coop = await createTestCoop("REG42");
+    const admin = await createTestMember(coop.id, { phone: "2348000010052", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+      },
+    });
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      {
+        acknowledgementId: "x".repeat(81),
+      },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.message).toBe("Acknowledgement must be 80 characters or fewer.");
+    expect(
+      (await prisma.regulatorReport.findUnique({ where: { id: report.id } }))!.acknowledgementId,
+    ).toBeNull();
+  });
+
+  it("rejects an acknowledgement that does not start with a letter or digit", async () => {
+    const coop = await createTestCoop("REG45");
+    const admin = await createTestMember(coop.id, { phone: "2348000010054", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "generated",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      {
+        acknowledgementId: "/ACK/2026",
+      },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.message).toMatch(/letter or digit/i);
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.acknowledgementId).toBeNull();
+    expect(saved!.status).toBe("generated");
+  });
+
+  it("clears an acknowledgement when only whitespace is submitted", async () => {
+    const coop = await createTestCoop("REG46");
+    const admin = await createTestMember(coop.id, { phone: "2348000010055", role: "superadmin" });
+    const filedAt = new Date("2026-04-02T00:00:00Z");
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        filedAt,
+        acknowledgementId: "ACK-OLD",
+        notes: "Received",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      {
+        acknowledgementId: "   ",
+      },
+    );
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("acknowledgement cleared");
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.acknowledgementId).toBeNull();
+    expect(saved!.notes).toBe("Received");
+    expect(saved!.status).toBe("filed");
+    expect(saved!.filedAt!.toISOString()).toBe(filedAt.toISOString());
+
+    const audited = await prisma.auditLog.findFirst({
+      where: {
+        cooperativeId: coop.id,
+        action: "regulator.report_acknowledged",
+        targetId: report.id,
+      },
+    });
+    expect(audited).not.toBeNull();
+  });
+
+  it("updates the acknowledgement without rewriting an unchanged note", async () => {
+    const coop = await createTestCoop("REG46e");
+    const admin = await createTestMember(coop.id, { phone: "2348000010061", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        acknowledgementId: "ACK-OLD",
+        notes: "Received",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      { acknowledgementId: "ACK-NEW", note: "Received" },
+    );
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("ACK-NEW");
+    expect(res.message).not.toContain("note");
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.acknowledgementId).toBe("ACK-NEW");
+    expect(saved!.notes).toBe("Received");
+
+    const audited = await prisma.auditLog.findFirst({
+      where: {
+        cooperativeId: coop.id,
+        targetId: report.id,
+        action: "regulator.report_acknowledged",
+      },
+    });
+    expect(audited!.detail).toContain("acknowledgement updated");
+    expect(audited!.detail).not.toContain("note");
+  });
+
+  it("updates only the filing note on a filed pack and audits the note change", async () => {
+    const coop = await createTestCoop("REG46b");
+    const admin = await createTestMember(coop.id, { phone: "2348000010058", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        filedAt: new Date("2026-04-02T00:00:00Z"),
+        acknowledgementId: "ACK-KEEP",
+        notes: "Old note",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      { note: "New note" },
+    );
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("filing updated");
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.acknowledgementId).toBe("ACK-KEEP");
+    expect(saved!.notes).toBe("New note");
+
+    const audited = await prisma.auditLog.findFirst({
+      where: {
+        cooperativeId: coop.id,
+        action: "regulator.report_acknowledged",
+        targetId: report.id,
+      },
+    });
+    expect(audited!.detail).toContain("filing note updated");
+  });
+
+  it("treats an unchanged resubmission as already filed without a new audit row", async () => {
+    const coop = await createTestCoop("REG46d");
+    const admin = await createTestMember(coop.id, { phone: "2348000010060", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        acknowledgementId: "ACK-SAME",
+        notes: "Received",
+      },
+    });
+    const before = await prisma.auditLog.count({
+      where: { cooperativeId: coop.id, targetId: report.id },
+    });
+
+    // The console always posts both fields, even when the operator changed nothing.
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      { acknowledgementId: "ACK-SAME", note: "Received" },
+    );
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain("already marked filed");
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.acknowledgementId).toBe("ACK-SAME");
+    expect(saved!.notes).toBe("Received");
+    const after = await prisma.auditLog.count({
+      where: { cooperativeId: coop.id, targetId: report.id },
+    });
+    expect(after).toBe(before);
+  });
+
+  it("clears a filing note when an empty note is submitted", async () => {
+    const coop = await createTestCoop("REG46c");
+    const admin = await createTestMember(coop.id, { phone: "2348000010059", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        acknowledgementId: "ACK-KEEP",
+        notes: "Remove me",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      { note: "" },
+    );
+    expect(res.ok).toBe(true);
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.notes).toBeNull();
+    expect(saved!.acknowledgementId).toBe("ACK-KEEP");
+  });
+
+  it("rejects an over-length filing note", async () => {
+    const coop = await createTestCoop("REG47");
+    const admin = await createTestMember(coop.id, { phone: "2348000010056", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "generated",
+      },
+    });
+
+    const res = await markFiled(
+      coop.id,
+      report.id,
+      { id: admin.id, phone: admin.phone },
+      {
+        note: "x".repeat(501),
+      },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.message).toBe("Filing note must be 500 characters or fewer.");
+
+    const saved = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
+    expect(saved!.notes).toBeNull();
+    expect(saved!.status).toBe("generated");
+  });
+
+  it("reports success and audits the filing when no acknowledgement or note is supplied", async () => {
+    const coop = await createTestCoop("REG48");
+    const admin = await createTestMember(coop.id, { phone: "2348000010057", role: "superadmin" });
+    const report = await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "generated",
+      },
+    });
+
+    const res = await markFiled(coop.id, report.id, { id: admin.id, phone: admin.phone });
+    expect(res.ok).toBe(true);
+    expect(res.message).toBe("*2026* annual regulator pack marked *filed*.");
+
+    const audited = await prisma.auditLog.findFirst({
+      where: { cooperativeId: coop.id, action: "regulator.report_filed", targetId: report.id },
+    });
+    expect(audited!.detail).toContain("annual statutory pack for 2026 marked filed");
+  });
 });
 
 describe("listReports", () => {
@@ -998,6 +1794,108 @@ describe("listReports", () => {
     const res = await listReports(coop.id);
     expect(res.ok).toBe(true);
     expect(res.reports).toEqual([]);
+  });
+
+  it("returns the acknowledgement and filing note", async () => {
+    const coop = await createTestCoop("REG43");
+    const dueAt = new Date("2027-03-31T00:00:00Z");
+    await prisma.regulatorReport.create({
+      data: {
+        cooperativeId: coop.id,
+        period: "2026",
+        periodType: "annual",
+        packType: "statutory",
+        status: "filed",
+        filedAt: new Date(),
+        dueAt,
+        acknowledgementId: "ACK-1",
+        notes: "Received",
+      },
+    });
+    const res = await listReports(coop.id);
+    expect(res.reports![0].acknowledgementId).toBe("ACK-1");
+    expect(res.reports![0].notes).toBe("Received");
+    expect(res.reports![0].dueAt!.toISOString()).toBe(dueAt.toISOString());
+  });
+});
+
+describe("getRegulatorProfile", () => {
+  it("returns the active profile with annual due fields, or null", async () => {
+    const coop = await createTestCoop("REG44");
+    expect(await getRegulatorProfile(coop.id)).toBeNull();
+    const created = await prisma.regulatorProfile.create({
+      data: {
+        cooperativeId: coop.id,
+        label: "Lagos Ministry",
+        type: "ministry",
+        monthlyDueDay: 15,
+        quarterlyDueDay: 15,
+        annualDueMonth: 4,
+        annualDueDay: 30,
+      },
+    });
+    const view = await getRegulatorProfile(coop.id);
+    expect(view).toEqual({
+      id: created.id,
+      label: "Lagos Ministry",
+      type: "ministry",
+      contactEmail: null,
+      monthlyDueDay: 15,
+      quarterlyDueDay: 15,
+      annualDueMonth: 4,
+      annualDueDay: 30,
+    });
+  });
+
+  it("returns only the active profile when several exist", async () => {
+    const coop = await createTestCoop("REG49");
+    await prisma.regulatorProfile.create({
+      data: {
+        cooperativeId: coop.id,
+        label: "Old Ministry",
+        type: "custom",
+        monthlyDueDay: 5,
+        quarterlyDueDay: 6,
+        annualDueMonth: 7,
+        annualDueDay: 8,
+        active: false,
+      },
+    });
+    const active = await prisma.regulatorProfile.create({
+      data: {
+        cooperativeId: coop.id,
+        label: "Current Ministry",
+        type: "ministry",
+        monthlyDueDay: 10,
+        quarterlyDueDay: 15,
+        annualDueMonth: 4,
+        annualDueDay: 30,
+        active: true,
+      },
+    });
+
+    const view = await getRegulatorProfile(coop.id);
+    expect(view).toEqual({
+      id: active.id,
+      label: "Current Ministry",
+      type: "ministry",
+      contactEmail: null,
+      monthlyDueDay: 10,
+      quarterlyDueDay: 15,
+      annualDueMonth: 4,
+      annualDueDay: 30,
+    });
+
+    const inactiveOnly = await createTestCoop("REG50");
+    await prisma.regulatorProfile.create({
+      data: {
+        cooperativeId: inactiveOnly.id,
+        label: "Retired Ministry",
+        type: "custom",
+        active: false,
+      },
+    });
+    expect(await getRegulatorProfile(inactiveOnly.id)).toBeNull();
   });
 });
 
@@ -1044,6 +1942,38 @@ describe("regulator admin commands", () => {
     await handleAdminCommand(admin.phone, "regreport", ["filed", report.id.slice(-6)]);
     const updated = await prisma.regulatorReport.findUnique({ where: { id: report.id } });
     expect(updated!.status).toBe("filed");
+  });
+
+  it("configures the annual due date via the annual=MM/DD token", async () => {
+    const coop = await createTestCoop("REG29b");
+    const admin = await createTestMember(coop.id, { phone: "2348000010047", role: "superadmin" });
+
+    await handleAdminCommand(admin.phone, "regulatorconfig", [
+      "Lagos",
+      "Ministry",
+      "ministry",
+      "annual=9/30",
+    ]);
+    const profile = await prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coop.id, active: true },
+    });
+    expect(profile?.label).toBe("Lagos Ministry");
+    expect(profile?.annualDueMonth).toBe(9);
+    expect(profile?.annualDueDay).toBe(30);
+    // The annual token must not be swallowed as the regulator label.
+    expect(profile?.label).not.toContain("annual");
+
+    vi.clearAllMocks();
+    await handleAdminCommand(admin.phone, "regulatorconfig", ["Lagos", "ministry", "annual=13/40"]);
+    const text = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => String(c[0].text))
+      .join("\n");
+    expect(text).toMatch(/Annual due month must be between 1 and 12/);
+    const unchanged = await prisma.regulatorProfile.findFirst({
+      where: { cooperativeId: coop.id, active: true },
+    });
+    expect(unchanged?.annualDueMonth).toBe(9);
   });
 
   it("does not handle regulator commands for ordinary members", async () => {

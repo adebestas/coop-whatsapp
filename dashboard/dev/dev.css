@@ -1,0 +1,204 @@
+/* ============================================================
+   Platform Console (developer) — additional styles
+   Layered on top of ../style.css (shared theme + components).
+   ============================================================ */
+
+/* Console flavour: a slate/indigo accent distinguishes the platform
+   console from the green coop dashboard. */
+:root {
+  --dev-accent: #4F46E5;
+  --dev-accent-dark: #4338CA;
+}
+
+.dev-badge {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  padding: 2px 7px;
+  border-radius: 999px;
+  margin-left: 8px;
+}
+
+/* ---- Login ---- */
+.dev-login-page { background: linear-gradient(135deg, #1E1B4B 0%, #312E81 55%, #0F172A 100%); }
+.dev-login-container { max-width: 460px; }
+.dev-login-card { padding: 44px 40px; }
+.dev-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+.dev-toggle-2fa {
+  background: none;
+  border: none;
+  color: var(--dev-accent);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+  align-self: flex-start;
+}
+.dev-toggle-2fa:hover { text-decoration: underline; }
+
+/* ---- Console shell ---- */
+.dev-console .sidebar { background: #14122B; }
+.dev-console .nav-item.active { background: rgba(79, 70, 229, 0.35); }
+.dev-console .user-avatar { background: var(--dev-accent); }
+.dev-console .stat-card::before { background: linear-gradient(90deg, var(--dev-accent), #22D3EE); }
+.dev-console .stat-card.stat-indigo::before { background: linear-gradient(90deg, var(--dev-accent), #22D3EE); }
+.dev-console .stat-card.stat-green::before { background: linear-gradient(90deg, var(--green-500), #22D3EE); }
+.dev-console .stat-card.stat-gold::before { background: linear-gradient(90deg, var(--gold), #22D3EE); }
+.dev-console .stat-card.stat-purple::before { background: linear-gradient(90deg, #7C3AED, #22D3EE); }
+.dev-console .stat-card.stat-blue::before { background: linear-gradient(90deg, #2563EB, #22D3EE); }
+.dev-console .stat-card.stat-red::before { background: linear-gradient(90deg, #EF4444, #22D3EE); }
+.stat-icon.indigo { background: #E0E7FF; color: var(--dev-accent); }
+[data-theme="dark"] .stat-icon.indigo { background: rgba(79, 70, 229, 0.18); }
+
+/* ---- Alerts ---- */
+.alert-list { display: flex; flex-direction: column; }
+.alert-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.alert-row:last-child { border-bottom: none; }
+.alert-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-top: 6px;
+  flex-shrink: 0;
+}
+.alert-dot.critical { background: #EF4444; }
+.alert-dot.warning { background: var(--gold); }
+.alert-body { flex: 1; min-width: 0; }
+.alert-msg { font-size: 0.875rem; }
+.alert-meta { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+
+/* ---- Tabs ---- */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  overflow-x: auto;
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 16px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab:hover { color: var(--text); }
+.tab.active {
+  color: var(--dev-accent);
+  border-bottom-color: var(--dev-accent);
+}
+
+/* ---- Coop list / rows ---- */
+.row-link { cursor: pointer; }
+.row-link:hover { background: var(--gray-50); }
+[data-theme="dark"] .row-link:hover { background: rgba(255, 255, 255, 0.04); }
+
+.coop-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* ---- Search / filter toolbar ---- */
+.toolbar-input, .toolbar-select {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  background: var(--bg-card);
+  color: var(--text);
+}
+.toolbar-input { width: 240px; }
+
+/* ---- Inline editable policy controls ---- */
+.policy-input {
+  width: 96px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  background: var(--bg-card);
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+}
+.policy-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8125rem; }
+
+/* ---- Misc ---- */
+.dev-code {
+  font-family: 'JetBrains Mono', monospace;
+  background: var(--gray-100);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+[data-theme="dark"] .dev-code { background: var(--gray-700); }
+
+.callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--gray-50);
+  font-size: 0.875rem;
+}
+[data-theme="dark"] .callout { background: rgba(255, 255, 255, 0.03); }
+.callout.success { border-color: #A7F3D0; background: var(--green-50); }
+[data-theme="dark"] .callout.success { background: rgba(0, 135, 81, 0.12); border-color: rgba(0, 135, 81, 0.3); }
+.temp-pin {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: var(--green-700);
+}
+[data-theme="dark"] .temp-pin { color: #6FCF97; }
+
+.form-inline {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.form-field { display: flex; flex-direction: column; gap: 6px; }
+.form-field label { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); }
+.form-field input, .form-field select {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 0.875rem;
+}
+.form-field input:focus, .form-field select:focus {
+  outline: none;
+  border-color: var(--dev-accent);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+}
+
+.mono-sm {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  word-break: break-all;
+}

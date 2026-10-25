@@ -24,6 +24,13 @@ export const STRUCTURING_RATIO = 0.96;
 /** Reporting threshold in kobo used for structuring detection (₦5,000,000). */
 export const REPORTING_THRESHOLD = 500_000_000;
 
+/** CBN CTR cash-reporting threshold for individuals (kobo). */
+export const CTR_INDIVIDUAL_KOBO = 500_000_000; // ₦5,000,000
+/** CBN CTR cash-reporting threshold for corporate bodies (kobo). */
+export const CTR_CORPORATE_KOBO = 1_000_000_000; // ₦10,000,000
+/** CBN CTR cross-border reporting threshold (USD). */
+export const CTR_CROSS_BORDER_USD = 10_000; // $10,000
+
 // ===== Types =====
 
 export type AmlReportType = "STR" | "CTR";
@@ -217,6 +224,27 @@ async function checkDepositStructuring(
 }
 
 // ===== Public API =====
+
+/**
+ * Classify a transaction into a CBN report type. Pure — no I/O. Suspicion alone
+ * is an STR; cross-border hits are CTRs; cash transactions are CTRs at or above
+ * the individual or corporate threshold.
+ */
+export function classifyReport(input: {
+  amountKobo: number;
+  isCash: boolean;
+  isCrossBorder: boolean;
+  isCorporate: boolean;
+  suspicious: boolean;
+}): "CTR" | "STR" | null {
+  if (input.suspicious) return "STR";
+  if (input.isCrossBorder) return "CTR";
+  if (input.isCash) {
+    const threshold = input.isCorporate ? CTR_CORPORATE_KOBO : CTR_INDIVIDUAL_KOBO;
+    if (input.amountKobo >= threshold) return "CTR";
+  }
+  return null;
+}
 
 /**
  * Check all AML rules for a transaction and return whether it is flagged.

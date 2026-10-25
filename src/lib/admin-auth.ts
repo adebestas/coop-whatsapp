@@ -22,6 +22,8 @@ export interface AdminTokenPayload {
   phone: string;
   cooperativeId: string;
   role: string;
+  /** Issued-at (epoch ms), inside the signed payload. */
+  iat: number;
 }
 
 function getSecret(): string {
@@ -59,8 +61,11 @@ export function verifyAdminToken(token: string): AdminTokenPayload | null {
   }
   try {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString());
+    if (typeof data.cooperativeId !== "string") return null;
+    if (data.scope !== undefined) return null;
+    if (typeof data.iat !== "number" || !Number.isFinite(data.iat)) return null;
     if (Date.now() - data.iat > TOKEN_TTL_MS) return null;
-    return { phone: data.phone, cooperativeId: data.cooperativeId, role: data.role };
+    return { phone: data.phone, cooperativeId: data.cooperativeId, role: data.role, iat: data.iat };
   } catch {
     return null;
   }
@@ -119,21 +124,39 @@ export async function requireLiveAdmin(
   // The cooperativeId comes from the signed token, so it is trustworthy and can
   // be used to open the RLS context BEFORE reading the RLS-protected Member
   // table (otherwise the read would fail-closed under FORCE RLS).
-  const live = await withCoopContext(payload.cooperativeId, () =>
-    prisma.member.findFirst({
-      where: { phone: payload.phone, cooperativeId: payload.cooperativeId },
-      select: { phone: true, role: true, status: true, cooperativeId: true },
-    }),
-  );
+  const live = await withCoopContext(payload.cooperativeId, async () => {
+    const [member, coop] = await Promise.all([
+      prisma.member.findFirst({
+        where: { phone: payload.phone, cooperativeId: payload.cooperativeId },
+        select: { phone: true, role: true, status: true, cooperativeId: true },
+      }),
+      prisma.cooperative.findUnique({
+        where: { id: payload.cooperativeId },
+        select: { status: true, tokensValidAfter: true },
+      }),
+    ]);
+    return { member, coop };
+  });
   if (
-    !live ||
-    !["admin", "superadmin"].includes(live.role) ||
-    live.status === "suspended" ||
-    live.status === "deceased"
+    !live.member ||
+    !["admin", "superadmin"].includes(live.member.role) ||
+    live.member.status === "suspended" ||
+    live.member.status === "deceased"
   ) {
     return null;
   }
-  return { phone: live.phone, role: live.role, cooperativeId: live.cooperativeId };
+  // A suspended cooperative is a platform-level stop: no coop admin may act.
+  if (!live.coop || live.coop.status !== "active") return null;
+  // Platform-initiated "revoke sessions": any token issued before the cutoff is
+  // dead, even though its HMAC and TTL are still valid.
+  if (live.coop.tokensValidAfter && payload.iat <= live.coop.tokensValidAfter.getTime()) {
+    return null;
+  }
+  return {
+    phone: live.member.phone,
+    role: live.member.role,
+    cooperativeId: live.member.cooperativeId,
+  };
 }
 
 export { getRedis };

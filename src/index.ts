@@ -17,6 +17,7 @@ import { initRedis, closeRedis, isRedisConnected, withDistributedLock } from "./
 import { log } from "./lib/logger.js";
 import { createShutdown } from "./lib/shutdown.js";
 import { rlsEnforcementStatus } from "./lib/tenant-context.js";
+import { ensurePlatformOwner } from "./services/platform-bootstrap.js";
 
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
@@ -74,6 +75,14 @@ async function main() {
   if (!envReport.ok) {
     console.error("[env] Startup aborted — fix the FATAL problems above.");
     process.exit(1);
+  }
+
+  // Seed the first platform owner from env. A bootstrap failure (e.g. a DB
+  // hiccup) must never take the server down — log it and keep booting.
+  try {
+    await ensurePlatformOwner();
+  } catch (err) {
+    console.error("[platform-bootstrap]", err);
   }
 
   app = buildApp();

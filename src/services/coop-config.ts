@@ -1,5 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { cacheGet, cacheSet, cacheDel } from "../lib/cache.js";
+import { getRule } from "../lib/rule-registry.js";
+import { loadPlatformPolicyRows, platformPolicyVersion } from "./platform-policy-store.js";
 
 const CACHE_TTL = 300; // 5 minutes
 
@@ -13,6 +15,10 @@ export interface CoopConfig {
   withdrawalCooldownMonths: number;
   lateFinePercent: number;
   maxLoanMultiplier: number;
+  loanDurationMonths: number;
+  minLoanTermMonths: number;
+  maxLoanPerMember: number;
+  minMembershipMonths: number;
   autoApproveLoans: boolean;
   requireGuarantors: boolean;
   minGuarantors: number;
@@ -25,6 +31,9 @@ export interface CoopConfig {
   literacyQuizPassMark: number;
   literacyQuizQuestionCount: number;
   certifiedLoanBoost: number;
+  reserveFundPercent: number;
+  educationFundPercent: number;
+  dividendCapPercent: number;
 }
 
 export interface BrandingConfig {
@@ -52,6 +61,10 @@ const DEFAULT_CONFIG: CoopConfig = {
   withdrawalCooldownMonths: 6,
   lateFinePercent: 5,
   maxLoanMultiplier: 3,
+  loanDurationMonths: 12,
+  minLoanTermMonths: 1,
+  maxLoanPerMember: 0,
+  minMembershipMonths: 0,
   autoApproveLoans: false,
   requireGuarantors: true,
   minGuarantors: 2,
@@ -64,10 +77,15 @@ const DEFAULT_CONFIG: CoopConfig = {
   literacyQuizPassMark: 4,
   literacyQuizQuestionCount: 6,
   certifiedLoanBoost: 1,
+  reserveFundPercent: 25,
+  educationFundPercent: 10,
+  dividendCapPercent: 5,
 };
 
 export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> {
-  const cacheKey = `coopconfig:${cooperativeId}`;
+  // Fold the platform-policy version into the key: a policy write bumps the
+  // version, so every cached coop-config entry is invalidated at once.
+  const cacheKey = `coopconfig:${cooperativeId}:v${platformPolicyVersion()}`;
   const cached = await cacheGet<CoopConfig>(cacheKey);
   if (cached) return cached;
 
@@ -75,39 +93,88 @@ export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> 
     where: { cooperativeId },
   });
 
-  if (!config) {
-    return DEFAULT_CONFIG;
-  }
+  const base: CoopConfig = config
+    ? {
+        loanInterestRate: config.loanInterestRate,
+        serviceChargePercent: config.serviceChargePercent,
+        minContribution: config.minContribution,
+        minSavings: config.minSavings,
+        minWithdrawal: config.minWithdrawal,
+        maxWithdrawal: config.maxWithdrawal,
+        withdrawalCooldownMonths: config.withdrawalCooldownMonths,
+        lateFinePercent: config.lateFinePercent,
+        maxLoanMultiplier: config.maxLoanMultiplier,
+        loanDurationMonths: config.loanDurationMonths ?? DEFAULT_CONFIG.loanDurationMonths,
+        minLoanTermMonths: config.minLoanTermMonths ?? DEFAULT_CONFIG.minLoanTermMonths,
+        maxLoanPerMember: config.maxLoanPerMember ?? DEFAULT_CONFIG.maxLoanPerMember,
+        minMembershipMonths: config.minMembershipMonths ?? DEFAULT_CONFIG.minMembershipMonths,
+        autoApproveLoans: config.autoApproveLoans,
+        requireGuarantors: config.requireGuarantors,
+        minGuarantors: config.minGuarantors,
+        largeTxThreshold: (config as any).largeTxThreshold ?? DEFAULT_CONFIG.largeTxThreshold,
+        reportingThreshold: (config as any).reportingThreshold ?? DEFAULT_CONFIG.reportingThreshold,
+        pendingDividendRate: (config as any).pendingDividendRate ?? null,
+        lastDividendRate: (config as any).lastDividendRate ?? null,
+        nextAGMDate: (config as any).nextAGMDate ?? null,
+        literacyCertificationEnabled:
+          (config as any).literacyCertificationEnabled ??
+          DEFAULT_CONFIG.literacyCertificationEnabled,
+        literacyQuizPassMark:
+          (config as any).literacyQuizPassMark ?? DEFAULT_CONFIG.literacyQuizPassMark,
+        literacyQuizQuestionCount:
+          (config as any).literacyQuizQuestionCount ?? DEFAULT_CONFIG.literacyQuizQuestionCount,
+        certifiedLoanBoost: (config as any).certifiedLoanBoost ?? DEFAULT_CONFIG.certifiedLoanBoost,
+        reserveFundPercent: (config as any).reserveFundPercent ?? DEFAULT_CONFIG.reserveFundPercent,
+        educationFundPercent:
+          (config as any).educationFundPercent ?? DEFAULT_CONFIG.educationFundPercent,
+        dividendCapPercent: (config as any).dividendCapPercent ?? DEFAULT_CONFIG.dividendCapPercent,
+      }
+    : { ...DEFAULT_CONFIG };
 
-  const result: CoopConfig = {
-    loanInterestRate: config.loanInterestRate,
-    serviceChargePercent: config.serviceChargePercent,
-    minContribution: config.minContribution,
-    minSavings: config.minSavings,
-    minWithdrawal: config.minWithdrawal,
-    maxWithdrawal: config.maxWithdrawal,
-    withdrawalCooldownMonths: config.withdrawalCooldownMonths,
-    lateFinePercent: config.lateFinePercent,
-    maxLoanMultiplier: config.maxLoanMultiplier,
-    autoApproveLoans: config.autoApproveLoans,
-    requireGuarantors: config.requireGuarantors,
-    minGuarantors: config.minGuarantors,
-    largeTxThreshold: (config as any).largeTxThreshold ?? DEFAULT_CONFIG.largeTxThreshold,
-    reportingThreshold: (config as any).reportingThreshold ?? DEFAULT_CONFIG.reportingThreshold,
-    pendingDividendRate: (config as any).pendingDividendRate ?? null,
-    lastDividendRate: (config as any).lastDividendRate ?? null,
-    nextAGMDate: (config as any).nextAGMDate ?? null,
-    literacyCertificationEnabled:
-      (config as any).literacyCertificationEnabled ?? DEFAULT_CONFIG.literacyCertificationEnabled,
-    literacyQuizPassMark:
-      (config as any).literacyQuizPassMark ?? DEFAULT_CONFIG.literacyQuizPassMark,
-    literacyQuizQuestionCount:
-      (config as any).literacyQuizQuestionCount ?? DEFAULT_CONFIG.literacyQuizQuestionCount,
-    certifiedLoanBoost: (config as any).certifiedLoanBoost ?? DEFAULT_CONFIG.certifiedLoanBoost,
-  };
+  // Always run the platform layer, including the "no row" path, so a coop with
+  // no config row still picks up the platform policy. `base` is a copy, never
+  // the shared DEFAULT_CONFIG, so the result is safe to cache and mutate.
+  const result = await applyPlatformPolicy(base, config !== null);
 
   await cacheSet(cacheKey, result, CACHE_TTL);
   return result;
+}
+
+/**
+ * Overlay the platform policy (defaults, bounds, lock) on top of a coop's base
+ * config.
+ *
+ * `coopConfigured` distinguishes "the coop has a stored config row" from the
+ * fallback DEFAULT_CONFIG. Without it the resolution could not tell a genuine
+ * coop override from a default, and a coop with no row would never pick up a
+ * platform value (Requirement: "a coop with no config row must still pick up a
+ * platform policy default"). When the coop has no row, coop values are treated
+ * as unset and the platform value / rule default wins.
+ *
+ * With zero PlatformPolicy rows this is a no-op that returns `{ ...base }`, so
+ * the output is identical to the pre-platform behaviour.
+ */
+async function applyPlatformPolicy(base: CoopConfig, coopConfigured: boolean): Promise<CoopConfig> {
+  const policies = await loadPlatformPolicyRows();
+  const out = { ...base } as Record<string, unknown>;
+  for (const [key, pol] of Object.entries(policies)) {
+    const rule = getRule(key);
+    if (!rule) continue;
+    const platVal = pol.value === undefined ? rule.default : pol.value;
+    const coopVal = coopConfigured ? (base as unknown as Record<string, unknown>)[key] : undefined;
+    let value: unknown = pol.locked ? platVal : coopVal !== undefined ? coopVal : platVal;
+    if (typeof value === "number") value = clamp(value, pol.min ?? rule.min, pol.max ?? rule.max);
+    if (rule.type === "bool") value = Boolean(value);
+    out[key] = value;
+  }
+  return out as unknown as CoopConfig;
+}
+
+// Defined locally (not imported from platform-policy.ts) to avoid a circular import.
+function clamp(n: number, min?: number | null, max?: number | null): number {
+  if (min !== null && min !== undefined && n < min) return min;
+  if (max !== null && max !== undefined && n > max) return max;
+  return n;
 }
 
 export async function updateCoopConfig(
@@ -119,7 +186,7 @@ export async function updateCoopConfig(
     create: { cooperativeId, ...updates },
     update: updates,
   });
-  await cacheDel(`coopconfig:${cooperativeId}`);
+  await cacheDel(`coopconfig:${cooperativeId}:v${platformPolicyVersion()}`);
   return getCoopConfig(cooperativeId);
 }
 

@@ -53,7 +53,9 @@ describe("share capital", () => {
 
     const postings = await prisma.posting.findMany();
     const debit = postings.filter((p) => p.direction === "DEBIT").reduce((s, p) => s + p.amount, 0);
-    const credit = postings.filter((p) => p.direction === "CREDIT").reduce((s, p) => s + p.amount, 0);
+    const credit = postings
+      .filter((p) => p.direction === "CREDIT")
+      .reduce((s, p) => s + p.amount, 0);
     expect(debit).toBe(credit);
     expect(postings.some((p) => p.account === "equity:share_capital")).toBe(true);
   });
@@ -106,16 +108,27 @@ describe("share capital", () => {
     const shares = await distributeDividend(admin.phone, 10, "shares");
     expect(shares.ok).toBe(true);
 
-    // Statutory 20/2/5% of 1,000,000 taken exactly once = 270,000.
-    const reserve = await prisma.reserveAllocation.aggregate({ where: { cooperativeId: coop.id }, _sum: { amount: true } });
-    const education = await prisma.educationFund.aggregate({ where: { cooperativeId: coop.id }, _sum: { amount: true } });
-    const development = await prisma.developmentFund.aggregate({ where: { cooperativeId: coop.id }, _sum: { amount: true } });
-    expect(reserve._sum.amount).toBe(200000);
-    expect(education._sum.amount).toBe(20000);
+    // Statutory 25/10/5% of 1,000,000 taken exactly once = 400,000.
+    const reserve = await prisma.reserveAllocation.aggregate({
+      where: { cooperativeId: coop.id },
+      _sum: { amount: true },
+    });
+    const education = await prisma.educationFund.aggregate({
+      where: { cooperativeId: coop.id },
+      _sum: { amount: true },
+    });
+    const development = await prisma.developmentFund.aggregate({
+      where: { cooperativeId: coop.id },
+      _sum: { amount: true },
+    });
+    expect(reserve._sum.amount).toBe(250000);
+    expect(education._sum.amount).toBe(100000);
     expect(development._sum.amount).toBe(50000);
 
     // Combined pools never exceed net profit minus statutory.
-    expect((savings.totalPool ?? 0) + (shares.totalPool ?? 0)).toBeLessThanOrEqual(1000000 - 270000);
+    expect((savings.totalPool ?? 0) + (shares.totalPool ?? 0)).toBeLessThanOrEqual(
+      1000000 - 400000,
+    );
   });
 
   it("manual reserve allocations do not suppress statutory appropriations", async () => {
@@ -145,7 +158,7 @@ describe("share capital", () => {
     const result = await distributeDividend(admin.phone, 10);
     expect(result.ok).toBe(true);
 
-    // The dividend run still takes the full 20/2/5% statutory slice.
+    // The dividend run still takes the full 25/10/5% statutory slice.
     const reserve = await prisma.reserveAllocation.aggregate({
       where: { cooperativeId: coop.id, source: "dividend_declaration" },
       _sum: { amount: true },
@@ -158,8 +171,8 @@ describe("share capital", () => {
       where: { cooperativeId: coop.id },
       _sum: { amount: true },
     });
-    expect(reserve._sum.amount).toBe(200000);
-    expect(education._sum.amount).toBe(20000);
+    expect(reserve._sum.amount).toBe(250000);
+    expect(education._sum.amount).toBe(100000);
     expect(development._sum.amount).toBe(50000);
   });
 });
@@ -175,7 +188,10 @@ describe("shares chat commands", () => {
 
     const account = await prisma.shareAccount.findFirst({ where: { memberId: member.id } });
     expect(account?.shares).toBe(2);
-    const calls = vi.mocked(sendText).mock.calls.map((c) => c[0].text).join("\n");
+    const calls = vi
+      .mocked(sendText)
+      .mock.calls.map((c) => c[0].text)
+      .join("\n");
     expect(calls).toMatch(/share/i);
   });
 
@@ -264,7 +280,11 @@ describe("share dividend (bank payout)", () => {
 describe("shares admin endpoint", () => {
   it("lists share accounts for the cooperative", async () => {
     const coop = await createTestCoop("SHAREAPI");
-    const admin = await createTestMember(coop.id, { phone: "2348000000200", role: "superadmin", pin: "1234" });
+    const admin = await createTestMember(coop.id, {
+      phone: "2348000000200",
+      role: "superadmin",
+      pin: "1234",
+    });
     const m = await createTestMember(coop.id, { phone: "2348000000201" });
     await fundWallet(m.id, 500000);
     await buyShares(m.id, 2);

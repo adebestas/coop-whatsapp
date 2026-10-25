@@ -8,7 +8,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, cleanupDatabase } from "./setup.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
-import { autoFileReport, flagTransaction, REPORTING_THRESHOLD } from "../src/services/aml.js";
+import {
+  autoFileReport,
+  classifyReport,
+  flagTransaction,
+  REPORTING_THRESHOLD,
+} from "../src/services/aml.js";
 
 const MEMBER = "2348017770001";
 
@@ -142,5 +147,74 @@ describe("CBN payload reports the true amount", () => {
     const record = await prisma.sTR.findUniqueOrThrow({ where: { id: result.strId! } });
     expect(record.reportType).toBe("CTR");
     expect(record.amount).toBe(aggregateTotal);
+  });
+});
+
+describe("AML report classification", () => {
+  it("classifies ≥₦5m cash (individual) as CTR, not STR", () => {
+    expect(
+      classifyReport({
+        amountKobo: 500_000_000,
+        isCash: true,
+        isCrossBorder: false,
+        isCorporate: false,
+        suspicious: false,
+      }),
+    ).toBe("CTR");
+  });
+  it("classifies a suspicious sub-threshold txn as STR (no threshold)", () => {
+    expect(
+      classifyReport({
+        amountKobo: 1_000_00,
+        isCash: false,
+        isCrossBorder: false,
+        isCorporate: false,
+        suspicious: true,
+      }),
+    ).toBe("STR");
+  });
+  it("classifies ≥₦10m cash (corporate) as CTR", () => {
+    expect(
+      classifyReport({
+        amountKobo: 1_000_000_000,
+        isCash: true,
+        isCrossBorder: false,
+        isCorporate: true,
+        suspicious: false,
+      }),
+    ).toBe("CTR");
+  });
+  it("classifies $10k cross-border as CTR", () => {
+    expect(
+      classifyReport({
+        amountKobo: 0,
+        isCash: false,
+        isCrossBorder: true,
+        isCorporate: false,
+        suspicious: false,
+      }),
+    ).toBe("CTR");
+  });
+  it("returns null when nothing triggers", () => {
+    expect(
+      classifyReport({
+        amountKobo: 1_000_00,
+        isCash: true,
+        isCrossBorder: false,
+        isCorporate: false,
+        suspicious: false,
+      }),
+    ).toBeNull();
+  });
+  it("below the corporate threshold is null for cash corporate", () => {
+    expect(
+      classifyReport({
+        amountKobo: 500_000_000,
+        isCash: true,
+        isCrossBorder: false,
+        isCorporate: true,
+        suspicious: false,
+      }),
+    ).toBeNull();
   });
 });

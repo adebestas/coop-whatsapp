@@ -1,5 +1,5 @@
 import { prisma } from "../lib/prisma.js";
-import { withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
+import { withCoopContext, listActiveCooperativeIds } from "../lib/tenant-context.js";
 
 const STATUS_TIPS = [
   "💡 Save before you spend. Even ₦500/day = ₦182,500/year.",
@@ -63,7 +63,7 @@ export async function postAutoStatus(): Promise<void> {
   const content = getStatusForHour(hour);
 
   // Post to all cooperatives with status enabled.
-  const coopIds = await listCooperativeIds();
+  const coopIds = await listActiveCooperativeIds();
   for (const coopId of coopIds) {
     await withCoopContext(coopId, async () => {
       const coop = await prisma.cooperative.findUnique({

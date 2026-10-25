@@ -55,7 +55,7 @@ const FlutterwaveChargeSchema = z
           })
           .passthrough()
           .optional(),
-        meta: z.record(z.unknown()).optional(),
+        meta: z.record(z.string(), z.unknown()).optional(),
         card: z
           .object({
             first_6digits: z.string().optional(),
@@ -67,7 +67,7 @@ const FlutterwaveChargeSchema = z
           })
           .passthrough()
           .optional(),
-        meta_data: z.record(z.unknown()).optional(),
+        meta_data: z.record(z.string(), z.unknown()).optional(),
       })
       .passthrough(),
   })

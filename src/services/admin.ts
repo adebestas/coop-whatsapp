@@ -81,6 +81,8 @@ import {
   refreshPin,
 } from "./auth2fa.js";
 import { getCoopConfig, updateCoopConfig, getSubscription } from "./coop-config.js";
+import { loadPlatformPolicyRows } from "./platform-policy-store.js";
+import { getRule } from "../lib/rule-registry.js";
 import { startDividendVote, closeDividendVote, dividendVoteStatus } from "./dividendvote.js";
 import {
   checkMultiSigRequirement,
@@ -1371,14 +1373,27 @@ export async function handleAdminCommand(
 
       case "regulatorconfig": {
         // regulatorconfig [label...] [type] [email] [monthlyDueDay] [quarterlyDueDay]
+        // [annual=MM/DD]
         const cfg: {
           label?: string;
           type?: string;
           contactEmail?: string;
           monthlyDueDay?: number;
           quarterlyDueDay?: number;
+          annualDueMonth?: number;
+          annualDueDay?: number;
         } = {};
         const rest = [...args];
+        const annualIdx = rest.findIndex((t) => /^annual=\d{1,2}\/\d{1,2}$/i.test(t));
+        if (annualIdx !== -1) {
+          const [month, day] = rest[annualIdx]
+            .split("=")[1]
+            .split("/")
+            .map((n) => Number(n));
+          cfg.annualDueMonth = month;
+          cfg.annualDueDay = day;
+          rest.splice(annualIdx, 1);
+        }
         const isDueDay = (s: string | undefined): boolean => s !== undefined && /^\d{1,2}$/.test(s);
         if (
           rest.length >= 2 &&
@@ -3232,7 +3247,9 @@ export async function handleAdminCommand(
               "Usage: *setconfig <key> <value>*\n\n" +
               "Keys: loanInterestRate, serviceChargePercent, minContribution, minSavings, " +
               "minWithdrawal, maxWithdrawal, withdrawalCooldownMonths, lateFinePercent, " +
-              "maxLoanMultiplier, autoApproveLoans, requireGuarantors, minGuarantors, " +
+              "maxLoanMultiplier, loanDurationMonths, minLoanTermMonths, maxLoanPerMember, " +
+              "minMembershipMonths, autoApproveLoans, requireGuarantors, minGuarantors, " +
+              "reserveFundPercent, educationFundPercent, dividendCapPercent, " +
               "literacyCertificationEnabled, literacyQuizPassMark, literacyQuizQuestionCount, " +
               "certifiedLoanBoost, language",
           });
@@ -3296,34 +3313,28 @@ export async function handleAdminCommand(
           });
           return true;
         }
-        const validKeys = new Set([
-          "loanInterestRate",
-          "serviceChargePercent",
-          "minContribution",
-          "minSavings",
-          "minWithdrawal",
-          "maxWithdrawal",
-          "withdrawalCooldownMonths",
-          "lateFinePercent",
-          "maxLoanMultiplier",
-          "autoApproveLoans",
-          "requireGuarantors",
-          "minGuarantors",
-          "literacyCertificationEnabled",
-          "literacyQuizPassMark",
-          "literacyQuizQuestionCount",
-          "certifiedLoanBoost",
-        ]);
-        if (!validKeys.has(key)) {
+        const rule = getRule(key);
+        if (!rule) {
           await sendText({ to: phone, text: `Unknown config key: *${key}*.` });
           return true;
         }
-        const isBoolean =
-          key === "autoApproveLoans" ||
-          key === "requireGuarantors" ||
-          key === "literacyCertificationEnabled";
+        if (!rule.coopEditable) {
+          await sendText({
+            to: phone,
+            text: `*${key}* is set by the platform and can't be changed here.`,
+          });
+          return true;
+        }
+        const policies = await loadPlatformPolicyRows();
+        if (policies[key]?.locked) {
+          await sendText({
+            to: phone,
+            text: `*${key}* is locked by the platform and can't be changed here.`,
+          });
+          return true;
+        }
         let parsedValue: any;
-        if (isBoolean) {
+        if (rule.type === "bool") {
           parsedValue = value.toLowerCase() === "true" || value === "1";
         } else {
           parsedValue = Number(value);
@@ -3331,17 +3342,13 @@ export async function handleAdminCommand(
             await sendText({ to: phone, text: `Value must be a number for *${key}*.` });
             return true;
           }
-          // Bounded integer keys — reject out-of-range values before persisting.
-          const ranges: Record<string, [number, number]> = {
-            literacyQuizPassMark: [1, 12],
-            literacyQuizQuestionCount: [1, 12],
-            certifiedLoanBoost: [0, 10],
-          };
-          const range = ranges[key];
-          if (range && (parsedValue < range[0] || parsedValue > range[1])) {
+          // Registry-driven bounds — reject out-of-range values before persisting.
+          const lo = rule.min;
+          const hi = rule.max;
+          if ((lo !== undefined && parsedValue < lo) || (hi !== undefined && parsedValue > hi)) {
             await sendText({
               to: phone,
-              text: `*${key}* must be between *${range[0]}* and *${range[1]}*.`,
+              text: `*${key}* must be between *${lo ?? "-∞"}* and *${hi ?? "∞"}*.`,
             });
             return true;
           }

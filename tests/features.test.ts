@@ -262,8 +262,8 @@ describe("dividends", () => {
     expect(preview.ok).toBe(true);
     expect(preview.message).toContain("Dividend pool");
     expect(preview.message).toContain("₦10,000.00"); // net profit
-    expect(preview.message).toContain("₦365.00"); // dividend pool = 5% of distributable profit
-    expect(preview.message).toContain("₦146.00"); // member1's share = 400,000 / 1,000,000 * 36,500 = 14,600 kobo = ₦146.00
+    expect(preview.message).toContain("₦300.00"); // dividend pool = 5% of distributable profit
+    expect(preview.message).toContain("₦120.00"); // member1's share = 400,000 / 1,000,000 * 30,000 = 12,000 kobo = ₦120.00
 
     const result = await distributeDividend(superAdmin.phone, 5);
     expect(result.ok).toBe(true);

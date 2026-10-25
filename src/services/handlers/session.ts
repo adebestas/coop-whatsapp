@@ -35,7 +35,7 @@ import { issueCertificate, renderCertificatePdf } from "../literacy-certificate.
 import { config } from "../../config.js";
 import { verifyPhoneChangeOtp } from "../phone-change.js";
 import { getActiveElectionsForNewMember } from "../votes.js";
-import { createCooperative, generateMemberFileNumber } from "../cooperative.js";
+import { provisionCooperative } from "../cooperative-provisioning.js";
 import { confirmDividendDistribution } from "../dividends.js";
 import { hashPin, verifyPin } from "../../lib/security.js";
 import { createMandate, cancelMandate } from "../mandates.js";
@@ -253,7 +253,7 @@ export function buildAdminMenu(): string {
     `• *par* — portfolio-at-risk aging report\n` +
     `• *provisionrates* — loan-loss provision rates\n` +
     `• *provision* — run the monthly loan-loss provision (super admin)\n` +
-    `• *regulatorconfig <label> [type] [email] [monthlyDue] [quarterlyDue]* — set the regulator to file with\n` +
+    `• *regulatorconfig <label> [type] [email] [monthlyDue] [quarterlyDue] [annual=MM/DD]* — set the regulator to file with\n` +
     `• *regreport <YYYY-MM> <statutory\\|nfiu\\|both> [monthly\\|quarterly]* — generate a regulator pack\n` +
     `• *regreportstatus* — view generated/filed regulator packs\n` +
     `• *regreport filed <id>* — mark a regulator pack filed\n` +
@@ -2467,68 +2467,18 @@ export async function handleAwaitingInput(
       const coopCodeVal = prevData3.coopCode ?? "";
       const coopStateVal = prevData3.coopState ?? null;
 
-      // Create the cooperative
-      const coop = await createCooperative({
+      await provisionCooperative({
         name: coopNameVal,
         code: coopCodeVal,
-        adminPhone,
         state: coopStateVal,
+        adminPhone,
+        sessionPhone: phone,
       });
-
-      // Create default config, branding, and subscription
-      await prisma.cooperativeConfig.create({
-        data: { cooperativeId: coop.id },
-      });
-      await prisma.brandingConfig.create({
-        data: { cooperativeId: coop.id, displayName: coopNameVal },
-      });
-      await prisma.subscription.create({
-        data: { cooperativeId: coop.id },
-      });
-
-      // Create the admin member
-      const memberCode = await generateMemberFileNumber(coop.id, coop.code);
-
-      // NOTE: Admin PIN is sent in plaintext over WhatsApp.
-      // This is acceptable due to WhatsApp's end-to-end encryption, but the admin
-      // should change their PIN immediately after onboarding (setpin command).
-      const adminPin = String(randomInt(1000, 9000));
-      await prisma.member.create({
-        data: {
-          phone,
-          contactPhone: adminPhone,
-          name: `${coopNameVal} Admin`,
-          code: memberCode,
-          pin: hashPin(adminPin),
-          cooperativeId: coop.id,
-          role: "superadmin",
-          nameVerified: true,
-          wallet: { create: {} },
-        },
-      });
-
-      // Link the admin phone to this member if different
-      if (phone !== adminPhone) {
-        // No second member needed — adminPhone is just a contact number on the Cooperative model
-      }
 
       await prisma.session.upsert({
         where: { phone },
         create: { phone, state: "idle", data: "{}" },
         update: { state: "idle", data: "{}" },
-      });
-
-      await sendText({
-        to: phone,
-        text:
-          `🏦 *${coopNameVal}* is live!\n\n` +
-          `Your cooperative code: *${coopCodeVal}*\n` +
-          `Your role: *superadmin*\n` +
-          `Your member code: *${memberCode}*\n` +
-          `Your temporary PIN: *${adminPin}*\n\n` +
-          `⚠️ *Change your PIN immediately* by replying: *setpin ${adminPin} <new pin>*\n\n` +
-          `Members can join by sending: *join ${coopCodeVal}*\n\n` +
-          `Reply *menu* to see all admin commands.`,
       });
       break;
     }

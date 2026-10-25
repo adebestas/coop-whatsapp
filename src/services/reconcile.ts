@@ -3,7 +3,7 @@ import { verifyAuditChain } from "./audit.js";
 import { formatBalance } from "./cooperative.js";
 import { trialBalance } from "./journal.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
-import { withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
+import { withCoopContext, listActiveCooperativeIds } from "../lib/tenant-context.js";
 
 /**
  * Nightly reconciliation: data-integrity checks that alert super admins.
@@ -14,7 +14,7 @@ import { withCoopContext, listCooperativeIds } from "../lib/tenant-context.js";
  */
 export async function runReconciliation(): Promise<string[]> {
   const allAlerts: string[] = [];
-  const coopIds = await listCooperativeIds();
+  const coopIds = await listActiveCooperativeIds();
   const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
