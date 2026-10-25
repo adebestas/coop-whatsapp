@@ -476,8 +476,14 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: cross-cooperative isolation at
   });
 
   it("every cooperativeId-bearing table has an RLS policy", async () => {
-    // The Federation* tables are deliberately platform-level (no RLS).
-    const PLATFORM_LEVEL = ["FederationMembership", "FederationPosting", "FederationLoan"];
+    // The Federation* and Platform* tables are deliberately platform-level (no RLS):
+    // platform owners operate across every cooperative, so a tenant GUC would hide rows.
+    const PLATFORM_LEVEL = [
+      "FederationMembership",
+      "FederationPosting",
+      "FederationLoan",
+      "PlatformAuditLog",
+    ];
     const tables = await owner.$queryRaw<{ table_name: string }[]>`
       SELECT c.table_name
       FROM information_schema.columns c
