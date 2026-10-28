@@ -1267,6 +1267,14 @@ export async function runSchedulerTick(): Promise<void> {
   await cleanupExpiredVirtualAccounts().catch((err) =>
     log.error("[scheduler] virtual account cleanup failed", { err: String(err) }),
   );
+  const { pruneInboundMessageLog } = await import("../lib/inbound-dedupe.js");
+  await pruneInboundMessageLog().catch((err) =>
+    log.error("[scheduler] inbound dedupe prune failed", { err: String(err) }),
+  );
+  const { pruneWebhookFailures } = await import("../lib/webhook-failures.js");
+  await pruneWebhookFailures().catch((err) =>
+    log.error("[scheduler] webhook failure prune failed", { err: String(err) }),
+  );
   await runDataRetention().catch((err) =>
     log.error("[scheduler] data retention failed", { err: String(err) }),
   );

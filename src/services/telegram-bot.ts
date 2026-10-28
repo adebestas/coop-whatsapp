@@ -13,6 +13,8 @@ import { handleAwaitingInput, safeParse } from "./handlers/session.js";
 import { prisma } from "../lib/prisma.js";
 import { getRedis } from "../lib/cache.js";
 import { RedisMutex } from "../lib/redis-mutex.js";
+import { claimInboundMessage } from "../lib/inbound-dedupe.js";
+import { failInbound } from "../lib/webhook-failures.js";
 
 const API_BASE = "https://api.telegram.org";
 
@@ -271,10 +273,15 @@ export async function startTelegramBot(): Promise<void> {
         const userId = `tg:${chatId}`;
         const text = message.text.trim();
 
+        // Long-polling is at-least-once: ignore a message id we already handled.
+        if (!(await claimInboundMessage("telegram", `${chatId}:${message.message_id}`))) {
+          continue;
+        }
+
         void withTelegramUserMutex(userId, () =>
           handleMessage(userId, text, { telegramMessageId: message.message_id }),
         ).catch((err) => {
-          console.error(`[telegram] handleMessage failed for ${userId}`, err);
+          void failInbound("telegram", `${chatId}:${message.message_id}`, userId, err);
         });
       }
       await saveOffset();

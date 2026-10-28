@@ -125,6 +125,34 @@ export function getRedis(): Redis | null {
   return redis;
 }
 
+/** Whether REDIS_URL was configured for this process. */
+export function isRedisConfigured(): boolean {
+  return Boolean(REDIS_URL);
+}
+
+/**
+ * Wait until Redis answers PING, or the timeout elapses.
+ *
+ * Boot uses this to make a broken Redis visible at startup instead of silently
+ * degrading to per-process memory: in production that would break multi-instance
+ * rate limits, OTP locks and distributed locks while /health still said "ok".
+ */
+export async function waitForRedisReady(timeoutMs = 3000): Promise<boolean> {
+  if (!REDIS_URL) return false;
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (redis && isConnected) {
+      try {
+        if ((await redis.ping()) === "PONG") return true;
+      } catch {
+        // Still warming up; keep polling until the deadline.
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  return false;
+}
+
 /**
  * Cache a value with TTL
  */
@@ -214,10 +242,20 @@ export async function claimOnce(key: string, period: string, ttlSeconds: number)
  * Close Redis connection
  */
 export async function closeRedis(): Promise<void> {
-  if (redis) {
-    await redis.quit();
-    redis = null;
-    isConnected = false;
+  if (!redis) return;
+  const client = redis;
+  redis = null;
+  isConnected = false;
+  if (reconnectTimer) {
+    clearInterval(reconnectTimer);
+    reconnectTimer = null;
+  }
+  // Shutdown must never throw: quit() rejects when the socket is already closed
+  // (e.g. Redis was down during a deploy), which would abort graceful shutdown.
+  try {
+    await client.quit();
+  } catch {
+    client.disconnect();
   }
 }
 
@@ -441,6 +479,91 @@ export async function checkOtpRateLimit(
   await client.set(cooldownKey, String(now), "EX", 60);
 
   return { allowed: true };
+}
+
+/**
+ * OTP *verification* attempt limiting (separate from generation limits above).
+ * Five wrong codes lock entry for 30 minutes. Kept separate so a resend does
+ * not count as a failure and a failed check does not consume the send budget.
+ */
+const OTP_VERIFY_PREFIX = "otp_verify_fail";
+const OTP_VERIFY_MAX_ATTEMPTS = 5;
+const OTP_VERIFY_WINDOW_SECONDS = 30 * 60;
+
+export interface OtpLockStatus {
+  locked: boolean;
+  message?: string;
+  retryAfter?: number;
+}
+
+function otpLockedMessage(retryAfterSeconds: number): string {
+  const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+  return `Too many wrong codes. OTP entry is *locked for ${minutes} minute(s)* for your security.`;
+}
+
+/** Read-only check: is OTP entry currently locked for this phone? */
+export async function checkOtpVerifyLock(phone: string): Promise<OtpLockStatus> {
+  const client = getRedis();
+  const now = Date.now();
+  if (!client) {
+    const entry = inMemoryRateLimits.get(`${OTP_VERIFY_PREFIX}_mem:${phone}`);
+    if (entry && entry.count >= OTP_VERIFY_MAX_ATTEMPTS && entry.resetAt > now) {
+      const retryAfter = Math.ceil((entry.resetAt - now) / 1000);
+      return { locked: true, message: otpLockedMessage(retryAfter), retryAfter };
+    }
+    return { locked: false };
+  }
+  const key = `${OTP_VERIFY_PREFIX}:${phone}`;
+  const count = Number((await client.get(key)) ?? 0);
+  if (count >= OTP_VERIFY_MAX_ATTEMPTS) {
+    const ttl = await client.ttl(key);
+    const retryAfter = ttl > 0 ? ttl : OTP_VERIFY_WINDOW_SECONDS;
+    return { locked: true, message: otpLockedMessage(retryAfter), retryAfter };
+  }
+  return { locked: false };
+}
+
+/** Record one wrong code. Returns locked=true once the limit is reached. */
+export async function recordOtpVerifyFailure(phone: string): Promise<OtpLockStatus> {
+  const client = getRedis();
+  const now = Date.now();
+  if (!client) {
+    const key = `${OTP_VERIFY_PREFIX}_mem:${phone}`;
+    const entry = inMemoryRateLimits.get(key);
+    if (!entry || entry.resetAt <= now) {
+      inMemoryRateLimits.set(key, {
+        count: 1,
+        resetAt: now + OTP_VERIFY_WINDOW_SECONDS * 1000,
+      });
+    } else {
+      entry.count++;
+    }
+    const current = inMemoryRateLimits.get(key)!;
+    if (current.count >= OTP_VERIFY_MAX_ATTEMPTS) {
+      const retryAfter = Math.max(1, Math.ceil((current.resetAt - now) / 1000));
+      return { locked: true, message: otpLockedMessage(retryAfter), retryAfter };
+    }
+    return { locked: false };
+  }
+  const key = `${OTP_VERIFY_PREFIX}:${phone}`;
+  const count = await client.incr(key);
+  if (count === 1) await client.expire(key, OTP_VERIFY_WINDOW_SECONDS);
+  if (count >= OTP_VERIFY_MAX_ATTEMPTS) {
+    const ttl = await client.ttl(key);
+    const retryAfter = ttl > 0 ? ttl : OTP_VERIFY_WINDOW_SECONDS;
+    return { locked: true, message: otpLockedMessage(retryAfter), retryAfter };
+  }
+  return { locked: false };
+}
+
+/** Clear the failure counter after a successful verification. */
+export async function clearOtpVerifyFailures(phone: string): Promise<void> {
+  const client = getRedis();
+  if (!client) {
+    inMemoryRateLimits.delete(`${OTP_VERIFY_PREFIX}_mem:${phone}`);
+    return;
+  }
+  await client.del(`${OTP_VERIFY_PREFIX}:${phone}`);
 }
 
 /**

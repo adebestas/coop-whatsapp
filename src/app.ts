@@ -15,6 +15,7 @@ import { certificateRoutes } from "./routes/certificate.js";
 import { prisma } from "./lib/prisma.js";
 import { isRedisConnected } from "./lib/cache.js";
 import { incCounter, renderMetrics } from "./lib/metrics.js";
+import { isInsecureRequest } from "./lib/http-guards.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -112,7 +113,7 @@ export function buildApp() {
   // application layer when behind a reverse proxy that sets x-forwarded-proto.
   if (process.env.NODE_ENV === "production") {
     app.addHook("onRequest", async (req, reply) => {
-      if (req.headers["x-forwarded-proto"] !== "https") {
+      if (isInsecureRequest(req.url, req.headers["x-forwarded-proto"] as string | undefined)) {
         return reply.code(403).send({ error: "HTTPS required" });
       }
     });

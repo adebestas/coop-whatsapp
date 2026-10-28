@@ -15,3 +15,6 @@ debug-*
 check-db.cjs
 fix-imports.js
 baseline.sql
+
+# Platform-owner bootstrap PIN (read once, then delete)
+platform-owner-pin.txt

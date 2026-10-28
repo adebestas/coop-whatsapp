@@ -66,6 +66,13 @@ async function inspect() {
 }
 
 async function main() {
+  // Migrations need the table owner: RLS policies and DDL fail for coop_app.
+  // The app itself connects with DATABASE_URL (non-owner), which is what makes
+  // RLS effective at runtime.
+  if (process.env.DATABASE_OWNER_URL) {
+    log("using DATABASE_OWNER_URL for migrations");
+    process.env.DATABASE_URL = process.env.DATABASE_OWNER_URL;
+  }
   if (!process.env.DATABASE_URL) {
     log("DATABASE_URL is not set");
     process.exit(1);

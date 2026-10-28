@@ -1,4 +1,6 @@
 import { randomInt } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { prisma } from "../lib/prisma.js";
 import { hashPin } from "../lib/security.js";
 import { normalizePhone } from "../lib/phones.js";
@@ -13,7 +15,8 @@ import { normalizePhone } from "../lib/phones.js";
  *
  * The owner is created with a random 6-digit temp PIN and mustChangePin=true,
  * so the PIN can only be used to reach the change-pin flow. The plaintext PIN is
- * printed exactly once here — it is never persisted.
+ * written once to a 0600 file (never to stdout/logs) — logs are shipped, mirrored
+ * and often over-readable, which is not acceptable for a platform-owner secret.
  */
 export async function ensurePlatformOwner(): Promise<void> {
   const raw = process.env.PLATFORM_OWNER_PHONE?.trim();
@@ -46,8 +49,19 @@ export async function ensurePlatformOwner(): Promise<void> {
     throw err;
   }
 
+  const pinFile = resolve(process.env.PLATFORM_OWNER_PIN_FILE || "platform-owner-pin.txt");
+  try {
+    writeFileSync(pinFile, `${tempPin}\n`, { mode: 0o600 });
+  } catch (err) {
+    console.error(
+      `[platform-bootstrap] Platform owner created for ${phone}, but the temp PIN could not be written to ${pinFile}: ` +
+        `${err instanceof Error ? err.message : String(err)}. Reset it from the platform console.`,
+    );
+    return;
+  }
+
   console.log(
     `[platform-bootstrap] Platform owner created for ${phone}. ` +
-      `Temp PIN: ${tempPin} — change on first login at /dashboard/dev/ and enable 2FA immediately.`,
+      `Temp PIN written to ${pinFile} (0600) — read it, change it on first login at /dashboard/dev/, enable 2FA, then delete the file.`,
   );
 }

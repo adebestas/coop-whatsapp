@@ -3,6 +3,11 @@ import { sendText, sendSecurePrompt, sendDocument } from "../../lib/messaging.js
 import { deleteTelegramMessage } from "../../lib/telegram.js";
 import { randomBytes, randomInt } from "node:crypto";
 import { hashOtp, verifyOtp } from "../../lib/security.js";
+import {
+  checkOtpVerifyLock,
+  recordOtpVerifyFailure,
+  clearOtpVerifyFailures,
+} from "../../lib/cache.js";
 import { normalizePhone } from "../../lib/phones.js";
 import {
   MESSAGE_CONSENT_REASK,
@@ -28,7 +33,14 @@ import { requestWithdrawal } from "../withdrawals.js";
 import { submitCertificate } from "../deathclaims.js";
 import type { BotState, FlowData, MessageMeta } from "../conversation.js";
 import { FlowDataSchema, SECRET_STATES } from "../conversation.js";
-import { askEmail, askBirthday, askNokName, askLiteracyOptIn, parseBirthday } from "./join.js";
+import {
+  askEmail,
+  askBirthday,
+  askNokName,
+  askLiteracyOptIn,
+  handleJoinCode,
+  parseBirthday,
+} from "./join.js";
 import { getCoopConfig } from "../coop-config.js";
 import { getQuizQuestions, getTotalLessons, QUIZ_QUESTIONS } from "../literacy.js";
 import { issueCertificate, renderCertificatePdf } from "../literacy-certificate.js";
@@ -666,16 +678,7 @@ export async function handleAwaitingInput(
 
   switch (state) {
     case "awaiting_coop_code": {
-      const code = text.trim().toUpperCase();
-      await prisma.session.upsert({
-        where: { phone },
-        create: { phone, state: "awaiting_name", data: JSON.stringify({ joinCode: code }) },
-        update: { state: "awaiting_name", data: JSON.stringify({ joinCode: code }) },
-      });
-      await sendText({
-        to: phone,
-        text: `Great — joining cooperative *${code}*. What's your full name?`,
-      });
+      await handleJoinCode(phone, text);
       break;
     }
 
@@ -840,17 +843,30 @@ export async function handleAwaitingInput(
         });
         return;
       }
+      // Brute-force guard: 6 digits is only 1M guesses, so entry must lock.
+      const lock = await checkOtpVerifyLock(phone);
+      if (lock.locked) {
+        await sendText({
+          to: phone,
+          text: lock.message ?? "OTP entry is locked. Try again later.",
+        });
+        return;
+      }
       if (!data.otpExpiresAt || data.otpExpiresAt < Date.now()) {
         await sendText({ to: phone, text: "That code expired. Reply *resend* for a new one." });
         return;
       }
       if (!data.otp || !verifyOtp(input, data.otp)) {
+        const failure = await recordOtpVerifyFailure(phone);
         await sendText({
           to: phone,
-          text: "Wrong code. Check the WhatsApp message and try again.",
+          text: failure.locked
+            ? (failure.message ?? "Too many wrong codes. OTP entry is locked.")
+            : "Wrong code. Check the WhatsApp message and try again.",
         });
         return;
       }
+      await clearOtpVerifyFailures(phone);
       await prisma.session.upsert({
         where: { phone },
         create: {
@@ -876,7 +892,26 @@ export async function handleAwaitingInput(
         });
         return;
       }
+      const lock = await checkOtpVerifyLock(phone);
+      if (lock.locked) {
+        await sendText({
+          to: phone,
+          text: lock.message ?? "OTP entry is locked. Try again later.",
+        });
+        return;
+      }
       const result = await verifyPhoneChangeOtp(phone, input);
+      if (!result.ok && /wrong code/i.test(result.message)) {
+        const failure = await recordOtpVerifyFailure(phone);
+        await sendText({
+          to: phone,
+          text: failure.locked
+            ? (failure.message ?? "Too many wrong codes. OTP entry is locked.")
+            : result.message,
+        });
+        break;
+      }
+      if (result.ok) await clearOtpVerifyFailures(phone);
       await sendText({ to: phone, text: result.message });
       break;
     }
