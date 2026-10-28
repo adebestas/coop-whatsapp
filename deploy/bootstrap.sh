@@ -27,7 +27,7 @@ fi
 export NEEDRESTART_MODE=a DEBIAN_FRONTEND=noninteractive
 log "Installing base packages"
 apt-get update -y
-apt-get install -y ca-certificates curl git openssl
+apt-get install -y ca-certificates curl git openssl cron
 
 # ---- 2. Docker ---------------------------------------------------------------
 if ! command -v docker >/dev/null 2>&1; then
@@ -89,10 +89,81 @@ gen POSTGRES_PASSWORD
 gen REDIS_PASSWORD
 gen SESSION_SECRET
 gen ADMIN_JWT_SECRET
+gen COOP_APP_PASSWORD
 
-# ---- 6. Build & start --------------------------------------------------------
+# The .env holds every secret in this stack; root-only, always.
+chmod 600 .env
+
+# ---- 6. Non-owner app role (RLS enforcement) ---------------------------------
+# The app must NOT connect as the table owner: Postgres skips RLS for owners.
+# DATABASE_URL (compose) uses coop_app; DATABASE_OWNER_URL is used only by the
+# boot-time migration. Idempotent, and re-grants new tables on every run.
+read_env() {
+  local key="$1" fallback="$2" value
+  value="$(grep -E "^${key}=" .env | head -n1 | cut -d= -f2- || true)"
+  printf '%s' "${value:-$fallback}"
+}
+PG_USER="$(read_env POSTGRES_USER coop)"
+PG_DB="$(read_env POSTGRES_DB coop)"
+APP_PASSWORD="$(read_env COOP_APP_PASSWORD '')"
+if [ -z "$APP_PASSWORD" ]; then
+  echo "COOP_APP_PASSWORD is empty in .env — refusing to continue" >&2
+  exit 1
+fi
+
+log "Starting Postgres to provision the app role"
+docker compose up -d postgres
+for _ in $(seq 1 30); do
+  docker compose exec -T postgres pg_isready -U "$PG_USER" -d "$PG_DB" >/dev/null 2>&1 && break
+  sleep 2
+done
+
+log "Provisioning coop_app (non-owner) + grants for RLS"
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d "$PG_DB" <<SQL
+DO \$do\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coop_app') THEN
+    CREATE ROLE coop_app LOGIN PASSWORD '${APP_PASSWORD}';
+  ELSE
+    ALTER ROLE coop_app LOGIN PASSWORD '${APP_PASSWORD}';
+  END IF;
+END
+\$do\$;
+GRANT CONNECT ON DATABASE "${PG_DB}" TO coop_app;
+CREATE SCHEMA IF NOT EXISTS app;
+GRANT USAGE ON SCHEMA public, app TO coop_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO coop_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO coop_app;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA app TO coop_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE ${PG_USER} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO coop_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE ${PG_USER} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO coop_app;
+SQL
+
+# ---- 7. Build & start --------------------------------------------------------
 log "Building and starting the stack"
 docker compose up -d --build
+
+# ---- 8. Nightly backups + uptime watchdog -------------------------------------
+log "Installing nightly database backup"
+install -m 0755 deploy/backup.sh /usr/local/bin/coop-backup.sh
+install -d -m 700 /var/backups/coop-whatsapp
+cat >/etc/cron.d/coop-whatsapp-backup <<CRON
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+15 2 * * * root APP_DIR=$APP_DIR /usr/local/bin/coop-backup.sh >> /var/log/coop-backup.log 2>&1
+CRON
+chmod 600 /etc/cron.d/coop-whatsapp-backup
+
+log "Installing uptime watchdog"
+install -m 0755 deploy/smoke.sh /usr/local/bin/coop-smoke.sh
+install -m 0755 deploy/uptime-check.sh /usr/local/bin/coop-uptime.sh
+install -d -m 755 /var/lib
+cat >/etc/cron.d/coop-whatsapp-uptime <<CRON
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/5 * * * * root APP_DIR=$APP_DIR /usr/local/bin/coop-uptime.sh >/dev/null 2>&1
+CRON
+chmod 600 /etc/cron.d/coop-whatsapp-uptime
 
 log "Stack status:"
 docker compose ps
@@ -103,8 +174,18 @@ Next steps:
   1. Edit .env — set DOMAIN and the WhatsApp / Monnify / Paystack values.
      (The app exits until the FATAL WhatsApp values are present; Caddy/TLS can
       come up first — set DOMAIN and point its A record here.)
+     Also set PLATFORM_OWNER_PHONE for the first platform-console login.
   2. Re-run:                 docker compose up -d
-  3. WhatsApp webhook URL:   https://<DOMAIN>/webhook
+  3. Platform console PIN:   docker compose exec app cat platform-owner-pin.txt
+                             (change it at https://<DOMAIN>/dashboard/dev/, enable
+                              2FA, then delete the file)
+  4. WhatsApp webhook URL:   https://<DOMAIN>/webhook
      Verify token:            the WHATSAPP_VERIFY_TOKEN value in .env
-  4. Tail logs:              docker compose logs -f app
+  5. Tail logs:              docker compose logs -f app
+  6. Smoke test:             sudo bash deploy/smoke.sh   (or: coop-smoke.sh)
+  7. Backups:                nightly at 02:15 to /var/backups/coop-whatsapp
+                             (14 kept; restore steps in DEPLOY.md)
+  8. Uptime alerts:          set ALERT_TELEGRAM_CHAT_ID in .env to get a
+                             Telegram message when /health goes down (checks
+                             every 5 minutes, alerts on state changes only)
 EOF

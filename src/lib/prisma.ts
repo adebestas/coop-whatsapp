@@ -47,7 +47,7 @@ export function resolveConnectionLimit(raw: string | undefined, fallback: number
 function resolveDatabaseUrl(): string {
   // For tests, use SQLite
   if (isTest) {
-    return "file:./dev.db";
+    return "file:./dev.db?connection_limit=1";
   }
 
   const url = process.env.DATABASE_URL ?? "";
@@ -67,7 +67,7 @@ function resolveDatabaseUrl(): string {
 function resolveOwnerDatabaseUrl(): string {
   // For tests, use SQLite
   if (isTest) {
-    return "file:./dev.db";
+    return "file:./dev.db?connection_limit=1";
   }
 
   const owner = process.env.DATABASE_OWNER_URL;

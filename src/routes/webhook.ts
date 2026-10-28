@@ -3,6 +3,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { config, isAllowed } from "../config.js";
 import { handleMessage } from "../services/conversation.js";
 import { extractWhatsAppMessages } from "../lib/inbound.js";
+import { claimInboundMessage } from "../lib/inbound-dedupe.js";
+import { failInbound } from "../lib/webhook-failures.js";
 import { sendText } from "../lib/messaging.js";
 import { downloadMedia, extFromMime } from "../lib/whatsapp-media.js";
 import { handleDeductionUpload } from "../services/deduction-ingest.js";
@@ -79,66 +81,87 @@ export async function webhookRoutes(app: FastifyInstance) {
   });
 
   // ---- POST: Meta delivers incoming messages ----
-  app.post("/webhook", async (req, reply) => {
-    const body = req.body as any;
-    const rawBody = (req as any).rawBody as string;
-    const signature = req.headers["x-hub-signature-256"] as string;
+  // Meta retries from a shared pool of IPs, so the global per-IP budget is too
+  // small here; signature verification (above) remains the security boundary.
+  app.post(
+    "/webhook",
+    { config: { rateLimit: { max: 600, timeWindow: "1 minute" } } },
+    async (req, reply) => {
+      const body = req.body as any;
+      const rawBody = (req as any).rawBody as string;
+      const signature = req.headers["x-hub-signature-256"] as string;
 
-    // Verify webhook signature — blocks fake messages from attackers
-    if (!verifyWhatsAppSignature(rawBody, signature)) {
-      app.log.warn("WhatsApp webhook signature verification failed");
-      return reply.code(401).send({ error: "Invalid signature" });
-    }
+      // Verify webhook signature — blocks fake messages from attackers
+      if (!verifyWhatsAppSignature(rawBody, signature)) {
+        app.log.warn("WhatsApp webhook signature verification failed");
+        return reply.code(401).send({ error: "Invalid signature" });
+      }
 
-    // Only process messages, ignore status updates etc.
-    const entries: any[] = body?.entry ?? [];
-    for (const entry of entries) {
-      const changes: any[] = entry.changes ?? [];
-      for (const change of changes) {
-        for (const inbound of extractWhatsAppMessages(change?.value)) {
-          if (!isAllowed(inbound.from)) continue;
+      // Only process messages, ignore status updates etc.
+      const entries: any[] = body?.entry ?? [];
+      for (const entry of entries) {
+        const changes: any[] = entry.changes ?? [];
+        for (const change of changes) {
+          for (const inbound of extractWhatsAppMessages(change?.value)) {
+            if (!isAllowed(inbound.from)) continue;
 
-          // Documents / photos: an admin uploading an employer deduction file.
-          if (inbound.document || inbound.image) {
-            const media = inbound.document ?? inbound.image!;
-            const dl = await downloadMedia(media.mediaId);
-            if (!dl) {
-              sendText({
-                to: inbound.from,
-                text: "I couldn't download that file. Please try again.",
-              }).catch(() => {});
+            // Meta retries a delivery when it doesn't see a timely 200. Claim the
+            // message id before any side effect so a retry cannot double-post.
+            if (inbound.id && !(await claimInboundMessage("whatsapp", inbound.id))) {
+              app.log.info({ id: inbound.id }, "duplicate WhatsApp delivery ignored");
               continue;
             }
-            const filename = inbound.document?.filename ?? `upload.${extFromMime(dl.mime)}`;
-            const result = await handleDeductionUpload(inbound.from, dl.data, filename);
-            await sendText({ to: inbound.from, text: result.message }).catch(() => {});
-            continue;
-          }
 
-          // Don't await — Meta needs a quick 200 and we don't want a
-          // slow upstream to cause retries. But catch errors so the
-          // user gets a fallback message instead of silent failure.
-          // Per-user mutex serializes processing to prevent race conditions.
-          void withUserMutex(inbound.from, () =>
-            handleMessage(inbound.from, inbound.text, {
-              flowToken: inbound.flowToken,
-              ip: req.ip,
-              audioMediaId: inbound.audio?.mediaId,
-            }),
-          ).catch((err) => {
-            app.log.error({ err, from: inbound.from }, "handleMessage failed");
-            sendText({
-              to: inbound.from,
-              text: "Sorry, something went wrong processing your message. Please try again.",
-            }).catch((err) => {
-              app.log.error({ err, from: inbound.from }, "Failed to send error fallback message");
+            // Documents / photos: an admin uploading an employer deduction file.
+            if (inbound.document || inbound.image) {
+              const media = inbound.document ?? inbound.image!;
+              try {
+                const dl = await downloadMedia(media.mediaId);
+                if (!dl) {
+                  sendText({
+                    to: inbound.from,
+                    text: "I couldn't download that file. Please try again.",
+                  }).catch(() => {});
+                  continue;
+                }
+                const filename = inbound.document?.filename ?? `upload.${extFromMime(dl.mime)}`;
+                const result = await handleDeductionUpload(inbound.from, dl.data, filename);
+                await sendText({ to: inbound.from, text: result.message }).catch(() => {});
+              } catch (err) {
+                await failInbound("whatsapp", inbound.id, inbound.from, err);
+                sendText({
+                  to: inbound.from,
+                  text: "Sorry, I couldn't process that file. Please try again.",
+                }).catch(() => {});
+              }
+              continue;
+            }
+
+            // Don't await — Meta needs a quick 200 and we don't want a
+            // slow upstream to cause retries. But catch errors so the
+            // user gets a fallback message instead of silent failure.
+            // Per-user mutex serializes processing to prevent race conditions.
+            void withUserMutex(inbound.from, () =>
+              handleMessage(inbound.from, inbound.text, {
+                flowToken: inbound.flowToken,
+                ip: req.ip,
+                audioMediaId: inbound.audio?.mediaId,
+              }),
+            ).catch((err) => {
+              void failInbound("whatsapp", inbound.id, inbound.from, err);
+              sendText({
+                to: inbound.from,
+                text: "Sorry, something went wrong processing your message. Please try again.",
+              }).catch((err) => {
+                app.log.error({ err, from: inbound.from }, "Failed to send error fallback message");
+              });
             });
-          });
+          }
         }
       }
-    }
 
-    reply.header("X-Content-Type-Options", "nosniff");
-    return reply.code(200).send({ status: "received" });
-  });
+      reply.header("X-Content-Type-Options", "nosniff");
+      return reply.code(200).send({ status: "received" });
+    },
+  );
 }

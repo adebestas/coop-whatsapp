@@ -1,4 +1,6 @@
 export interface InboundMessage {
+  /** Channel message id (Meta wamid / Telegram message id) used for dedupe. */
+  id?: string;
   from: string;
   text: string;
   /** Present when the message is a completed WhatsApp Flow (nfm_reply). */
@@ -25,6 +27,7 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
 
   for (const raw of messages) {
     const message = raw as {
+      id?: string;
       from?: string;
       type?: string;
       text?: { body?: string };
@@ -38,9 +41,10 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
     };
     const from = message.from;
     if (!from) continue;
+    const id = message.id;
 
     if (message.type === "text" && message.text?.body) {
-      out.push({ from, text: message.text.body });
+      out.push({ id, from, text: message.text.body });
       continue;
     }
 
@@ -54,6 +58,7 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
       const text = typeof fields.code === "string" ? fields.code : "";
       if (!text) continue; // not a secure-input flow reply we can act on
       out.push({
+        id,
         from,
         text,
         flowToken: typeof fields.flow_token === "string" ? fields.flow_token : undefined,
@@ -63,13 +68,14 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
 
     // Voice notes: carry the media id so the route can transcribe downstream.
     if (message.type === "audio" && message.audio?.id) {
-      out.push({ from, text: "", audio: { mediaId: message.audio.id } });
+      out.push({ id, from, text: "", audio: { mediaId: message.audio.id } });
       continue;
     }
 
     // Documents (e.g. an employer deduction schedule) and images (OCR).
     if (message.type === "document" && message.document?.id) {
       out.push({
+        id,
         from,
         text: "",
         document: {
@@ -82,6 +88,7 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
     }
     if (message.type === "image" && message.image?.id) {
       out.push({
+        id,
         from,
         text: "",
         image: { mediaId: message.image.id, mimeType: message.image.mime_type },

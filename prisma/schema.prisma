@@ -2170,3 +2170,28 @@ model PlatformAuditLog {
   @@index([cooperativeId, createdAt])
 }
 
+
+/// Idempotency log for inbound channel messages. Meta retries a webhook when it
+/// does not receive a timely 200, and Telegram long-polling is at-least-once, so
+/// the same user message can arrive twice. Claiming the channel message id here
+/// turns that into exactly-once processing (no double-posted savings/repayments).
+model ProcessedInbound {
+  id         String   @id // "<channel>:<message id>"
+  channel    String
+  receivedAt DateTime @default(now())
+
+  @@index([receivedAt])
+}
+
+/// A message that failed after its inbound claim was taken. The claim is
+/// released so provider retries can succeed; this row is the visible record.
+model WebhookFailure {
+  id        String   @id @default(cuid())
+  channel   String
+  messageId String?
+  phone     String?
+  error     String
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}

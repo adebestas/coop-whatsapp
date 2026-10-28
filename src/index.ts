@@ -13,7 +13,14 @@ import { transferPollIntervalMs } from "./services/statuspoller.js";
 import { validateEnvironment } from "./lib/envcheck.js";
 import { prisma } from "./lib/prisma.js";
 import { closeQueues, initQueueProcessors, scheduleSchedulerJobs } from "./lib/queue.js";
-import { initRedis, closeRedis, isRedisConnected, withDistributedLock } from "./lib/cache.js";
+import {
+  initRedis,
+  closeRedis,
+  isRedisConfigured,
+  isRedisConnected,
+  waitForRedisReady,
+  withDistributedLock,
+} from "./lib/cache.js";
 import { log } from "./lib/logger.js";
 import { createShutdown } from "./lib/shutdown.js";
 import { rlsEnforcementStatus } from "./lib/tenant-context.js";
@@ -87,13 +94,26 @@ async function main() {
 
   app = buildApp();
 
-  // Initialize Redis and verify connectivity
+  // Initialize Redis and verify connectivity. A configured-but-unreachable
+  // Redis is fatal in production: memory fallbacks would break rate limits, OTP
+  // locks and distributed locks while looking healthy from the outside.
   initRedis();
-  await new Promise((r) => setTimeout(r, 500)); // Allow connection attempt
-  if (isRedisConnected()) {
-    log.info("Redis connectivity verified");
-  } else if (process.env.REDIS_URL) {
-    log.warn("Redis URL set but not connected — will retry in background");
+  if (isRedisConfigured()) {
+    const ready = await waitForRedisReady(3000);
+    if (ready) {
+      log.info("Redis connectivity verified");
+    } else if (process.env.NODE_ENV === "production") {
+      log.error(
+        "REDIS_URL is set but Redis did not answer PING within 3s — refusing to boot (rate limits and OTP locks would silently fall back to per-process memory).",
+      );
+      process.exit(1);
+    } else {
+      log.warn("Redis URL set but not connected — will retry in background");
+    }
+  } else if (process.env.NODE_ENV === "production") {
+    log.warn(
+      "REDIS_URL not set — running single-instance with per-process rate limits and OTP locks. Set REDIS_URL before scaling out.",
+    );
   } else {
     log.warn("Redis not configured — running without cache");
   }

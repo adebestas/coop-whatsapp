@@ -13,6 +13,17 @@ export default defineConfig({
     hookTimeout: 120000,
     testTimeout: 120000,
     fileParallelism: false,
+    // This suite is large (100+ files) and the app is heavy to boot. Spawning a
+    // fresh fork per file exhausts memory on small (8GB) machines, which shows up
+    // as random unrelated failures ("Thread failed to start", ERR_IPC_CHANNEL_CLOSED,
+    // spurious 120s timeouts). One long-lived fork with per-file isolation keeps the
+    // footprint flat and the results deterministic.
+    pool: "forks",
+    poolOptions: {
+      forks: {
+        singleFork: true,
+      },
+    },
     setupFiles: [path.resolve(__dirname, "tests/setup.ts")],
     env: {
       NODE_ENV: "test",
