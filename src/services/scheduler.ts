@@ -8,7 +8,7 @@ import { runAllAlerts } from "../lib/ai-alerts.js";
 import { alertSupers, AlertSeverity, withMoneyPathAlert } from "../lib/alerting.js";
 import { getRedis, claimOnce } from "../lib/cache.js";
 import { forEachCoop, withCoopContext, listActiveCooperativeIds } from "../lib/tenant-context.js";
-import { getCurrency } from "../lib/runtime-context.js";
+import { getCurrency, getCoopId } from "../lib/runtime-context.js";
 import { log } from "../lib/logger.js";
 import { maskId } from "../lib/security.js";
 import { computeRepaymentDue } from "./loans.js";
@@ -31,7 +31,10 @@ export async function setAutoSave(
   amount: number | null,
   interval?: string,
 ): Promise<{ ok: boolean; message: string }> {
-  const member = await prisma.member.findFirst({ where: { phone } });
+  const coopId = getCoopId();
+  const member = await prisma.member.findFirst({
+    where: { phone, ...(coopId ? { cooperativeId: coopId } : {}) },
+  });
   if (!member) {
     return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
   }
@@ -864,6 +867,128 @@ async function notifySuperAdminsDigest(cooperativeId: string, text: string): Pro
   }
 }
 
+// ===== Automated Month-End Savings Digest (Xara-style Proactive Nudge) =====
+
+const monthEndDigestLastSent = new Map<string, string>();
+
+/**
+ * Checks whether the current time is appropriate for dispatching the month-end
+ * member savings digest. Fired at DIGEST_HOUR (default 20:00 WAT) when either:
+ *  - Tomorrow begins a new calendar month (month-end), OR
+ *  - Today is the final Friday or Saturday of the month (>= 24th), encouraging
+ *    members to save their weekly thrift before weekend spending occurs.
+ *  - Overridable via FORCE_SAVINGS_DIGEST=1 for testing and on-demand triggers.
+ */
+export function isMonthEndDigestTime(now = new Date()): boolean {
+  if (process.env.FORCE_SAVINGS_DIGEST === "1") return true;
+
+  const hour = Number(
+    new Intl.DateTimeFormat("en-US", {
+      hour: "numeric",
+      hour12: false,
+      timeZone: "Africa/Lagos",
+    }).format(now),
+  );
+  const targetHour = Number(process.env.DIGEST_HOUR ?? 20); // 8pm default
+  if (hour !== targetHour) return false;
+
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const isMonthEnd = tomorrow.getMonth() !== now.getMonth();
+
+  // Final Friday (5) or Saturday (6) of the month (date >= 24)
+  const dayOfWeek = now.getDay();
+  const isFinalWeekend = (dayOfWeek === 5 || dayOfWeek === 6) && now.getDate() >= 24;
+
+  return isMonthEnd || isFinalWeekend;
+}
+
+/**
+ * Proactive Xara-style month-end savings digest sent directly to members.
+ * Computes monthly savings progress and delivers a warm, encouraging thrift
+ * message motivating members to save consistently before the weekend.
+ *
+ * Deduplicated per cooperative per month across restarts (Redis-backed with
+ * in-memory fallback).
+ */
+export async function runMonthEndSavingsDigest(now = new Date()): Promise<number> {
+  if (!isMonthEndDigestTime(now)) return 0;
+
+  const coopIds = await listActiveCooperativeIds();
+  const redis = getRedis();
+  let totalNotified = 0;
+
+  const yearMonth = `${now.getFullYear()}-${now.getMonth() + 1}`;
+
+  for (const coopId of coopIds) {
+    const dedupeKey = `savings_digest:${coopId}:${yearMonth}`;
+    let alreadySent = monthEndDigestLastSent.get(coopId) === dedupeKey;
+    if (!alreadySent && redis) {
+      try {
+        alreadySent = (await redis.get(dedupeKey)) === "sent";
+      } catch {
+        /* fallback to in-memory map */
+      }
+    }
+    if (alreadySent) continue;
+
+    await withCoopContext(coopId, async () => {
+      const coop = await prisma.cooperative.findUnique({
+        where: { id: coopId },
+        select: { name: true },
+      });
+
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+      const members = await prisma.member.findMany({
+        where: {
+          cooperativeId: coopId,
+          status: "active",
+          optedOut: false,
+        },
+        include: {
+          wallet: true,
+          contributions: {
+            where: {
+              status: "confirmed",
+              createdAt: { gte: startOfMonth },
+            },
+            select: { amount: true },
+          },
+        },
+      });
+
+      for (const m of members) {
+        if (!m.wallet) continue;
+        const thisMonthSaved = m.contributions.reduce((acc, c) => acc + c.amount, 0);
+        const totalSaved = m.wallet.balance ?? 0;
+
+        const message =
+          `🌟 *Month-End Savings Digest — ${coop?.name ?? "Your Cooperative"}*\n\n` +
+          `Hi *${m.name}*! Here is your savings progress for this month:\n\n` +
+          `💰 *Total Savings Balance:* ${formatBalance(totalSaved)}\n` +
+          `📈 *Saved This Month:* ${formatBalance(thisMonthSaved)}\n\n` +
+          `💡 *Smart Money Habit:* Consistent thrift builds lasting security. Plan your weekend expenses and put a little aside before spending begins!\n\n` +
+          `_Reply *save <amount>* to top up anytime, or *menu* to explore services._`;
+
+        try {
+          await notifyMember(m, message);
+          totalNotified++;
+        } catch (err) {
+          console.error(`[scheduler] Failed to send savings digest to ${maskId(m.phone)}:`, err);
+        }
+      }
+    });
+
+    monthEndDigestLastSent.set(coopId, dedupeKey);
+    if (redis) {
+      await redis.set(dedupeKey, "sent", "EX", 35 * 24 * 60 * 60).catch(() => {});
+    }
+  }
+
+  return totalNotified;
+}
+
 // ---- Proactive intelligence alerts (opt-in) ----
 // Savings reminders, loan/overdue reminders, low-balance warnings, trend
 // alerts and monthly summaries. Runs monthly (on the 1st) so members are
@@ -1214,6 +1339,182 @@ export async function runRegulatorReports(
   return created;
 }
 
+/**
+ * Proactive Loan Repayment & Guarantor Early-Warning Alerts
+ *
+ * Scans active disbursed loans with outstanding balance:
+ * 1. 7 days before dueDate: friendly reminder to borrower
+ * 2. 1 day before dueDate: urgent reminder to borrower
+ * 3. 1-5 days past dueDate: overdue notice to borrower
+ * 4. 15+ days past dueDate (after 15 days): escalation alert to GUARANTORS
+ */
+export async function runLoanRepaymentReminders(
+  now = new Date(),
+  targetCoopId?: string,
+): Promise<{
+  sevenDayCount: number;
+  oneDayCount: number;
+  borrowerOverdueCount: number;
+  guarantorOverdueCount: number;
+}> {
+  let sevenDayCount = 0;
+  let oneDayCount = 0;
+  let borrowerOverdueCount = 0;
+  let guarantorOverdueCount = 0;
+
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const nowMs = now.getTime();
+
+  const runner = async (coopId: string) => {
+    const activeLoans = await prisma.loan.findMany({
+      where: {
+        cooperativeId: coopId,
+        status: "disbursed",
+        balance: { gt: 0 },
+        dueDate: { not: null },
+      },
+      include: {
+        member: true,
+        guarantors: { where: { status: "confirmed" }, include: { member: true } },
+      },
+    });
+
+    for (const loan of activeLoans) {
+      if (!loan.dueDate) continue;
+
+      const dueMs = loan.dueDate.getTime();
+      const diffMs = dueMs - nowMs;
+      const diffDays = Math.round(diffMs / MS_PER_DAY);
+      const dueFormatted = loan.dueDate.toLocaleDateString("en-NG", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      });
+      const installment =
+        loan.monthlyPayment && loan.monthlyPayment > 0
+          ? Math.min(loan.monthlyPayment, loan.balance)
+          : loan.balance;
+
+      const cycleKey = loan.dueDate.toISOString().slice(0, 10);
+
+      // 1. Seven days before due (diffDays between 6 and 8)
+      if (diffDays >= 6 && diffDays <= 8) {
+        const claimed = await claimOnce("loan-remind-7d", `${loan.id}:${cycleKey}`, 20 * 24 * 3600);
+        if (claimed) {
+          const text =
+            `⏰ *Upcoming Loan Repayment Due*\n\n` +
+            `Hi *${loan.member.name}*, your monthly loan installment of *${formatBalance(installment)}* ` +
+            `is due on *${dueFormatted}* (in ~7 days).\n\n` +
+            `Remaining balance: *${formatBalance(loan.balance)}*.\n\n` +
+            `Reply *repay* anytime to pay your installment cleanly and maintain an excellent credit score!`;
+
+          void notifyMember(loan.member, text).catch((err) =>
+            console.warn(`[loan-reminders] failed to notify borrower ${loan.member.id} (7d):`, err),
+          );
+          sevenDayCount++;
+        }
+      }
+
+      // 2. One day before due (diffDays between 0 and 2)
+      else if (diffDays >= 0 && diffDays <= 2) {
+        const claimed = await claimOnce("loan-remind-1d", `${loan.id}:${cycleKey}`, 20 * 24 * 3600);
+        if (claimed) {
+          const text =
+            `⏰ *Loan Repayment Due Tomorrow*\n\n` +
+            `Hi *${loan.member.name}*, your loan installment of *${formatBalance(installment)}* ` +
+            `is due tomorrow (*${dueFormatted}*).\n\n` +
+            `Reply *repay* to pay now and avoid late penalties.`;
+
+          void notifyMember(loan.member, text).catch((err) =>
+            console.warn(`[loan-reminders] failed to notify borrower ${loan.member.id} (1d):`, err),
+          );
+          oneDayCount++;
+        }
+      }
+
+      // 3. Early overdue (1 to 5 days past due): notice to borrower only
+      else if (diffDays <= -1 && diffDays >= -5) {
+        const claimed = await claimOnce(
+          "loan-remind-overdue-early",
+          `${loan.id}:${cycleKey}`,
+          20 * 24 * 3600,
+        );
+        if (claimed) {
+          const daysOverdue = Math.abs(diffDays);
+          const borrowerText =
+            `⚠️ *Overdue Loan Repayment Notice*\n\n` +
+            `Hi *${loan.member.name}*, your loan installment of *${formatBalance(installment)}* ` +
+            `was due on *${dueFormatted}* (${daysOverdue} days ago) and is now overdue.\n\n` +
+            `Please reply *repay* promptly to clear your overdue installment before guarantor escalation.`;
+
+          void notifyMember(loan.member, borrowerText).catch((err) =>
+            console.warn(
+              `[loan-reminders] failed to notify borrower ${loan.member.id} (early overdue):`,
+              err,
+            ),
+          );
+          borrowerOverdueCount++;
+        }
+      }
+
+      // 4. After 15 days overdue (diffDays <= -14 && diffDays >= -25): escalate to GUARANTORS
+      else if (diffDays <= -14 && diffDays >= -25) {
+        const claimed = await claimOnce(
+          "loan-remind-overdue-15d-guarantor",
+          `${loan.id}:${cycleKey}`,
+          20 * 24 * 3600,
+        );
+        if (claimed) {
+          const daysOverdue = Math.abs(diffDays);
+
+          // Reminder to borrower
+          const borrowerText =
+            `🚨 *Urgent: Loan 15+ Days Overdue*\n\n` +
+            `Hi *${loan.member.name}*, your loan installment of *${formatBalance(installment)}* ` +
+            `is now ${daysOverdue} days overdue. As per cooperative by-laws, your guarantors have been formally notified. ` +
+            `Please reply *repay* immediately.`;
+
+          void notifyMember(loan.member, borrowerText).catch((err) =>
+            console.warn(
+              `[loan-reminders] failed to notify borrower ${loan.member.id} (15d overdue):`,
+              err,
+            ),
+          );
+
+          // Escalation notice to each confirmed guarantor
+          for (const g of loan.guarantors) {
+            const guarantorText =
+              `⚠️ *Notice to Guarantor: Loan 15+ Days Overdue*\n\n` +
+              `This is a formal notice that *${loan.member.name}* is now *${daysOverdue} days overdue* on their loan installment ` +
+              `of *${formatBalance(installment)}* (due on *${dueFormatted}*).\n\n` +
+              `• Loan ID: *${loan.id.slice(-6)}*\n` +
+              `• Outstanding Balance: *${formatBalance(loan.balance)}*\n\n` +
+              `As their guarantor, please contact them promptly to regularize their repayment (*repay*) ` +
+              `to protect your cooperative guarantee capacity and avoid future recovery deductions from your savings.`;
+
+            void notifyMember(g.member, guarantorText).catch((err) =>
+              console.warn(
+                `[loan-reminders] failed to notify guarantor ${g.member.id} (15d overdue):`,
+                err,
+              ),
+            );
+          }
+
+          guarantorOverdueCount++;
+        }
+      }
+    }
+  };
+
+  if (targetCoopId) {
+    await runner(targetCoopId);
+  } else {
+    await forEachCoop(runner);
+  }
+
+  return { sevenDayCount, oneDayCount, borrowerOverdueCount, guarantorOverdueCount };
+}
+
 /** One scheduler tick: reminders, statements, birthdays, anniversaries,
  *  guarantor defaults, status posts, VA cleanup, retention, STR escalation,
  *  ombudsman SLA escalation, regulator packs, proactive alerts, backup
@@ -1293,6 +1594,9 @@ export async function runSchedulerTick(): Promise<void> {
   await runBackupVerificationJob().catch((err) =>
     log.error("[scheduler] backup verification failed", { err: String(err) }),
   );
+  await runLoanRepaymentReminders().catch((err) =>
+    log.error("[scheduler] loan repayment reminders failed", { err: String(err) }),
+  );
 }
 
 export async function runBackupJob(): Promise<void> {
@@ -1321,6 +1625,13 @@ export async function runDigestJob(): Promise<void> {
   await withMoneyPathAlert("system", "runDailyDigest (daily movement digest)", async () => {
     await runDailyDigest();
   });
+  await withMoneyPathAlert(
+    "system",
+    "runMonthEndSavingsDigest (member savings digest)",
+    async () => {
+      await runMonthEndSavingsDigest();
+    },
+  );
 }
 
 /** Dispatch a named scheduler job (used by the BullMQ worker). */
@@ -1336,6 +1647,8 @@ export async function runSchedulerJob(name: string): Promise<void> {
       return runPollerJob();
     case "digest":
       return runDigestJob();
+    case "loan_reminders":
+      return runLoanRepaymentReminders().then(() => {});
     default:
       log.warn("[scheduler] unknown job", { name });
   }

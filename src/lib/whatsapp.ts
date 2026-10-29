@@ -142,3 +142,71 @@ export async function sendFlowMessage({
   }
   return true;
 }
+
+export interface InteractiveButton {
+  id: string;
+  title: string;
+}
+
+export interface SendButtonsParams {
+  to: string;
+  body: string;
+  buttons: InteractiveButton[];
+  header?: string;
+  footer?: string;
+}
+
+/**
+ * Send an interactive quick-reply button message (up to 3 buttons) via WhatsApp.
+ * Clicking a button immediately returns its id/title to the inbound webhook.
+ */
+export async function sendInteractiveButtons({
+  to,
+  body,
+  buttons,
+  header,
+  footer,
+}: SendButtonsParams): Promise<boolean> {
+  const url = `${API_BASE}/${config.whatsapp.phoneNumberId}/messages`;
+  const formattedButtons = buttons.slice(0, 3).map((btn) => ({
+    type: "reply",
+    reply: {
+      id: btn.id.slice(0, 256),
+      title: btn.title.slice(0, 20),
+    },
+  }));
+
+  const interactivePayload: Record<string, unknown> = {
+    type: "button",
+    body: { text: body },
+    action: { buttons: formattedButtons },
+  };
+  if (header) {
+    interactivePayload.header = { type: "text", text: header };
+  }
+  if (footer) {
+    interactivePayload.footer = { text: footer };
+  }
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.whatsapp.token}`,
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to,
+      type: "interactive",
+      interactive: interactivePayload,
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    console.error(`[whatsapp] button send failed (${res.status}): ${errBody}`);
+    return false;
+  }
+  return true;
+}

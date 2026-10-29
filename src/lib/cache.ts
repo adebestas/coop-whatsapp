@@ -379,9 +379,9 @@ export async function checkOtpRateLimit(
     const verifyEntry = inMemoryRateLimits.get(verifyKey);
     const cooldownEntry = inMemoryRateLimits.get(cooldownKey);
 
-    // 60s cooldown check
-    if (cooldownEntry && now - cooldownEntry.resetAt < 60_000) {
-      const remaining = Math.ceil((60_000 - (now - cooldownEntry.resetAt)) / 1000);
+    // 60s cooldown check: reject if the cooldown window hasn't elapsed yet.
+    if (cooldownEntry && now < cooldownEntry.resetAt) {
+      const remaining = Math.ceil((cooldownEntry.resetAt - now) / 1000);
       return {
         allowed: false,
         message: `Please wait *${remaining}* more second(s) before requesting a new OTP.`,
@@ -424,9 +424,9 @@ export async function checkOtpRateLimit(
       verifyEntry.count++;
       verifyEntry.resetAt = now + 30 * 60 * 1000;
     }
-    // 60s cooldown: store the generation timestamp (NOT a future resetAt — the
-    // check above compares `now - resetAt < 60_000`).
-    inMemoryRateLimits.set(cooldownKey, { count: 1, resetAt: now });
+    // 60s cooldown: store as a future expiry so the cleanup sweep doesn't
+    // delete this entry before the 60s window elapses.
+    inMemoryRateLimits.set(cooldownKey, { count: 1, resetAt: now + 60_000 });
 
     return { allowed: true };
   }

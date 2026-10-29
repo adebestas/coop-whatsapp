@@ -1,6 +1,7 @@
 import { prisma } from "../lib/prisma.js";
 import { normalizePhone } from "../lib/phones.js";
-import { getMemberByPhone } from "./cooperative.js";
+import { formatBalance, getMemberByPhone } from "./cooperative.js";
+import { notifyMember } from "../lib/messaging.js";
 import {
   parseDeductionFile,
   type ParsedRow,
@@ -110,9 +111,56 @@ export async function handleDeductionUpload(
     name: filename,
   });
   if (!result.ok) return { ok: false, message: result.message };
+
+  if (result.ref) {
+    void notifyMembersOfIngestedSchedule(member.cooperativeId, matched, result.ref, filename).catch(
+      (err) => console.warn("[deduction-ingest] error in notifyMembersOfIngestedSchedule:", err),
+    );
+  }
+
   const warn =
     ingested.unmatchedCount > 0
       ? `\n⚠️ ${ingested.unmatchedCount} row(s) didn't match a member and were skipped.`
       : "";
-  return { ok: true, message: result.message + warn };
+  const notified = `\n📱 Notified ${matched.length} member(s) of their scheduled payroll deductions.`;
+  return { ok: true, message: result.message + notified + warn };
+}
+
+/**
+ * Notify members when an employer deduction spreadsheet is ingested and matched,
+ * alerting them that their payroll schedule has been staged for processing.
+ */
+export async function notifyMembersOfIngestedSchedule(
+  cooperativeId: string,
+  matchedRows: Array<{ memberId: string; amount: number }>,
+  batchRef: string,
+  filename: string,
+): Promise<number> {
+  const memberIds = Array.from(new Set(matchedRows.map((r) => r.memberId)));
+  const members = await prisma.member.findMany({
+    where: { id: { in: memberIds }, cooperativeId, status: "active" },
+  });
+  const memberMap = new Map(members.map((m) => [m.id, m]));
+
+  let sent = 0;
+  for (const row of matchedRows) {
+    const target = memberMap.get(row.memberId);
+    if (!target) continue;
+
+    const alertText =
+      `🏢 *Payroll Deduction Staged*\n\n` +
+      `Your employer payroll schedule (*${filename}*) has been processed by your cooperative.\n\n` +
+      `• Scheduled Amount: *${formatBalance(row.amount)}*\n` +
+      `• Batch Ref: *${batchRef}*\n\n` +
+      `Your account will be credited once the employer bank remittance is reconciled.`;
+
+    try {
+      await notifyMember(target, alertText);
+      sent++;
+    } catch (err) {
+      console.warn(`[deduction-ingest] failed to notify member ${target.id}:`, err);
+    }
+  }
+
+  return sent;
 }

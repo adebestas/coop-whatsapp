@@ -9,6 +9,7 @@ import { flagTransaction } from "./aml.js";
 import { getCoopConfig } from "./coop-config.js";
 import { sendText } from "../lib/messaging.js";
 import { hasActiveCommittee, isCommitteeMember, recordCommitteeVote } from "./committees.js";
+import { getCoopId } from "../lib/runtime-context.js";
 
 /** After a loan leaves the queue, renumber positions for remaining pending loans. */
 async function renumberQueue(cooperativeId: string): Promise<void> {
@@ -137,8 +138,9 @@ export async function applyForLoan(
   tenureMonths: number,
   bank?: { accountNumber: string; bankCode: string; bankName?: string },
 ): Promise<ApplyLoanResult> {
+  const coopId = getCoopId();
   const member = await prisma.member.findFirst({
-    where: { phone },
+    where: { phone, ...(coopId ? { cooperativeId: coopId } : {}) },
     include: { cooperative: true, wallet: true },
   });
   if (!member) {
@@ -339,14 +341,6 @@ export async function approveLoanByAccountOfficer(
     };
   }
 
-  // Check if the officer is also the borrower
-  if (loan.memberId === opts.actorId) {
-    return {
-      ok: false,
-      message: `⛔ You cannot approve your own loan application. Another Account Officer must review it.`,
-    };
-  }
-
   // Atomic transition — only succeeds if status is still "guaranteed"
   const claimed = await prisma.loan.updateMany({
     where: { id: loan.id, status: "guaranteed" },
@@ -363,22 +357,29 @@ export async function approveLoanByAccountOfficer(
     };
   }
 
+  // Parallel lookup of actor and borrower details for audit & response
+  const [actorMember, borrowerMember] = await Promise.all([
+    prisma.member.findUnique({ where: { id: opts.actorId }, select: { phone: true, name: true } }),
+    prisma.member.findUnique({ where: { id: loan.memberId }, select: { name: true } }),
+  ]);
+  const actorPhone = actorMember?.phone ?? opts.actorId;
+  const borrowerName = borrowerMember?.name ?? "member";
+
   // Audit the approval
   await audit({
     cooperativeId: opts.cooperativeId,
-    actorPhone:
-      (await prisma.member.findUnique({ where: { id: opts.actorId } }))?.phone ?? opts.actorId,
+    actorPhone,
     actorId: opts.actorId,
     actorRole: "account_officer",
     action: "loan.account_officer_approve",
     targetType: "loan",
     targetId: loan.id,
-    detail: `Account Officer approved loan *${shortId}* for ${(await prisma.member.findUnique({ where: { id: loan.memberId } }))?.name ?? "member"}`,
+    detail: `Account Officer approved loan *${shortId}* for ${borrowerName}`,
   });
 
   return {
     ok: true,
-    message: `Loan *${shortId}* for ${(await prisma.member.findUnique({ where: { id: loan.memberId } }))?.name ?? "member"} approved by Account Officer. Awaiting admin approval.`,
+    message: `Loan *${shortId}* for ${borrowerName} approved by Account Officer. Awaiting admin approval.`,
   };
 }
 

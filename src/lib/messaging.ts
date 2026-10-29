@@ -2,6 +2,7 @@ import {
   sendText as sendWhatsApp,
   sendFlowMessage,
   sendDocument as sendWhatsAppDocument,
+  sendInteractiveButtons,
 } from "./whatsapp.js";
 import {
   sendTelegramMessage,
@@ -125,6 +126,26 @@ export async function sendSecurePrompt(params: {
     // NOTE: Degrades to plaintext PIN prompt when the secure card isn't available.
   }
   return { sent: await sendText({ to, text }) };
+}
+
+/**
+ * Channel-aware interactive button prompt (Xara style).
+ * WhatsApp: native Interactive Buttons (up to 3 clickable buttons).
+ * Telegram: inline keyboard callbacks.
+ */
+export async function sendButtonsPrompt(params: {
+  to: string;
+  text: string;
+  buttons: { id: string; title: string }[];
+  header?: string;
+  footer?: string;
+}): Promise<boolean> {
+  const { to, text, buttons, header, footer } = params;
+  if (to.startsWith("tg:")) {
+    const keyboard = [buttons.map((b) => ({ text: b.title, callback_data: b.id }))];
+    return (await sendTelegramKeyboard(to.slice(3), text, keyboard)) !== null;
+  }
+  return sendInteractiveButtons({ to, body: text, buttons, header, footer });
 }
 
 /** Which platform does this channel id belong to? */

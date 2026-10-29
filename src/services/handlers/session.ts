@@ -161,17 +161,20 @@ export function buildFullMenu(
     `• *save <amount>* — contribute (e.g. *save 2000*)\n` +
     `• *withdraw <amount>* — request a withdrawal (up to 45%)\n` +
     `• *plan <amount> <weekly|monthly>* — recurring contribution\n` +
+    `• *goal <amount> [date]* — calculate savings goal timeline\n` +
     `• *fund* — your personal top-up account\n` +
     `• *shares* / *buyshares <count>* — own shares in the coop\n\n` +
     `*📄 Loans*\n` +
     `• *loan <amount> <months>* — apply (e.g. *loan 50000 3*)\n` +
     `• *repay* — pay your monthly installment\n` +
+    `• *myguarantees* — view loans you guarantee & exposure limit\n` +
     `• *validate <claim id>* — validate a death claim (guarantors)\n\n` +
     `*👥 Savings groups (ROSCA / VSLA)*\n` +
     `• *joingroup <code>* — join a group\n` +
     `• *groupcontribute <group id> <amount>* — pay into your group\n` +
     `• *grouploan <group id> <amount> <months>* — joint-liability group loan\n` +
-    `• *mygroups* / *groupstatus <group id>* — your groups\n\n` +
+    `• *mygroups* / *groupstatus <group id>* — your groups\n` +
+    `• *split <total> <phone1> <phone2>...* — request split Ajo contributions\n\n` +
     `*🏦 Savings products*\n` +
     `• *products* — browse fixed, goal, seasonal and junior products\n` +
     `• *openproduct <product id> [target]* — open one\n` +
@@ -185,6 +188,9 @@ export function buildFullMenu(
     `• *cancelmandate <id>* — stop automatic debits\n\n` +
     `*📊 Account*\n` +
     `• *history* / *statement <month|year>* — transactions\n` +
+    `• *estatement [month]* — download bank-style PDF statement\n` +
+    `• *trend* — 6-month savings sparkline\n` +
+    `• *receipt [ref]* — download official PDF transaction receipt\n` +
     `• *analytics* — savings analytics\n` +
     `• *ledger* — cooperative ledger (transparency)\n` +
     `• *code* — your member code\n` +
@@ -212,6 +218,10 @@ export function buildFullMenu(
     `• *joinunit <code>* / *confirm <code>*\n` +
     `• *support <issue>* / *contexthelp*\n\n` +
     `🤖 You can also just *ask a question* in plain English or Pidgin.\n`;
+
+  if (member.role === "collector" || member.role === "admin" || member.role === "superadmin") {
+    menu += `\n*💵 Thrift Collector:*\n• *collect <amount> <code/phone> [note]* — record cash collection\n• *collectsummary* — view today's collections\n`;
+  }
 
   if (member.role === "admin" || member.role === "superadmin") {
     menu += `\n*Admin commands:* reply *admin*\n`;

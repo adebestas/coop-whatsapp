@@ -44,6 +44,12 @@ import { detectLocale, localeFromLanguageCode, t, LOCALES, type Locale } from ".
 import { runWithLocale, getLocale } from "../lib/runtime-context.js";
 import { translateToEnglish } from "../lib/translate.js";
 import { submitNin, isValidNin } from "./kyc.js";
+import { getMemberReceiptData, sendReceipt } from "./receipt.js";
+import { getMemberGuarantees, formatMyGuarantees } from "./guarantors.js";
+import { collectCashDeposit, getCollectorDailySummary } from "./thrift-collector.js";
+import { getBalanceTrend } from "./balance-trend.js";
+import { sendEStatement } from "./estatement.js";
+import { calculateGoalProjection } from "./savings-goals.js";
 
 export { LOCALES } from "../lib/i18n.js";
 
@@ -1213,9 +1219,105 @@ async function handleMessageInner(
       await handleAnalytics(phone, member);
       break;
 
+    case "receipt": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const ref = args[0]?.trim();
+      const receiptData = await getMemberReceiptData(member.id, ref);
+      if (!receiptData) {
+        await sendText({
+          to: phone,
+          text: ref
+            ? `No transaction found matching reference *${ref}*.`
+            : "No completed transactions found on your account yet.",
+        });
+        break;
+      }
+      await sendText({ to: phone, text: "Generating your official transaction receipt... 🧾" });
+      await sendReceipt(phone, receiptData);
+      break;
+    }
+
+    case "split": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
+      const amountStr = args[0];
+      const participantPhones = args
+        .slice(1)
+        .map((p) => p.replace(/[^0-9+]/g, ""))
+        .filter(Boolean);
+      const totalAmount = parseNaira(amountStr);
+      if (!totalAmount || totalAmount <= 0 || participantPhones.length === 0) {
+        await sendText({
+          to: phone,
+          text: "Usage: *split <total_amount> <phone1> <phone2>...*\nExample: *split 15000 08012345678 08087654321*",
+        });
+        break;
+      }
+      const totalParticipants = participantPhones.length + 1; // including requester
+      const shareKobo = Math.round(totalAmount / totalParticipants);
+
+      for (const targetPhone of participantPhones) {
+        await sendText({
+          to: targetPhone,
+          text:
+            `🤝 *Group Contribution Request (Ajo Split)*\n\n` +
+            `*${member.name}* requested a split contribution of *${formatBalance(shareKobo)}* towards a shared total of *${formatBalance(totalAmount)}*.\n\n` +
+            `Reply *send ${shareKobo / 100} ${phone}* to settle your share directly!`,
+        }).catch(() => {});
+      }
+
+      await sendText({
+        to: phone,
+        text: `✅ Split request created for *${formatBalance(totalAmount)}* across ${totalParticipants} people (*${formatBalance(shareKobo)}* each).\n\nNotifications sent to ${participantPhones.length} participant(s).`,
+      });
+      break;
+    }
+
     case "confirm":
       await handleConfirm(phone, args);
       break;
+
+    case "myguarantees":
+    case "guarantees": {
+      const summary = await getMemberGuarantees(member.id, member.cooperativeId);
+      await sendText({ to: phone, text: formatMyGuarantees(summary, member.name) });
+      break;
+    }
+
+    case "collect":
+    case "cashcollect": {
+      const amount = Number(args[0]);
+      const targetIdentifier = args[1];
+      const note = args.slice(2).join(" ");
+      if (!amount || !targetIdentifier) {
+        await sendText({
+          to: phone,
+          text: "Usage: *collect <amount> <member_code_or_phone> [note]*\n\nExample: `collect 2000 MEM001 Daily thrift`",
+        });
+        break;
+      }
+      const result = await collectCashDeposit(phone, amount, targetIdentifier, note);
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "collectsummary":
+    case "cashsummary": {
+      const summary = await getCollectorDailySummary(phone);
+      await sendText({ to: phone, text: summary });
+      break;
+    }
 
     case "code":
       await handleCode(phone);
@@ -1270,6 +1372,37 @@ async function handleMessageInner(
     case "statement":
       await handleStatement(phone, args);
       break;
+
+    case "estatement":
+      await sendEStatement(phone, args);
+      break;
+
+    case "trend":
+    case "sparkline": {
+      const trend = await getBalanceTrend(member.id, member.cooperativeId);
+      await sendText({ to: phone, text: trend });
+      break;
+    }
+
+    case "goal": {
+      const amountNaira = Number(args[0]);
+      if (!amountNaira || amountNaira <= 0) {
+        await sendText({
+          to: phone,
+          text:
+            "Usage: *goal <amount> [target_date]*\n\n" +
+            "Examples:\n" +
+            "• `goal 200000` — calculate when you'll reach ₦200,000\n" +
+            "• `goal 500000 Dec 2027` — calculate monthly savings needed to hit ₦500,000 by Dec 2027",
+        });
+        break;
+      }
+      const targetKobo = Math.round(amountNaira * 100);
+      const targetDateStr = args.slice(1).join(" ");
+      const projection = await calculateGoalProjection(member.id, targetKobo, targetDateStr);
+      await sendText({ to: phone, text: projection });
+      break;
+    }
 
     case "plan":
       await handlePlan(phone, args);

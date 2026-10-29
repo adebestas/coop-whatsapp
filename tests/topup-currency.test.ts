@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { prisma } from "../src/lib/prisma.js";
+import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { handlePaymentNotification } from "../src/services/payments/topup.js";
 
 describe("topup currency", () => {
@@ -28,5 +29,14 @@ describe("topup currency", () => {
     });
     const wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
     expect(wallet?.balance).toBe(10000);
+
+    const alerts = [
+      ...vi.mocked(notifyMember).mock.calls.map((c) => c[1] as string),
+      ...vi.mocked(sendText).mock.calls.map((c) => (c[0] as { text: string }).text),
+    ];
+    const creditAlert = alerts.find((t) => t.includes("Wallet credited"));
+    expect(creditAlert).toBeDefined();
+    expect(creditAlert).toContain("New balance");
+    expect(creditAlert).toContain("Total saved");
   });
 });

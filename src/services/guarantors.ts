@@ -239,3 +239,153 @@ async function uniqueGuarantorCode(): Promise<string> {
   }
   return code;
 }
+
+export interface MemberGuaranteeItem {
+  id: string;
+  code: string;
+  status: string;
+  confirmedAt: Date | null;
+  borrowerName: string;
+  borrowerCode: string;
+  borrowerPhone: string;
+  loanId: string;
+  loanAmount: number;
+  loanBalance: number;
+  loanStatus: string;
+  exposure: number;
+}
+
+export interface MemberGuaranteesSummary {
+  guarantees: MemberGuaranteeItem[];
+  activeCount: number;
+  maxActive: number;
+  totalExposure: number;
+  totalSavings: number;
+  exposureLimit: number;
+  availableGuaranteeLimit: number;
+}
+
+/**
+ * Retrieve a member's full guarantor portfolio: active guarantees,
+ * contingent liability exposures, and remaining guarantee limits.
+ */
+export async function getMemberGuarantees(
+  memberId: string,
+  cooperativeId?: string,
+): Promise<MemberGuaranteesSummary> {
+  const [records, wallet] = await Promise.all([
+    prisma.guarantor.findMany({
+      where: {
+        memberId,
+        ...(cooperativeId ? { loan: { cooperativeId } } : {}),
+      },
+      include: {
+        loan: {
+          include: {
+            member: {
+              select: { name: true, code: true, phone: true },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.wallet.findUnique({ where: { memberId } }),
+  ]);
+
+  const totalSavings = wallet?.totalSaved ?? 0;
+  const exposureLimit = Math.floor(totalSavings * GUARANTOR_EXPOSURE_RATIO);
+
+  const activeLoanStatuses = ["pending", "guaranteed", "admin_approved", "approved", "disbursed"];
+
+  let totalExposure = 0;
+  let activeCount = 0;
+
+  const items: MemberGuaranteeItem[] = records.map((g) => {
+    const isActiveLoan = activeLoanStatuses.includes(g.loan.status);
+    const exposure =
+      isActiveLoan && g.status === "confirmed"
+        ? g.loan.balance > 0
+          ? g.loan.balance
+          : g.loan.amount
+        : 0;
+
+    if (isActiveLoan && g.status === "confirmed") {
+      totalExposure += exposure;
+      activeCount += 1;
+    }
+
+    return {
+      id: g.id,
+      code: g.code,
+      status: g.status,
+      confirmedAt: g.confirmedAt,
+      borrowerName: g.loan.member.name,
+      borrowerCode: g.loan.member.code,
+      borrowerPhone: g.loan.member.phone,
+      loanId: g.loan.id,
+      loanAmount: g.loan.amount,
+      loanBalance: g.loan.balance,
+      loanStatus: g.loan.status,
+      exposure,
+    };
+  });
+
+  const availableGuaranteeLimit = Math.max(0, exposureLimit - totalExposure);
+
+  return {
+    guarantees: items,
+    activeCount,
+    maxActive: GUARANTOR_MAX_ACTIVE,
+    totalExposure,
+    totalSavings,
+    exposureLimit,
+    availableGuaranteeLimit,
+  };
+}
+
+/** Formats a member's guarantor portfolio summary for chat display. */
+export function formatMyGuarantees(data: MemberGuaranteesSummary, memberName: string): string {
+  const activeLoanStatuses = ["pending", "guaranteed", "admin_approved", "approved", "disbursed"];
+  const confirmed = data.guarantees.filter(
+    (g) => activeLoanStatuses.includes(g.loanStatus) && g.status === "confirmed",
+  );
+  const pending = data.guarantees.filter(
+    (g) => activeLoanStatuses.includes(g.loanStatus) && g.status === "pending",
+  );
+
+  let out = `🛡️ *My Guarantees Portfolio* — ${memberName}\n\n`;
+  out += `*Contingent Liability Summary:*\n`;
+  out += `• Total Active Exposure: *${formatBalance(data.totalExposure)}*\n`;
+  out += `• Your Savings: *${formatBalance(data.totalSavings)}*\n`;
+  out += `• Max Guarantee Cap (${GUARANTOR_EXPOSURE_RATIO}x): *${formatBalance(data.exposureLimit)}*\n`;
+  out += `• Remaining Guarantee Capacity: *${formatBalance(data.availableGuaranteeLimit)}*\n`;
+  out += `• Active Slots: *${data.activeCount}/${data.maxActive}* active loans\n\n`;
+
+  if (confirmed.length === 0 && pending.length === 0) {
+    out += `You are not currently guaranteeing any active loans.`;
+    return out;
+  }
+
+  if (confirmed.length > 0) {
+    out += `*Active Commitments:*\n`;
+    confirmed.forEach((g, index) => {
+      out += `\n${index + 1}. *${g.borrowerName}* (${g.borrowerCode})\n`;
+      out += `   • Status: ✅ Confirmed (${g.loanStatus.toUpperCase()})\n`;
+      out += `   • Loan Amount: ${formatBalance(g.loanAmount)}\n`;
+      out += `   • Outstanding Balance: ${formatBalance(g.loanBalance)}\n`;
+      out += `   • Your Exposure: *${formatBalance(g.exposure)}*\n`;
+    });
+  }
+
+  if (pending.length > 0) {
+    out += (confirmed.length > 0 ? "\n\n" : "") + `*⚠️ Requests Awaiting Your Confirmation:*\n`;
+    pending.forEach((g, index) => {
+      out += `\n${index + 1}. *${g.borrowerName}* (${g.borrowerCode})\n`;
+      out += `   • Loan Requested: ${formatBalance(g.loanAmount)}\n`;
+      out += `   • Accept with: *confirm ${g.code}*\n`;
+    });
+  }
+
+  return out;
+}

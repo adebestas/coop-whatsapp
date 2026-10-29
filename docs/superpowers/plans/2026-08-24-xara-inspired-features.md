@@ -10,6 +10,19 @@
 
 **Spec:** Derived from Xara (usexara.ai) feature analysis — see conversation context.
 
+## Implementation Status — COMPLETE (2026-10-28)
+
+All five features shipped in `aa96039` ("Implement documented-but-missing Xara features + fix doc/code mismatches"), with the enriched credit alert and dedicated test coverage added on 2026-10-28. The task text below keeps the original design names; the table maps them to what actually shipped.
+
+| Planned design | Shipped implementation |
+|----------------|------------------------|
+| `prisma` `Wallet.frozen` | `Member.frozenAt` (+ `Member.supervisoryFrozenAt`, which outranks self-serve freeze) — `prisma/schema.prisma:204-205` |
+| `src/lib/voice.ts` | `src/lib/transcribe.ts` (Groq Whisper, fail-closed) |
+| `src/lib/spending.ts` | `handleAnalytics` in `src/services/handlers/money.ts:296` |
+| `src/lib/inbound.ts` audio extraction | webhook audio path calling `transcribe.ts` |
+| Enriched `handleSave` confirmation | Savings no longer self-credit; the real-payment credit alert in `src/services/payments/topup.ts` now reports new balance **and** total saved |
+| `tests/xara-features.test.ts` for all 5 | Payees, self-serve freeze (+ supervisory precedence), analytics, and loan-aware balance covered in `tests/xara-features.test.ts`; voice in `tests/transcribe-language.test.ts`; credit alert in `tests/topup-currency.test.ts` |
+
 ## Global Constraints
 
 - All monetary values stored as Int (kobo) — ₦1 = 100 kobo

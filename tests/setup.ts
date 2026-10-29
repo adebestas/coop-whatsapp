@@ -33,6 +33,7 @@ vi.mock("../src/lib/whatsapp.js", () => ({
   sendText: vi.fn().mockResolvedValue(true),
   sendFlowMessage: vi.fn().mockResolvedValue(true),
   sendDocument: vi.fn().mockResolvedValue(true),
+  sendInteractiveButtons: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock("../src/lib/telegram.js", async (importOriginal) => {
@@ -54,6 +55,7 @@ vi.mock("../src/lib/messaging.js", async (importOriginal) => {
     sendText: vi.fn(actual.sendText),
     sendSecurePrompt: vi.fn(actual.sendSecurePrompt),
     notifyMember: vi.fn(actual.notifyMember),
+    sendDocument: vi.fn(actual.sendDocument),
   };
 });
 

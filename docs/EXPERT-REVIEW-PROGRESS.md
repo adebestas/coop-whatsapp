@@ -81,9 +81,9 @@ AI prompt still says ₦ (`ai-query.ts:153`); translation trigger ignores the re
 
 ## Resume
 
-1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `a6af6ee`).
+1. `cd C:\Users\Hp\projects\coop-whatsapp` · `git log --oneline -1` (expect `3dcfbe1`).
 2. Read this file + `docs/EXPERT-REVIEW-2026-10-15.md` + `~/.config/opencode/memory.md`.
-3. All **Critical (A1–A17)**, the insurance + federation + topup Important items, **SEC-1…9**, **PERF-1…4** and **OPS-1…8** are done — the backlog is complete. Remaining work is non-code (rotate the Neon credential; open a PR once `gh` is authenticated).
+3. All **Critical (A1–A17)**, the insurance + federation + topup Important items, **SEC-1…9**, **PERF-1…4** and **OPS-1…8** are done — the backlog is complete. The Neon credential has been rotated and the PR is open; the only outstanding item is deployment.
 
 ## Final regression pass (`a6af6ee`)
 
@@ -110,7 +110,7 @@ Result: **895 tests, 0 failures (14 skipped)**; `tsc` clean; `eslint` 0 errors.
 
 ## Also pending (separate)
 
-- **PR not created** — `gh` isn't authenticated. Run `gh auth login`, then:
-  `gh pr create --base main --head feat/world-class --title "feat: multi-language + multi-currency, CubeCover insurance hardening, and federation" --body-file PR_BODY.md`
+- **PR #1 merged** — https://github.com/adebestas/coop-whatsapp/pull/1 squashed onto `main` as `1718ef0` (head `feat/world-class`, tip `3dcfbe1`; `gh` authenticated as `adebestas`). **CI is green on both the PR and `main`.** The `production-deploy-gate` ran on `main` and no-op'd (`RENDER_DEPLOY_HOOK_PRODUCTION` not set), so nothing deployed. Two CI-only fixes landed on the branch: `b444e85` adds a `prisma db push` step so the SQLite test schema exists on a fresh runner (the unit/security jobs previously failed with `P2021: table main.DataConsent does not exist`); `3dcfbe1` supplies `ADMIN_JWT_SECRET`/`SESSION_SECRET` in the unit-tests job (CI has no `.env`) and makes the `prelaunch` digest tests timezone-independent (`runDailyDigest` fires in Africa/Lagos/UTC+1 — the test now uses `setUTCHours`).
+- **Neon credential rotated (2026-10-17)** — SEC-6 leak was local-dev-only (never committed; Render uses managed Postgres). Reset the `neondb_owner` role on project `coop` (`dry-art-49484928`) / branch `production` (`br-green-snow-b23elhqk`) via the Neon REST API; new credential verified. `.env` deliberately keeps the placeholder — do NOT re-add a live string.
 - Untracked (not committed): `PR_BODY.md`, `docs/EXPERT-REVIEW-2026-10-15.md`, `docs/superpowers/plans/2026-10-14-multi-language-multi-currency.md`, `docs/superpowers/plans/2026-10-15-federation.md`, `docs/superpowers/specs/2026-10-14-multi-language-multi-currency-design.md`.
 - **Not yet deployed** — see the pre-launch checklist in the earlier assessment (staging env, RLS cutover, CubeCover docs, prod env vars, `db:migrate:deploy`).
