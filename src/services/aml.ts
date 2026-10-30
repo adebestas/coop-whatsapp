@@ -375,11 +375,16 @@ export async function generateSTR(
     })),
   ];
 
-  // Check each transaction for flags
+  // Check AML rules once against the member as a whole (using the most recent
+  // transaction as the representative). Calling flagTransaction per-tx would
+  // fire N sets of DB queries and could trigger duplicate autoFileReport calls
+  // for the same day. The admin `str` command is a read path — actual auto-
+  // filing happens at transaction time in flagTransaction.
   const allReasons: string[] = [];
   let suspicious = false;
-  for (const tx of allTx) {
-    const result = await flagTransaction(tx);
+  if (allTx.length > 0) {
+    const representative = allTx[0]; // most recent (ordered desc)
+    const result = await flagTransaction({ ...representative, id: undefined });
     if (result.flagged) {
       allReasons.push(...result.reasons);
     }
@@ -590,7 +595,12 @@ export async function escalateOverdueSTRs(now = new Date()): Promise<number> {
         createdAt: { lt: new Date(now.getTime() - SIXTY_ENDING_HOURS_MS) },
         OR: [{ escalatedAt: null }, { escalatedAt: { lt: resendBefore } }],
       },
-      select: { id: true, cooperativeId: true, member: { select: { name: true, code: true } } },
+      select: {
+        id: true,
+        cooperativeId: true,
+        reportType: true,
+        member: { select: { name: true, code: true } },
+      },
     });
 
     for (const str of overdue) {
@@ -607,9 +617,14 @@ export async function escalateOverdueSTRs(now = new Date()): Promise<number> {
         where: { cooperativeId: str.cooperativeId, role: "superadmin", status: "active" },
       });
       for (const admin of supers) {
+        const reportLabel = str.reportType === "CTR" ? "CTR" : "STR";
+        const reportFull =
+          str.reportType === "CTR"
+            ? "Currency Transaction Report"
+            : "Suspicious Transaction Report";
         await notifyMember(
           admin,
-          `🚨 *STR filing deadline breached*\n\nA Suspicious Transaction Report for *${str.member.name}* (${str.member.code}) ` +
+          `🚨 *${reportLabel} filing deadline breached*\n\nA ${reportFull} for *${str.member.name}* (${str.member.code}) ` +
             `has been pending for over 72 hours. CBN requires filing within 72 hours — file it *now* (\`strs\` to review).`,
         ).catch(() => {});
       }

@@ -66,6 +66,29 @@ export function extractWhatsAppMessages(changeValue: unknown): InboundMessage[] 
       continue;
     }
 
+    // Interactive button clicks (e.g. [Check Balance], [Save], [Menu])
+    if (message.type === "interactive") {
+      const interactive = message.interactive as {
+        type?: string;
+        button_reply?: { id?: string; title?: string };
+        list_reply?: { id?: string; title?: string };
+      };
+      if (interactive.type === "button_reply" && interactive.button_reply) {
+        const text = interactive.button_reply.id || interactive.button_reply.title || "";
+        if (text) {
+          out.push({ id, from, text });
+          continue;
+        }
+      }
+      if (interactive.type === "list_reply" && interactive.list_reply) {
+        const text = interactive.list_reply.id || interactive.list_reply.title || "";
+        if (text) {
+          out.push({ id, from, text });
+          continue;
+        }
+      }
+    }
+
     // Voice notes: carry the media id so the route can transcribe downstream.
     if (message.type === "audio" && message.audio?.id) {
       out.push({ id, from, text: "", audio: { mediaId: message.audio.id } });

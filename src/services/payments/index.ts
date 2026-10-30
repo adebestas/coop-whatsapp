@@ -12,6 +12,8 @@ export interface VirtualAccountData {
   provider: string;
   /** Provider-side reference for the virtual account */
   providerRef?: string;
+  /** Optional expiry date if the provider issues expiring accounts */
+  expiresAt?: Date | null;
 }
 
 export interface CreateVirtualAccountParams {

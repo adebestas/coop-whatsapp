@@ -113,7 +113,7 @@ describe("employer deduction remittance", () => {
     const notes = vi
       .mocked(notifyMember)
       .mock.calls.map((c) => ({ to: c[0].phone, text: String(c[1]) }));
-    expect(notes.find((n) => n.to === saver.phone)?.text).toContain("credited to your savings");
+    expect(notes.find((n) => n.to === saver.phone)?.text).toContain("Payroll Deduction Credited");
     expect(notes.find((n) => n.to === payer.phone)?.text).toContain("Remaining balance");
 
     const approved = await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } });

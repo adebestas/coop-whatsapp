@@ -564,9 +564,15 @@ export async function approveBatch(
             data: { balance: { increment: item.amount }, totalSaved: { increment: item.amount } },
           });
         }
+        const updatedBalance = (member.wallet?.balance ?? 0) + item.amount;
         notifications.push({
           member,
-          text: `💰 ${formatBalance(item.amount)} salary deduction received and credited to your savings.`,
+          text:
+            `🏢 *Payroll Deduction Credited*\n\n` +
+            `Your employer deduction of *${formatBalance(item.amount)}* for batch *${ref}* has been applied to your cooperative savings.\n\n` +
+            `• Credited: *${formatBalance(item.amount)}*\n` +
+            `• New Savings Balance: *${formatBalance(updatedBalance)}*\n\n` +
+            `Thank you for building your wealth! 🛡️`,
         });
         savingsCredited.push({ id: member.id, cooperativeId: member.cooperativeId });
         savedCount += 1;

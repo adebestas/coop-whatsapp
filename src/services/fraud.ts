@@ -33,6 +33,9 @@ export async function checkDailyPayoutLimit(
   // as a payout succeeds, letting subsequent money-out exceed the configured
   // daily/monthly ceiling (a fraud-control bypass). The few extra reads are
   // cheap relative to the money-out write path this guards.
+  //
+  // NOTE: The `payout` table covers provider bank transfers including loan disbursements
+  // (idempotency key `TFR-LOAN-<loanId>`), direct bank payouts, and dividend distributions.
   const [payouts, withdrawals, externals, monthPayouts, monthWithdrawals, monthExternals] =
     await Promise.all([
       prisma.payout.aggregate({

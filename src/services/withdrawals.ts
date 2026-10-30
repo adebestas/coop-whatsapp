@@ -73,10 +73,12 @@ export async function withdrawLimit(
   return { balance, max: Math.floor(balance * WITHDRAW_LIMIT_RATIO) };
 }
 
+export type MemberWithWallet = Awaited<ReturnType<typeof memberByPhone>>;
+
 /** Is this member allowed to withdraw under the 6-month rule? */
 export async function canWithdraw(
   phone: string,
-): Promise<{ ok: boolean; message: string; member: any }> {
+): Promise<{ ok: boolean; message: string; member: MemberWithWallet }> {
   const member = await memberByPhone(phone);
   if (!member || !member.wallet) {
     return {
@@ -661,12 +663,16 @@ export async function rejectWithdrawal(
     include: { member: true },
   });
   if (!request) return { ok: false, message: "Withdrawal request not found." };
-  if (request.status === "paid" || request.status === "rejected") {
+  if (
+    request.status === "paid" ||
+    request.status === "rejected" ||
+    request.status === "processing"
+  ) {
     return { ok: false, message: `This request is already ${request.status}.` };
   }
   // Atomic — can't reject something that just flipped to paid/processing.
   const moved = await prisma.withdrawalRequest.updateMany({
-    where: { id: request.id, status: { in: ["pending", "admin_approved"] } },
+    where: { id: request.id, status: { in: ["pending", "admin_approved", "aml_review"] } },
     data: { status: "rejected", rejectedAt: new Date() },
   });
   if (moved.count === 0) {

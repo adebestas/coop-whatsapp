@@ -56,9 +56,10 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
     currency,
   };
 
-  // Virtual account expiry: 90 days from now
-  const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
-
+  // Virtual account expiry: providers (Monnify, Paystack) issue permanent virtual
+  // accounts that do not expire on their end. We store null so the cleanup job
+  // never nulls out a live account and drops incoming real-money transfers.
+  // Only set an expiry if the provider itself returns one in the future.
   let lastError: unknown = null;
   let lastProviderName: string | undefined;
   // Try preferred provider first, then all fallbacks
@@ -71,6 +72,11 @@ export async function provisionVirtualAccount(memberId: string): Promise<{
     try {
       const va = await provider.createVirtualAccount(params);
       markProviderUp(provider.name);
+
+      // Use provider-supplied expiry when available; otherwise null (permanent).
+      // Never apply a hard-coded 90-day window — that would null out valid accounts
+      // and cause incoming transfers to be silently dropped after 90 days (BUG-5).
+      const expiresAt = va.expiresAt instanceof Date ? va.expiresAt : null;
 
       await prisma.member.update({
         where: { id: member.id },
@@ -237,10 +243,17 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
       );
 
       // Real-time credit alert: tell the member the moment their bank transfer lands.
-      const newBalance = (member.wallet?.balance ?? 0) + amount;
+      // Re-fetch the wallet to get the accurate post-credit balance (the pre-tx
+      // snapshot could be stale if a concurrent credit also landed).
+      const updatedWallet = await prisma.wallet.findUnique({
+        where: { memberId: member.id },
+        select: { balance: true, totalSaved: true },
+      });
+      const newBalance = updatedWallet?.balance ?? (member.wallet?.balance ?? 0) + amount;
+      const totalSaved = updatedWallet?.totalSaved ?? (member.wallet?.totalSaved ?? 0) + amount;
       await notifyMember(
         member,
-        `✅ *Wallet credited!*\n\n${formatBalance(amount)} just landed in your savings via ${n.provider} (Ref ${n.transactionId.slice(-8)}).\n\nNew balance: *${formatBalance(newBalance)}*.`,
+        `? *Wallet credited!*\n\n${formatBalance(amount)} just landed in your savings via ${n.provider} (Ref ${n.transactionId.slice(-8)}).\n\nNew balance: *${formatBalance(newBalance)}*.\nTotal saved: *${formatBalance(totalSaved)}*.`,
       ).catch((err) => {
         console.error("[topup] Failed to notify member of credit:", err);
       });

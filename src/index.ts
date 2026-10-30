@@ -66,6 +66,9 @@ process.on("unhandledRejection", (reason) => {
     error: reason instanceof Error ? reason.message : String(reason),
     stack: reason instanceof Error ? reason.stack : undefined,
   });
+  // An unhandled rejection leaves the process in an unknown state. Shut down
+  // gracefully so the watchdog can restart a clean instance.
+  void shutdown("unhandledRejection", 1);
 });
 process.on("uncaughtException", (err) => {
   log.error("uncaughtException", { error: err.message, stack: err.stack });

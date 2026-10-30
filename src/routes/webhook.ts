@@ -114,26 +114,44 @@ export async function webhookRoutes(app: FastifyInstance) {
 
             // Documents / photos: an admin uploading an employer deduction file.
             if (inbound.document || inbound.image) {
-              const media = inbound.document ?? inbound.image!;
-              try {
-                const dl = await downloadMedia(media.mediaId);
-                if (!dl) {
+              // Wrap in per-user mutex so a concurrent text message from the
+              // same phone cannot race with the upload handler.
+              void withUserMutex(inbound.from, async () => {
+                const media = inbound.document ?? inbound.image!;
+                try {
+                  const dl = await downloadMedia(media.mediaId);
+                  if (!dl) {
+                    sendText({
+                      to: inbound.from,
+                      text: "I couldn't download that file. Please try again.",
+                    }).catch((err) =>
+                      app.log.warn(
+                        { err, to: inbound.from },
+                        "Failed to send download error notice",
+                      ),
+                    );
+                    return;
+                  }
+                  const filename = inbound.document?.filename ?? `upload.${extFromMime(dl.mime)}`;
+                  const result = await handleDeductionUpload(inbound.from, dl.data, filename);
+                  await sendText({ to: inbound.from, text: result.message }).catch((err) =>
+                    app.log.warn({ err, to: inbound.from }, "Failed to send upload result notice"),
+                  );
+                } catch (err) {
+                  await failInbound("whatsapp", inbound.id, inbound.from, err);
                   sendText({
                     to: inbound.from,
-                    text: "I couldn't download that file. Please try again.",
-                  }).catch(() => {});
-                  continue;
+                    text: "Sorry, I couldn't process that file. Please try again.",
+                  }).catch((err) =>
+                    app.log.warn({ err, to: inbound.from }, "Failed to send upload failure notice"),
+                  );
                 }
-                const filename = inbound.document?.filename ?? `upload.${extFromMime(dl.mime)}`;
-                const result = await handleDeductionUpload(inbound.from, dl.data, filename);
-                await sendText({ to: inbound.from, text: result.message }).catch(() => {});
-              } catch (err) {
-                await failInbound("whatsapp", inbound.id, inbound.from, err);
-                sendText({
-                  to: inbound.from,
-                  text: "Sorry, I couldn't process that file. Please try again.",
-                }).catch(() => {});
-              }
+              }).catch((err) => {
+                app.log.error(
+                  { err, from: inbound.from },
+                  "Failed to acquire mutex for document upload",
+                );
+              });
               continue;
             }
 
