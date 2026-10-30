@@ -5,7 +5,7 @@ import { provisionVirtualAccount } from "../payments/topup.js";
 import { setAutoSave } from "../scheduler.js";
 import { joinUnit } from "../units.js";
 import { withdrawLimit, canWithdraw } from "../withdrawals.js";
-import { computeDividendPreview } from "../dividends.js";
+import { computeDividendPreview, computeDividendCalculator } from "../dividends.js";
 import { getQueuePosition } from "../loans.js";
 import { getShareAccount } from "../shares.js";
 import { applyGroupLoan } from "../groups.js";
@@ -246,6 +246,20 @@ export async function handleDividend(phone: string, args: string[]): Promise<voi
     return;
   }
   const result = await computeDividendPreview(phone, rate);
+  await sendText({ to: phone, text: result.message });
+}
+
+export async function handleDividendCalc(phone: string, args: string[]): Promise<void> {
+  const raw = args[0] ? args[0].replace(/[,?\s]/g, "") : "";
+  const rate = raw ? Number(raw) : undefined;
+  if (raw && (!Number.isFinite(rate) || (rate ?? 0) <= 0)) {
+    await sendText({
+      to: phone,
+      text: "Usage: *dividendcalc [rate%]*, e.g. *dividendcalc 12* for a 12% surplus projection.",
+    });
+    return;
+  }
+  const result = await computeDividendCalculator(phone, rate);
   await sendText({ to: phone, text: result.message });
 }
 

@@ -58,6 +58,9 @@ model Cooperative {
   deductionBatches  DeductionBatch[]
   externalPayments   ExternalPayment[]
   purchasePolls      PurchasePoll[]
+  shopItems          ShopItem[]
+  shopOrders         ShopOrder[]
+  guarantorSubstitutions GuarantorSubstitution[]
   reconciliationLogs ReconciliationLog[]
   reserveAllocations   ReserveAllocation[]
   educationFunds      EducationFund[]
@@ -299,6 +302,12 @@ model Member {
   savingsDeposits         SavingsDeposit[]
   mandates                Mandate[]           @relation("MemberMandates")
   refunds                 RefundRequest[]     @relation("MemberRefunds")
+  shopItemsCreated        ShopItem[]          @relation("ShopItemCreator")
+  shopOrders              ShopOrder[]         @relation("ShopOrderMember")
+  shopOrdersApproved      ShopOrder[]         @relation("ShopOrderApprover")
+  shopOrdersDispatched    ShopOrder[]         @relation("ShopOrderDispatcher")
+  substitutionsRequested  GuarantorSubstitution[] @relation("SubstitutionRequester")
+  substitutionsAsNewGuarantor GuarantorSubstitution[] @relation("SubstitutionNewGuarantor")
   referralsMade           Referral[]          @relation("Referrer")
   referralReceived        Referral?           @relation("ReferredMember")
   referralBonusBalance    Int                 @default(0) // kobo; withdrawable referral bonus
@@ -430,6 +439,9 @@ model Loan {
   provisionEntries   ProvisionEntry[]
   groupId            String?
   group              Group?          @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  kind               String          @default("cash")
+  shopOrder          ShopOrder?
+  substitutions      GuarantorSubstitution[]
 
   @@index([memberId, status])
   @@index([cooperativeId, status])
@@ -449,9 +461,12 @@ model Guarantor {
   memberId    String
   member      Member    @relation(fields: [memberId], references: [id], onDelete: Restrict)
   code        String    @unique // auto-generated unique confirmation code
-  status      String    @default("pending") // pending | confirmed | declined
+  status      String    @default("pending") // pending | confirmed | declined | released
   confirmedAt DateTime?
+  releasedAt  DateTime? // set when a substitution formally releases this guarantor
+  releasedReason String?
   createdAt   DateTime  @default(now())
+  substitutionsReleased GuarantorSubstitution[] @relation("SubstitutionOldGuarantor")
 
   @@unique([loanId, memberId])
   @@index([code])
@@ -474,6 +489,35 @@ model GuarantorVerification {
   @@unique([loanId, guarantorId])
   @@index([loanId])
   @@index([guarantorId])
+}
+
+// ---- Guarantor substitution ----
+// A live loan's confirmed guarantor can be replaced. The new guarantor accepts by
+// code, then an admin approves; only then is the old guarantee released.
+model GuarantorSubstitution {
+  id             String      @id @default(cuid())
+  reference      String      @unique
+  cooperativeId  String
+  cooperative    Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  loanId         String
+  loan           Loan        @relation(fields: [loanId], references: [id], onDelete: Cascade)
+  oldGuarantorId String
+  oldGuarantor   Guarantor   @relation("SubstitutionOldGuarantor", fields: [oldGuarantorId], references: [id], onDelete: Cascade)
+  newMemberId    String
+  newMember      Member      @relation("SubstitutionNewGuarantor", fields: [newMemberId], references: [id], onDelete: Restrict)
+  requestedById  String
+  requestedBy    Member      @relation("SubstitutionRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  code           String      @unique // sent to the new guarantor; reply confirm <code>
+  status         String      @default("pending_guarantor") // pending_guarantor | pending_admin | approved | rejected | cancelled
+  reason         String?
+  confirmedAt    DateTime?
+  decidedAt      DateTime?
+  decidedById    String?
+  createdAt      DateTime    @default(now())
+
+  @@index([cooperativeId, status])
+  @@index([loanId])
+  @@index([newMemberId, status])
 }
 
 model LoanRepayment {
@@ -2194,4 +2238,51 @@ model WebhookFailure {
   createdAt DateTime @default(now())
 
   @@index([createdAt])
+}
+
+
+model ShopItem {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
+  name          String
+  cashPrice     Int
+  maxMonths     Int         @default(3)
+  stockQty      Int?
+  active        Boolean     @default(true)
+  createdById   String
+  creator       Member      @relation("ShopItemCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  orders        ShopOrder[]
+  createdAt     DateTime    @default(now())
+
+  @@index([cooperativeId, active])
+}
+
+model ShopOrder {
+  id             String      @id @default(cuid())
+  ref            String      @unique
+  cooperativeId  String
+  cooperative    Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
+  memberId       String
+  member         Member      @relation("ShopOrderMember", fields: [memberId], references: [id], onDelete: Restrict)
+  itemId         String
+  item           ShopItem    @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  cashPrice      Int
+  months         Int
+  monthlyKobo    Int
+  status         String      @default("pending")
+  approvedById   String?
+  approvedBy     Member?     @relation("ShopOrderApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedAt     DateTime?
+  dispatchedById String?
+  dispatchedBy   Member?     @relation("ShopOrderDispatcher", fields: [dispatchedById], references: [id], onDelete: SetNull)
+  dispatchedAt   DateTime?
+  rejectReason   String?
+  loanId         String?     @unique
+  loan           Loan?       @relation(fields: [loanId], references: [id], onDelete: SetNull)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([cooperativeId, status])
+  @@index([memberId, status])
 }

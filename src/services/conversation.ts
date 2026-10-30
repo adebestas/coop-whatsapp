@@ -16,6 +16,7 @@ import { getAiConsentState } from "../lib/ai-consent.js";
 import { transcribeAudioMessage, transcriptionEnabled } from "../lib/transcribe.js";
 import { getMemberByPhone, invalidateMemberCache } from "./cooperative.js";
 import { handleAdminCommand, handleOmbudsmanCommand } from "./admin.js";
+import { handleShopCommand } from "./shop-commands.js";
 import { isOmbudsman } from "./ombudsman.js";
 import { checkMoneyRateLimit, checkAIRateLimit } from "./fraud.js";
 import { aiEnabled, suggestCommand } from "../lib/ai.js";
@@ -46,6 +47,7 @@ import { translateToEnglish } from "../lib/translate.js";
 import { submitNin, isValidNin } from "./kyc.js";
 import { getMemberReceiptData, sendReceipt } from "./receipt.js";
 import { getMemberGuarantees, formatMyGuarantees } from "./guarantors.js";
+import { requestSubstitution } from "./guarantor-substitution.js";
 import { collectCashDeposit, getCollectorDailySummary } from "./thrift-collector.js";
 import { getBalanceTrend } from "./balance-trend.js";
 import { sendEStatement } from "./estatement.js";
@@ -178,6 +180,7 @@ import {
   handleFund,
   handlePlan,
   handleDividend,
+  handleDividendCalc,
   handleJoinUnit,
   handleLoanQueue,
   handleAnalytics,
@@ -271,6 +274,7 @@ export type BotState =
   | "awaiting_bonus_pin"
   | "awaiting_repay_pin"
   | "awaiting_buyshares_pin"
+  | "awaiting_shop_pin"
   | "awaiting_bank_account"
   | "awaiting_bank_choice"
   | "awaiting_bank_confirm"
@@ -303,6 +307,8 @@ export const FlowDataSchema = z.object({
   coopCode: z.string().optional(),
   coopState: z.string().nullable().optional(),
   pin: z.string().optional(),
+  shopItemId: z.string().optional(),
+  shopMonths: z.number().optional(),
   name: z.string().optional(),
   contactPhone: z.string().optional(),
   newPhone: z.string().optional(),
@@ -385,6 +391,7 @@ export const SECRET_STATES: BotState[] = [
   "awaiting_bonus_pin",
   "awaiting_repay_pin",
   "awaiting_buyshares_pin",
+  "awaiting_shop_pin",
   "awaiting_mandate_pin",
   "awaiting_cancelmandate_pin",
   "awaiting_delete_account_pin",
@@ -1005,6 +1012,8 @@ async function handleMessageInner(
   const handled = await handleAdminCommand(phone, cmd, args);
   if (handled) return;
 
+  if (await handleShopCommand(phone, cmd, args, text, await getMemberByPhone(phone))) return;
+
   switch (cmd) {
     case "hi":
     case "hello":
@@ -1295,6 +1304,12 @@ async function handleMessageInner(
       break;
     }
 
+    case "substituteguarantor": {
+      const result = await requestSubstitution(phone, args[0] ?? "", args[1] ?? "", args[2] ?? "");
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
     case "collect":
     case "cashcollect": {
       const amount = Number(args[0]);
@@ -1410,6 +1425,10 @@ async function handleMessageInner(
 
     case "dividend":
       await handleDividend(phone, args);
+      break;
+
+    case "dividendcalc":
+      await handleDividendCalc(phone, args);
       break;
 
     case "joinunit":

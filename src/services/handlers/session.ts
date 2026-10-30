@@ -27,6 +27,7 @@ import { verifyMemberPin } from "../pin.js";
 import { resolveBankCode } from "../../lib/banks.js";
 import { applyForLoan, repayLoan } from "../loans.js";
 import { buyShares } from "../shares.js";
+import { createShopOrder } from "../shop.js";
 import { addGuarantor, requiredGuarantors } from "../guarantors.js";
 import type { LoanIntent } from "../../lib/ai-loan.js";
 import { requestWithdrawal } from "../withdrawals.js";
@@ -163,11 +164,15 @@ export function buildFullMenu(
     `• *plan <amount> <weekly|monthly>* — recurring contribution\n` +
     `• *goal <amount> [date]* — calculate savings goal timeline\n` +
     `• *fund* — your personal top-up account\n` +
-    `• *shares* / *buyshares <count>* — own shares in the coop\n\n` +
+    `• *shares* / *buyshares <count>* — own shares in the coop\n` +
+    `• *shop* / *buyitem <number> <months>* — interest-free coop shop\n` +
+    `• *myshop* — track your shop orders\n` +
+    `• *dividendcalc [rate%]* — project your AGM dividend & patronage\n\n` +
     `*📄 Loans*\n` +
     `• *loan <amount> <months>* — apply (e.g. *loan 50000 3*)\n` +
     `• *repay* — pay your monthly installment\n` +
     `• *myguarantees* — view loans you guarantee & exposure limit\n` +
+    `• *substituteguarantor <loan id> <old code> <new code>* — swap a guarantor\n` +
     `• *validate <claim id>* — validate a death claim (guarantors)\n\n` +
     `*👥 Savings groups (ROSCA / VSLA)*\n` +
     `• *joingroup <code>* — join a group\n` +
@@ -265,6 +270,13 @@ export function buildAdminMenu(): string {
     `• *startbuyvote <title>* — start a buy vote\n` +
     `• *addoption <id> <item> <cost> <acct> <bank>* — add buy option\n` +
     `• *closebuyvote <id>* — close a buy vote\n` +
+    `• *addshopitem "<name>" <price> [months] [stock]* — add a shop item\n` +
+    `• *shopitems* / *closeshopitem <name>* — manage the shop catalog\n` +
+    `• *shoporders [status]* — list shop orders\n` +
+    `• *approveorder <ref>* / *rejectorder <ref> [reason]* — review orders\n` +
+    `• *dispatch <ref>* — hand over the goods and start the installment plan\n` +
+    `• *substitutions* / *approvesubstitution <ref>* — review guarantor swaps\n` +
+    `• *rejectsubstitution <ref> [reason]* — reject a guarantor swap\n` +
     `• *startvotediv <rate%>* — open a dividend-rate member vote\n` +
     `• *closedivid [approve|reject]* — close a dividend-rate vote\n` +
     `• *votedivstatus* — dividend-rate vote tally\n` +
@@ -1617,6 +1629,48 @@ export async function handleAwaitingInput(
         to: phone,
         text: result.message + "\n\nReply *menu* to see other options.",
       });
+      break;
+    }
+
+    case "awaiting_shop_pin": {
+      const input = text.trim();
+      if (input.toLowerCase() === "menu" || input.toLowerCase() === "cancel") {
+        await prisma.session.upsert({
+          where: { phone },
+          create: { phone, state: "idle" },
+          update: { state: "idle", data: "{}" },
+        });
+        await sendText({ to: phone, text: "Shop order cancelled. Reply *shop* to browse again." });
+        return;
+      }
+      const member = await getMemberByPhone(phone);
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>* to get started.",
+        });
+        return;
+      }
+      const pinCheck = await verifyMemberPin(member, input);
+      if (!pinCheck.ok) {
+        const msg = pinCheck.message ?? "Incorrect PIN. Try again, or reply *menu* to cancel.";
+        await sendText({ to: phone, text: msg });
+        await issueSecretChallenge(phone, "awaiting_shop_pin", data, msg);
+        return;
+      }
+      const result = await createShopOrder({
+        cooperativeId: member.cooperativeId,
+        memberId: member.id,
+        memberName: member.name,
+        itemId: data.shopItemId ?? "",
+        months: data.shopMonths ?? 1,
+      });
+      await prisma.session.upsert({
+        where: { phone },
+        create: { phone, state: "idle" },
+        update: { state: "idle" },
+      });
+      await sendText({ to: phone, text: result.message });
       break;
     }
 
