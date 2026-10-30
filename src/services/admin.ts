@@ -32,6 +32,11 @@ import {
 } from "./committees.js";
 import { previewDividendRun, getFundBalances } from "./dividends.js";
 import {
+  approveSubstitution,
+  rejectSubstitution,
+  listSubstitutions,
+} from "./guarantor-substitution.js";
+import {
   addMotion,
   closeMeeting,
   closeMotion,
@@ -2743,6 +2748,25 @@ export async function handleAdminCommand(
           },
         });
         await sendText({ to: phone, text: preview.message });
+        return true;
+      }
+
+      case "substitutions": {
+        const result = await listSubstitutions(phone);
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "approvesubstitution": {
+        const result = await approveSubstitution(phone, args[0] ?? "");
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "rejectsubstitution": {
+        const reason = args.slice(1).join(" ");
+        const result = await rejectSubstitution(phone, args[0] ?? "", reason);
+        await sendText({ to: phone, text: result.message });
         return true;
       }
 

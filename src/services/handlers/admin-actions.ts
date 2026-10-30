@@ -4,6 +4,7 @@ import { normalizePhone } from "../../lib/phones.js";
 import { getMemberByPhone, formatBalance } from "../cooperative.js";
 import { showLedger, showHistory, getMonthlyStatement, getYearlyStatement } from "../statements.js";
 import { confirmGuarantee } from "../guarantors.js";
+import { confirmSubstitution } from "../guarantor-substitution.js";
 import { createTicket, listTickets, resolveTicket } from "../support.js";
 import { listPosts } from "../posts.js";
 import { myDeduction, requestMonthWaiver } from "../deductions.js";
@@ -54,7 +55,8 @@ export async function handleConfirm(phone: string, args: string[]): Promise<void
     });
     return;
   }
-  const result = await confirmGuarantee(phone, code);
+  const substitution = await confirmSubstitution(phone, code);
+  const result = substitution ?? (await confirmGuarantee(phone, code));
   await sendText({ to: phone, text: result.message });
 }
 

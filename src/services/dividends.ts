@@ -1,6 +1,7 @@
 import { prisma, withTx, withTxBatch } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { computePnl } from "./ledger.js";
+import { calculateInterestPortion } from "./loans.js";
 import { postJournal, getBankAccountBalance } from "./journal.js";
 import {
   setCoopContext,
@@ -277,6 +278,153 @@ export async function computeDividendPreview(
   lines.push(
     ``,
     `Super admin: reply *paydividend ${rate}* to pay everyone directly to their bank.`,
+  );
+  return { ok: true, message: lines.join("\n") };
+}
+
+// ---------------------------------------------------------------------------
+// Member-facing AGM projection (share dividend + patronage rebate)
+// ---------------------------------------------------------------------------
+
+const SHARE_SPLIT = (() => {
+  const raw = Number(process.env.DIVIDEND_SHARE_SPLIT ?? "70");
+  return Number.isFinite(raw) && raw >= 0 && raw <= 100 ? raw / 100 : 0.7;
+})();
+
+function replayInterestPaid(loan: {
+  amount: number;
+  tenureMonths: number;
+  repayments: { amount: number; paidAt: Date }[];
+}): number {
+  let remaining = loan.amount;
+  let paid = 0;
+  for (const repayment of loan.repayments) {
+    if (remaining <= 0) break;
+    const interest = Math.min(
+      calculateInterestPortion(remaining, loan.tenureMonths),
+      repayment.amount,
+    );
+    paid += interest;
+    remaining = Math.max(0, remaining - (repayment.amount - interest));
+  }
+  return paid;
+}
+
+/**
+ * Project a member's AGM payout at a given surplus rate: 70% of the member pool
+ * by share capital and 30% by patronage (interest actually paid on cash loans).
+ */
+export async function computeDividendCalculator(
+  phone: string,
+  requestedRate?: number,
+): Promise<{ ok: boolean; message: string }> {
+  const member = await prisma.member.findFirst({
+    where: { phone },
+    include: { cooperative: true, wallet: true, shareAccount: true },
+  });
+  if (!member) {
+    return { ok: false, message: "You need to join a cooperative first. Reply *join <code>*." };
+  }
+
+  let rate = requestedRate;
+  let rateSource = "your rate";
+  if (!Number.isFinite(rate)) {
+    const last = await prisma.dividend.findFirst({
+      where: {
+        cooperativeId: member.cooperativeId,
+        createdAt: { gte: currentPeriodStart() },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { rate: true },
+    });
+    if (!last) {
+      return {
+        ok: false,
+        message:
+          "No dividend has been declared this year yet.\nTry *dividendcalc <rate%>*, e.g. *dividendcalc 12*.",
+      };
+    }
+    rate = last.rate;
+    rateSource = "last declared rate";
+  }
+  const effectiveRate = Number(rate);
+  if (!Number.isFinite(effectiveRate) || effectiveRate <= 0 || effectiveRate > MAX_DIVIDEND_RATE) {
+    return {
+      ok: false,
+      message: `Rate must be between 0 and ${MAX_DIVIDEND_RATE}, e.g. *dividendcalc 12*.`,
+    };
+  }
+
+  const pnl = await computePnl(member.cooperativeId);
+  const rates = await getStatutoryRates(member.cooperativeId);
+  const reserveAmount = Math.floor(pnl.netProfit * rates.reserve);
+  const educationAmount = Math.floor(pnl.netProfit * rates.education);
+  const developmentAmount = Math.floor(pnl.netProfit * rates.development);
+  const totalDeductions = reserveAmount + educationAmount + developmentAmount;
+  const distributableProfit = Math.max(0, pnl.netProfit - totalDeductions);
+  const pool = Math.max(0, Math.round(distributableProfit * (effectiveRate / 100)));
+  const sharePool = Math.round(pool * SHARE_SPLIT);
+  const patronagePool = pool - sharePool;
+
+  const members = await prisma.member.findMany({
+    where: { cooperativeId: member.cooperativeId, status: { not: "deceased" } },
+    select: {
+      id: true,
+      wallet: { select: { totalSaved: true } },
+      shareAccount: { select: { shares: true } },
+      loans: {
+        where: { kind: "cash" },
+        select: {
+          amount: true,
+          tenureMonths: true,
+          repayments: { select: { amount: true, paidAt: true }, orderBy: { paidAt: "asc" } },
+        },
+      },
+    },
+  });
+
+  let totalShares = 0;
+  let totalInterest = 0;
+  const weights = new Map<string, { shares: number; interest: number }>();
+  for (const m of members) {
+    const shares = m.shareAccount?.shares ?? 0;
+    const interest = m.loans.reduce((sum, loan) => sum + replayInterestPaid(loan), 0);
+    totalShares += Math.max(0, shares);
+    totalInterest += interest;
+    weights.set(m.id, { shares: Math.max(0, shares), interest });
+  }
+
+  const mine = weights.get(member.id) ?? { shares: 0, interest: 0 };
+  const shareDividend = totalShares > 0 ? Math.floor((mine.shares / totalShares) * sharePool) : 0;
+  const patronageRebate =
+    totalInterest > 0 ? Math.floor((mine.interest / totalInterest) * patronagePool) : 0;
+  const total = shareDividend + patronageRebate;
+
+  const lines = [
+    `*🏦 Dividend calculator (projected AGM payout)*`,
+    ``,
+    `Rate: *${effectiveRate}%* of distributable profit (${rateSource})`,
+    `Coop net profit: ${formatBalance(pnl.netProfit)}`,
+    `Statutory deductions: reserve ${rates.reserve * 100}% - education ${rates.education * 100}% - development ${rates.development * 100}% = ${formatBalance(totalDeductions)}`,
+    `Distributable profit: ${formatBalance(distributableProfit)}`,
+    `Member pool: *${formatBalance(pool)}* (${Math.round(SHARE_SPLIT * 100)}% share dividend - ${Math.round((1 - SHARE_SPLIT) * 100)}% patronage)`,
+    ``,
+    `*Your projection*`,
+    `Shares held: ${mine.shares}${totalShares > 0 ? ` of ${totalShares}` : ""}`,
+    `Interest paid on loans: ${formatBalance(mine.interest)}`,
+    `• Share capital dividend: *${formatBalance(shareDividend)}*`,
+    `• Patronage rebate: *${formatBalance(patronageRebate)}*`,
+    `• Total projected payout: *${formatBalance(total)}*`,
+  ];
+  if (pool > 0 && totalShares === 0 && totalInterest === 0) {
+    lines.push(``, `You have no shares and no loan interest recorded, so the projection is zero.`);
+  }
+  if (member.shareAccount && member.shareAccount.shares === 0) {
+    lines.push(``, `Reply *buyshares <count>* to start earning a share dividend.`);
+  }
+  lines.push(
+    ``,
+    `_Projection only - the AGM sets the final rate and no money moves from this command._`,
   );
   return { ok: true, message: lines.join("\n") };
 }
