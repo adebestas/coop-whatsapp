@@ -107,9 +107,6 @@ CREATE INDEX "CommoditySubscription_cooperativeId_status_idx" ON "CommoditySubsc
 CREATE INDEX "CommoditySubscription_memberId_status_idx" ON "CommoditySubscription"("memberId", "status");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "CommoditySubscription_schemeId_itemId_memberId_key" ON "CommoditySubscription"("schemeId", "itemId", "memberId");
-
--- CreateIndex
 CREATE INDEX "DeductionShortfall_cooperativeId_status_idx" ON "DeductionShortfall"("cooperativeId", "status");
 
 -- CreateIndex

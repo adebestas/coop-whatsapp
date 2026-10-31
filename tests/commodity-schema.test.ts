@@ -96,7 +96,7 @@ describe("commodity credit schema", () => {
     await expect(
       prisma.commoditySubscription.create({
         data: {
-          reference: "CS-DUP",
+          reference: "CS-TEST-1",
           cooperativeId: coop.id,
           schemeId: scheme.id,
           itemId: item.id,

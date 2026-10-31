@@ -2372,7 +2372,6 @@ model CommoditySubscription {
   createdAt       DateTime               @default(now())
   updatedAt       DateTime               @updatedAt
 
-  @@unique([schemeId, itemId, memberId])
   @@index([cooperativeId, status])
   @@index([memberId, status])
 }
