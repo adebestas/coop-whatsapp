@@ -391,3 +391,295 @@ export async function rejectCommoditySubscription(
   ).catch(() => {});
   return { ok: true, message: `Subscription *${sub.reference}* rejected; credit released.` };
 }
+
+export async function bankCashKobo(cooperativeId: string): Promise<number> {
+  const rows = await prisma.posting.groupBy({
+    by: ["direction"],
+    where: { entry: { cooperativeId }, account: "assets:bank" },
+    _sum: { amount: true },
+  });
+  const debit = rows.find((r) => r.direction === "DEBIT")?._sum.amount ?? 0;
+  const credit = rows.find((r) => r.direction === "CREDIT")?._sum.amount ?? 0;
+  return debit - credit;
+}
+
+export async function purchaseScheme(
+  superPhone: string,
+  ref: string,
+  supplier: string,
+  actualCostKobo: number,
+  opts: { fundingSource?: "cash" | "supplier_credit"; note?: string } = {},
+): Promise<SchemeResult> {
+  const superM = await staffMember(superPhone, ["superadmin"]);
+  if (!superM) return { ok: false, message: "Only a *super admin* can record a scheme purchase." };
+  const scheme = await findScheme(superM.cooperativeId, ref);
+  if (!scheme) return { ok: false, message: "Scheme not found." };
+  if (scheme.status !== "closed") {
+    return {
+      ok: false,
+      message: `Scheme ${scheme.reference} is ${scheme.status}; close it before purchasing.`,
+    };
+  }
+  if (!Number.isFinite(actualCostKobo) || actualCostKobo <= 0) {
+    return { ok: false, message: "Usage: *purchasescheme <ref> | <supplier> | <cost>*" };
+  }
+  const fundingSource = opts.fundingSource ?? "cash";
+  if (fundingSource === "supplier_credit" && !opts.note?.trim()) {
+    return { ok: false, message: "A supplier-credit purchase needs a note (payment terms)." };
+  }
+  if (fundingSource === "cash") {
+    const cash = await bankCashKobo(scheme.cooperativeId);
+    const alreadyCommitted = await prisma.commodityScheme.aggregate({
+      where: {
+        cooperativeId: scheme.cooperativeId,
+        status: { in: ["purchased", "converted"] },
+        id: { not: scheme.id },
+      },
+      _sum: { actualCostKobo: true },
+    });
+    const available = cash - (alreadyCommitted._sum.actualCostKobo ?? 0);
+    if (available < actualCostKobo) {
+      return {
+        ok: false,
+        message:
+          `Reconciled bank cash is ${formatBalance(available)}; this purchase needs ${formatBalance(actualCostKobo)}.\n` +
+          `Wait for remittances, or record supplier credit with *purchasescheme ${scheme.reference} | ${supplier} | ${actualCostKobo / 100} | supplier_credit | <terms>* (super admin only, audited).`,
+      };
+    }
+  }
+  await prisma.commodityScheme.update({
+    where: { id: scheme.id },
+    data: {
+      status: "purchased",
+      supplier: supplier.trim(),
+      actualCostKobo,
+      fundingSource,
+      purchaseNote: opts.note?.trim() || null,
+      purchasedAt: new Date(),
+      purchasedById: superM.id,
+    },
+  });
+  await audit({
+    cooperativeId: scheme.cooperativeId,
+    actorPhone: superPhone,
+    actorRole: "superadmin",
+    action: "commodity.scheme.purchased",
+    targetType: "commodityScheme",
+    targetId: scheme.id,
+    amount: actualCostKobo,
+    detail: `${scheme.reference}: ${supplier} via ${fundingSource}${opts.note ? ` (${opts.note})` : ""}`,
+  });
+  return {
+    ok: true,
+    message:
+      `Purchase recorded for *${scheme.reference}*: ${formatBalance(actualCostKobo)} from ${supplier} (${fundingSource}).\n` +
+      `Run *convertscheme ${scheme.reference}* to turn reservations into payroll installments.`,
+  };
+}
+
+export async function convertScheme(superPhone: string, ref: string): Promise<SchemeResult> {
+  const superM = await staffMember(superPhone, ["superadmin"]);
+  if (!superM) return { ok: false, message: "Only a *super admin* can convert a scheme." };
+  const scheme = await findScheme(superM.cooperativeId, ref);
+  if (!scheme) return { ok: false, message: "Scheme not found." };
+  if (scheme.status !== "purchased") {
+    return {
+      ok: false,
+      message: `Scheme ${scheme.reference} is ${scheme.status}; purchase it first.`,
+    };
+  }
+  const subs = await prisma.commoditySubscription.findMany({
+    where: { schemeId: scheme.id, status: { in: ["reserved", "approved"] } },
+    include: { item: true, member: true },
+    orderBy: { createdAt: "asc" },
+  });
+  if (subs.length === 0) return { ok: false, message: "No subscriptions to convert." };
+
+  const period = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, "0")}`;
+  let batch = await prisma.deductionBatch.findFirst({
+    where: { cooperativeId: scheme.cooperativeId, status: { in: ["draft", "submitted"] } },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!batch) {
+    batch = await prisma.deductionBatch.create({
+      data: {
+        cooperativeId: scheme.cooperativeId,
+        ref: `DED-${period}-${Date.now().toString(36).toUpperCase()}`,
+        note: `Commodity scheme ${scheme.reference}`,
+        totalAmount: 0,
+        createdById: superM.id,
+      },
+    });
+  }
+
+  let created = 0;
+  let addedTotal = 0;
+  for (const sub of subs) {
+    const { monthly } = installmentSchedule(sub.totalKobo, sub.months);
+    const loan = await prisma.loan.create({
+      data: {
+        cooperativeId: scheme.cooperativeId,
+        memberId: sub.memberId,
+        amount: sub.totalKobo,
+        balance: sub.totalKobo,
+        tenureMonths: sub.months,
+        monthlyPayment: monthly,
+        status: "disbursed",
+        kind: "commodity",
+      },
+    });
+    const firstInstallment = Math.min(monthly, loan.balance);
+    const existingItem = await prisma.deductionItem.findFirst({
+      where: { batchId: batch.id, memberId: sub.memberId, kind: "commodity" },
+    });
+    if (existingItem) {
+      await prisma.deductionItem.update({
+        where: { id: existingItem.id },
+        data: { amount: existingItem.amount + firstInstallment },
+      });
+    } else {
+      await prisma.deductionItem.create({
+        data: {
+          batchId: batch.id,
+          memberId: sub.memberId,
+          kind: "commodity",
+          loanId: loan.id,
+          amount: firstInstallment,
+        },
+      });
+    }
+    addedTotal += firstInstallment;
+    await prisma.commoditySubscription.update({
+      where: { id: sub.id },
+      data: {
+        status: "converted",
+        convertedLoanId: loan.id,
+        decidedAt: new Date(),
+        decidedById: superM.id,
+      },
+    });
+    await notifyMember(
+      sub.member,
+      `*${sub.qty} x ${sub.item.name}* is now financed.\n` +
+        `${sub.months} payroll installments of about ${formatBalance(monthly)}, starting with batch *${batch.ref}*.`,
+    ).catch(() => {});
+    created += 1;
+  }
+  if (addedTotal > 0) {
+    await prisma.deductionBatch.update({
+      where: { id: batch.id },
+      data: { totalAmount: { increment: addedTotal } },
+    });
+  }
+  await prisma.commodityScheme.update({
+    where: { id: scheme.id },
+    data: { status: "converted", convertedAt: new Date() },
+  });
+  await audit({
+    cooperativeId: scheme.cooperativeId,
+    actorPhone: superPhone,
+    actorRole: "superadmin",
+    action: "commodity.scheme.converted",
+    targetType: "commodityScheme",
+    targetId: scheme.id,
+    detail: `${scheme.reference}: ${created} subscription(s)`,
+  });
+  return {
+    ok: true,
+    message:
+      `Converted *${created}* subscription(s) on *${scheme.reference}*.\n` +
+      `First installments were added to batch *${batch.ref}*.`,
+  };
+}
+
+async function findSubscription(cooperativeId: string, ref: string) {
+  return prisma.commoditySubscription.findFirst({
+    where: { cooperativeId, OR: [{ id: ref }, { reference: ref.toUpperCase() }] },
+    include: { member: { select: { id: true, name: true, code: true } }, item: true, scheme: true },
+  });
+}
+
+export async function dispatchCommodity(adminPhone: string, ref: string): Promise<SchemeResult> {
+  const admin = await staffMember(adminPhone, ["admin", "superadmin"]);
+  if (!admin) return { ok: false, message: "Only an admin can mark a subscription dispatched." };
+  const sub = await findSubscription(admin.cooperativeId, ref);
+  if (!sub) return { ok: false, message: "Subscription not found." };
+  if (sub.status !== "converted")
+    return { ok: false, message: `Subscription ${sub.reference} is ${sub.status}.` };
+  if (sub.dispatchedAt)
+    return { ok: false, message: `Subscription ${sub.reference} was already dispatched.` };
+  await prisma.commoditySubscription.update({
+    where: { id: sub.id },
+    data: { dispatchedAt: new Date() },
+  });
+  await audit({
+    cooperativeId: admin.cooperativeId,
+    actorPhone: adminPhone,
+    actorRole: admin.role,
+    action: "commodity.subscription.dispatched",
+    targetType: "commoditySubscription",
+    targetId: sub.id,
+    detail: sub.reference,
+  });
+  await notifyMember(
+    sub.member,
+    `Your *${sub.qty} x ${sub.item.name}* is ready for collection.\n` +
+      `Admin will mark it collected with *collectsub ${sub.reference} <your code>*.`,
+  ).catch(() => {});
+  return { ok: true, message: `Subscription *${sub.reference}* marked dispatched.` };
+}
+
+export async function collectCommodity(
+  adminPhone: string,
+  ref: string,
+  memberCode: string,
+): Promise<SchemeResult> {
+  const admin = await staffMember(adminPhone, ["admin", "superadmin"]);
+  if (!admin) return { ok: false, message: "Only an admin can mark a subscription collected." };
+  const sub = await findSubscription(admin.cooperativeId, ref);
+  if (!sub) return { ok: false, message: "Subscription not found." };
+  if (sub.status !== "converted" || !sub.dispatchedAt) {
+    return { ok: false, message: "Dispatch the item before marking it collected." };
+  }
+  if (sub.collectedAt)
+    return { ok: false, message: `Subscription ${sub.reference} was already collected.` };
+  if (sub.member.code.toUpperCase() !== memberCode.trim().toUpperCase()) {
+    return { ok: false, message: "That member code does not match the subscription." };
+  }
+  await prisma.commoditySubscription.update({
+    where: { id: sub.id },
+    data: { collectedAt: new Date(), collectedById: admin.id },
+  });
+  await audit({
+    cooperativeId: admin.cooperativeId,
+    actorPhone: adminPhone,
+    actorRole: admin.role,
+    action: "commodity.subscription.collected",
+    targetType: "commoditySubscription",
+    targetId: sub.id,
+    detail: `${sub.reference} collected by ${sub.member.name}`,
+  });
+  return {
+    ok: true,
+    message: `Collected: *${sub.qty} x ${sub.item.name}* handed to ${sub.member.name}.`,
+  };
+}
+
+export async function listSchemeSubscriptions(cooperativeId: string, ref: string) {
+  const scheme = await findScheme(cooperativeId, ref);
+  if (!scheme) return null;
+  const subs = await prisma.commoditySubscription.findMany({
+    where: { schemeId: scheme.id },
+    include: { member: { select: { name: true, code: true } }, item: true },
+    orderBy: { createdAt: "asc" },
+  });
+  return { scheme, subs };
+}
+
+export async function listMemberSubscriptions(memberId: string, cooperativeId: string) {
+  return prisma.commoditySubscription.findMany({
+    where: { memberId, cooperativeId, status: { not: "cancelled" } },
+    include: { item: true, scheme: true },
+    orderBy: { createdAt: "desc" },
+  });
+}

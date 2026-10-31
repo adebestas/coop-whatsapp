@@ -9,6 +9,11 @@ import {
   subscribeCommodity,
   cancelCommoditySubscription,
   rejectCommoditySubscription,
+  bankCashKobo,
+  purchaseScheme,
+  convertScheme,
+  dispatchCommodity,
+  collectCommodity,
 } from "../src/services/commodity-schemes.js";
 
 const SUPER = "2348090000100";
@@ -195,5 +200,88 @@ describe("commodity schemes", () => {
     const res = await subscribeCommodity(MEMBER, scheme.ref!, "Rice 50kg", 1, 3);
     expect(res.ok).toBe(false);
     expect(res.message.toLowerCase()).toContain("closed");
+  });
+});
+
+describe("commodity purchase and conversion", () => {
+  it("refuses to purchase without reconciled bank cash", async () => {
+    await seed();
+    const { scheme } = await makeOpenScheme(SUPER);
+    await openScheme(ADMIN, scheme.ref!);
+    await prisma.commoditySchemeItem.updateMany({ data: { memberPriceKobo: 1_000 } });
+    await subscribeCommodity(MEMBER, scheme.ref!, "Rice 50kg", 1, 3);
+    await closeScheme(ADMIN, scheme.ref!);
+    const res = await purchaseScheme(SUPER, scheme.ref!, "Farm Ltd", 5_000_000);
+    expect(res.ok).toBe(false);
+    expect(res.message).toContain("cash");
+    const fresh = await prisma.commodityScheme.findUnique({
+      where: { reference: scheme.ref! },
+    });
+    expect(fresh!.status).toBe("closed");
+  });
+
+  it("allows an audited supplier-credit override", async () => {
+    await seed();
+    const { scheme } = await makeOpenScheme(SUPER);
+    const coop = (await prisma.cooperative.findFirst())!;
+    await openScheme(ADMIN, scheme.ref!);
+    await prisma.commoditySchemeItem.updateMany({ data: { memberPriceKobo: 1_000 } });
+    await subscribeCommodity(MEMBER, scheme.ref!, "Rice 50kg", 1, 3);
+    await closeScheme(ADMIN, scheme.ref!);
+    const res = await purchaseScheme(SUPER, scheme.ref!, "Farm Ltd", 5_000_000, {
+      fundingSource: "supplier_credit",
+      note: "Supplier allows 60 days",
+    });
+    expect(res.ok).toBe(true);
+    const fresh = await prisma.commodityScheme.findUnique({
+      where: { reference: scheme.ref! },
+    });
+    expect(fresh!.status).toBe("purchased");
+    expect(fresh!.fundingSource).toBe("supplier_credit");
+    const logged = await prisma.auditLog.findFirst({
+      where: { cooperativeId: coop.id, action: "commodity.scheme.purchased" },
+    });
+    expect(logged).not.toBeNull();
+  });
+
+  it("converts reservations into commodity loans and dispatch/collect tracking", async () => {
+    await seed();
+    const coop = (await prisma.cooperative.findFirst())!;
+    const { scheme } = await makeOpenScheme(SUPER);
+    await openScheme(ADMIN, scheme.ref!);
+    await prisma.commoditySchemeItem.updateMany({ data: { memberPriceKobo: 3_000 } });
+    const subscribed = await subscribeCommodity(MEMBER, scheme.ref!, "Rice 50kg", 2, 3);
+    await closeScheme(ADMIN, scheme.ref!);
+    await prisma.journalEntry.create({
+      data: {
+        cooperativeId: coop.id,
+        txRef: `TEST-REMITTANCE-${Date.now()}`,
+        description: "reconciled remittance",
+        postings: {
+          create: [{ account: "assets:bank", direction: "DEBIT", amount: 10_000_000 }],
+        },
+      },
+    });
+    expect(await bankCashKobo(coop.id)).toBe(10_000_000);
+    expect((await purchaseScheme(SUPER, scheme.ref!, "Farm Ltd", 6_000_000)).ok).toBe(true);
+    const converted = await convertScheme(SUPER, scheme.ref!);
+    expect(converted.ok).toBe(true);
+    const loan = await prisma.loan.findFirst({ where: { kind: "commodity" } });
+    expect(loan).not.toBeNull();
+    expect(loan!.balance).toBe(6_000);
+    expect(loan!.status).toBe("disbursed");
+    const item = await prisma.deductionItem.findFirst({ where: { kind: "commodity" } });
+    expect(item).not.toBeNull();
+    expect(item!.amount).toBe(2_000);
+    const sub = await prisma.commoditySubscription.findFirst();
+    expect(sub!.status).toBe("converted");
+    expect(sub!.convertedLoanId).toBe(loan!.id);
+
+    const dispatched = await dispatchCommodity(ADMIN, subscribed.ref!);
+    expect(dispatched.ok).toBe(true);
+    const collected = await collectCommodity(ADMIN, subscribed.ref!, "SM001");
+    expect(collected.ok).toBe(true);
+    const after = await prisma.commoditySubscription.findFirst();
+    expect(after!.collectedAt).not.toBeNull();
   });
 });
