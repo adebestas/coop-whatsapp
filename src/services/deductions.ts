@@ -5,6 +5,50 @@ import { audit } from "./audit.js";
 import { qualifyReferral } from "./referrals.js";
 import { notifySuperAdmins } from "./withdrawals.js";
 
+type DraftItem = {
+  memberId: string;
+  kind: "savings" | "loan" | "commodity";
+  loanId?: string;
+  amount: number;
+};
+
+/**
+ * Commodity loans still being repaid, as payroll items. A loan already queued in
+ * an open batch is skipped so the same installment is never collected twice.
+ */
+async function commodityDraftItems(coopId: string): Promise<DraftItem[]> {
+  const queued = await prisma.deductionItem.findMany({
+    where: {
+      kind: "commodity",
+      status: "pending",
+      batch: {
+        cooperativeId: coopId,
+        status: { in: ["draft", "submitted", "reconciled", "partially_approved"] },
+      },
+    },
+    select: { loanId: true },
+  });
+  const queuedLoanIds = new Set(queued.map((i) => i.loanId));
+  const loans = await prisma.loan.findMany({
+    where: { cooperativeId: coopId, kind: "commodity", status: "disbursed", balance: { gt: 0 } },
+    orderBy: { createdAt: "asc" },
+  });
+  return loans
+    .filter((loan) => !queuedLoanIds.has(loan.id))
+    .map((loan) => {
+      const installment =
+        loan.monthlyPayment && loan.monthlyPayment > 0
+          ? Math.min(loan.monthlyPayment, loan.balance)
+          : loan.balance;
+      return {
+        memberId: loan.memberId,
+        kind: "commodity" as const,
+        loanId: loan.id,
+        amount: Math.round(installment * 100) / 100,
+      };
+    });
+}
+
 /** "YYYY-MM" for a date, in UTC. */
 export function periodOf(d: Date): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
@@ -45,11 +89,10 @@ export async function buildBatch(
   const members = await prisma.member.findMany({
     where: { cooperativeId: coopId, status: "active" },
     include: {
-      loans: { where: { status: "disbursed" }, orderBy: { createdAt: "asc" } },
+      loans: { where: { status: "disbursed", kind: "cash" }, orderBy: { createdAt: "asc" } },
     },
   });
 
-  type DraftItem = { memberId: string; kind: "savings" | "loan"; loanId?: string; amount: number };
   const items: DraftItem[] = [];
   for (const m of members) {
     if (waivedIds.has(m.id)) continue;
@@ -70,6 +113,7 @@ export async function buildBatch(
       });
     }
   }
+  items.push(...(await commodityDraftItems(coopId)));
   if (items.length === 0) {
     return {
       ok: false,
@@ -132,7 +176,9 @@ export async function buildBatchFromRows(
 
   const members = await prisma.member.findMany({
     where: { id: { in: rows.map((r) => r.memberId) }, cooperativeId: coopId },
-    include: { loans: { where: { status: "disbursed" }, orderBy: { createdAt: "asc" } } },
+    include: {
+      loans: { where: { status: "disbursed", kind: "cash" }, orderBy: { createdAt: "asc" } },
+    },
   });
   const byId = new Map(members.map((m) => [m.id, m]));
 
@@ -142,7 +188,6 @@ export async function buildBatchFromRows(
   });
   const waivedIds = new Set(waived.map((w) => w.memberId));
 
-  type DraftItem = { memberId: string; kind: "savings" | "loan"; loanId?: string; amount: number };
   const items: DraftItem[] = [];
   for (const r of rows) {
     const m = byId.get(r.memberId);
@@ -162,6 +207,7 @@ export async function buildBatchFromRows(
       });
     }
   }
+  items.push(...(await commodityDraftItems(coopId)));
   if (items.length === 0) {
     return { ok: false, message: "Nothing to collect after applying waivers." };
   }
