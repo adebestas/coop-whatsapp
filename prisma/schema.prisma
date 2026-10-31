@@ -99,6 +99,9 @@ subscription       Subscription?
   insurancePolicies  InsurancePolicy[]
   insuranceClaims    InsuranceClaim[]
   literacyCertificates LiteracyCertificate[]
+  commoditySchemes       CommodityScheme[]
+  commoditySubscriptions CommoditySubscription[]
+  deductionShortfalls    DeductionShortfall[]
 
   @@index([status])
   @@index([code])
@@ -314,6 +317,9 @@ model Member {
   referralWithdrawals     ReferralWithdrawal[]
   insurancePolicies       InsurancePolicy[]
   insuranceClaims         InsuranceClaim[]
+  schemesCreated          CommodityScheme[]       @relation("SchemeCreator")
+  commoditySubscriptions  CommoditySubscription[]
+  deductionShortfalls     DeductionShortfall[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -439,7 +445,7 @@ model Loan {
   provisionEntries   ProvisionEntry[]
   groupId            String?
   group              Group?          @relation(fields: [groupId], references: [id], onDelete: SetNull)
-  kind               String          @default("cash")
+  kind               String          @default("cash") // cash | shop | commodity
   shopOrder          ShopOrder?
   substitutions      GuarantorSubstitution[]
 
@@ -1189,6 +1195,7 @@ model DeductionBatch {
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
   items         DeductionItem[]
+  shortfalls    DeductionShortfall[]
 
   @@index([cooperativeId])
 }
@@ -1199,11 +1206,14 @@ model DeductionItem {
   batch      DeductionBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
   memberId   String
   member     Member         @relation(fields: [memberId], references: [id])
-  kind       String         @default("savings") // savings | loan
-  loanId     String? // set when kind = loan
+  kind       String         @default("savings") // savings | loan | commodity
+  loanId     String? // set when kind = loan or commodity
   amount     Int // stored in kobo
   status     String         @default("pending") // pending | credited
   creditedAt DateTime?
+  rolloverOfItemId String?        @unique
+  rolledFrom       DeductionItem? @relation("DeductionRollover", fields: [rolloverOfItemId], references: [id])
+  rolledTo         DeductionItem? @relation("DeductionRollover")
 
   @@unique([batchId, memberId, kind])
 }
@@ -2285,4 +2295,107 @@ model ShopOrder {
 
   @@index([cooperativeId, status])
   @@index([memberId, status])
+}
+
+// ---- Commodity credit schemes ----
+// Seasonal bulk-purchase schemes (rice, oil, rams, appliances) that members fund
+// with capped payroll-backed credit. Purchases are gated on reconciled bank cash
+// (or an audited supplier-credit decision) and repaid through payroll deduction.
+model CommodityScheme {
+  id             String                  @id @default(cuid())
+  cooperativeId  String
+  cooperative    Cooperative             @relation(fields: [cooperativeId], references: [id])
+  reference      String                  @unique
+  name           String
+  season         String?
+  opensAt        DateTime
+  closesAt       DateTime
+  status         String                  @default("draft") // draft | open | closed | purchased | converted | cancelled
+  pollId         String?
+  supplier       String?
+  quotedCostKobo Int                     @default(0)
+  actualCostKobo Int?
+  fundingSource  String? // cash | supplier_credit
+  purchaseNote   String?
+  purchasedAt    DateTime?
+  purchasedById  String?
+  convertedAt    DateTime?
+  createdById    String
+  creator        Member                  @relation("SchemeCreator", fields: [createdById], references: [id])
+  items          CommoditySchemeItem[]
+  subscriptions  CommoditySubscription[]
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@index([cooperativeId, status])
+}
+
+model CommoditySchemeItem {
+  id              String                  @id @default(cuid())
+  schemeId        String
+  scheme          CommodityScheme         @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  name            String
+  unitLabel       String
+  unitCostKobo    Int
+  memberPriceKobo Int
+  totalUnits      Int?
+  maxQtyPerMember Int                     @default(1)
+  subscriptions   CommoditySubscription[]
+
+  @@index([schemeId])
+}
+
+model CommoditySubscription {
+  id              String                 @id @default(cuid())
+  reference       String                 @unique
+  cooperativeId   String
+  cooperative     Cooperative            @relation(fields: [cooperativeId], references: [id])
+  schemeId        String
+  scheme          CommodityScheme        @relation(fields: [schemeId], references: [id])
+  itemId          String
+  item            CommoditySchemeItem    @relation(fields: [itemId], references: [id])
+  memberId        String
+  member          Member                 @relation(fields: [memberId], references: [id])
+  qty             Int                    @default(1)
+  unitPriceKobo   Int
+  totalKobo       Int
+  months          Int                    @default(3)
+  status          String                 @default("reserved") // reserved | approved | rejected | cancelled | converted
+  reservedAt      DateTime               @default(now())
+  decidedAt       DateTime?
+  decidedById     String?
+  rejectReason    String?
+  convertedLoanId String?                @unique
+  dispatchedAt    DateTime?
+  collectedAt     DateTime?
+  collectedById   String?
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  @@unique([schemeId, itemId, memberId])
+  @@index([cooperativeId, status])
+  @@index([memberId, status])
+}
+
+// Per-member record of an approved deduction batch that came up short. The
+// shortfall is rolled forward into the next batch (status = rolled) instead of
+// blocking the whole batch.
+model DeductionShortfall {
+  id             String         @id @default(cuid())
+  cooperativeId  String
+  cooperative    Cooperative    @relation(fields: [cooperativeId], references: [id])
+  batchId        String
+  batch          DeductionBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  memberId       String
+  member         Member         @relation(fields: [memberId], references: [id])
+  amount         Int
+  reason         String?
+  attributedById String?
+  status         String         @default("open") // open | rolled | waived
+  rolledToItemId String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@unique([batchId, memberId])
+  @@index([cooperativeId, status])
 }
