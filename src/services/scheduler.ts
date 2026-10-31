@@ -13,6 +13,7 @@ import { log } from "../lib/logger.js";
 import { maskId } from "../lib/security.js";
 import { computeRepaymentDue } from "./loans.js";
 import { runShopInstallments } from "./shop.js";
+import { runSchemeWindows } from "./commodity-schemes.js";
 import {
   reportPeriod,
   generateReport,
@@ -1600,6 +1601,9 @@ export async function runSchedulerTick(): Promise<void> {
   );
   await runShopInstallments().catch((err) =>
     log.error("[scheduler] shop installments failed", { err: String(err) }),
+  );
+  await runSchemeWindows().catch((err) =>
+    log.error("[scheduler] commodity scheme windows failed", { err: String(err) }),
   );
 }
 

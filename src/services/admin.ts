@@ -18,6 +18,18 @@ import {
   attributeShortfall,
 } from "./deductions.js";
 import { approveLoan, listPendingLoans, rejectLoan } from "./loans.js";
+import {
+  addSchemeItem,
+  closeScheme,
+  collectCommodity,
+  convertScheme,
+  createScheme,
+  dispatchCommodity,
+  openScheme,
+  purchaseScheme,
+  rejectCommoditySubscription,
+} from "./commodity-schemes.js";
+import { formatSchemeSubsText, parseNaira, parseSchemeItem } from "./commodity-commands.js";
 import { formatBalance } from "./cooperative.js";
 import { toKobo } from "../lib/money.js";
 import { sendToBank } from "./disbursements.js";
@@ -157,6 +169,7 @@ const MONEY_OUT_COMMANDS = new Set([
   "paydividend",
   "paysharedividend",
   "disable2fa",
+  "purchasescheme",
 ]);
 
 /** Send the guard failure text and return true (command handled). */
@@ -559,8 +572,10 @@ export async function handleAdminCommand(
   phone: string,
   cmd: string,
   args: string[],
+  text?: string,
 ): Promise<boolean> {
   try {
+    let rawText = text ?? [cmd, ...args].join(" ");
     const ctx = await adminContext(phone);
 
     // Committee commands are open to seated committee members, who are often
@@ -613,9 +628,11 @@ export async function handleAdminCommand(
 
     // 2FA gate on every money-out command (consumes a trailing TOTP code).
     if (MONEY_OUT_COMMANDS.has(cmd)) {
+      const before = args.length;
       const guard = await assertMoneyAuthorized(admin.id, args);
       if (!guard.ok) return guardFailed(phone, guard.message);
       args = guard.args;
+      if (args.length < before) rawText = rawText.replace(/\s+\S+$/, "");
     }
 
     switch (cmd) {
@@ -3026,6 +3043,109 @@ export async function handleAdminCommand(
           parsed,
           reasonParts.join(" ") || undefined,
         );
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "newscheme": {
+        const body = rawText.replace(/^\/?\s*newscheme\s+/i, "");
+        const [name, season, opens, closes] = body.split("|").map((p) => p.trim());
+        if (!name || !opens || !closes) {
+          await sendText({
+            to: phone,
+            text: "Usage: *newscheme <name> | <season> | <YYYY-MM-DD> | <YYYY-MM-DD>*",
+          });
+          return true;
+        }
+        const result = await createScheme(phone, {
+          name,
+          season,
+          opensAt: new Date(`${opens}T00:00:00Z`),
+          closesAt: new Date(`${closes}T23:59:59Z`),
+        });
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "addschemeitem": {
+        const parsed = parseSchemeItem(rawText);
+        if (!parsed) {
+          await sendText({
+            to: phone,
+            text: "Usage: *addschemeitem <ref> | <name> | <unit> | <cost> | <price> | <units|-> | <max>*",
+          });
+          return true;
+        }
+        const ref = rawText
+          .replace(/^\/?\s*addschemeitem\s+/i, "")
+          .split("|")[0]
+          .trim();
+        const result = await addSchemeItem(phone, ref, parsed);
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "openscheme": {
+        const result = await openScheme(phone, args[0] ?? "");
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "closescheme": {
+        const result = await closeScheme(phone, args[0] ?? "");
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "schemesubs": {
+        await sendText({ to: phone, text: await formatSchemeSubsText(coopId, args[0] ?? "") });
+        return true;
+      }
+
+      case "rejectsub": {
+        const result = await rejectCommoditySubscription(
+          phone,
+          args[0] ?? "",
+          args.slice(1).join(" "),
+        );
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "purchasescheme": {
+        const body = rawText.replace(/^\/?\s*purchasescheme\s+/i, "");
+        const parts = body.split("|").map((p) => p.trim());
+        const [ref, supplier, cost, funding, ...noteParts] = parts;
+        const costKobo = parseNaira(cost ?? "");
+        if (!ref || !supplier || !costKobo) {
+          await sendText({
+            to: phone,
+            text: "Usage: *purchasescheme <ref> | <supplier> | <cost> [| supplier_credit | <terms>]*",
+          });
+          return true;
+        }
+        const result = await purchaseScheme(phone, ref, supplier, costKobo, {
+          fundingSource: funding === "supplier_credit" ? "supplier_credit" : "cash",
+          note: noteParts.join(" | ") || undefined,
+        });
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "convertscheme": {
+        const result = await convertScheme(phone, args[0] ?? "");
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "dispatchsub": {
+        const result = await dispatchCommodity(phone, args[0] ?? "");
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "collectsub": {
+        const result = await collectCommodity(phone, args[0] ?? "", args[1] ?? "");
         await sendText({ to: phone, text: result.message });
         return true;
       }

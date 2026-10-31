@@ -4,6 +4,7 @@ import { audit } from "./audit.js";
 import { notifyMember } from "../lib/messaging.js";
 import { getCreditPositionForMember } from "./commodity-credit.js";
 import { installmentSchedule } from "./shop.js";
+import { notifySuperAdmins } from "./withdrawals.js";
 
 export interface SchemeResult {
   ok: boolean;
@@ -686,4 +687,38 @@ export async function listMemberSubscriptions(memberId: string, cooperativeId: s
     include: { item: true, scheme: true },
     orderBy: { createdAt: "desc" },
   });
+}
+
+export async function runSchemeWindows(now: Date = new Date()): Promise<number> {
+  const expired = await prisma.commodityScheme.findMany({
+    where: { status: "open", closesAt: { lt: now } },
+    select: { id: true, reference: true, cooperativeId: true },
+  });
+  for (const scheme of expired) {
+    await prisma.commodityScheme.update({ where: { id: scheme.id }, data: { status: "closed" } });
+    await audit({
+      cooperativeId: scheme.cooperativeId,
+      actorPhone: "system",
+      actorRole: "system",
+      action: "commodity.scheme.closed",
+      targetType: "commodityScheme",
+      targetId: scheme.id,
+      detail: `${scheme.reference}: window elapsed`,
+    });
+  }
+  const openShortfalls = await prisma.deductionShortfall.findMany({
+    where: { status: "open" },
+    select: { cooperativeId: true },
+  });
+  const byCoop = new Map<string, number>();
+  for (const row of openShortfalls) {
+    byCoop.set(row.cooperativeId, (byCoop.get(row.cooperativeId) ?? 0) + 1);
+  }
+  for (const [cooperativeId, count] of byCoop) {
+    await notifySuperAdmins(
+      cooperativeId,
+      `⚠️ ${count} member(s) have an open payroll shortfall. Review with *schemesubs* and *shortbatch*.`,
+    ).catch(() => {});
+  }
+  return expired.length;
 }

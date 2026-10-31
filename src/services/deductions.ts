@@ -784,7 +784,6 @@ export async function approveBatch(
     });
     const shortfallByMember = new Map(shortfalls.map((s) => [s.memberId, s.amount]));
 
-    let spent = 0;
     let remainingBudget = budget;
     for (const [memberId, memberItems] of pendingByMember) {
       const memberTotal = memberItems.reduce((s, i) => s + i.amount, 0);
@@ -858,7 +857,6 @@ export async function approveBatch(
               }
             }
           }
-          spent += portion;
           memberBudget -= portion;
           remainingBudget -= portion;
           if (portion < item.amount) {

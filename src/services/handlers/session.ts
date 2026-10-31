@@ -167,6 +167,8 @@ export function buildFullMenu(
     `• *shares* / *buyshares <count>* — own shares in the coop\n` +
     `• *shop* / *buyitem <number> <months>* — interest-free coop shop\n` +
     `• *myshop* — track your shop orders\n` +
+    `• *credit* — check your commodity credit\n` +
+    `• *schemes* / *subscribe* / *mysubs* / *cancelsub* — seasonal commodity schemes\n` +
     `• *dividendcalc [rate%]* — project your AGM dividend & patronage\n\n` +
     `*📄 Loans*\n` +
     `• *loan <amount> <months>* — apply (e.g. *loan 50000 3*)\n` +
@@ -273,6 +275,9 @@ export function buildAdminMenu(): string {
     `• *addshopitem "<name>" <price> [months] [stock]* — add a shop item\n` +
     `• *shopitems* / *closeshopitem <name>* — manage the shop catalog\n` +
     `• *shoporders [status]* — list shop orders\n` +
+    `• *newscheme* / *addschemeitem* / *openscheme* / *closescheme* — commodity schemes\n` +
+    `• *schemesubs* / *rejectsub* / *purchasescheme* / *convertscheme* / *dispatchsub* / *collectsub*\n` +
+    `• *shortbatch <ref> <code|all> <amount|all|waive>* — attribute payroll shortfall\n` +
     `• *approveorder <ref>* / *rejectorder <ref> [reason]* — review orders\n` +
     `• *dispatch <ref>* — hand over the goods and start the installment plan\n` +
     `• *substitutions* / *approvesubstitution <ref>* — review guarantor swaps\n` +

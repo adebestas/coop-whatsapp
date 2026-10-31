@@ -17,6 +17,9 @@ import { transcribeAudioMessage, transcriptionEnabled } from "../lib/transcribe.
 import { getMemberByPhone, invalidateMemberCache } from "./cooperative.js";
 import { handleAdminCommand, handleOmbudsmanCommand } from "./admin.js";
 import { handleShopCommand } from "./shop-commands.js";
+import { formatMySubsText, formatSchemesText, COMMODITY_DISABLED } from "./commodity-commands.js";
+import { cancelCommoditySubscription, subscribeCommodity } from "./commodity-schemes.js";
+import { commoditySchemesEnabled, getCommodityCreditPosition } from "./commodity-credit.js";
 import { isOmbudsman } from "./ombudsman.js";
 import { checkMoneyRateLimit, checkAIRateLimit } from "./fraud.js";
 import { aiEnabled, suggestCommand } from "../lib/ai.js";
@@ -1009,7 +1012,7 @@ async function handleMessageInner(
   // ombudsmen are not cooperative members, so they have no member row.
   if (await handleOmbudsmanCommand(phone, cmd, args)) return;
 
-  const handled = await handleAdminCommand(phone, cmd, args);
+  const handled = await handleAdminCommand(phone, cmd, args, text);
   if (handled) return;
 
   if (await handleShopCommand(phone, cmd, args, text, await getMemberByPhone(phone))) return;
@@ -1901,6 +1904,77 @@ async function handleMessageInner(
         lines.push(`• ${m.name}${pos}${sh}`);
       }
       await sendText({ to: phone, text: lines.join("\n") });
+      break;
+    }
+
+    case "schemes": {
+      await sendText({ to: phone, text: await formatSchemesText(phone) });
+      break;
+    }
+
+    case "mysubs": {
+      await sendText({ to: phone, text: await formatMySubsText(phone) });
+      break;
+    }
+
+    case "credit": {
+      if (!commoditySchemesEnabled()) {
+        await sendText({ to: phone, text: COMMODITY_DISABLED });
+        break;
+      }
+      const position = await getCommodityCreditPosition(phone);
+      if (!position) {
+        await sendText({ to: phone, text: "Join a cooperative first." });
+        break;
+      }
+      await sendText({
+        to: phone,
+        text:
+          `📦 *Commodity credit*\n` +
+          `Expected payroll deduction: ${formatBalance(position.expectedKobo)}\n` +
+          `Cap (x${position.multiplier}): ${formatBalance(position.capKobo)}\n` +
+          `Committed: ${formatBalance(position.committedKobo)}\n` +
+          `Available: *${formatBalance(position.availableKobo)}*` +
+          (position.blockedReason ? `\n! ${position.blockedReason}` : ""),
+      });
+      break;
+    }
+
+    case "subscribe": {
+      if (!commoditySchemesEnabled()) {
+        await sendText({ to: phone, text: COMMODITY_DISABLED });
+        break;
+      }
+      const [schemeRef, itemKey, qtyRaw, monthsRaw] = args;
+      if (!schemeRef || !itemKey) {
+        await sendText({
+          to: phone,
+          text: "Usage: *subscribe <scheme> <item> <qty> [months 3-6]*",
+        });
+        break;
+      }
+      const result = await subscribeCommodity(
+        phone,
+        schemeRef,
+        itemKey,
+        Number(qtyRaw ?? 1),
+        Number(monthsRaw ?? 3),
+      );
+      await sendText({ to: phone, text: result.message });
+      break;
+    }
+
+    case "cancelsub": {
+      if (!commoditySchemesEnabled()) {
+        await sendText({ to: phone, text: COMMODITY_DISABLED });
+        break;
+      }
+      if (!args[0]) {
+        await sendText({ to: phone, text: "Usage: *cancelsub <reference>*" });
+        break;
+      }
+      const result = await cancelCommoditySubscription(phone, args[0]);
+      await sendText({ to: phone, text: result.message });
       break;
     }
 
