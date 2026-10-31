@@ -354,7 +354,7 @@ describe("employer deduction remittance", () => {
     );
   });
 
-  it("a short reconciliation blocks approval until the full amount is received", async () => {
+  it("a short reconciliation settles and rolls the unpaid amount forward", async () => {
     const coop = await makeCoop("DEDB08", "Short Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
     const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
@@ -366,16 +366,20 @@ describe("employer deduction remittance", () => {
     await handleMessage(SUPER_PHONE, `confirmname ${admin.code}`);
     await handleMessage(SUPER_PHONE, `recordcheque ${batch!.ref} 100`);
     await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 60`);
+    await handleMessage(SUPER_PHONE, `shortbatch ${batch!.ref} ${m.code} 40`);
 
     vi.clearAllMocks();
     await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
-    expect(texts()).toContain("reconciled short");
-    expect((await prisma.wallet.findUnique({ where: { memberId: m.id } }))!.balance).toBe(0);
-
-    // A later full reconciliation unblocks approval.
-    await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 100`);
-    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
-    expect((await prisma.wallet.findUnique({ where: { memberId: m.id } }))!.balance).toBe(10000);
+    expect((await prisma.wallet.findUnique({ where: { memberId: m.id } }))!.balance).toBe(6_000);
+    const shortfall = await prisma.deductionShortfall.findFirst();
+    expect(shortfall!.status).toBe("rolled");
+    const rolled = await prisma.deductionItem.findFirst({ where: { status: "rolled" } });
+    expect(rolled).not.toBeNull();
+    const replacement = await prisma.deductionItem.findFirst({
+      where: { rolloverOfItemId: rolled!.id },
+    });
+    expect(replacement!.amount).toBe(4_000);
+    expect(replacement!.batchId).not.toBe(batch!.id);
   });
 
   it("auto-reconciles a cheque_received batch from a matching bank credit", async () => {
@@ -396,7 +400,7 @@ describe("employer deduction remittance", () => {
     expect(fresh!.reconciliationSource).toBe("webhook");
   });
 
-  it("partial approval credits only what the reconciled amount covers", async () => {
+  it("partial approval applies priority per member and rolls the remainder", async () => {
     const coop = await makeCoop("DEDB10", "Partial Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
     const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
@@ -409,23 +413,22 @@ describe("employer deduction remittance", () => {
     await handleMessage(ADMIN_PHONE, `submitbatch ${batch!.ref}`);
     await handleMessage(SUPER_PHONE, `confirmname ${admin.code}`);
     await handleMessage(SUPER_PHONE, `recordcheque ${batch!.ref} 200`);
-    await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 100`); // only ₦100 arrived
+    await handleMessage(SUPER_PHONE, `reconbatch ${batch!.ref} 100`); // only half arrived
+    await handleMessage(SUPER_PHONE, `shortbatch ${batch!.ref} all all`);
 
     vi.clearAllMocks();
     await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref}`);
-    expect(texts()).toContain("reconciled short");
-
-    await handleMessage(SUPER_PHONE, `approvebatch ${batch!.ref} partial`);
-    const fresh = await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } });
-    expect(fresh!.status).toBe("partially_approved");
-    const credited = await prisma.deductionItem.count({
-      where: { batchId: batch!.id, status: "credited" },
-    });
-    expect(credited).toBe(1);
     const wallets = await prisma.wallet.findMany({
       where: { memberId: { in: [m1.id, m2.id] } },
     });
-    expect(wallets.reduce((s, w) => s + w.balance, 0)).toBe(10000);
+    expect(wallets.reduce((s, w) => s + w.balance, 0)).toBe(10_000);
+    const replacements = await prisma.deductionItem.findMany({
+      where: { rolloverOfItemId: { not: null } },
+    });
+    expect(replacements).toHaveLength(2);
+    expect(replacements.map((r) => r.amount).sort()).toEqual([5_000, 5_000]);
+    const fresh = await prisma.deductionBatch.findUnique({ where: { ref: batch!.ref } });
+    expect(fresh!.status).toBe("approved");
   });
 
   it("reconciles a cheque_received batch from an uploaded statement", async () => {

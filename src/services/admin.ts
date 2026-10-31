@@ -15,6 +15,7 @@ import {
   waiveMonth,
   recordCheque,
   reconcileBatch,
+  attributeShortfall,
 } from "./deductions.js";
 import { approveLoan, listPendingLoans, rejectLoan } from "./loans.js";
 import { formatBalance } from "./cooperative.js";
@@ -2984,6 +2985,47 @@ export async function handleAdminCommand(
           return true;
         }
         const result = await reconcileBatch(phone, ref, toKobo(amount));
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "shortbatch": {
+        if (!isSuper) {
+          await sendText({
+            to: phone,
+            text: "Only the *super admin* can attribute a shortfall.",
+          });
+          return true;
+        }
+        const [ref, code, amountArg, ...reasonParts] = args;
+        if (!ref || !code || !amountArg) {
+          await sendText({
+            to: phone,
+            text: "Usage: *shortbatch <ref> <member code|all> <amount|all|waive> [reason]*",
+          });
+          return true;
+        }
+        const raw = amountArg.toLowerCase();
+        const parsed =
+          raw === "all" || raw === "waive"
+            ? raw
+            : Number.isFinite(Number(raw))
+              ? toKobo(Number(raw))
+              : NaN;
+        if (typeof parsed === "number" && !(parsed > 0)) {
+          await sendText({
+            to: phone,
+            text: "Usage: *shortbatch <ref> <member code|all> <amount|all|waive> [reason]*",
+          });
+          return true;
+        }
+        const result = await attributeShortfall(
+          phone,
+          ref,
+          code,
+          parsed,
+          reasonParts.join(" ") || undefined,
+        );
         await sendText({ to: phone, text: result.message });
         return true;
       }
