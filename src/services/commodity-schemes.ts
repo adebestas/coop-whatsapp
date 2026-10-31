@@ -595,7 +595,11 @@ export async function convertScheme(superPhone: string, ref: string): Promise<Sc
 async function findSubscription(cooperativeId: string, ref: string) {
   return prisma.commoditySubscription.findFirst({
     where: { cooperativeId, OR: [{ id: ref }, { reference: ref.toUpperCase() }] },
-    include: { member: { select: { id: true, name: true, code: true } }, item: true, scheme: true },
+    include: {
+      member: { select: { id: true, name: true, code: true, phone: true } },
+      item: true,
+      scheme: true,
+    },
   });
 }
 
