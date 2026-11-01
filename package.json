@@ -61,7 +61,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.67.0",
-    "vitest": "^3.2.7"
+    "vitest": "^5.0.4"
   },
   "overrides": {
     "deepmerge-ts": "^8.0.2",
