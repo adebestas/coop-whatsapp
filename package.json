@@ -43,7 +43,7 @@
     "nodemailer": "^10.0.15",
     "pdf-parse": "^1.1.1",
     "pdfkit": "^0.19.1",
-    "pino": "^9.6.0",
+    "pino": "^10.4.0",
     "prisma": "^6.2.1",
     "tesseract.js": "^5.1.1",
     "zod": "^4.6.7"
