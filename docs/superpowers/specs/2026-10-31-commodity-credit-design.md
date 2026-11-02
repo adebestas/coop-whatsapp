@@ -1,7 +1,7 @@
 # Commodity Credit - Payroll-Backed Purchase Schemes
 
 **Date:** 2026-10-31
-**Status:** Approved design, pending implementation plan
+**Status:** Implemented on `feat/commodity-credit` (2026-10-31)
 **Related:** `src/services/deductions.ts`, `src/services/deduction-ingest.ts`, `src/services/shop.ts`, `src/services/reconciliation.ts`, `src/services/scheduler.ts`, `src/services/buypoll.ts`, `docs/superpowers/specs/2026-10-29-coop-shop-design.md`
 
 ## Problem

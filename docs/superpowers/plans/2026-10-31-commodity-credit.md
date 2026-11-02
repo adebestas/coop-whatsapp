@@ -1,6 +1,6 @@
 # Commodity Credit Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Let members commit capped, payroll-backed credit to seasonal commodity schemes that the co-op only purchases once reconciled bank cash (or an audited supplier-credit decision) covers it, then collect repayment through payroll deduction installments with per-member shortfall attribution and roll-forward.
 
@@ -63,7 +63,7 @@
 - Consumes: nothing.
 - Produces: Prisma models `commodityScheme`, `commoditySchemeItem`, `commoditySubscription`, `deductionShortfall`; `DeductionItem.kind` accepts `"commodity"`; `DeductionItem.rolloverOfItemId: string | null`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 // tests/commodity-schema.test.ts
@@ -180,12 +180,12 @@ describe("commodity credit schema", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run tests/commodity-schema.test.ts`
 Expected: FAIL — `prisma.commodityScheme` is undefined.
 
-- [ ] **Step 3: Add the models to both schema files**
+- [x] **Step 3: Add the models to both schema files**
 
 Append to `prisma/schema.prisma` and `prisma/schema.local.prisma` (identical text):
 
@@ -329,7 +329,7 @@ In `model Loan`, update the `kind` comment to:
   kind            String   @default("cash") // cash | shop | commodity
 ```
 
-- [ ] **Step 4: Regenerate the SQLite client and push**
+- [x] **Step 4: Regenerate the SQLite client and push**
 
 Run:
 
@@ -341,7 +341,7 @@ npx vitest run tests/commodity-schema.test.ts
 
 Expected: PASS (1 test).
 
-- [ ] **Step 5: Generate the DDL migration**
+- [x] **Step 5: Generate the DDL migration**
 
 Run (PowerShell; `cmd /c` avoids a BOM in the redirect):
 
@@ -357,7 +357,7 @@ Expected: the file contains `CREATE TABLE "CommodityScheme"`, the three other ta
 Select-String -Path prisma/migrations/20261063000000_commodity_credit/migration.sql -Pattern 'CREATE TABLE|ADD COLUMN'
 ```
 
-- [ ] **Step 6: Write the RLS migration**
+- [x] **Step 6: Write the RLS migration**
 
 Create `prisma/migrations/20261064000000_commodity_credit_rls/migration.sql`:
 
@@ -404,7 +404,7 @@ END $$;
 COMMIT;
 ```
 
-- [ ] **Step 7: Verify migrations on a fresh PostgreSQL**
+- [x] **Step 7: Verify migrations on a fresh PostgreSQL**
 
 Run:
 
@@ -424,7 +424,7 @@ node scripts/prisma-generate.mjs --local
 
 Expected: migrations apply, 14 RLS tests pass, no extra RLS failures for the new tables.
 
-- [ ] **Step 8: Run the schema suite and commit**
+- [x] **Step 8: Run the schema suite and commit**
 
 Run: `npx vitest run tests/schema-sync.test.ts tests/commodity-schema.test.ts`
 Expected: PASS.
@@ -453,7 +453,7 @@ git commit -m "feat(db): add commodity scheme, subscription and deduction shortf
   - `getCommodityCreditPosition(phone: string): Promise<CommodityCreditPosition | null>`
   - `getCreditPositionForMember(memberId: string, cooperativeId: string): Promise<CommodityCreditPosition>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 // tests/commodity-credit.test.ts
@@ -612,12 +612,12 @@ describe("commodity credit position", () => {
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run tests/commodity-credit.test.ts`
 Expected: FAIL — cannot resolve `../src/services/commodity-credit.js`.
 
-- [ ] **Step 3: Implement the service**
+- [x] **Step 3: Implement the service**
 
 ```ts
 // src/services/commodity-credit.ts
@@ -712,12 +712,12 @@ export async function getCreditPositionForMember(
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run tests/commodity-credit.test.ts`
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/services/commodity-credit.ts tests/commodity-credit.test.ts
@@ -747,7 +747,7 @@ git commit -m "feat: compute commodity credit from uploaded payroll schedules"
   - `type SchemeResult = { ok: boolean; message: string; id?: string; ref?: string }`
   - `interface SchemeItemInput` (for the admin parser)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 // tests/commodity-scheme.test.ts
@@ -954,12 +954,12 @@ describe("commodity schemes", () => {
 
 Note: `addSchemeItem` returns `SchemeResult` with `ref` set to the item id so tests can reference it; the concrete contract is `{ ok, message, id: scheme.id, ref: item.id }`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run tests/commodity-scheme.test.ts`
 Expected: FAIL — cannot resolve `../src/services/commodity-schemes.js`.
 
-- [ ] **Step 3: Implement lifecycle + subscriptions**
+- [x] **Step 3: Implement lifecycle + subscriptions**
 
 ```ts
 // src/services/commodity-schemes.ts
@@ -1348,12 +1348,12 @@ export async function rejectCommoditySubscription(
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run tests/commodity-scheme.test.ts`
 Expected: PASS (6 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/services/commodity-schemes.ts tests/commodity-scheme.test.ts
@@ -1380,7 +1380,7 @@ git commit -m "feat: add commodity scheme lifecycle and credit reservations"
   - `bankCashKobo(cooperativeId: string): Promise<number>`
   - `listSchemeSubscriptions(cooperativeId: string, ref: string): Promise<...>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/commodity-scheme.test.ts`:
 
@@ -1481,12 +1481,12 @@ describe("commodity purchase and conversion", () => {
 
 Note: the `posting`/`entry` shape must match the schema; inspect an existing test that creates a posting (e.g. `tests/reconciliation.test.ts`) and copy its creation shape if the nested form differs.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run tests/commodity-scheme.test.ts`
 Expected: FAIL — `purchaseScheme` is not exported.
 
-- [ ] **Step 3: Implement purchase, conversion, collection**
+- [x] **Step 3: Implement purchase, conversion, collection**
 
 Append to `src/services/commodity-schemes.ts`:
 
@@ -1777,12 +1777,12 @@ export async function listMemberSubscriptions(memberId: string, cooperativeId: s
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run tests/commodity-scheme.test.ts`
 Expected: PASS (9 tests). If the `posting.create` shape fails, copy the exact nested shape from `tests/reconciliation.test.ts` and re-run.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/services/commodity-schemes.ts tests/commodity-scheme.test.ts
@@ -1803,7 +1803,7 @@ git commit -m "feat: gate scheme purchases on bank cash and convert reservations
 - Consumes: `DeductionItem.kind`, `Loan.kind`.
 - Produces: `DraftItem.kind` widened to `"savings" | "loan" | "commodity"`; `buildBatch` emits commodity items; it no longer emits `"loan"` items for `kind != "cash"`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 // tests/commodity-payroll.test.ts
@@ -1891,12 +1891,12 @@ describe("buildBatch commodity installments", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run tests/commodity-payroll.test.ts`
 Expected: FAIL — commodities are emitted as `"loan"` or the shop loan is included.
 
-- [ ] **Step 3: Implement the builder changes**
+- [x] **Step 3: Implement the builder changes**
 
 In `buildBatch`, change the member include to cash-only:
 
@@ -1943,12 +1943,12 @@ for (const loan of commodityLoans) {
 
 Apply the same include change and commodity loop in `buildBatchFromRows` (it builds loan items separately around lines 150-200; keep its row-derived savings items and add the same cash-only filter plus the commodity block before it creates the batch).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run tests/commodity-payroll.test.ts tests/deductions.test.ts`
 Expected: new file PASS; existing deductions tests still PASS (the shortfall tests are rewritten in Task 6).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/services/deductions.ts tests/commodity-payroll.test.ts
@@ -1973,7 +1973,7 @@ git commit -m "feat: collect commodity installments through payroll without doub
   - `rollForwardItem(batchId: string, itemId: string, approverId: string): Promise<DeductionItem>`
   - `priorityRank(kind: string): number` (loan 0, commodity 1, savings 2)
 
-- [ ] **Step 1: Rewrite the two existing shortfall tests**
+- [x] **Step 1: Rewrite the two existing shortfall tests**
 
 In `tests/deductions.test.ts`, replace the test named `"a short reconciliation blocks approval until the full amount is received"` with:
 
@@ -2032,7 +2032,7 @@ it("partial approval applies priority per member and rolls the remainder", async
 });
 ```
 
-- [ ] **Step 2: Write the new failing test**
+- [x] **Step 2: Write the new failing test**
 
 ```ts
 // tests/deduction-shortfall.test.ts
@@ -2153,12 +2153,12 @@ describe("deduction shortfalls", () => {
 });
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `npx vitest run tests/deduction-shortfall.test.ts`
 Expected: FAIL — `attributeShortfall` / `rollForwardItem` / `priorityRank` are not exported.
 
-- [ ] **Step 4: Implement attribution and roll-forward**
+- [x] **Step 4: Implement attribution and roll-forward**
 
 Add to `src/services/deductions.ts`:
 
@@ -2332,7 +2332,7 @@ export async function rollForwardItem(
 }
 ```
 
-- [ ] **Step 5: Change `reconcileBatch` to settle short batches**
+- [x] **Step 5: Change `reconcileBatch` to settle short batches**
 
 Replace the shortfall early-return block in `reconcileBatch`:
 
@@ -2367,7 +2367,7 @@ if (shortfall > 0) {
 }
 ```
 
-- [ ] **Step 6: Rewrite the `approveBatch` allocation loop**
+- [x] **Step 6: Rewrite the `approveBatch` allocation loop**
 
 Replace the `let spent = 0; for (const item of batch.items) { ... }` block with a per-member version. Insert before the loop:
 
@@ -2427,12 +2427,12 @@ const remainingPending = await prisma.deductionItem.count({
 
 stays as-is; because rolled items leave `pending`, a fully-allocated batch reaches `approved` with shortfalls recorded. Update the audit detail to include `rollovers` count when > 0.
 
-- [ ] **Step 7: Run the tests**
+- [x] **Step 7: Run the tests**
 
 Run: `npx vitest run tests/deduction-shortfall.test.ts tests/deductions.test.ts`
 Expected: PASS (5 new tests + rewritten DEDB08/DEDB10 + the rest of the deductions suite).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/services/deductions.ts tests/deduction-shortfall.test.ts tests/deductions.test.ts
@@ -2457,7 +2457,7 @@ git commit -m "feat: attribute payroll shortfalls per member and roll unpaid ite
 - Consumes: all services from Tasks 2-6.
 - Produces: `runSchemeWindows(now?: Date): Promise<number>`; `formatSchemesText(phone)`, `formatMySubsText(phone)`, `formatSchemeSubsText(coopId, ref)`; `parseSchemeItem(raw)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 // tests/commodity-commands.test.ts
@@ -2601,12 +2601,12 @@ describe("commodity WhatsApp commands", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npx vitest run tests/commodity-commands.test.ts`
 Expected: FAIL — `newscheme` is treated as an unknown command.
 
-- [ ] **Step 3: Implement the command helper module**
+- [x] **Step 3: Implement the command helper module**
 
 ```ts
 // src/services/commodity-commands.ts
@@ -2717,7 +2717,7 @@ export async function formatSchemeSubsText(cooperativeId: string, ref: string): 
 }
 ```
 
-- [ ] **Step 4: Wire member cases in `conversation.ts`**
+- [x] **Step 4: Wire member cases in `conversation.ts`**
 
 Add imports near the other service imports:
 
@@ -2785,7 +2785,7 @@ Add cases before `default:` (next to the shop/guarantee cases):
 
 Add `formatBalance` to the existing imports from `./cooperative.js` if it is not already in scope.
 
-- [ ] **Step 5: Wire admin cases in `admin.ts`**
+- [x] **Step 5: Wire admin cases in `admin.ts`**
 
 Add imports:
 
@@ -2905,7 +2905,7 @@ Add cases inside the admin switch:
 
 If `raw` is not in scope in the admin switch, use the original text variable already available there (the shop cases use it as `raw`).
 
-- [ ] **Step 6: Add help-menu lines**
+- [x] **Step 6: Add help-menu lines**
 
 In `src/services/handlers/session.ts`, add to the member Money section:
 
@@ -2922,7 +2922,7 @@ and to the admin section:
 ` *shortbatch <ref> <code|all> <amount|all|waive>* - attribute payroll shortfall\n` +
 ```
 
-- [ ] **Step 7: Add the scheduler tick**
+- [x] **Step 7: Add the scheduler tick**
 
 In `src/services/commodity-schemes.ts`, append:
 
@@ -2972,7 +2972,7 @@ await runSchemeWindows().catch((err) =>
 );
 ```
 
-- [ ] **Step 8: Run tests and commit**
+- [x] **Step 8: Run tests and commit**
 
 Run:
 
@@ -2999,7 +2999,7 @@ git commit -m "feat: add WhatsApp commands for seasonal commodity schemes"
 - Modify: `docs/superpowers/specs/2026-10-31-commodity-credit-design.md` (status line only, if implementation deviates)
 - No new source files.
 
-- [ ] **Step 1: Update the README feature list**
+- [x] **Step 1: Update the README feature list**
 
 Add below the coop shop bullet:
 
@@ -3011,7 +3011,7 @@ Add below the coop shop bullet:
   shortfall attribution and roll-forward.
 ```
 
-- [ ] **Step 2: Run the formatting and type gates**
+- [x] **Step 2: Run the formatting and type gates**
 
 ```powershell
 npx prettier --write "src/services/commodity-*.ts" "src/services/deductions.ts" "src/services/admin.ts" "src/services/conversation.ts" "src/services/handlers/session.ts" "src/services/scheduler.ts" "tests/commodity-*.ts" "tests/deduction-shortfall.test.ts"
@@ -3022,7 +3022,7 @@ npx tsc --noEmit
 
 Expected: formatting clean, 0 lint errors, tsc clean.
 
-- [ ] **Step 3: Run the focused suites**
+- [x] **Step 3: Run the focused suites**
 
 ```powershell
 npx vitest run tests/commodity-credit.test.ts tests/commodity-schema.test.ts tests/commodity-scheme.test.ts tests/commodity-payroll.test.ts tests/commodity-commands.test.ts tests/deduction-shortfall.test.ts tests/deductions.test.ts tests/shop.test.ts tests/guarantor-phone.test.ts tests/dividend-payouts.test.ts tests/schema-sync.test.ts
@@ -3030,7 +3030,7 @@ npx vitest run tests/commodity-credit.test.ts tests/commodity-schema.test.ts tes
 
 Expected: all PASS.
 
-- [ ] **Step 4: Run the PostgreSQL RLS job locally**
+- [x] **Step 4: Run the PostgreSQL RLS job locally**
 
 ```powershell
 docker rm -f coop-commodity-final 2>$null
@@ -3048,7 +3048,7 @@ node scripts/prisma-generate.mjs --local
 
 Expected: migrations apply from a clean database and 14 RLS tests pass.
 
-- [ ] **Step 5: Commit, push, open the PR**
+- [x] **Step 5: Commit, push, open the PR**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-10-31-commodity-credit-design.md
@@ -3071,7 +3071,7 @@ gh pr create --base main --title "feat: payroll-backed commodity credit schemes"
 
 Expected: PR created; CI (type-check, unit, security, dependency audit, Postgres/RLS, build) green.
 
-- [ ] **Step 6: Report**
+- [x] **Step 6: Report**
 
 Summarize: tasks completed, test counts, CI status, and the one behavioral change (short batches now settle instead of blocking).
 
