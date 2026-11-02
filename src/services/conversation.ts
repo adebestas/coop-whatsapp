@@ -236,6 +236,7 @@ import {
   handleBuyPolls,
   handleVoteBuy,
   handlePollResults,
+  handleLiveTrend,
   handleElections,
 } from "./handlers/voting.js";
 import {
@@ -245,6 +246,7 @@ import {
   listMeetings,
   listMotions,
 } from "./meetings.js";
+import { appendTrend } from "./live-trends.js";
 
 export type BotState =
   | "idle"
@@ -1554,6 +1556,10 @@ async function handleMessageInner(
       await handlePollResults(phone, args);
       break;
 
+    case "livetrend":
+      await handleLiveTrend(phone, args);
+      break;
+
     case "elections":
       await handleElections(phone);
       break;
@@ -1652,7 +1658,10 @@ async function handleMessageInner(
         member.id,
         motionChoice,
       );
-      await sendText({ to: phone, text: voteRes.message });
+      const motionText = voteRes.ok
+        ? await appendTrend(voteRes.message, member.cooperativeId, voteRes.motionId ?? motionRef)
+        : voteRes.message;
+      await sendText({ to: phone, text: motionText });
       break;
     }
 
@@ -1668,7 +1677,14 @@ async function handleMessageInner(
         { id: member.id, name: member.name, phone, cooperativeId: member.cooperativeId },
         args[0] ?? "",
       );
-      await sendText({ to: phone, text: voteResult.message });
+      const dividendText = voteResult.ok
+        ? await appendTrend(
+            voteResult.message,
+            member.cooperativeId,
+            voteResult.voteId ?? undefined,
+          )
+        : voteResult.message;
+      await sendText({ to: phone, text: dividendText });
       break;
     }
 

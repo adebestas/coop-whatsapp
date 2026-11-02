@@ -1414,15 +1414,14 @@ export async function adminApiRoutes(app: FastifyInstance) {
     "/api/admin/votes/:id/results",
     withTenant(async (req, reply) => {
       const coopId = req.adminCoopId!;
-      const phone = req.adminPhone!;
       const { id } = req.params as { id: string };
       const vote = await prisma.vote.findFirst({
         where: { id, cooperativeId: coopId },
         select: { id: true },
       });
       if (!vote) return reply.code(404).send({ error: "Election not found" });
-      const { showLiveResults } = await import("../services/votes.js");
-      const result = await showLiveResults(phone, id);
+      const { getLiveTrend } = await import("../services/live-trends.js");
+      const result = await getLiveTrend(coopId, id);
       if (!result.ok) return reply.code(400).send({ error: result.message });
       return { ok: true, results: result.message };
     }),

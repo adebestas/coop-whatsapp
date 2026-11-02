@@ -155,6 +155,7 @@ export async function castBuyVote(
 
   return {
     ok: true,
+    pollId: poll.id,
     message: `🗳️ Vote recorded for *${option.name}* (${formatBalance(option.estimatedCost)}). Thank you for participating.`,
   };
 }
@@ -244,7 +245,10 @@ export async function closeBuyPoll(
 export async function listBuyPolls(cooperativeId: string) {
   return prisma.purchasePoll.findMany({
     where: { cooperativeId },
-    include: { options: { include: { _count: { select: { ballots: true } } } } },
+    include: {
+      options: { include: { _count: { select: { ballots: true } } } },
+      _count: { select: { ballots: true } },
+    },
     orderBy: { createdAt: "desc" },
     take: 5,
   });

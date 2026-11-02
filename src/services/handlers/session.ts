@@ -207,6 +207,7 @@ export function buildFullMenu(
     `• *mydata* / *deleteaccount* — your data (NDPR)\n\n` +
     `*🗳️ Governance*\n` +
     `• *vote <election id> <member code>* / *pollresults <id>*\n` +
+    `• *livetrend <id>* — live voters, leader & counts for any open vote\n` +
     `• *buypolls* / *votebuy <poll id> <option #>*\n` +
     `• *votediv <yes|no>* — dividend-rate vote\n` +
     `• *dividend <rate>* — dividend calculator\n` +
