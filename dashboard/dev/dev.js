@@ -23,6 +23,7 @@
   let currentCoopTab = 'health';
   let coopDetail = null;
   let coopRegulator = { profile: null, reports: [] };
+  let coopRegisters = { breaches: [], dpias: [], crossBorderTransfers: [], breachSummary: {} };
   let regulatorFileTarget = null;
   let regulatorFilingDraft = null;
   let coopActivityEntries = [];
@@ -482,6 +483,11 @@
       } catch {
         coopRegulator = { profile: null, reports: [] };
       }
+      try {
+        coopRegisters = await api(`/coops/${id}/compliance-registers`);
+      } catch {
+        coopRegisters = { breaches: [], dpias: [], crossBorderTransfers: [], breachSummary: {} };
+      }
       renderCoopShell();
     } catch (err) {
       el.innerHTML = `<div class="empty-state"><h3>Failed to load cooperative</h3><p>${esc(err.message)}</p></div>`;
@@ -578,6 +584,10 @@
               <tr><td class="text-muted">TIN</td><td>${esc(coop.tin || '—')}</td></tr>
               <tr><td class="text-muted">CVN</td><td>${esc(coop.cvn || '—')}</td></tr>
               <tr><td class="text-muted">SCUML</td><td>${esc(coop.scumlStatus || '—')}</td></tr>
+              <tr><td class="text-muted">SCUML number</td><td>${esc(coop.scumlNumber || '—')}</td></tr>
+              <tr><td class="text-muted">SCUML expiry</td><td>${coop.scumlExpiresAt ? date(coop.scumlExpiresAt) : '—'}</td></tr>
+              <tr><td class="text-muted">NDPC number</td><td>${esc(coop.ndpcRegistrationNumber || '—')}</td></tr>
+              <tr><td class="text-muted">NDPC registered</td><td>${coop.ndpcRegisteredAt ? date(coop.ndpcRegisteredAt) : '—'}</td></tr>
               <tr><td class="text-muted">DPO</td><td>${esc([coop.dpoName, coop.dpoPhone, coop.dpoEmail].filter(Boolean).join(' · ') || '—')}</td></tr>
             </tbody>
           </table>
@@ -592,6 +602,11 @@
             <div class="form-field"><label>TIN</label><input id="cmpTin" value="${esc(coop.tin || '')}" ${dis}></div>
             <div class="form-field"><label>CVN</label><input id="cmpCvn" value="${esc(coop.cvn || '')}" ${dis}></div>
             <div class="form-field"><label>SCUML status</label><input id="cmpScuml" value="${esc(coop.scumlStatus || '')}" ${dis}></div>
+            <div class="form-field"><label>SCUML number</label><input id="cmpScumlNo" value="${esc(coop.scumlNumber || '')}" ${dis}></div>
+            <div class="form-field"><label>SCUML filed</label><input type="date" id="cmpScumlFiled" value="${esc((coop.scumlFiledAt || '').slice(0, 10))}" ${dis}></div>
+            <div class="form-field"><label>SCUML expires</label><input type="date" id="cmpScumlExp" value="${esc((coop.scumlExpiresAt || '').slice(0, 10))}" ${dis}></div>
+            <div class="form-field"><label>NDPC number</label><input id="cmpNdpcNo" value="${esc(coop.ndpcRegistrationNumber || '')}" ${dis}></div>
+            <div class="form-field"><label>NDPC registered</label><input type="date" id="cmpNdpcAt" value="${esc((coop.ndpcRegisteredAt || '').slice(0, 10))}" ${dis}></div>
             <div class="form-field"><label>DPO name</label><input id="cmpDpoName" value="${esc(coop.dpoName || '')}" ${dis}></div>
             <div class="form-field"><label>DPO phone</label><input id="cmpDpoPhone" value="${esc(coop.dpoPhone || '')}" ${dis}></div>
             <div class="form-field"><label>DPO email</label><input id="cmpDpoEmail" value="${esc(coop.dpoEmail || '')}" ${dis}></div>
@@ -602,6 +617,10 @@
 
       <div class="card mb-6" id="regulatorCard">
         ${renderRegulatorCard(coop)}
+      </div>
+
+      <div class="card mb-6" id="complianceRegistersCard">
+        ${renderComplianceRegistersCard(coop)}
       </div>
 
       <div class="card">
@@ -618,6 +637,74 @@
     return entries
       .map(([k, v]) => `<span class="badge badge-gray">${esc(k)}: ${fmt(v)}</span>`)
       .join(' ');
+  }
+
+  function renderComplianceRegistersCard(coop) {
+    const dis = readOnly ? 'disabled' : '';
+    const summary = coopRegisters.breachSummary || {};
+    const breaches = coopRegisters.breaches || [];
+    const dpias = coopRegisters.dpias || [];
+    const transfers = coopRegisters.crossBorderTransfers || [];
+    const breachRows = breaches.slice(0, 6).map((b) => {
+      const overdue = b.overdue
+        ? '<span class="badge badge-red">overdue</span>'
+        : b.status === 'notified' || b.status === 'closed'
+          ? '<span class="badge badge-green">closed</span>'
+          : '<span class="badge badge-gold">open</span>';
+      const action = readOnly || b.status === 'notified' || b.status === 'closed'
+        ? ''
+        : `<button class="btn btn-ghost btn-sm" data-action="markBreachNotified" data-arg="${esc(coop.id)}:${esc(b.id)}">Mark NDPC notified</button>`;
+      return `<tr>
+        <td class="font-mono text-xs">${esc(b.reference)}</td>
+        <td>${esc(b.title)}<div class="text-muted text-xs">${esc(b.status)} · ${esc(String(b.affectedCount ?? '—'))} affected</div></td>
+        <td>${new Date(b.notificationDueAt).toISOString().slice(0, 16).replace('T', ' ')} UTC ${overdue}</td>
+        <td>${action}</td>
+      </tr>`;
+    }).join('');
+    const dpiaRows = dpias.slice(0, 4).map((d) => `<li>${esc(d.title)} — <span class="text-muted">${esc(d.status)}</span></li>`).join('');
+    const transferRows = transfers.slice(0, 4).map((t) => `<li>${esc(t.country)} · ${esc(t.recipient)} — <span class="text-muted">${esc(t.status)}</span></li>`).join('');
+
+    return `
+      <div class="card-header"><span class="card-title">Compliance registers</span></div>
+      <div class="card-body">
+        <p class="text-muted text-sm">
+          Breaches: <strong>${esc(String(summary.open ?? 0))}</strong> open ·
+          <strong>${esc(String(summary.overdue ?? 0))}</strong> overdue ·
+          <strong>${esc(String(summary.dueWithin24h ?? 0))}</strong> due within 24h |
+          DPIAs: <strong>${dpias.length}</strong> |
+          Cross-border transfers: <strong>${transfers.length}</strong>
+        </p>
+        ${breaches.length ? `<table class="mb-4"><thead><tr><th>Ref</th><th>Incident</th><th>NDPC deadline</th><th></th></tr></thead><tbody>${breachRows}</tbody></table>` : '<p class="text-muted text-sm">No breaches recorded.</p>'}
+        <div class="form-inline mb-4">
+          <div class="form-field"><label>Breach title</label><input id="brTitle" ${dis}></div>
+          <div class="form-field"><label>What happened</label><input id="brDesc" ${dis}></div>
+          <div class="form-field"><label>Discovered</label><input type="date" id="brDate" ${dis}></div>
+          <div class="form-field"><label>Affected</label><input type="number" min="0" id="brCount" ${dis}></div>
+          ${readOnly ? '' : `<button class="btn btn-primary btn-sm" data-action="createBreach" data-arg="${esc(coop.id)}">Record breach</button>`}
+        </div>
+        <div class="form-inline mb-4">
+          <div class="form-field"><label>DPIA title</label><input id="dpTitle" ${dis}></div>
+          <div class="form-field"><label>Processing activity</label><input id="dpActivity" ${dis}></div>
+          ${readOnly ? '' : `<button class="btn btn-primary btn-sm" data-action="createDpia" data-arg="${esc(coop.id)}">Add DPIA</button>`}
+        </div>
+        ${dpiaRows ? `<ul class="text-sm">${dpiaRows}</ul>` : '<p class="text-muted text-sm">No DPIAs recorded.</p>'}
+        <div class="form-inline mb-4">
+          <div class="form-field"><label>Country</label><input id="xbCountry" ${dis}></div>
+          <div class="form-field"><label>Recipient</label><input id="xbRecipient" ${dis}></div>
+          <div class="form-field"><label>Purpose</label><input id="xbPurpose" ${dis}></div>
+          <div class="form-field"><label>Safeguard</label>
+            <select id="xbSafeguard" ${dis}>
+              <option value="scc">SCC</option>
+              <option value="adequacy">Adequacy</option>
+              <option value="bcr">BCR</option>
+              <option value="consent">Consent</option>
+              <option value="contract">Contract</option>
+            </select>
+          </div>
+          ${readOnly ? '' : `<button class="btn btn-primary btn-sm" data-action="createCrossBorder" data-arg="${esc(coop.id)}">Add transfer</button>`}
+        </div>
+        ${transferRows ? `<ul class="text-sm">${transferRows}</ul>` : '<p class="text-muted text-sm">No cross-border transfers recorded.</p>'}
+      </div>`;
   }
 
   function renderRegulatorCard(coop) {
@@ -910,6 +997,11 @@
           tin: val('cmpTin'),
           cvn: val('cmpCvn'),
           scumlStatus: val('cmpScuml'),
+          scumlNumber: val('cmpScumlNo'),
+          scumlFiledAt: val('cmpScumlFiled'),
+          scumlExpiresAt: val('cmpScumlExp'),
+          ndpcRegistrationNumber: val('cmpNdpcNo'),
+          ndpcRegisteredAt: val('cmpNdpcAt'),
           dpoName: val('cmpDpoName'),
           dpoPhone: val('cmpDpoPhone'),
           dpoEmail: val('cmpDpoEmail'),
@@ -917,6 +1009,86 @@
       });
       toast('Compliance metadata saved', 'success');
       renderCoopDetail(id);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+
+  async function reloadRegisters(id) {
+    coopRegisters = await api(`/coops/${id}/compliance-registers`);
+    renderCoopShell();
+  }
+
+  window.createBreach = async function (id) {
+    const title = (document.getElementById('brTitle')?.value || '').trim();
+    const description = (document.getElementById('brDesc')?.value || '').trim();
+    const discoveredAt = (document.getElementById('brDate')?.value || '').trim();
+    const affectedCount = (document.getElementById('brCount')?.value || '').trim();
+    if (!title || !description) return toast('Title and description are required', 'error');
+    try {
+      await api(`/coops/${id}/breaches`, {
+        method: 'POST',
+        body: {
+          title,
+          description,
+          discoveredAt: discoveredAt || undefined,
+          affectedCount: affectedCount === '' ? null : Number(affectedCount),
+        },
+      });
+      toast('Breach recorded', 'success');
+      await reloadRegisters(id);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+
+  window.markBreachNotified = async function (arg) {
+    const [id, breachId] = String(arg).split(':');
+    const reference = prompt('NDPC acknowledgement / reference (optional):') || '';
+    try {
+      await api(`/coops/${id}/breaches/${breachId}`, {
+        method: 'PATCH',
+        body: {
+          ndpcNotifiedAt: new Date().toISOString(),
+          ndpcReference: reference.trim() || null,
+          status: 'notified',
+        },
+      });
+      toast('NDPC notification recorded', 'success');
+      await reloadRegisters(id);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+
+  window.createDpia = async function (id) {
+    const title = (document.getElementById('dpTitle')?.value || '').trim();
+    const activity = (document.getElementById('dpActivity')?.value || '').trim();
+    if (!title || !activity) return toast('Title and activity are required', 'error');
+    try {
+      await api(`/coops/${id}/dpias`, { method: 'POST', body: { title, activity } });
+      toast('DPIA added', 'success');
+      await reloadRegisters(id);
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+
+  window.createCrossBorder = async function (id) {
+    const country = (document.getElementById('xbCountry')?.value || '').trim();
+    const recipient = (document.getElementById('xbRecipient')?.value || '').trim();
+    const purpose = (document.getElementById('xbPurpose')?.value || '').trim();
+    const safeguard = document.getElementById('xbSafeguard')?.value || 'scc';
+    if (!country || !recipient || !purpose) {
+      return toast('Country, recipient and purpose are required', 'error');
+    }
+    try {
+      await api(`/coops/${id}/cross-border-transfers`, {
+        method: 'POST',
+        body: { country, recipient, purpose, safeguard },
+      });
+      toast('Cross-border transfer added', 'success');
+      await reloadRegisters(id);
     } catch (err) {
       toast(err.message, 'error');
     }

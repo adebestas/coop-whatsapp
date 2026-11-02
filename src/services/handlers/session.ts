@@ -304,6 +304,7 @@ export function buildAdminMenu(): string {
     `*Meetings:* *startmeeting <agm\\|sgm> <title> [quorum%]*, *openmeeting <id>*, *closemeeting <id>*, *addmotion <meeting id> <title> \\| <description> [kind]*, *closemotion <id>*, *meetingminutes <id>*\n\n` +
     `*Savings groups:* *newgroup <rosca\\|vsla> <name> <code> <amount> <cycleLength>*, *closegroupcycle <group id>*, *groups*, *grouploans <group id>*\n\n` +
     `*Savings products:* *newproduct <fixed\\|goal\\|seasonal\\|junior> <name> [rate] [termMonths]*, *products*\n\n` +
+    `*Corporate members:* *corporate <member code> <RC number>*, *beneficial <member code> <owner name> <percent>*, *beneficials <member code>*, *removebeneficial <member code> <owner id>*\n\n` +
     `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *confirmname <code>*, *paydividend <rate%>*, *paysharedividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
 }

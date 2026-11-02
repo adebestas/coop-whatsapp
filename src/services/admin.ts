@@ -68,6 +68,13 @@ import { startAssistWithdrawal, confirmAssistWithdrawal } from "./adminassist.js
 import { revokeMemberSessions, unrevokeMemberSessions } from "./revocation.js";
 import { approvePhoneChange, rejectPhoneChange } from "./phone-change.js";
 import { requestManualCredit, approveManualCredit, rejectManualCredit } from "./manualcredit.js";
+import {
+  addBeneficialOwner,
+  BeneficialOwnerError,
+  listBeneficialOwners,
+  markCorporateMember,
+  removeBeneficialOwner,
+} from "./beneficial-owners.js";
 import { startDeathClaim, setClaimBank, approveClaim, rejectClaim } from "./deathclaims.js";
 import { listCoopMandates, pauseMandate, resumeMandate, skipDebit } from "./mandates.js";
 import { recommendRefund, approveRefund, rejectRefund } from "./refunds.js";
@@ -1315,6 +1322,136 @@ export async function handleAdminCommand(
           targetId: target.id,
           detail: `${target.name} -> ${role}`,
         });
+        return true;
+      }
+
+      case "corporate": {
+        const code = args[0];
+        const rc = args.slice(1).join(" ");
+        if (!code || !rc) {
+          await sendText({
+            to: phone,
+            text: "Usage: *corporate <member code> <RC number>* — e.g. *corporate MEM001 RC1234567*.",
+          });
+          return true;
+        }
+        try {
+          const member = await markCorporateMember(coopId, code, rc);
+          await sendText({
+            to: phone,
+            text: `✅ *${member.name}* (${member.code}) is now a corporate member, RC *${member.rcNumber}*.\n\nAdd its owners with *beneficial ${member.code} <owner name> <percent>*.`,
+          });
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: phone,
+            actorId: admin.id,
+            actorRole: roleLabel(ctx),
+            action: "member.corporate.set",
+            targetType: "member",
+            targetId: member.id,
+            detail: `RC ${member.rcNumber}`,
+          });
+        } catch (err) {
+          if (!(err instanceof BeneficialOwnerError)) throw err;
+          await sendText({ to: phone, text: err.message });
+        }
+        return true;
+      }
+
+      case "beneficial": {
+        const code = args[0];
+        const pctRaw = args[args.length - 1];
+        const ownerName = args.slice(1, -1).join(" ");
+        const pct = Number(pctRaw);
+        if (!code || !ownerName || !Number.isFinite(pct)) {
+          await sendText({
+            to: phone,
+            text: "Usage: *beneficial <member code> <owner name> <percent>* — e.g. *beneficial MEM001 Ada Obi 40*.",
+          });
+          return true;
+        }
+        try {
+          const owner = await addBeneficialOwner(coopId, code, ownerName, pct);
+          await sendText({
+            to: phone,
+            text: `✅ Recorded *${owner.name}* as a ${owner.ownershipPct}% beneficial owner of *${code.toUpperCase()}*.\n\nOwner id: *${owner.id.slice(-6)}*`,
+          });
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: phone,
+            actorId: admin.id,
+            actorRole: roleLabel(ctx),
+            action: "member.beneficial_owner.add",
+            targetType: "member",
+            targetId: owner.memberId,
+            detail: `${owner.name} ${owner.ownershipPct}%`,
+          });
+        } catch (err) {
+          if (!(err instanceof BeneficialOwnerError)) throw err;
+          await sendText({ to: phone, text: err.message });
+        }
+        return true;
+      }
+
+      case "beneficials": {
+        const code = args[0];
+        if (!code) {
+          await sendText({ to: phone, text: "Usage: *beneficials <member code>*." });
+          return true;
+        }
+        try {
+          const { member, owners, total } = await listBeneficialOwners(coopId, code);
+          if (owners.length === 0) {
+            await sendText({
+              to: phone,
+              text: `No beneficial owners recorded for *${member.name}* (${member.code}).\n\nAdd one with *beneficial ${member.code} <owner name> <percent>*.`,
+            });
+            return true;
+          }
+          const lines = owners
+            .map(
+              (o) =>
+                `• *${o.id.slice(-6)}* — ${o.name} · ${o.ownershipPct}%${o.idType && o.idNumber ? ` · ${o.idType} ${o.idNumber}` : ""}`,
+            )
+            .join("\n");
+          await sendText({
+            to: phone,
+            text: `*Beneficial owners — ${member.name} (${member.code})*\n\n${lines}\n\nTotal recorded: *${total}%*`,
+          });
+        } catch (err) {
+          if (!(err instanceof BeneficialOwnerError)) throw err;
+          await sendText({ to: phone, text: err.message });
+        }
+        return true;
+      }
+
+      case "removebeneficial": {
+        const code = args[0];
+        const ref = args[1];
+        if (!code || !ref) {
+          await sendText({
+            to: phone,
+            text: "Usage: *removebeneficial <member code> <owner id>* — the owner id is printed by *beneficials*.",
+          });
+          return true;
+        }
+        try {
+          const removed = await removeBeneficialOwner(coopId, code, ref);
+          await sendText({ to: phone, text: `✅ Removed beneficial owner *${removed.name}*.` });
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: phone,
+            actorId: admin.id,
+            actorRole: roleLabel(ctx),
+            action: "member.beneficial_owner.remove",
+            targetType: "member",
+            targetId: removed.memberId,
+            detail: `${removed.name} ${removed.ownershipPct}%`,
+          });
+        } catch (err) {
+          if (!(err instanceof BeneficialOwnerError)) throw err;
+          await sendText({ to: phone, text: err.message });
+        }
         return true;
       }
 
