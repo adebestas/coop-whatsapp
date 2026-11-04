@@ -13,6 +13,7 @@ import { log } from "../lib/logger.js";
 import { maskId } from "../lib/security.js";
 import { computeRepaymentDue } from "./loans.js";
 import { runShopInstallments } from "./shop.js";
+import { runSchemeWindows } from "./commodity-schemes.js";
 import {
   reportPeriod,
   generateReport,
@@ -1526,6 +1527,8 @@ export async function runSchedulerTick(): Promise<void> {
   const { postAutoStatus } = await import("./status-scheduler.js");
   const { cleanupExpiredVirtualAccounts } = await import("./payments/topup.js");
   const { escalateOverdueSTRs } = await import("./aml.js");
+  const { runBreachDeadlineReminders } = await import("./compliance-registers.js");
+  const { refreshSanctionsList } = await import("./sanctions-refresh.js");
 
   await runAutoSaveReminders().catch((err) =>
     log.error("[scheduler] auto-save reminders failed", { err: String(err) }),
@@ -1583,6 +1586,23 @@ export async function runSchedulerTick(): Promise<void> {
   await escalateOverdueSTRs().catch((err) =>
     log.error("[scheduler] STR deadline escalation failed", { err: String(err) }),
   );
+  await runBreachDeadlineReminders().catch((err) =>
+    log.error("[scheduler] data-breach deadline reminders failed", { err: String(err) }),
+  );
+  if (process.env.SANCTIONS_LIST_URL) {
+    const day = new Date().toISOString().slice(0, 10);
+    if (await claimOnce("sanctions-refresh", day, 40 * 3600)) {
+      await refreshSanctionsList()
+        .then((result) => {
+          if (!result.ok) {
+            log.warn("[scheduler] sanctions watchlist refresh failed", { err: result.error });
+          }
+        })
+        .catch((err) =>
+          log.error("[scheduler] sanctions watchlist refresh failed", { err: String(err) }),
+        );
+    }
+  }
   await runOmbudsmanEscalations().catch((err) =>
     log.error("[scheduler] ombudsman SLA escalation failed", { err: String(err) }),
   );
@@ -1600,6 +1620,9 @@ export async function runSchedulerTick(): Promise<void> {
   );
   await runShopInstallments().catch((err) =>
     log.error("[scheduler] shop installments failed", { err: String(err) }),
+  );
+  await runSchemeWindows().catch((err) =>
+    log.error("[scheduler] commodity scheme windows failed", { err: String(err) }),
   );
 }
 

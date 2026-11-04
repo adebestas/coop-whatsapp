@@ -275,6 +275,11 @@ export interface CoopComplianceInput {
   dpoName?: string | null;
   dpoPhone?: string | null;
   dpoEmail?: string | null;
+  ndpcRegistrationNumber?: string | null;
+  ndpcRegisteredAt?: string | null;
+  scumlNumber?: string | null;
+  scumlFiledAt?: string | null;
+  scumlExpiresAt?: string | null;
 }
 
 const COMPLIANCE_FIELDS = [
@@ -285,7 +290,32 @@ const COMPLIANCE_FIELDS = [
   "dpoName",
   "dpoPhone",
   "dpoEmail",
+  "ndpcRegistrationNumber",
+  "ndpcRegisteredAt",
+  "scumlNumber",
+  "scumlFiledAt",
+  "scumlExpiresAt",
 ] as const satisfies ReadonlyArray<keyof CoopComplianceInput>;
+
+/** Compliance fields stored as dates (ISO YYYY-MM-DD in, UTC Date out). */
+const COMPLIANCE_DATE_FIELDS = new Set<string>([
+  "ndpcRegisteredAt",
+  "scumlFiledAt",
+  "scumlExpiresAt",
+]);
+
+function normalizeComplianceDate(key: string, raw: unknown): Date | null {
+  const value = normalizeComplianceValue(key, raw);
+  if (value === null) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new ComplianceInputError(`${key} must be a date in YYYY-MM-DD format`);
+  }
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw new ComplianceInputError(`${key} must be a valid calendar date`);
+  }
+  return parsed;
+}
 
 /** A rejected compliance payload (bad type or no recognised field). Maps to 400. */
 export class ComplianceInputError extends Error {}
@@ -316,10 +346,12 @@ export async function setCoopCompliance(
   if (typeof input !== "object" || input === null) {
     throw new ComplianceInputError("invalid compliance payload");
   }
-  const data: Record<string, string | null> = {};
+  const data: Record<string, string | Date | null> = {};
   for (const key of COMPLIANCE_FIELDS) {
     if (key in input) {
-      data[key] = normalizeComplianceValue(key, input[key]);
+      data[key] = COMPLIANCE_DATE_FIELDS.has(key)
+        ? normalizeComplianceDate(key, input[key])
+        : normalizeComplianceValue(key, input[key]);
     }
   }
   if (Object.keys(data).length === 0) {

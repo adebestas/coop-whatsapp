@@ -45,6 +45,24 @@ import {
   markFiled,
   getRegulatorProfile,
 } from "../services/regulator-reporting.js";
+import {
+  ComplianceRegisterError,
+  createBreach,
+  createCrossBorderTransfer,
+  createDpia,
+  endCrossBorderTransfer,
+  listBreaches,
+  listCrossBorderTransfers,
+  listDpias,
+  summariseBreaches,
+  updateBreach,
+  updateDpia,
+  type BreachPatch,
+  type BreachInput,
+  type CrossBorderInput,
+  type DpiaInput,
+} from "../services/compliance-registers.js";
+import { getSanctionsRefreshStatus, refreshSanctionsList } from "../services/sanctions-refresh.js";
 
 const MAX_IP_ATTEMPTS = 5;
 const IP_WINDOW_SECONDS = 60;
@@ -284,6 +302,34 @@ export async function developerApiRoutes(app: FastifyInstance) {
     return { coops, alerts };
   });
 
+  app.get("/api/developer/sanctions", async () => {
+    const refresh = await getSanctionsRefreshStatus();
+    return { configured: Boolean(process.env.SANCTIONS_LIST_URL), refresh };
+  });
+
+  app.post("/api/developer/sanctions/refresh", async (req, reply) => {
+    if (!requireOwner(req, reply)) return;
+    const result = await refreshSanctionsList();
+    const actor = actorOf(req);
+    await writePlatformAudit({
+      actorId: actor.id,
+      actorPhone: actor.phone,
+      actorRole: actor.role,
+      action: "sanctions.refresh",
+      targetType: "sanctions_list",
+      targetId: "global",
+      detail: JSON.stringify({
+        ok: result.ok,
+        fetched: result.fetched ?? 0,
+        created: result.created ?? 0,
+        updated: result.updated ?? 0,
+        deactivated: result.deactivated ?? 0,
+        error: result.error ?? null,
+      }),
+    });
+    return reply.code(result.ok ? 200 : 502).send(result);
+  });
+
   app.post("/api/developer/coops", async (req, reply) => {
     const body = (req.body ?? {}) as CreateCoopInput;
     if (!body.name || !body.code) {
@@ -497,6 +543,113 @@ export async function developerApiRoutes(app: FastifyInstance) {
       return reply.code(notFound ? 404 : 400).send({ error: result.message });
     }
     return { ok: true, message: result.message };
+  });
+
+  // ---- Compliance registers (breaches, DPIAs, cross-border transfers) ----
+
+  app.get("/api/developer/coops/:id/compliance-registers", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    const [breaches, dpias, crossBorderTransfers] = await Promise.all([
+      listBreaches(id),
+      listDpias(id),
+      listCrossBorderTransfers(id),
+    ]);
+    return {
+      breaches,
+      breachSummary: summariseBreaches(breaches),
+      dpias,
+      crossBorderTransfers,
+    };
+  });
+
+  app.post("/api/developer/coops/:id/breaches", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    try {
+      return await createBreach(id, (req.body ?? {}) as BreachInput, actorOf(req));
+    } catch (err) {
+      if (err instanceof ComplianceRegisterError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
+  app.patch("/api/developer/coops/:id/breaches/:breachId", async (req, reply) => {
+    const { id, breachId } = req.params as { id: string; breachId: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    try {
+      return await updateBreach(id, breachId, (req.body ?? {}) as BreachPatch, actorOf(req));
+    } catch (err) {
+      if (err instanceof ComplianceRegisterError) {
+        const notFound = err.message === "breach not found";
+        return reply.code(notFound ? 404 : 400).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
+  app.post("/api/developer/coops/:id/dpias", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    try {
+      return await createDpia(id, (req.body ?? {}) as DpiaInput, actorOf(req));
+    } catch (err) {
+      if (err instanceof ComplianceRegisterError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
+  app.patch("/api/developer/coops/:id/dpias/:dpiaId", async (req, reply) => {
+    const { id, dpiaId } = req.params as { id: string; dpiaId: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    try {
+      return await updateDpia(id, dpiaId, (req.body ?? {}) as DpiaInput, actorOf(req));
+    } catch (err) {
+      if (err instanceof ComplianceRegisterError) {
+        const notFound = err.message === "DPIA not found";
+        return reply.code(notFound ? 404 : 400).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
+  app.post("/api/developer/coops/:id/cross-border-transfers", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    try {
+      return await createCrossBorderTransfer(
+        id,
+        (req.body ?? {}) as CrossBorderInput,
+        actorOf(req),
+      );
+    } catch (err) {
+      if (err instanceof ComplianceRegisterError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      throw err;
+    }
+  });
+
+  app.patch("/api/developer/coops/:id/cross-border-transfers/:transferId", async (req, reply) => {
+    const { id, transferId } = req.params as { id: string; transferId: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    const body = (req.body ?? {}) as { status?: string };
+    if (body.status !== "ended") {
+      return reply.code(400).send({ error: "status must be ended" });
+    }
+    try {
+      return await endCrossBorderTransfer(id, transferId, actorOf(req));
+    } catch (err) {
+      if (err instanceof ComplianceRegisterError) {
+        const notFound = err.message === "cross-border transfer not found";
+        return reply.code(notFound ? 404 : 400).send({ error: err.message });
+      }
+      throw err;
+    }
   });
 
   app.post("/api/developer/coops/:id/admins", async (req, reply) => {

@@ -1,6 +1,7 @@
 import { prisma, withTxBatch } from "../lib/prisma.js";
 import { audit } from "./audit.js";
 import { getCoopConfig, updateCoopConfig } from "./coop-config.js";
+import { buildDividendTrend } from "./live-trends.js";
 
 const VOTE_DAYS = 7;
 const REQUIRED_YES_PCT = 40;
@@ -8,6 +9,7 @@ const REQUIRED_YES_PCT = 40;
 export interface VoteResult {
   ok: boolean;
   message: string;
+  voteId?: string;
 }
 
 function activeMemberCountForVote(cooperativeId: string): Promise<number> {
@@ -116,6 +118,7 @@ export async function castDividendVote(
   ]);
   return {
     ok: true,
+    voteId: vote.id,
     message:
       choice === "yes"
         ? `✅ Your *yes* vote for a ${vote.proposedRate}% dividend rate has been recorded.`
@@ -127,23 +130,33 @@ export async function dividendVoteStatus(cooperativeId: string): Promise<VoteRes
   const latest = await prisma.dividendVote.findFirst({
     where: { cooperativeId },
     orderBy: { createdAt: "desc" },
-    include: { openedBy: { select: { name: true } } },
+    include: {
+      openedBy: { select: { name: true } },
+      ballots: { select: { choice: true } },
+    },
   });
   if (!latest) {
     return { ok: false, message: "No dividend-rate vote has been held yet." };
   }
-  const active =
-    latest.status === "open"
-      ? ` (open — closes ${latest.expiresAt.toLocaleDateString("en-GB")})`
-      : ` (${latest.status})`;
+  const yes = latest.ballots.filter((b) => b.choice).length;
+  const no = latest.ballots.filter((b) => !b.choice).length;
+  const eligible = await activeMemberCountForVote(cooperativeId);
   return {
     ok: true,
+    voteId: latest.id,
     message:
-      `🗳️ *Dividend-rate vote status*${active}\n\n` +
-      `Proposed rate: *${latest.proposedRate}%*\n` +
-      `Yes: *${latest.yesVotes}* · No: *${latest.noVotes}*\n` +
-      `Opened by: ${latest.openedBy.name}\n` +
-      `Pass threshold: *${latest.requiredYesPct}%* of active members must vote yes.`,
+      `Opened by ${latest.openedBy.name}\n\n` +
+      buildDividendTrend({
+        id: latest.id,
+        proposedRate: latest.proposedRate,
+        status: latest.status,
+        yes,
+        no,
+        requiredYesPct: latest.requiredYesPct,
+        expiresAt: latest.expiresAt,
+        voters: yes + no,
+        eligible,
+      }),
   };
 }
 

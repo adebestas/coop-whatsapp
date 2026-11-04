@@ -167,6 +167,8 @@ export function buildFullMenu(
     `• *shares* / *buyshares <count>* — own shares in the coop\n` +
     `• *shop* / *buyitem <number> <months>* — interest-free coop shop\n` +
     `• *myshop* — track your shop orders\n` +
+    `• *credit* — check your commodity credit\n` +
+    `• *schemes* / *subscribe* / *mysubs* / *cancelsub* — seasonal commodity schemes\n` +
     `• *dividendcalc [rate%]* — project your AGM dividend & patronage\n\n` +
     `*📄 Loans*\n` +
     `• *loan <amount> <months>* — apply (e.g. *loan 50000 3*)\n` +
@@ -205,6 +207,7 @@ export function buildFullMenu(
     `• *mydata* / *deleteaccount* — your data (NDPR)\n\n` +
     `*🗳️ Governance*\n` +
     `• *vote <election id> <member code>* / *pollresults <id>*\n` +
+    `• *livetrend <id>* — live voters, leader & counts for any open vote\n` +
     `• *buypolls* / *votebuy <poll id> <option #>*\n` +
     `• *votediv <yes|no>* — dividend-rate vote\n` +
     `• *dividend <rate>* — dividend calculator\n` +
@@ -273,6 +276,9 @@ export function buildAdminMenu(): string {
     `• *addshopitem "<name>" <price> [months] [stock]* — add a shop item\n` +
     `• *shopitems* / *closeshopitem <name>* — manage the shop catalog\n` +
     `• *shoporders [status]* — list shop orders\n` +
+    `• *newscheme* / *addschemeitem* / *openscheme* / *closescheme* — commodity schemes\n` +
+    `• *schemesubs* / *rejectsub* / *purchasescheme* / *convertscheme* / *dispatchsub* / *collectsub*\n` +
+    `• *shortbatch <ref> <code|all> <amount|all|waive>* — attribute payroll shortfall\n` +
     `• *approveorder <ref>* / *rejectorder <ref> [reason]* — review orders\n` +
     `• *dispatch <ref>* — hand over the goods and start the installment plan\n` +
     `• *substitutions* / *approvesubstitution <ref>* — review guarantor swaps\n` +
@@ -298,6 +304,7 @@ export function buildAdminMenu(): string {
     `*Meetings:* *startmeeting <agm\\|sgm> <title> [quorum%]*, *openmeeting <id>*, *closemeeting <id>*, *addmotion <meeting id> <title> \\| <description> [kind]*, *closemotion <id>*, *meetingminutes <id>*\n\n` +
     `*Savings groups:* *newgroup <rosca\\|vsla> <name> <code> <amount> <cycleLength>*, *closegroupcycle <group id>*, *groups*, *grouploans <group id>*\n\n` +
     `*Savings products:* *newproduct <fixed\\|goal\\|seasonal\\|junior> <name> [rate] [termMonths]*, *products*\n\n` +
+    `*Corporate members:* *corporate <member code> <RC number>*, *beneficial <member code> <owner name> <percent>*, *beneficials <member code>*, *removebeneficial <member code> <owner id>*\n\n` +
     `*Super admin:* *finalize <id>*, *approveclaim <id>*, *setrole <code> <role>*, *confirmname <code>*, *paydividend <rate%>*, *paysharedividend <rate%>*, *pnl*, *monthly*, *expense <amt> <cat> <desc>*, *payout <amt> <phone> <narr>*, *payanyone*, *approvepay <id>*, *setsalary*, *runpayroll <narr>*, *export members|transactions|pnl*, *setlimit <amt>*, *backup*, *reconcile*`
   );
 }

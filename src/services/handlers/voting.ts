@@ -6,10 +6,11 @@ import {
   castVote,
   closeVote,
   showResults,
-  showLiveResults,
   memberElectionsMessage,
+  countActiveMembers,
 } from "../votes.js";
 import { castBuyVote, listBuyPolls } from "../buypoll.js";
+import { getLiveTrend, appendTrend, buildBuyPollTrend } from "../live-trends.js";
 
 export async function handleStartVote(phone: string, args: string[]): Promise<void> {
   const kind = args[0]?.toLowerCase();
@@ -38,7 +39,12 @@ export async function handleVote(phone: string, args: string[]): Promise<void> {
     return;
   }
   const result = await castVote(phone, voteCode, memberCode);
-  await sendText({ to: phone, text: result.message });
+  let text = result.message;
+  if (result.ok) {
+    const member = await getMemberByPhone(phone);
+    if (member) text = await appendTrend(text, member.cooperativeId, voteCode);
+  }
+  await sendText({ to: phone, text });
 }
 
 export async function handleCloseVote(phone: string, args: string[]): Promise<void> {
@@ -76,20 +82,27 @@ export async function handleBuyPolls(phone: string, cooperativeId?: string): Pro
     });
     return;
   }
-  const parts: string[] = [];
-  for (const p of polls) {
-    parts.push(
-      `🛒 *${p.title}* (${p.status}) — id *${p.id.slice(-6)}*`,
-      ...p.options.map(
-        (o, i) =>
-          `   ${i + 1}. ${o.name} — ~${formatBalance(o.estimatedCost)} — ${o._count.ballots} vote(s)`,
-      ),
-      "",
-    );
-  }
+  const eligible = await countActiveMembers(member.cooperativeId, null);
+  const parts = polls.map((p) =>
+    buildBuyPollTrend({
+      id: p.id,
+      title: p.title,
+      status: p.status,
+      options: p.options.map((o) => ({
+        label: o.name,
+        votes: o._count.ballots,
+        note: `~${formatBalance(o.estimatedCost)}`,
+      })),
+      voters: p._count.ballots,
+      eligible,
+      includeFooter: false,
+    }),
+  );
   await sendText({
     to: phone,
-    text: parts.join("\n").trim() + `\n\nVote with *votebuy <poll id> <option number>*.`,
+    text:
+      parts.join("\n\n---\n\n") +
+      `\n\nVote with *votebuy <poll id> <option number>* · live tally: *livetrend <poll id>*.`,
   });
 }
 
@@ -120,16 +133,40 @@ export async function handleVoteBuy(
     pollCode,
     optionNumber,
   );
-  await sendText({ to: phone, text: result.message });
+  let text = result.message;
+  if (result.ok) {
+    text = await appendTrend(text, member.cooperativeId, result.pollId ?? pollCode);
+  }
+  await sendText({ to: phone, text });
 }
 
 export async function handlePollResults(phone: string, args: string[]): Promise<void> {
   if (!args[0]) {
-    await sendText({ to: phone, text: "Usage: *pollresults <election id>*" });
+    await sendText({ to: phone, text: "Usage: *livetrend <election id>*" });
     return;
   }
-  const result = await showLiveResults(phone, args[0]);
-  await sendText({ to: phone, text: result.message });
+  const result = await showLiveTrend(phone, args[0]);
+  await sendText({ to: phone, text: result });
+}
+
+/** Any member can ask for the live tally of any open vote they can see. */
+export async function handleLiveTrend(phone: string, args: string[]): Promise<void> {
+  if (!args[0]) {
+    await sendText({
+      to: phone,
+      text: "Usage: *livetrend <id>* — elections, buy-votes, motions and the open dividend-rate vote.",
+    });
+    return;
+  }
+  const result = await showLiveTrend(phone, args[0]);
+  await sendText({ to: phone, text: result });
+}
+
+async function showLiveTrend(phone: string, ref: string): Promise<string> {
+  const member = await getMemberByPhone(phone);
+  if (!member) return "You need to join a cooperative first. Reply *join <code>*.";
+  const trend = await getLiveTrend(member.cooperativeId, ref);
+  return trend.message;
 }
 
 export async function handleElections(phone: string, cooperativeId?: string): Promise<void> {

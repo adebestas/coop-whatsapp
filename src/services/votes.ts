@@ -11,7 +11,10 @@ export interface VoteResult {
   voteId?: string;
 }
 
-async function countActiveMembers(cooperativeId: string, unitId: string | null): Promise<number> {
+export async function countActiveMembers(
+  cooperativeId: string,
+  unitId: string | null,
+): Promise<number> {
   const where: { cooperativeId: string; status: string; unitId?: string } = {
     cooperativeId,
     status: "active",
@@ -54,7 +57,7 @@ function positionLabel(vote: { position?: string | null; title: string }): strin
   return vote.position ? ` for *${vote.position}*` : "";
 }
 
-async function buildLiveResultsMessage(voteId: string): Promise<string> {
+export async function buildLiveResultsMessage(voteId: string): Promise<string> {
   const vote = await prisma.vote.findUnique({
     where: { id: voteId },
     include: {
@@ -84,6 +87,16 @@ async function buildLiveResultsMessage(voteId: string): Promise<string> {
     return `${c.member.name}: ${bar} ${votes} vote${votes !== 1 ? "s" : ""} (${pct}%)`;
   });
 
+  const leaders = vote.candidates.filter((c) => c.ballots.length === maxVotes);
+  const leaderLine =
+    vote.candidates.length === 0
+      ? ""
+      : totalVotes === 0
+        ? "Leading: _no votes yet_\n"
+        : leaders.length > 1
+          ? `Leading: *tied* (${maxVotes} vote${maxVotes !== 1 ? "s" : ""} each)\n`
+          : `Leading: *${leaders[0].member.name}* (${maxVotes} vote${maxVotes !== 1 ? "s" : ""})\n`;
+
   const quorumStatus = quorumMet ? "✅" : "❌";
   // Votes are closed manually (no end time), so no valid countdown exists —
   // show an honest status rather than a misleading "Ended" from the start time.
@@ -93,13 +106,15 @@ async function buildLiveResultsMessage(voteId: string): Promise<string> {
   return (
     `${typeTag} LIVE: ${vote.title}${posLabel}\n\n` +
     `${lines.join("\n") || "No candidates yet."}\n\n` +
-    `Total votes: ${totalVotes} | Quorum: ${totalVotes}/${quorumRequired} (${quorumPercent}%) ${quorumStatus}\n` +
+    leaderLine +
+    `Voters: ${totalVotes} of ${activeMembers} active (${quorumPercent}%) | Quorum: ${totalVotes}/${quorumRequired} ${quorumStatus}\n` +
     `Voting: ${channels} | One person, one vote\n` +
     `Status: Open — closes when an admin runs *closevote ${vote.id.slice(-6)}*`
   );
 }
 
 async function broadcastLiveResults(voteId: string): Promise<void> {
+  if (process.env.LIVE_RESULTS_BROADCAST !== "1") return;
   const vote = await prisma.vote.findUnique({ where: { id: voteId } });
   if (!vote || vote.status !== "open") return;
 
@@ -341,17 +356,7 @@ export async function castVote(
 export async function showResults(phone: string, voteCode: string): Promise<VoteResult> {
   const vote = await findVote(voteCode);
   if (!vote) return { ok: false, message: "Election not found." };
-  return { ok: true, message: await tallyMessage(vote.id) };
-}
-
-/** Show formatted live results for an ongoing election (pollresults command). */
-export async function showLiveResults(phone: string, voteCode: string): Promise<VoteResult> {
-  const vote = await findVote(voteCode);
-  if (!vote) return { ok: false, message: "Election not found." };
-  if (vote.status !== "open") {
-    return { ok: true, message: await tallyMessage(vote.id) };
-  }
-  return { ok: true, message: await buildLiveResultsMessage(vote.id) };
+  return { ok: true, message: await buildTallyMessage(vote.id) };
 }
 
 /** Close an election and tally. Unit elections install the winner as unit admin. */
@@ -436,11 +441,11 @@ export async function closeVote(actorPhone: string, voteCode: string): Promise<V
     detail: tied ? "tied result" : `winner: ${winner.member.name}`,
   });
 
-  const finalMessage = (await tallyMessage(vote.id)) + `\n\n${quorumMessage}` + extra;
+  const finalMessage = (await buildTallyMessage(vote.id)) + `\n\n${quorumMessage}` + extra;
   return { ok: true, message: finalMessage };
 }
 
-async function tallyMessage(voteId: string): Promise<string> {
+export async function buildTallyMessage(voteId: string): Promise<string> {
   const vote = await prisma.vote.findUnique({
     where: { id: voteId },
     include: {

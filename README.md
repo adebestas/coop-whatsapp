@@ -651,19 +651,51 @@ lifecycle is maker-checked and reconciled before any money is credited:
 5. **Reconcile** — `reconbatch <ref> <amount>` (cheque_received → reconciled).
    A matching bank credit can auto-reconcile a batch, or upload a bank statement
    via `POST /api/admin/deductions/reconcile-statement` to match credits to
-   batches. Approval is blocked while the reconciled amount is below the batch
-   total.
+   batches.
 6. **Approve** — `approvebatch <ref>` credits wallets and repays loans in a
-   single transaction. If the employer under-remitted, `approvebatch <ref>
-   partial` credits only the items the reconciled amount covers and leaves the
-   rest pending (batch → `partially_approved`) for a later top-up. Maker-checker:
-   the approver must be a *different* super admin than the maker, and the maker's
-   name must be confirmed first with `confirmname <code>`.
+   single transaction. Maker-checker: the approver must be a *different* super
+   admin than the maker, and the maker's name must be confirmed first with
+   `confirmname <code>`.
+
+When the employer under-remits, approval no longer blocks. The reconciled
+amount is allocated per member in priority order (loan → commodity → savings).
+Any gap is recorded as an open shortfall for that member, and the unpaid part of
+an item rolls into the next batch as a new `rollover` item:
+
+- `shortbatch <ref> <member code|all> <amount|all|waive>` — name the member
+  responsible for the short gap (`all` splits it pro-rata) or waive it entirely.
+
+A member with an open shortfall cannot draw commodity credit until it is
+settled.
 
 Uploaded files are stored in S3-compatible object storage (when `BACKUP_*` is
 configured) and linked to the batch via `sourceFileKey` / `sourceFileName`.
 
 Reject with `rejectbatch <ref> [reason]`.
+
+## Commodity credit schemes
+
+Seasonal bulk-purchase schemes (rice, oil, rams, appliances) funded from
+payroll-deduction credit. A member's credit line is their expected monthly
+payroll deduction multiplied by `COMMODITY_CREDIT_MULTIPLIER` (default `3`),
+minus any outstanding commodity loan balances and active reservations. The
+feature is gated behind `COMMODITY_SCHEMES_ENABLED=1`.
+
+- **Member:** `credit`, `schemes`, `subscribe <scheme> <item> <qty> [months 3-6]`,
+  `mysubs`, `cancelsub <reference>`.
+- **Admin:** `newscheme <name> | <season> | <opens> | <closes>`,
+  `addschemeitem <ref> | <name> | <unit> | <cost> | <price> | <units|-> | <max>`,
+  `openscheme` / `closescheme`, `schemesubs`, `rejectsub`.
+- **Super admin:** `purchasescheme <ref> | <supplier> | <cost> [| supplier_credit
+  | <terms>]`, `convertscheme <ref>`, `dispatchsub <ref>`, `collectsub <ref>
+  <member code>`.
+
+The co-op can only buy goods once reconciled bank cash covers the order; a
+supplier-credit purchase is an audited super-admin override that needs payment
+terms. Conversion creates `Loan(kind=commodity)` records and adds the first
+installments to the current deduction batch, so repayment is collected with the
+member's payroll deduction. Expired scheme windows close automatically on the
+scheduler, and super admins get a month-end notice of open shortfalls.
 
 ## Changing your phone number
 

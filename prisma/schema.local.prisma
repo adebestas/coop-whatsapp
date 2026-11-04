@@ -38,6 +38,11 @@ model Cooperative {
   dpoName            String? // NDPA Data Protection Officer — name
   dpoPhone           String? // NDPA Data Protection Officer — phone
   dpoEmail           String? // NDPA Data Protection Officer — email
+  ndpcRegistrationNumber String? // NDPC data-controller registration number
+  ndpcRegisteredAt   DateTime? // date the NDPC certificate was issued
+  scumlNumber        String? // SCUML registration number
+  scumlFiledAt       DateTime? // date the SCUML registration was filed
+  scumlExpiresAt     DateTime? // SCUML renewal deadline
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
   tokensValidAfter   DateTime?
@@ -100,6 +105,13 @@ subscription       Subscription?
   insurancePolicies  InsurancePolicy[]
   insuranceClaims    InsuranceClaim[]
   literacyCertificates LiteracyCertificate[]
+  commoditySchemes       CommodityScheme[]
+  commoditySubscriptions CommoditySubscription[]
+  deductionShortfalls    DeductionShortfall[]
+  dataBreaches           DataBreach[]
+  dpias                  DpiaRecord[]
+  crossBorderTransfers   CrossBorderTransfer[]
+  beneficialOwners       MemberBeneficialOwner[]
 
   @@index([status])
   @@index([code])
@@ -186,6 +198,8 @@ model Member {
   bvn                     String? // NOTE: BVN is deliberately NOT collected (avoids FI classification)
   nin                     String? // 11-digit National Identification Number (KYC)
   kycStatus               String              @default("unset") // unset | pending | verified | failed
+  entityType              String              @default("individual") // individual | corporate
+  rcNumber                String? // CAC RC number when the member is a corporate body
   kycVerifiedAt           DateTime?
   role                    String              @default("member") // member | admin | superadmin
   state                   String? // member's home state/LGA grouping
@@ -227,6 +241,7 @@ model Member {
   cooperativeId           String
   cooperative             Cooperative         @relation(fields: [cooperativeId], references: [id], onDelete: Restrict)
   progress                MemberProgress?
+  beneficialOwners        MemberBeneficialOwner[]
   consentAt               DateTime?           // when the member opted in to messages
   aiConsentAt             DateTime?           // when the member consented to AI processing (voice transcription / translation via Groq)
   screeningStatus         String              @default("unset") // unset | clear | review | matched — sanctions/PEP screening of the member name
@@ -315,6 +330,9 @@ model Member {
   referralWithdrawals     ReferralWithdrawal[]
   insurancePolicies       InsurancePolicy[]
   insuranceClaims         InsuranceClaim[]
+  schemesCreated          CommodityScheme[]       @relation("SchemeCreator")
+  commoditySubscriptions  CommoditySubscription[]
+  deductionShortfalls     DeductionShortfall[]
 
   @@unique([cooperativeId, phone])
   @@index([phone])
@@ -440,7 +458,7 @@ model Loan {
   provisionEntries   ProvisionEntry[]
   groupId            String?
   group              Group?          @relation(fields: [groupId], references: [id], onDelete: SetNull)
-  kind               String          @default("cash")
+  kind               String          @default("cash") // cash | shop | commodity
   shopOrder          ShopOrder?
   substitutions      GuarantorSubstitution[]
 
@@ -1190,6 +1208,7 @@ model DeductionBatch {
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
   items         DeductionItem[]
+  shortfalls    DeductionShortfall[]
 
   @@index([cooperativeId])
 }
@@ -1200,11 +1219,14 @@ model DeductionItem {
   batch      DeductionBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
   memberId   String
   member     Member         @relation(fields: [memberId], references: [id])
-  kind       String         @default("savings") // savings | loan
-  loanId     String? // set when kind = loan
+  kind       String         @default("savings") // savings | loan | commodity
+  loanId     String? // set when kind = loan or commodity
   amount     Int // stored in kobo
   status     String         @default("pending") // pending | credited
   creditedAt DateTime?
+  rolloverOfItemId String?        @unique
+  rolledFrom       DeductionItem? @relation("DeductionRollover", fields: [rolloverOfItemId], references: [id])
+  rolledTo         DeductionItem? @relation("DeductionRollover")
 
   @@unique([batchId, memberId, kind])
 }
@@ -1362,6 +1384,21 @@ model SanctionsEntry {
 
   @@index([name])
   @@index([isActive])
+}
+
+// Platform-level status of the last external watchlist refresh (no RLS).
+model SanctionsListRefresh {
+  id          String    @id @default("global")
+  source      String?
+  status      String    @default("never") // never | ok | failed
+  fetched     Int       @default(0)
+  created     Int       @default(0)
+  updated     Int       @default(0)
+  deactivated Int       @default(0)
+  error       String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  updatedAt   DateTime  @updatedAt
 }
 
 // Immutable audit of every screening decision (member, NOK, payee, payout).
@@ -2029,6 +2066,99 @@ model RegulatorReport {
   @@index([cooperativeId, status])
 }
 
+// NDPA breach register. Notification to the NDPC is due within 72 hours of
+// discovery; the deadline is derived from discoveredAt, never stored.
+model DataBreach {
+  id              String      @id @default(cuid())
+  cooperativeId   String
+  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  reference       String // BR-YYYYMMDD-XXXX, unique per coop
+  title           String
+  description     String
+  discoveredAt    DateTime
+  occurredAt      DateTime?
+  affectedCount   Int?
+  dataCategories  String?
+  containment     String?
+  status          String      @default("open") // open | contained | notified | closed
+  ndpcNotifiedAt  DateTime?
+  ndpcReference   String?
+  subjectsNotifiedAt DateTime?
+  notes           String?
+  createdById     String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@unique([cooperativeId, reference])
+  @@index([cooperativeId, status])
+  @@index([cooperativeId, discoveredAt])
+}
+
+// Data Protection Impact Assessment register (NDPA s.27).
+model DpiaRecord {
+  id              String      @id @default(cuid())
+  cooperativeId   String
+  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  title           String
+  activity        String
+  dataCategories  String?
+  necessity       String? // why the processing is necessary and proportionate
+  risks           String? // identified risks to data subjects
+  mitigations     String? // controls that reduce each risk
+  status          String      @default("draft") // draft | approved | review_due | archived
+  ownerName       String?
+  reviewedAt      DateTime?
+  nextReviewAt    DateTime?
+  createdById     String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([cooperativeId, status])
+  @@index([cooperativeId, nextReviewAt])
+}
+
+// NDPA cross-border transfer register (s.42-43).
+model CrossBorderTransfer {
+  id              String      @id @default(cuid())
+  cooperativeId   String
+  cooperative     Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  country         String
+  recipient       String
+  purpose         String
+  dataCategories  String?
+  safeguard       String // adequacy | scc | bcr | consent | contract
+  safeguardDetail String?
+  status          String      @default("active") // active | ended
+  startedAt       DateTime    @default(now())
+  reviewedAt      DateTime?
+  endedAt         DateTime?
+  createdById     String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([cooperativeId, status])
+  @@index([cooperativeId, country])
+}
+
+// Beneficial owners of a corporate member (CAMA/SCUML expectations).
+model MemberBeneficialOwner {
+  id            String      @id @default(cuid())
+  cooperativeId String
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id], onDelete: Cascade)
+  memberId      String
+  member        Member      @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  name          String
+  ownershipPct  Float
+  idType        String? // nin | bvn | passport | rc
+  idNumber      String?
+  verifiedAt    DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([cooperativeId, memberId])
+  @@index([cooperativeId, name])
+}
+
 // ---- CubeCover insurance policies & claims ----
 model InsurancePolicy {
   id              String   @id @default(cuid())
@@ -2286,4 +2416,106 @@ model ShopOrder {
 
   @@index([cooperativeId, status])
   @@index([memberId, status])
+}
+
+// ---- Commodity credit schemes ----
+// Seasonal bulk-purchase schemes (rice, oil, rams, appliances) that members fund
+// with capped payroll-backed credit. Purchases are gated on reconciled bank cash
+// (or an audited supplier-credit decision) and repaid through payroll deduction.
+model CommodityScheme {
+  id             String                  @id @default(cuid())
+  cooperativeId  String
+  cooperative    Cooperative             @relation(fields: [cooperativeId], references: [id])
+  reference      String                  @unique
+  name           String
+  season         String?
+  opensAt        DateTime
+  closesAt       DateTime
+  status         String                  @default("draft") // draft | open | closed | purchased | converted | cancelled
+  pollId         String?
+  supplier       String?
+  quotedCostKobo Int                     @default(0)
+  actualCostKobo Int?
+  fundingSource  String? // cash | supplier_credit
+  purchaseNote   String?
+  purchasedAt    DateTime?
+  purchasedById  String?
+  convertedAt    DateTime?
+  createdById    String
+  creator        Member                  @relation("SchemeCreator", fields: [createdById], references: [id])
+  items          CommoditySchemeItem[]
+  subscriptions  CommoditySubscription[]
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@index([cooperativeId, status])
+}
+
+model CommoditySchemeItem {
+  id              String                  @id @default(cuid())
+  schemeId        String
+  scheme          CommodityScheme         @relation(fields: [schemeId], references: [id], onDelete: Cascade)
+  name            String
+  unitLabel       String
+  unitCostKobo    Int
+  memberPriceKobo Int
+  totalUnits      Int?
+  maxQtyPerMember Int                     @default(1)
+  subscriptions   CommoditySubscription[]
+
+  @@index([schemeId])
+}
+
+model CommoditySubscription {
+  id              String                 @id @default(cuid())
+  reference       String                 @unique
+  cooperativeId   String
+  cooperative     Cooperative            @relation(fields: [cooperativeId], references: [id])
+  schemeId        String
+  scheme          CommodityScheme        @relation(fields: [schemeId], references: [id])
+  itemId          String
+  item            CommoditySchemeItem    @relation(fields: [itemId], references: [id])
+  memberId        String
+  member          Member                 @relation(fields: [memberId], references: [id])
+  qty             Int                    @default(1)
+  unitPriceKobo   Int
+  totalKobo       Int
+  months          Int                    @default(3)
+  status          String                 @default("reserved") // reserved | approved | rejected | cancelled | converted
+  reservedAt      DateTime               @default(now())
+  decidedAt       DateTime?
+  decidedById     String?
+  rejectReason    String?
+  convertedLoanId String?                @unique
+  dispatchedAt    DateTime?
+  collectedAt     DateTime?
+  collectedById   String?
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  @@index([cooperativeId, status])
+  @@index([memberId, status])
+}
+
+// Per-member record of an approved deduction batch that came up short. The
+// shortfall is rolled forward into the next batch (status = rolled) instead of
+// blocking the whole batch.
+model DeductionShortfall {
+  id             String         @id @default(cuid())
+  cooperativeId  String
+  cooperative    Cooperative    @relation(fields: [cooperativeId], references: [id])
+  batchId        String
+  batch          DeductionBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  memberId       String
+  member         Member         @relation(fields: [memberId], references: [id])
+  amount         Int
+  reason         String?
+  attributedById String?
+  status         String         @default("open") // open | rolled | waived
+  rolledToItemId String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@unique([batchId, memberId])
+  @@index([cooperativeId, status])
 }

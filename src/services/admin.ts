@@ -15,8 +15,21 @@ import {
   waiveMonth,
   recordCheque,
   reconcileBatch,
+  attributeShortfall,
 } from "./deductions.js";
 import { approveLoan, listPendingLoans, rejectLoan } from "./loans.js";
+import {
+  addSchemeItem,
+  closeScheme,
+  collectCommodity,
+  convertScheme,
+  createScheme,
+  dispatchCommodity,
+  openScheme,
+  purchaseScheme,
+  rejectCommoditySubscription,
+} from "./commodity-schemes.js";
+import { formatSchemeSubsText, parseNaira, parseSchemeItem } from "./commodity-commands.js";
 import { formatBalance } from "./cooperative.js";
 import { toKobo } from "../lib/money.js";
 import { sendToBank } from "./disbursements.js";
@@ -55,6 +68,13 @@ import { startAssistWithdrawal, confirmAssistWithdrawal } from "./adminassist.js
 import { revokeMemberSessions, unrevokeMemberSessions } from "./revocation.js";
 import { approvePhoneChange, rejectPhoneChange } from "./phone-change.js";
 import { requestManualCredit, approveManualCredit, rejectManualCredit } from "./manualcredit.js";
+import {
+  addBeneficialOwner,
+  BeneficialOwnerError,
+  listBeneficialOwners,
+  markCorporateMember,
+  removeBeneficialOwner,
+} from "./beneficial-owners.js";
 import { startDeathClaim, setClaimBank, approveClaim, rejectClaim } from "./deathclaims.js";
 import { listCoopMandates, pauseMandate, resumeMandate, skipDebit } from "./mandates.js";
 import { recommendRefund, approveRefund, rejectRefund } from "./refunds.js";
@@ -156,6 +176,7 @@ const MONEY_OUT_COMMANDS = new Set([
   "paydividend",
   "paysharedividend",
   "disable2fa",
+  "purchasescheme",
 ]);
 
 /** Send the guard failure text and return true (command handled). */
@@ -558,8 +579,10 @@ export async function handleAdminCommand(
   phone: string,
   cmd: string,
   args: string[],
+  text?: string,
 ): Promise<boolean> {
   try {
+    let rawText = text ?? [cmd, ...args].join(" ");
     const ctx = await adminContext(phone);
 
     // Committee commands are open to seated committee members, who are often
@@ -612,9 +635,11 @@ export async function handleAdminCommand(
 
     // 2FA gate on every money-out command (consumes a trailing TOTP code).
     if (MONEY_OUT_COMMANDS.has(cmd)) {
+      const before = args.length;
       const guard = await assertMoneyAuthorized(admin.id, args);
       if (!guard.ok) return guardFailed(phone, guard.message);
       args = guard.args;
+      if (args.length < before) rawText = rawText.replace(/\s+\S+$/, "");
     }
 
     switch (cmd) {
@@ -1297,6 +1322,136 @@ export async function handleAdminCommand(
           targetId: target.id,
           detail: `${target.name} -> ${role}`,
         });
+        return true;
+      }
+
+      case "corporate": {
+        const code = args[0];
+        const rc = args.slice(1).join(" ");
+        if (!code || !rc) {
+          await sendText({
+            to: phone,
+            text: "Usage: *corporate <member code> <RC number>* — e.g. *corporate MEM001 RC1234567*.",
+          });
+          return true;
+        }
+        try {
+          const member = await markCorporateMember(coopId, code, rc);
+          await sendText({
+            to: phone,
+            text: `✅ *${member.name}* (${member.code}) is now a corporate member, RC *${member.rcNumber}*.\n\nAdd its owners with *beneficial ${member.code} <owner name> <percent>*.`,
+          });
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: phone,
+            actorId: admin.id,
+            actorRole: roleLabel(ctx),
+            action: "member.corporate.set",
+            targetType: "member",
+            targetId: member.id,
+            detail: `RC ${member.rcNumber}`,
+          });
+        } catch (err) {
+          if (!(err instanceof BeneficialOwnerError)) throw err;
+          await sendText({ to: phone, text: err.message });
+        }
+        return true;
+      }
+
+      case "beneficial": {
+        const code = args[0];
+        const pctRaw = args[args.length - 1];
+        const ownerName = args.slice(1, -1).join(" ");
+        const pct = Number(pctRaw);
+        if (!code || !ownerName || !Number.isFinite(pct)) {
+          await sendText({
+            to: phone,
+            text: "Usage: *beneficial <member code> <owner name> <percent>* — e.g. *beneficial MEM001 Ada Obi 40*.",
+          });
+          return true;
+        }
+        try {
+          const owner = await addBeneficialOwner(coopId, code, ownerName, pct);
+          await sendText({
+            to: phone,
+            text: `✅ Recorded *${owner.name}* as a ${owner.ownershipPct}% beneficial owner of *${code.toUpperCase()}*.\n\nOwner id: *${owner.id.slice(-6)}*`,
+          });
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: phone,
+            actorId: admin.id,
+            actorRole: roleLabel(ctx),
+            action: "member.beneficial_owner.add",
+            targetType: "member",
+            targetId: owner.memberId,
+            detail: `${owner.name} ${owner.ownershipPct}%`,
+          });
+        } catch (err) {
+          if (!(err instanceof BeneficialOwnerError)) throw err;
+          await sendText({ to: phone, text: err.message });
+        }
+        return true;
+      }
+
+      case "beneficials": {
+        const code = args[0];
+        if (!code) {
+          await sendText({ to: phone, text: "Usage: *beneficials <member code>*." });
+          return true;
+        }
+        try {
+          const { member, owners, total } = await listBeneficialOwners(coopId, code);
+          if (owners.length === 0) {
+            await sendText({
+              to: phone,
+              text: `No beneficial owners recorded for *${member.name}* (${member.code}).\n\nAdd one with *beneficial ${member.code} <owner name> <percent>*.`,
+            });
+            return true;
+          }
+          const lines = owners
+            .map(
+              (o) =>
+                `• *${o.id.slice(-6)}* — ${o.name} · ${o.ownershipPct}%${o.idType && o.idNumber ? ` · ${o.idType} ${o.idNumber}` : ""}`,
+            )
+            .join("\n");
+          await sendText({
+            to: phone,
+            text: `*Beneficial owners — ${member.name} (${member.code})*\n\n${lines}\n\nTotal recorded: *${total}%*`,
+          });
+        } catch (err) {
+          if (!(err instanceof BeneficialOwnerError)) throw err;
+          await sendText({ to: phone, text: err.message });
+        }
+        return true;
+      }
+
+      case "removebeneficial": {
+        const code = args[0];
+        const ref = args[1];
+        if (!code || !ref) {
+          await sendText({
+            to: phone,
+            text: "Usage: *removebeneficial <member code> <owner id>* — the owner id is printed by *beneficials*.",
+          });
+          return true;
+        }
+        try {
+          const removed = await removeBeneficialOwner(coopId, code, ref);
+          await sendText({ to: phone, text: `✅ Removed beneficial owner *${removed.name}*.` });
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: phone,
+            actorId: admin.id,
+            actorRole: roleLabel(ctx),
+            action: "member.beneficial_owner.remove",
+            targetType: "member",
+            targetId: removed.memberId,
+            detail: `${removed.name} ${removed.ownershipPct}%`,
+          });
+        } catch (err) {
+          if (!(err instanceof BeneficialOwnerError)) throw err;
+          await sendText({ to: phone, text: err.message });
+        }
         return true;
       }
 
@@ -2984,6 +3139,150 @@ export async function handleAdminCommand(
           return true;
         }
         const result = await reconcileBatch(phone, ref, toKobo(amount));
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "shortbatch": {
+        if (!isSuper) {
+          await sendText({
+            to: phone,
+            text: "Only the *super admin* can attribute a shortfall.",
+          });
+          return true;
+        }
+        const [ref, code, amountArg, ...reasonParts] = args;
+        if (!ref || !code || !amountArg) {
+          await sendText({
+            to: phone,
+            text: "Usage: *shortbatch <ref> <member code|all> <amount|all|waive> [reason]*",
+          });
+          return true;
+        }
+        const raw = amountArg.toLowerCase();
+        const parsed =
+          raw === "all" || raw === "waive"
+            ? raw
+            : Number.isFinite(Number(raw))
+              ? toKobo(Number(raw))
+              : NaN;
+        if (typeof parsed === "number" && !(parsed > 0)) {
+          await sendText({
+            to: phone,
+            text: "Usage: *shortbatch <ref> <member code|all> <amount|all|waive> [reason]*",
+          });
+          return true;
+        }
+        const result = await attributeShortfall(
+          phone,
+          ref,
+          code,
+          parsed,
+          reasonParts.join(" ") || undefined,
+        );
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "newscheme": {
+        const body = rawText.replace(/^\/?\s*newscheme\s+/i, "");
+        const [name, season, opens, closes] = body.split("|").map((p) => p.trim());
+        if (!name || !opens || !closes) {
+          await sendText({
+            to: phone,
+            text: "Usage: *newscheme <name> | <season> | <YYYY-MM-DD> | <YYYY-MM-DD>*",
+          });
+          return true;
+        }
+        const result = await createScheme(phone, {
+          name,
+          season,
+          opensAt: new Date(`${opens}T00:00:00Z`),
+          closesAt: new Date(`${closes}T23:59:59Z`),
+        });
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "addschemeitem": {
+        const parsed = parseSchemeItem(rawText);
+        if (!parsed) {
+          await sendText({
+            to: phone,
+            text: "Usage: *addschemeitem <ref> | <name> | <unit> | <cost> | <price> | <units|-> | <max>*",
+          });
+          return true;
+        }
+        const ref = rawText
+          .replace(/^\/?\s*addschemeitem\s+/i, "")
+          .split("|")[0]
+          .trim();
+        const result = await addSchemeItem(phone, ref, parsed);
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "openscheme": {
+        const result = await openScheme(phone, args[0] ?? "");
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "closescheme": {
+        const result = await closeScheme(phone, args[0] ?? "");
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "schemesubs": {
+        await sendText({ to: phone, text: await formatSchemeSubsText(coopId, args[0] ?? "") });
+        return true;
+      }
+
+      case "rejectsub": {
+        const result = await rejectCommoditySubscription(
+          phone,
+          args[0] ?? "",
+          args.slice(1).join(" "),
+        );
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "purchasescheme": {
+        const body = rawText.replace(/^\/?\s*purchasescheme\s+/i, "");
+        const parts = body.split("|").map((p) => p.trim());
+        const [ref, supplier, cost, funding, ...noteParts] = parts;
+        const costKobo = parseNaira(cost ?? "");
+        if (!ref || !supplier || !costKobo) {
+          await sendText({
+            to: phone,
+            text: "Usage: *purchasescheme <ref> | <supplier> | <cost> [| supplier_credit | <terms>]*",
+          });
+          return true;
+        }
+        const result = await purchaseScheme(phone, ref, supplier, costKobo, {
+          fundingSource: funding === "supplier_credit" ? "supplier_credit" : "cash",
+          note: noteParts.join(" | ") || undefined,
+        });
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "convertscheme": {
+        const result = await convertScheme(phone, args[0] ?? "");
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "dispatchsub": {
+        const result = await dispatchCommodity(phone, args[0] ?? "");
+        await sendText({ to: phone, text: result.message });
+        return true;
+      }
+
+      case "collectsub": {
+        const result = await collectCommodity(phone, args[0] ?? "", args[1] ?? "");
         await sendText({ to: phone, text: result.message });
         return true;
       }
