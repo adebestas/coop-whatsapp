@@ -11,6 +11,13 @@
  */
 
 import { GROQ_URL, groqAvailable, groqModel, groqHeaders, GROQ_TIMEOUT_MS } from "./groq.js";
+import {
+  isInjectionAttempt,
+  isInScope,
+  sanitiseUserInput,
+  GUARDRAIL_PREFIX,
+  GUARDRAIL_SUFFIX,
+} from "./ai-guardrails.js";
 
 export interface LoanIntent {
   /** Requested principal in naira (null when the message didn't state one). */
@@ -74,6 +81,11 @@ function sanitizeGuarantors(raw: unknown): string[] {
  */
 export async function extractLoanRequest(text: string): Promise<LoanIntent | null> {
   if (!groqAvailable() || !text || text.length > 300) return null;
+  // Guardrail: reject prompt injections and off-topic requests immediately
+  if (isInjectionAttempt(text) || !isInScope(text)) return null;
+
+  const cleanText = sanitiseUserInput(text, 300);
+
   try {
     const res = await fetch(GROQ_URL, {
       method: "POST",
@@ -83,8 +95,9 @@ export async function extractLoanRequest(text: string): Promise<LoanIntent | nul
         temperature: 0,
         max_tokens: 200,
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: text },
+          { role: "system", content: `${GUARDRAIL_PREFIX}\n\n${SYSTEM_PROMPT}` },
+          { role: "system", content: GUARDRAIL_SUFFIX },
+          { role: "user", content: `<user_message>${cleanText}</user_message>` },
         ],
       }),
       signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),

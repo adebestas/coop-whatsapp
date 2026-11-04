@@ -7,6 +7,13 @@
  */
 
 import { GROQ_URL, groqAvailable, groqModel, groqHeaders, GROQ_TIMEOUT_MS } from "./groq.js";
+import {
+  isInjectionAttempt,
+  isInScope,
+  sanitiseUserInput,
+  GUARDRAIL_PREFIX,
+  GUARDRAIL_SUFFIX,
+} from "./ai-guardrails.js";
 
 /**
  * Commands a member may be nudged toward by the AI. The AI suggestion is NEVER
@@ -158,6 +165,11 @@ export function aiEnabled(): boolean {
 /** Ask the LLM to map free text to a known command. Returns null when disabled or unsure. */
 export async function suggestCommand(text: string): Promise<Suggestion | null> {
   if (!aiEnabled() || !text || text.length > 300) return null;
+  // Guardrail: reject prompt injections and off-topic queries immediately
+  if (isInjectionAttempt(text) || !isInScope(text)) return null;
+
+  const cleanText = sanitiseUserInput(text, 300);
+
   try {
     const res = await fetch(GROQ_URL, {
       method: "POST",
@@ -167,8 +179,9 @@ export async function suggestCommand(text: string): Promise<Suggestion | null> {
         temperature: 0,
         max_tokens: 100,
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: text },
+          { role: "system", content: `${GUARDRAIL_PREFIX}\n\n${SYSTEM_PROMPT}` },
+          { role: "system", content: GUARDRAIL_SUFFIX },
+          { role: "user", content: `<user_message>${cleanText}</user_message>` },
         ],
       }),
       signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),

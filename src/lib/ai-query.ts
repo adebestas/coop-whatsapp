@@ -27,6 +27,12 @@ import { KNOWN_COMMANDS } from "./ai.js";
 import { languageInstruction } from "./i18n.js";
 import { formatBalance } from "./money.js";
 import { getLocale } from "./runtime-context.js";
+import {
+  isInjectionAttempt,
+  guardCheck,
+  GUARDRAIL_PREFIX,
+  GUARDRAIL_SUFFIX,
+} from "./ai-guardrails.js";
 
 export type AIQueryType =
   | "member_balance"
@@ -62,7 +68,9 @@ async function classifyIntent(text: string): Promise<AIQueryIntent | null> {
         messages: [
           {
             role: "system",
-            content: `You classify Nigerian cooperative banking questions into intents.
+            content: `${GUARDRAIL_PREFIX}
+
+You classify Nigerian cooperative banking questions into intents.
 
 Reply with STRICT JSON only: {"type":"<intent>","args":{}}
 
@@ -86,6 +94,7 @@ Args can include:
 
 If unsure, return {"type":"help","args":{}}`,
           },
+          { role: "system", content: GUARDRAIL_SUFFIX },
           { role: "user", content: `<user_message>${text}</user_message>` },
         ],
       },
@@ -162,7 +171,8 @@ ${languageInstruction(getLocale())}`;
         temperature: 0.3,
         max_tokens: 300,
         messages: [
-          { role: "system", content: systemPrompt },
+          { role: "system", content: `${GUARDRAIL_PREFIX}\n\n${systemPrompt}` },
+          { role: "system", content: GUARDRAIL_SUFFIX },
           {
             role: "user",
             content: `Question: <user_message>${question}</user_message>\n\n<coop_data>\n${JSON.stringify(data, null, 2)}\n</coop_data>`,
@@ -351,11 +361,14 @@ export async function handleAIQuery(
   cooperativeId: string,
   memberId?: string,
 ): Promise<string | null> {
-  // Enforce input length limit to prevent abuse and excessive token usage
-  const truncated = text.slice(0, 500);
+  const guard = guardCheck(text, 500);
+  if (!guard.allowed) {
+    return guard.refusal;
+  }
+  const cleanText = guard.sanitised;
 
   // 1. Classify intent
-  const intent = await classifyIntent(truncated);
+  const intent = await classifyIntent(cleanText);
   if (!intent) return null;
 
   // 2. Resolve the tool and enforce permissions in code — never the model.
@@ -377,7 +390,7 @@ export async function handleAIQuery(
   }
 
   // 3. Generate response
-  return generateResponse(truncated, intent.type, data);
+  return generateResponse(cleanText, intent.type, data);
 }
 
 /**
@@ -392,6 +405,9 @@ export function isNaturalLanguageQuery(text: string): boolean {
   // where e.g. "balance" or "save 2000" enters the AI path.
   const firstWord = trimmed.split(/\s+/)[0].toLowerCase();
   if ((KNOWN_COMMANDS as readonly string[]).includes(firstWord)) return false;
+
+  // Route prompt injections to AI query handler so member receives an immediate clean refusal
+  if (isInjectionAttempt(trimmed)) return true;
 
   // Check if it looks like a question or statement (not a command)
   const questionPatterns = /^(how|what|when|where|who|why|show|tell|check|give|list|who|which)/i;

@@ -15,6 +15,8 @@ import {
   listBreaches,
   listCrossBorderTransfers,
   listDpias,
+  runScumlRenewalReminders,
+  SCUML_RENEWAL_WINDOW_DAYS,
   summariseBreaches,
   updateBreach,
   updateDpia,
@@ -337,5 +339,69 @@ describe("beneficial ownership", () => {
       where: { cooperativeId: coop.id, memberId: target.id },
     });
     expect(owner?.ownershipPct).toBe(55);
+  });
+});
+
+describe("SCUML renewal reminders", () => {
+  it("reminds active platform admins inside the window, once per day", async () => {
+    const coop = await createTestCoop("SCML01");
+    await prisma.cooperative.update({
+      where: { id: coop.id },
+      data: {
+        scumlStatus: "registered",
+        scumlNumber: "SCUML-12345",
+        scumlExpiresAt: new Date("2026-12-20T00:00:00.000Z"),
+      },
+    });
+    await prisma.platformAdmin.create({
+      data: { name: "owner", phone: "2348000000901", role: "owner", active: true },
+    });
+    vi.mocked(sendText).mockClear();
+
+    const now = new Date("2026-12-01T09:00:00.000Z");
+    expect(await runScumlRenewalReminders(now)).toBe(1);
+
+    const texts = vi.mocked(sendText).mock.calls.map((call) => call[0].text);
+    expect(texts.some((text) => text.includes("SCUML renewal due"))).toBe(true);
+    expect(texts.some((text) => text.includes(coop.name) && text.includes("SCUML-12345"))).toBe(
+      true,
+    );
+
+    expect(await runScumlRenewalReminders(now)).toBe(0);
+  });
+
+  it("flags an overdue registration", async () => {
+    const coop = await createTestCoop("SCML02");
+    await prisma.cooperative.update({
+      where: { id: coop.id },
+      data: { scumlExpiresAt: new Date("2026-11-20T00:00:00.000Z") },
+    });
+    await prisma.platformAdmin.create({
+      data: { name: "owner", phone: "2348000000902", role: "owner", active: true },
+    });
+    vi.mocked(sendText).mockClear();
+
+    expect(await runScumlRenewalReminders(new Date("2026-12-01T09:00:00.000Z"))).toBe(1);
+    const texts = vi.mocked(sendText).mock.calls.map((call) => call[0].text);
+    expect(texts.some((text) => text.includes("overdue"))).toBe(true);
+  });
+
+  it("ignores registrations outside the reminder window", async () => {
+    const coop = await createTestCoop("SCML03");
+    await prisma.cooperative.update({
+      where: { id: coop.id },
+      data: {
+        scumlExpiresAt: new Date(
+          Date.UTC(2027, 5, 1) + SCUML_RENEWAL_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+        ),
+      },
+    });
+    await prisma.platformAdmin.create({
+      data: { name: "owner", phone: "2348000000903", role: "owner", active: true },
+    });
+    vi.mocked(sendText).mockClear();
+
+    expect(await runScumlRenewalReminders(new Date("2026-12-01T09:00:00.000Z"))).toBe(0);
+    expect(vi.mocked(sendText)).not.toHaveBeenCalled();
   });
 });

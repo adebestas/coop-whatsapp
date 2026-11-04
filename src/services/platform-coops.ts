@@ -2,6 +2,9 @@ import { prisma } from "../lib/prisma.js";
 import { listCooperativeIds, withCoopContext } from "../lib/tenant-context.js";
 import { sendText } from "../lib/messaging.js";
 import { normalizePhone } from "../lib/phones.js";
+import { cacheDel } from "../lib/cache.js";
+import { getRule } from "../lib/rule-registry.js";
+import { platformPolicyVersion } from "./platform-policy-store.js";
 import {
   provisionCooperative,
   addCoopAdmin,
@@ -140,6 +143,7 @@ export async function getCoopDetail(id: string): Promise<{
   admins: CoopAdminView[];
   config: Awaited<ReturnType<typeof getEffectiveConfig>>["config"];
   meta: Awaited<ReturnType<typeof getEffectiveConfig>>["meta"];
+  rawConfig: Awaited<ReturnType<typeof prisma.cooperativeConfig.findUnique>> | null;
 } | null> {
   return withCoopContext(id, async () => {
     const cooperative = await prisma.cooperative.findUnique({ where: { id } });
@@ -157,8 +161,9 @@ export async function getCoopDetail(id: string): Promise<{
       },
       orderBy: { createdAt: "asc" },
     });
+    const rawConfig = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: id } });
     const { config, meta } = await getEffectiveConfig(id);
-    return { cooperative, admins, config, meta };
+    return { cooperative, admins, config, meta, rawConfig };
   });
 }
 
@@ -395,4 +400,155 @@ export async function setCoopAdminRole(
       detail: JSON.stringify({ role }),
     });
   }
+}
+
+/** Allowed configuration keys in CooperativeConfig */
+export const ALLOWED_CONFIG_KEYS = new Set([
+  "autoApproveLoans",
+  "requireGuarantors",
+  "statusEnabled",
+  "loanProtectionEnabled",
+  "directDebitEnabled",
+  "regulatorReportingEnabled",
+  "referralEnabled",
+  "literacyCertificationEnabled",
+  "allowShareRedemption",
+  "loanInterestRate",
+  "maxLoanMultiplier",
+  "loanDurationMonths",
+  "minLoanTermMonths",
+  "maxLoanPerMember",
+  "minMembershipMonths",
+  "minGuarantors",
+  "serviceChargePercent",
+  "lateFinePercent",
+  "minContribution",
+  "minSavings",
+  "minWithdrawal",
+  "maxWithdrawal",
+  "withdrawalCooldownMonths",
+  "loanProtectionPercent",
+  "referralRewardAmount",
+  "referralRewardType",
+  "reserveFundPercent",
+  "educationFundPercent",
+  "dividendCapPercent",
+  "sharePrice",
+  "minShares",
+  "maxShares",
+  "ombudsmanSlaDays",
+  "agmQuorumPercent",
+]);
+
+/** Update features and configuration for a specific cooperative. */
+export async function setCoopConfig(
+  coopId: string,
+  input: Record<string, unknown>,
+  actor?: PlatformActor,
+): Promise<{
+  ok: boolean;
+  cooperative: Awaited<ReturnType<typeof prisma.cooperative.findUnique>>;
+  config: Awaited<ReturnType<typeof getEffectiveConfig>>["config"];
+  meta: Awaited<ReturnType<typeof getEffectiveConfig>>["meta"];
+  rawConfig: Awaited<ReturnType<typeof prisma.cooperativeConfig.findUnique>> | null;
+}> {
+  if (typeof input !== "object" || input === null) {
+    throw new ComplianceInputError("invalid config payload");
+  }
+
+  const existingCoop = await withCoopContext(coopId, () =>
+    prisma.cooperative.findUnique({ where: { id: coopId } }),
+  );
+  if (!existingCoop) throw new ComplianceInputError("cooperative not found");
+
+  const { meta } = await getEffectiveConfig(coopId);
+
+  const coopData: Record<string, unknown> = {};
+  if (input.dailyPayoutLimit !== undefined) {
+    const val = Number(input.dailyPayoutLimit);
+    if (!Number.isFinite(val) || val < 0) {
+      throw new ComplianceInputError("dailyPayoutLimit must be a non-negative number");
+    }
+    coopData.dailyPayoutLimit = Math.round(val);
+  }
+  if (input.status !== undefined) {
+    if (input.status !== "active" && input.status !== "suspended") {
+      throw new ComplianceInputError("status must be active or suspended");
+    }
+    coopData.status = input.status;
+  }
+  if (Object.keys(coopData).length > 0) {
+    await withCoopContext(coopId, () =>
+      prisma.cooperative.update({ where: { id: coopId }, data: coopData }),
+    );
+  }
+
+  const configUpdates: Record<string, unknown> = {};
+
+  for (const [key, val] of Object.entries(input)) {
+    if (!ALLOWED_CONFIG_KEYS.has(key)) continue;
+
+    // Check if key is locked by platform policy
+    if (meta[key]?.locked) {
+      throw new ComplianceInputError(
+        `${key} is locked by platform policy and cannot be overridden at cooperative level`,
+      );
+    }
+
+    const rule = getRule(key);
+
+    if (typeof val === "boolean") {
+      configUpdates[key] = val;
+    } else if (typeof val === "string") {
+      if (key === "referralRewardType") {
+        if (!["wallet", "bank", "airtime"].includes(val)) {
+          throw new ComplianceInputError("referralRewardType must be wallet, bank, or airtime");
+        }
+        configUpdates[key] = val;
+      }
+    } else if (typeof val === "number" && Number.isFinite(val)) {
+      if (rule) {
+        if (rule.min !== undefined && val < rule.min) {
+          throw new ComplianceInputError(`${key} cannot be below statutory minimum (${rule.min})`);
+        }
+        if (rule.max !== undefined && val > rule.max) {
+          throw new ComplianceInputError(`${key} cannot exceed statutory maximum (${rule.max})`);
+        }
+      }
+      configUpdates[key] = Math.round(val);
+    }
+  }
+
+  if (Object.keys(configUpdates).length > 0) {
+    await withCoopContext(coopId, () =>
+      prisma.cooperativeConfig.upsert({
+        where: { cooperativeId: coopId },
+        create: { cooperativeId: coopId, ...configUpdates },
+        update: configUpdates,
+      }),
+    );
+    await cacheDel(`coopconfig:${coopId}:v${platformPolicyVersion()}`);
+  }
+
+  if (actor) {
+    await writePlatformAudit({
+      actorId: actor.id,
+      actorPhone: actor.phone,
+      actorRole: actor.role,
+      action: "coop.config.update",
+      cooperativeId: coopId,
+      targetType: "cooperative_config",
+      targetId: coopId,
+      detail: JSON.stringify({ ...coopData, ...configUpdates }).slice(0, 500),
+    });
+  }
+
+  const updatedDetail = await getCoopDetail(coopId);
+  return {
+    ok: true,
+    cooperative: updatedDetail!.cooperative,
+    config: updatedDetail!.config,
+    meta: updatedDetail!.meta,
+    rawConfig: updatedDetail!.rawConfig,
+  };
 }

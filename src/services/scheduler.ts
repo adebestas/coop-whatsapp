@@ -1527,7 +1527,8 @@ export async function runSchedulerTick(): Promise<void> {
   const { postAutoStatus } = await import("./status-scheduler.js");
   const { cleanupExpiredVirtualAccounts } = await import("./payments/topup.js");
   const { escalateOverdueSTRs } = await import("./aml.js");
-  const { runBreachDeadlineReminders } = await import("./compliance-registers.js");
+  const { runBreachDeadlineReminders, runScumlRenewalReminders } =
+    await import("./compliance-registers.js");
   const { refreshSanctionsList } = await import("./sanctions-refresh.js");
 
   await runAutoSaveReminders().catch((err) =>
@@ -1588,6 +1589,9 @@ export async function runSchedulerTick(): Promise<void> {
   );
   await runBreachDeadlineReminders().catch((err) =>
     log.error("[scheduler] data-breach deadline reminders failed", { err: String(err) }),
+  );
+  await runScumlRenewalReminders().catch((err) =>
+    log.error("[scheduler] SCUML renewal reminders failed", { err: String(err) }),
   );
   if (process.env.SANCTIONS_LIST_URL) {
     const day = new Date().toISOString().slice(0, 10);

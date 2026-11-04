@@ -3,12 +3,17 @@ import { prisma } from "../lib/prisma.js";
 import { withCoopContext } from "../lib/tenant-context.js";
 import { claimOnce } from "../lib/cache.js";
 import { audit } from "./audit.js";
-import { notifyMember } from "../lib/messaging.js";
+import { notifyMember, sendText } from "../lib/messaging.js";
 import { writePlatformAudit } from "./platform-audit.js";
 import type { PlatformActor } from "./platform-coops.js";
 
 /** NDPA s.40: the NDPC must be notified within 72 hours of discovery. */
 export const BREACH_NOTIFICATION_WINDOW_MS = 72 * 60 * 60 * 1000;
+
+/** SCUML certificates are renewed annually; warn this many days ahead. */
+export const SCUML_RENEWAL_WINDOW_DAYS = 30;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const BREACH_STATUSES = ["open", "contained", "notified", "closed"] as const;
 export const DPIA_STATUSES = ["draft", "approved", "review_due", "archived"] as const;
@@ -579,6 +584,75 @@ export async function runBreachDeadlineReminders(now = new Date()): Promise<numb
     } catch (err) {
       console.error("[compliance] breach reminder failed", coop.id, err);
     }
+  }
+  return reminded;
+}
+
+/**
+ * Warn when a cooperative's SCUML registration is within the renewal window or
+ * already overdue. Platform owners/developers maintain these registrations in
+ * the console, so they are the primary recipients (coop admins are the
+ * fallback). Deduped per cooperative per day.
+ */
+export async function runScumlRenewalReminders(now = new Date()): Promise<number> {
+  const day = now.toISOString().slice(0, 10);
+  const horizon = new Date(now.getTime() + SCUML_RENEWAL_WINDOW_DAYS * DAY_MS);
+
+  const coops = await prisma.cooperative.findMany({
+    where: { scumlExpiresAt: { not: null, lte: horizon } },
+    select: {
+      id: true,
+      name: true,
+      code: true,
+      scumlNumber: true,
+      scumlExpiresAt: true,
+    },
+  });
+  if (coops.length === 0) return 0;
+
+  const platformAdmins = await prisma.platformAdmin.findMany({
+    where: { active: true, role: { in: ["owner", "developer"] } },
+    select: { phone: true },
+  });
+
+  let reminded = 0;
+  for (const coop of coops) {
+    const expires = coop.scumlExpiresAt;
+    if (!expires) continue;
+    if (!(await claimOnce("scuml-renewal", `${coop.id}:${day}`, (2 * DAY_MS) / 1000))) continue;
+
+    const daysLeft = Math.ceil((expires.getTime() - now.getTime()) / DAY_MS);
+    const state =
+      daysLeft < 0 ? `overdue by ${Math.abs(daysLeft)} day(s)` : `due in ${daysLeft} day(s)`;
+    const text =
+      `⚠️ *SCUML renewal due*\n\n` +
+      `*${coop.name}* (${coop.code})\n` +
+      `SCUML number: *${coop.scumlNumber || "not recorded"}*\n` +
+      `Expires: *${expires.toISOString().slice(0, 10)}* (${state})\n\n` +
+      `Update the registration in the platform console once renewed.`;
+
+    if (platformAdmins.length > 0) {
+      await Promise.all(
+        platformAdmins.map((admin) => sendText({ to: admin.phone, text }).catch(() => {})),
+      );
+    } else {
+      const admins = await prisma.member.findMany({
+        where: { cooperativeId: coop.id, role: { in: ["admin", "superadmin"] }, status: "active" },
+      });
+      await Promise.all(admins.map((admin) => notifyMember(admin, text).catch(() => {})));
+    }
+
+    await audit({
+      cooperativeId: coop.id,
+      actorPhone: "system",
+      actorId: null,
+      actorRole: "system",
+      action: "compliance.scuml_renewal_reminder",
+      targetType: "cooperative",
+      targetId: coop.id,
+      detail: `${coop.code} ${state}`,
+    }).catch(() => {});
+    reminded++;
   }
   return reminded;
 }

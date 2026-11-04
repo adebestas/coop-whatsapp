@@ -21,6 +21,7 @@ import {
   createCoop,
   getCoopDetail,
   setCoopStatus,
+  setCoopConfig,
   revokeCoopSessions,
   addCoopAdminAndNotify,
   setCoopAdminRole,
@@ -401,6 +402,28 @@ export async function developerApiRoutes(app: FastifyInstance) {
       throw err;
     }
     return { ok: true };
+  });
+
+  // Per-cooperative feature flags and configuration rules (developer/owner).
+  app.patch("/api/developer/coops/:id/config", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) {
+      return reply.code(404).send({ error: "cooperative not found" });
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    try {
+      const result = await setCoopConfig(id, body, actorOf(req));
+      return reply.code(200).send(result);
+    } catch (err) {
+      if ((err as { code?: string }).code === "P2025") {
+        return reply.code(404).send({ error: "cooperative not found" });
+      }
+      if (err instanceof ComplianceInputError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      req.log.error(err);
+      return reply.code(500).send({ error: "failed to update cooperative configuration" });
+    }
   });
 
   // ---- Regulator returns (developer/owner) ----

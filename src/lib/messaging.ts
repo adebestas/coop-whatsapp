@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   sendText as sendWhatsApp,
   sendFlowMessage,
@@ -17,6 +18,41 @@ import { enqueueDeferredSend } from "./deferred.js";
 const WHATSAPP_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Human pacing before a WhatsApp send. Skipped under NODE_ENV=test so the suite stays fast. */
 const WHATSAPP_PACING_MS = process.env.NODE_ENV === "test" ? 0 : 1500;
+
+export interface SimulatorMessage {
+  type: "text" | "document" | "buttons" | "flow";
+  text?: string;
+  filename?: string;
+  mimeType?: string;
+  caption?: string;
+  header?: string;
+  footer?: string;
+  buttons?: Array<{ id: string; title: string }>;
+  timestamp: string;
+}
+
+interface SimulatorStore {
+  phone: string;
+  messages: SimulatorMessage[];
+}
+
+const simulatorStore = new AsyncLocalStorage<SimulatorStore>();
+
+/**
+ * Execute a conversation turn within an isolated simulator capture scope.
+ * Any outbound messages to `phone` will be recorded and returned without
+ * issuing real external WhatsApp/Telegram network calls.
+ */
+export function runInSimulatorScope<T>(
+  phone: string,
+  fn: () => Promise<T>,
+): Promise<{ result: T; messages: SimulatorMessage[] }> {
+  const store: SimulatorStore = { phone, messages: [] };
+  return simulatorStore.run(store, async () => {
+    const result = await fn();
+    return { result, messages: store.messages };
+  });
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -42,6 +78,17 @@ export async function sendText(params: { to: string; text: string }): Promise<bo
 
 async function sendTextNow(params: { to: string; text: string }): Promise<boolean> {
   const { to, text } = params;
+
+  // Simulator capture hook: capture in-memory and return immediately
+  const sim = simulatorStore.getStore();
+  if (sim && sim.phone === to) {
+    sim.messages.push({
+      type: "text",
+      text,
+      timestamp: new Date().toISOString(),
+    });
+    return true;
+  }
 
   // WhatsApp 24-hour session window check
   if (!to.startsWith("tg:")) {
@@ -84,6 +131,17 @@ export async function sendDocument(params: SendDocumentParams): Promise<boolean>
 
 async function sendDocumentNow(params: SendDocumentParams): Promise<boolean> {
   const { to, filename, mimeType, data, caption } = params;
+  const sim = simulatorStore.getStore();
+  if (sim && sim.phone === to) {
+    sim.messages.push({
+      type: "document",
+      filename,
+      mimeType,
+      caption,
+      timestamp: new Date().toISOString(),
+    });
+    return true;
+  }
   if (to.startsWith("tg:")) {
     return sendTelegramDocument({ chatId: to.slice(3), filename, data, caption });
   }
@@ -106,6 +164,16 @@ export async function sendSecurePrompt(params: {
   flowToken?: string;
 }): Promise<{ sent: boolean; messageId?: number }> {
   const { to, text, flowToken } = params;
+
+  const sim = simulatorStore.getStore();
+  if (sim && sim.phone === to) {
+    sim.messages.push({
+      type: "flow",
+      text,
+      timestamp: new Date().toISOString(),
+    });
+    return { sent: true };
+  }
 
   if (to.startsWith("tg:")) {
     const prompt = `${text}\n\nTap the digits below — your PIN is never typed as text. When done, press *✓ Done*.`;
@@ -141,6 +209,20 @@ export async function sendButtonsPrompt(params: {
   footer?: string;
 }): Promise<boolean> {
   const { to, text, buttons, header, footer } = params;
+
+  const sim = simulatorStore.getStore();
+  if (sim && sim.phone === to) {
+    sim.messages.push({
+      type: "buttons",
+      text,
+      header,
+      footer,
+      buttons,
+      timestamp: new Date().toISOString(),
+    });
+    return true;
+  }
+
   if (to.startsWith("tg:")) {
     const keyboard = [buttons.map((b) => ({ text: b.title, callback_data: b.id }))];
     return (await sendTelegramKeyboard(to.slice(3), text, keyboard)) !== null;
