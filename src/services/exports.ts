@@ -8,6 +8,7 @@ import nodemailer from "nodemailer";
 import { prisma } from "../lib/prisma.js";
 import { computePnl } from "./ledger.js";
 import { uploadToS3 } from "../lib/s3.js";
+import { blockSandboxExternal, isSandboxMode } from "../lib/sandbox.js";
 import { audit } from "./audit.js";
 import { quorumMet, resolveMeeting } from "./meetings.js";
 
@@ -537,6 +538,10 @@ export async function emailFiles(
   body: string,
   attachments: string[],
 ): Promise<boolean> {
+  if (isSandboxMode()) {
+    blockSandboxExternal("email");
+    return true;
+  }
   try {
     const transport = nodemailer.createTransport({
       host: process.env.SMTP_HOST,

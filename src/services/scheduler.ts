@@ -1666,7 +1666,7 @@ export async function runDigestJob(): Promise<void> {
 }
 
 /** Dispatch a named scheduler job (used by the BullMQ worker). */
-export async function runSchedulerJob(name: string): Promise<void> {
+export async function runSchedulerJob(name: string, cooperativeId?: string): Promise<void> {
   switch (name) {
     case "tick":
       return runSchedulerTick();
@@ -1679,6 +1679,11 @@ export async function runSchedulerJob(name: string): Promise<void> {
     case "digest":
       return runDigestJob();
     case "loan_reminders":
+      if (cooperativeId) {
+        return withCoopContext(cooperativeId, () =>
+          runLoanRepaymentReminders(new Date(), cooperativeId),
+        ).then(() => {});
+      }
       return runLoanRepaymentReminders().then(() => {});
     default:
       log.warn("[scheduler] unknown job", { name });

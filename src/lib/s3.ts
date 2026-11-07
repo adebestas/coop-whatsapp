@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createHash, createHmac } from "node:crypto";
+import { blockSandboxExternal, isSandboxMode } from "./sandbox.js";
 
 const BACKUP_BUCKET = process.env.BACKUP_BUCKET ?? "";
 const BACKUP_KEY = process.env.BACKUP_KEY ?? "";
@@ -12,6 +13,10 @@ const BACKUP_REGION = process.env.BACKUP_REGION ?? "eu-west-1";
  * PUT approach. This avoids pulling in the full AWS SDK.
  */
 export async function uploadToS3(filePath: string, key: string): Promise<boolean> {
+  if (isSandboxMode()) {
+    blockSandboxExternal("storage");
+    return false;
+  }
   if (!s3Configured()) return false;
   try {
     const date = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
@@ -88,6 +93,10 @@ export async function uploadBufferToS3(
   key: string,
   contentType?: string,
 ): Promise<boolean> {
+  if (isSandboxMode()) {
+    blockSandboxExternal("storage");
+    return false;
+  }
   if (!s3Configured()) return false;
   try {
     const date = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");

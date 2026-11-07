@@ -3,9 +3,12 @@
  * Used by ai.ts, ai-query.ts, and ai-support.ts.
  */
 
+import { isSandboxMode, noteSandboxAiPath, sandboxAiEnabled } from "./sandbox.js";
+
 export const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 export function groqAvailable(): boolean {
+  if (isSandboxMode() && !sandboxAiEnabled()) return false;
   return !!process.env.GROQ_API_KEY;
 }
 
@@ -67,6 +70,7 @@ export async function groqFetch(
       }
 
       // Success or non-retryable 4xx client error — return immediately
+      if (res.ok) noteSandboxAiPath("ai");
       if (res.ok || res.status < 500) return res;
 
       lastError = new Error(`HTTP ${res.status}`);

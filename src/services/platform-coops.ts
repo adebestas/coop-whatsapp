@@ -27,6 +27,7 @@ export interface CoopSummary {
   name: string;
   code: string;
   status: string;
+  sandbox: boolean;
   plan: string;
   createdAt: Date;
   memberCount: number;
@@ -71,6 +72,7 @@ export async function listCoops(): Promise<CoopSummary[]> {
         name: coop.name,
         code: coop.code,
         status: coop.status,
+        sandbox: coop.isSandbox,
         plan: subscription?.plan ?? "free",
         createdAt: coop.createdAt,
         memberCount,

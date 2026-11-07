@@ -202,6 +202,10 @@ export async function listActiveCooperativeIds(): Promise<string[]> {
   const ids = await listCooperativeIds();
   const active: string[] = [];
   for (const id of ids) {
+    const coop = await withCoopContext(id, () =>
+      prisma.cooperative.findUnique({ where: { id }, select: { isSandbox: true } }),
+    );
+    if (coop?.isSandbox) continue;
     const suspended = await withCoopContext(id, () => isCoopSuspended(id));
     if (!suspended) active.push(id);
   }

@@ -244,6 +244,7 @@ import { flutterwaveAdapter } from "./flutterwave.js";
 import { RedisCircuitBreaker } from "../../lib/redis-mutex.js";
 import { BANK_CODES } from "../../lib/banks.js";
 import { providersForCurrency } from "../../lib/currency.js";
+import { isSandboxMode } from "../../lib/sandbox.js";
 
 /** Constant-time string comparison for signature checks (anti-timing-attack). */
 export function signaturesMatch(expected: string, received: string): boolean {
@@ -289,11 +290,68 @@ function adapterFor(name: string): ProviderAdapter | null {
 
 const ALL_PROVIDERS = ["monnify", "paystack", "flutterwave"];
 
+const sandboxAdapter: ProviderAdapter = {
+  name: "sandbox",
+  async createVirtualAccount(params) {
+    return {
+      accountNumber: params.phone.slice(-10).padStart(10, "0"),
+      bank: "Sandbox Bank",
+      provider: "sandbox",
+      providerRef: `sandbox-${params.reference}`,
+    };
+  },
+  async payout(params) {
+    return { ok: true, providerRef: `sandbox-${params.reference}` };
+  },
+  async resolveAccount() {
+    return { ok: true, name: "Sandbox Recipient" };
+  },
+  async listBanks() {
+    return staticBanks();
+  },
+  verifyWebhook() {
+    return false;
+  },
+  parseNotification() {
+    return null;
+  },
+  parsePayoutNotification() {
+    return null;
+  },
+  async getTransferStatus() {
+    return { status: "successful", providerRef: "sandbox-transfer" };
+  },
+  async createMandate(params) {
+    return {
+      ok: true,
+      providerMandateId: `sandbox-${params.reference}`,
+      authorizationUrl: "https://sandbox.invalid/authorize",
+      status: "active",
+    };
+  },
+  async debitMandate(params) {
+    return { ok: true, providerRef: `sandbox-${params.reference}`, status: "successful" };
+  },
+  async cancelMandate() {
+    return { ok: true };
+  },
+  async triggerActivationCharge() {
+    return { ok: true };
+  },
+  parseMandateNotification() {
+    return null;
+  },
+  parseDebitNotification() {
+    return null;
+  },
+};
+
 /** Preferred provider first (env or explicit), then any healthy fallback. */
 export async function resolveProvider(
   preferred?: string,
   currency?: string,
 ): Promise<ProviderAdapter> {
+  if (isSandboxMode()) return sandboxAdapter;
   const supported = currency ? providersForCurrency(currency) : ALL_PROVIDERS;
   const configured = (preferred ?? process.env.PAYMENT_PROVIDER ?? "monnify").toLowerCase();
   const first = supported.includes(configured) ? configured : supported[0];

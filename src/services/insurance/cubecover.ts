@@ -1,4 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { blockSandboxExternal, isSandboxMode } from "../../lib/sandbox.js";
+import { SandboxExternalBlockedError } from "../../lib/sandbox-errors.js";
 
 export interface CubeCoverConfig {
   apiKey: string;
@@ -58,6 +60,32 @@ export class CubeCoverClient {
   }
 
   private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+    if (isSandboxMode()) {
+      blockSandboxExternal("insurance");
+      if (path === "/v1/products") return [] as T;
+      if (path.startsWith("/v1/products/")) {
+        return {
+          code: path.slice("/v1/products/".length),
+          name: "Sandbox insurance product",
+          description: "Simulated product",
+          plans: [],
+        } as T;
+      }
+      if (path === "/v1/quotes") {
+        return { quoteId: `sandbox-quote-${Date.now()}`, premiumKobo: 10_000 } as T;
+      }
+      if (path === "/v1/policies") {
+        return {
+          id: `sandbox-policy-${Date.now()}`,
+          productCode: "sandbox",
+          planCode: "sandbox",
+          status: "active",
+          startDate: new Date().toISOString(),
+          coverageKobo: 0,
+        } as T;
+      }
+      throw new SandboxExternalBlockedError("insurance");
+    }
     const url = `${this.config.baseUrl}${path}`;
     const response = await fetch(url, {
       ...options,

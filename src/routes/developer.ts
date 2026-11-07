@@ -2,11 +2,13 @@ import { createReadStream } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { Queue } from "bullmq";
 import { prisma } from "../lib/prisma.js";
+import { checkRateLimit, getRedis, isRedisConfigured, resetRateLimit } from "../lib/cache.js";
+import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES } from "../lib/queue.js";
+import { listCooperativeIds, withCoopContext } from "../lib/tenant-context.js";
 import { hashPin, verifyPin } from "../lib/security.js";
-import { checkRateLimit, resetRateLimit } from "../lib/cache.js";
 import { normalizePhone } from "../lib/phones.js";
-import { withCoopContext } from "../lib/tenant-context.js";
 import { verifyTotp, otpauthUri } from "../lib/totp.js";
 import {
   PLATFORM_COOKIE,
@@ -64,6 +66,15 @@ import {
   type DpiaInput,
 } from "../services/compliance-registers.js";
 import { getSanctionsRefreshStatus, refreshSanctionsList } from "../services/sanctions-refresh.js";
+import {
+  getSandboxOverview,
+  getSandboxState,
+  isSandboxPersonaId,
+  runSandboxTurn,
+  resetSandbox,
+  SANDBOX_PERSONAS,
+} from "../services/sandbox.js";
+import { SandboxBusyError } from "../lib/sandbox-errors.js";
 
 const MAX_IP_ATTEMPTS = 5;
 const IP_WINDOW_SECONDS = 60;
@@ -116,6 +127,65 @@ function requireOwner(req: FastifyRequest, reply: FastifyReply): boolean {
     return false;
   }
   return true;
+}
+
+function requireSandboxWriter(req: FastifyRequest, reply: FastifyReply): boolean {
+  if (req.platformAdmin?.role !== "owner" && req.platformAdmin?.role !== "developer") {
+    reply.code(403).send({ error: "owner or developer role required" });
+    return false;
+  }
+  return true;
+}
+
+async function isSandboxCoop(cooperativeId: string): Promise<boolean> {
+  const cooperative = await withCoopContext(cooperativeId, () =>
+    prisma.cooperative.findUnique({
+      where: { id: cooperativeId },
+      select: { isSandbox: true },
+    }),
+  );
+  return cooperative?.isSandbox ?? false;
+}
+
+type DiagnosticResult = {
+  status: "healthy" | "error" | "not_configured";
+  durationMs?: number;
+  statusCode?: number;
+  message: string;
+};
+
+async function probeExternalService(
+  url: string,
+  init: RequestInit = {},
+): Promise<DiagnosticResult> {
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(url, {
+      ...init,
+      redirect: "error",
+      signal: AbortSignal.timeout(6000),
+    });
+    const status = response.status >= 200 && response.status < 300 ? "healthy" : "error";
+    return {
+      status,
+      statusCode: response.status,
+      durationMs: Date.now() - startedAt,
+      message:
+        status === "healthy"
+          ? "Connection and credentials verified"
+          : "Provider rejected the check",
+    };
+  } catch {
+    return {
+      status: "error",
+      durationMs: Date.now() - startedAt,
+      message: "Connection failed or timed out",
+    };
+  }
+}
+
+function missingDiagnostic(): DiagnosticResult {
+  return { status: "not_configured", message: "Credentials are not configured" };
 }
 
 export async function developerApiRoutes(app: FastifyInstance) {
@@ -431,6 +501,9 @@ export async function developerApiRoutes(app: FastifyInstance) {
   app.get("/api/developer/coops/:id/regulator-reports", async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    if (await isSandboxCoop(id)) {
+      return reply.code(404).send({ error: "regulator reports are unavailable for the sandbox" });
+    }
     const data = await withCoopContext(id, async () => {
       const [profile, listed] = await Promise.all([getRegulatorProfile(id), listReports(id)]);
       return { profile, reports: listed.reports ?? [] };
@@ -441,6 +514,9 @@ export async function developerApiRoutes(app: FastifyInstance) {
   app.post("/api/developer/coops/:id/regulator-reports", async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    if (await isSandboxCoop(id)) {
+      return reply.code(404).send({ error: "regulator reports are unavailable for the sandbox" });
+    }
 
     const body = (req.body ?? {}) as { year?: number | string; packType?: string };
     const rawYear = body.year;
@@ -480,6 +556,9 @@ export async function developerApiRoutes(app: FastifyInstance) {
         kind: string;
       };
       if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+      if (await isSandboxCoop(id)) {
+        return reply.code(404).send({ error: "regulator reports are unavailable for the sandbox" });
+      }
       if (kind !== "xlsx" && kind !== "pdf" && kind !== "csv") {
         return reply.code(400).send({ error: "kind must be xlsx, pdf or csv" });
       }
@@ -543,6 +622,9 @@ export async function developerApiRoutes(app: FastifyInstance) {
   app.post("/api/developer/coops/:id/regulator-reports/:reportId/file", async (req, reply) => {
     const { id, reportId } = req.params as { id: string; reportId: string };
     if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    if (await isSandboxCoop(id)) {
+      return reply.code(404).send({ error: "regulator reports are unavailable for the sandbox" });
+    }
 
     const body = (req.body ?? {}) as { acknowledgementId?: string; note?: string };
     if (body.acknowledgementId !== undefined && typeof body.acknowledgementId !== "string") {
@@ -809,6 +891,486 @@ export async function developerApiRoutes(app: FastifyInstance) {
       if (code === "P2025") return reply.code(404).send({ error: "admin not found" });
       return reply.code(400).send({ error: (err as Error).message });
     }
+  });
+
+  // ---- Developer operations ----
+
+  app.get("/api/developer/sandbox", async (req, reply) => {
+    try {
+      return await getSandboxOverview();
+    } catch (err) {
+      req.log.error({ err }, "Could not load sandbox overview");
+      return reply.code(503).send({ error: "Sandbox is unavailable; check its configuration" });
+    }
+  });
+
+  app.get("/api/developer/sandbox/state", async (req, reply) => {
+    const { personaId } = req.query as { personaId?: string };
+    if (!personaId || !isSandboxPersonaId(personaId)) {
+      return reply.code(400).send({ error: "A valid personaId is required" });
+    }
+    try {
+      return await getSandboxState(personaId);
+    } catch (err) {
+      req.log.error({ err }, "Could not load sandbox state");
+      return reply.code(503).send({ error: "Sandbox state is unavailable" });
+    }
+  });
+
+  app.post("/api/developer/sandbox/message", async (req, reply) => {
+    if (!requireSandboxWriter(req, reply)) return;
+    const body = (req.body ?? {}) as {
+      personaId?: unknown;
+      text?: unknown;
+      aiEnabled?: unknown;
+    };
+    if (typeof body.personaId !== "string" || !isSandboxPersonaId(body.personaId)) {
+      return reply.code(400).send({ error: "A valid personaId is required" });
+    }
+    if (typeof body.text !== "string") {
+      return reply.code(400).send({ error: "text is required" });
+    }
+    const text = body.text.trim();
+    if (!text || text.length > 500) {
+      return reply.code(400).send({ error: "text must be between 1 and 500 characters" });
+    }
+    if (body.aiEnabled !== undefined && typeof body.aiEnabled !== "boolean") {
+      return reply.code(400).send({ error: "aiEnabled must be a boolean" });
+    }
+
+    const admin = req.platformAdmin!;
+    const rateLimit = await checkRateLimit(`sandbox:rl:turn:${admin.id}`, 60, 60);
+    if (!rateLimit.allowed) {
+      return reply
+        .code(429)
+        .send({ error: "Sandbox turn limit reached", retryAfter: rateLimit.retryAfter });
+    }
+    try {
+      return await runSandboxTurn({
+        personaId: body.personaId,
+        text,
+        aiEnabled: body.aiEnabled !== false,
+      });
+    } catch (err) {
+      if (err instanceof SandboxBusyError) {
+        return reply.code(409).send({ error: err.message });
+      }
+      req.log.error({ err }, "Sandbox turn failed");
+      return reply
+        .code(503)
+        .send({ error: "Sandbox turn failed; reset the sandbox and try again" });
+    }
+  });
+
+  app.post("/api/developer/sandbox/reset", async (req, reply) => {
+    if (!requireSandboxWriter(req, reply)) return;
+    const admin = req.platformAdmin!;
+    const rateLimit = await checkRateLimit(`sandbox:rl:reset:${admin.id}`, 10, 60);
+    if (!rateLimit.allowed) {
+      return reply
+        .code(429)
+        .send({ error: "Sandbox reset limit reached", retryAfter: rateLimit.retryAfter });
+    }
+    try {
+      const result = await resetSandbox(actorOf(req));
+      return { ok: true, deleted: result.deleted, personas: SANDBOX_PERSONAS.length };
+    } catch (err) {
+      if (err instanceof SandboxBusyError) {
+        return reply.code(409).send({ error: err.message });
+      }
+      req.log.error({ err }, "Sandbox reset failed");
+      return reply
+        .code(503)
+        .send({ error: "Sandbox reset failed; retry after checking server logs" });
+    }
+  });
+
+  app.get("/api/developer/ops/liquidity", async () => {
+    const ids = await listCooperativeIds();
+    const coops = [];
+    for (const id of ids) {
+      const coopData = await withCoopContext(id, async () => {
+        const coop = await prisma.cooperative.findUnique({
+          where: { id },
+          select: { isSandbox: true },
+        });
+        if (!coop || coop.isSandbox) return null;
+        const stats = await coopStats(id);
+        const loans = await prisma.loan.findMany({
+          where: { cooperativeId: id, status: "disbursed", balance: { gt: 0 } },
+          select: { balance: true, dueDate: true },
+        });
+        return { stats, loans };
+      });
+      if (coopData) coops.push(coopData);
+    }
+
+    const now = Date.now();
+    const totalLoanOutstanding = coops.reduce((sum, { stats }) => sum + stats.loanOutstanding, 0);
+    const atRisk30 = coops.reduce(
+      (sum, { loans }) =>
+        sum +
+        loans.reduce(
+          (loanSum, loan) =>
+            loan.dueDate && loan.dueDate.getTime() <= now - 30 * 24 * 60 * 60 * 1000
+              ? loanSum + loan.balance
+              : loanSum,
+          0,
+        ),
+      0,
+    );
+    const atRisk90 = coops.reduce(
+      (sum, { loans }) =>
+        sum +
+        loans.reduce(
+          (loanSum, loan) =>
+            loan.dueDate && loan.dueDate.getTime() <= now - 90 * 24 * 60 * 60 * 1000
+              ? loanSum + loan.balance
+              : loanSum,
+          0,
+        ),
+      0,
+    );
+    const totals = coops.reduce(
+      (sum, { stats }) => ({
+        memberCount: sum.memberCount + stats.memberCount,
+        savingsTotal: sum.savingsTotal + stats.savingsTotal,
+        loanOutstanding: sum.loanOutstanding + stats.loanOutstanding,
+        pendingPayouts: sum.pendingPayouts + stats.pendingPayouts,
+        pendingWithdrawals: sum.pendingWithdrawals + stats.pendingWithdrawals,
+        reserveFundBalance: sum.reserveFundBalance + stats.reserveFundBalance,
+        walletFloat: sum.walletFloat + stats.walletFloat,
+      }),
+      {
+        memberCount: 0,
+        savingsTotal: 0,
+        loanOutstanding: 0,
+        pendingPayouts: 0,
+        pendingWithdrawals: 0,
+        reserveFundBalance: 0,
+        walletFloat: 0,
+      },
+    );
+
+    return {
+      totals: {
+        cooperativeCount: coops.length,
+        ...totals,
+        pendingOutflows: totals.pendingPayouts + totals.pendingWithdrawals,
+        par30Amount: atRisk30,
+        par30Pct:
+          totalLoanOutstanding > 0
+            ? Math.round((atRisk30 / totalLoanOutstanding) * 10000) / 100
+            : 0,
+        par90Amount: atRisk90,
+        par90Pct:
+          totalLoanOutstanding > 0
+            ? Math.round((atRisk90 / totalLoanOutstanding) * 10000) / 100
+            : 0,
+        reserveToSavingsPct:
+          totals.savingsTotal > 0
+            ? Math.round((totals.reserveFundBalance / totals.savingsTotal) * 10000) / 100
+            : 0,
+      },
+      reserveTargetConfigured: false,
+      coops: coops.map(({ stats }) => ({
+        id: stats.id,
+        name: stats.name,
+        code: stats.code,
+        status: stats.status,
+        memberCount: stats.memberCount,
+        savingsTotal: stats.savingsTotal,
+        loanOutstanding: stats.loanOutstanding,
+        pendingOutflows: stats.pendingPayouts + stats.pendingWithdrawals,
+        reserveFundBalance: stats.reserveFundBalance,
+      })),
+      asOf: new Date().toISOString(),
+    };
+  });
+
+  app.get("/api/developer/ops/jobs", async (req, reply) => {
+    const redis = getRedis();
+    if (!redis) {
+      return {
+        configured: isRedisConfigured(),
+        connected: false,
+        schedulers: [],
+        recentRuns: [],
+      };
+    }
+
+    const queue = new Queue(QUEUE_NAMES.SCHEDULER, { connection: redis });
+    try {
+      const [schedulers, completed, failed] = await Promise.all([
+        queue.getJobSchedulers(0, 49, false),
+        queue.getJobs(["completed"], 0, 9, false),
+        queue.getJobs(["failed"], 0, 9, false),
+      ]);
+      const recentRuns = [...completed, ...failed]
+        .map((job) => ({
+          id: job.id,
+          name: job.name,
+          job: typeof job.data?.job === "string" ? job.data.job : job.name,
+          cooperativeId:
+            typeof job.data?.cooperativeId === "string" ? job.data.cooperativeId : null,
+          status: failed.includes(job) ? "failed" : "completed",
+          finishedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : null,
+          failedReason: failed.includes(job) ? "The worker reported a failed run" : null,
+        }))
+        .sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""))
+        .slice(0, 12);
+
+      return {
+        configured: true,
+        connected: true,
+        schedulers: schedulers.map((scheduler) => ({
+          id: scheduler.key,
+          name: scheduler.name,
+          everyMs: scheduler.every ?? null,
+          pattern: scheduler.pattern ?? null,
+          nextAt: scheduler.next ? new Date(scheduler.next).toISOString() : null,
+        })),
+        recentRuns,
+        manualRun: {
+          job: "loan_reminders",
+          description: "Send due-loan reminders for one cooperative",
+          scopeRequired: true,
+          allowed: true,
+        },
+      };
+    } catch (err) {
+      req.log.error({ err }, "Could not read scheduler queue");
+      return reply.code(503).send({ error: "Could not read scheduler status" });
+    } finally {
+      await queue.close();
+    }
+  });
+
+  app.post("/api/developer/ops/jobs/run", async (req, reply) => {
+    if (!requireOwner(req, reply)) return;
+    const body = (req.body ?? {}) as { job?: string; cooperativeId?: string };
+    if (body.job !== "loan_reminders" || !body.cooperativeId) {
+      return reply.code(400).send({
+        error: "Only cooperative-scoped loan reminders can be run manually",
+      });
+    }
+    if (!(await coopExists(body.cooperativeId))) {
+      return reply.code(404).send({ error: "cooperative not found" });
+    }
+    if (await isSandboxCoop(body.cooperativeId)) {
+      return reply
+        .code(400)
+        .send({ error: "sandbox cooperatives are excluded from scheduled jobs" });
+    }
+    const redis = getRedis();
+    if (!redis) return reply.code(503).send({ error: "Redis queue is unavailable" });
+
+    const actor = actorOf(req);
+    const rateLimit = await checkRateLimit(`dev-job-run:${actor.id}`, 3, 60);
+    if (!rateLimit.allowed) {
+      return reply.code(429).send({
+        error: "Manual job run limit reached; try again later",
+        retryAfter: rateLimit.retryAfter,
+      });
+    }
+    const queue = new Queue(QUEUE_NAMES.SCHEDULER, { connection: redis });
+    try {
+      const job = await queue.add(
+        "manual-loan-reminders",
+        { job: "loan_reminders", cooperativeId: body.cooperativeId },
+        {
+          ...DEFAULT_JOB_OPTIONS,
+          jobId: `manual-loan-reminders-${body.cooperativeId}-${new Date().toISOString().slice(0, 10)}`,
+        },
+      );
+      await writePlatformAudit({
+        actorId: actor.id,
+        actorPhone: actor.phone,
+        actorRole: actor.role,
+        action: "scheduler.run",
+        cooperativeId: body.cooperativeId,
+        targetType: "scheduler_job",
+        targetId: "loan_reminders",
+        detail: JSON.stringify({ jobId: job.id }),
+      });
+      return reply.code(202).send({ ok: true, jobId: job.id, status: "queued" });
+    } catch (err) {
+      req.log.error({ err }, "Could not enqueue manual scheduler run");
+      return reply.code(503).send({ error: "Could not queue the scheduler run" });
+    } finally {
+      await queue.close();
+    }
+  });
+
+  app.get("/api/developer/ops/webhooks", async (req) => {
+    const { take } = req.query as { take?: string };
+    const parsed = Number.parseInt(take ?? "", 10);
+    const limit = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 100) : 50;
+    const [inboundFailures, providerEvents] = await Promise.all([
+      prisma.webhookFailure.findMany({
+        orderBy: { createdAt: "desc" },
+        take: limit,
+        select: { id: true, channel: true, messageId: true, error: true, createdAt: true },
+      }),
+      prisma.webhookEvent.findMany({
+        orderBy: { receivedAt: "desc" },
+        take: limit,
+        select: {
+          id: true,
+          provider: true,
+          kind: true,
+          status: true,
+          payloadHash: true,
+          receivedAt: true,
+          processedAt: true,
+        },
+      }),
+    ]);
+    return {
+      events: [
+        ...inboundFailures.map((event) => ({
+          id: event.id,
+          source: event.channel,
+          kind: "inbound_failure",
+          status: "failed",
+          reference: event.messageId,
+          receivedAt: event.createdAt,
+          detail: event.error.slice(0, 240),
+          canReplay: false,
+        })),
+        ...providerEvents.map((event) => ({
+          id: event.id,
+          source: event.provider,
+          kind: event.kind ?? "provider_event",
+          status: event.status,
+          reference: event.id,
+          receivedAt: event.receivedAt,
+          processedAt: event.processedAt,
+          payloadHash: event.payloadHash,
+          detail: null,
+          canReplay: false,
+        })),
+      ]
+        .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime())
+        .slice(0, limit),
+      replayEnabled: false,
+      replayDisabledReason:
+        "The platform stores payload hashes and failure metadata, not replayable request bodies.",
+    };
+  });
+
+  app.post("/api/developer/ops/diagnostics/check", async (req, reply) => {
+    if (!requireOwner(req, reply)) return;
+    const actor = actorOf(req);
+    if (!(await checkRateLimit(`dev-diagnostics:${actor.id}`, 3, 60))) {
+      return reply.code(429).send({ error: "Diagnostic check limit reached; try again later" });
+    }
+
+    const token = process.env.WHATSAPP_TOKEN;
+    const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const groqKey = process.env.GROQ_API_KEY;
+    const paystackKey = process.env.PAYSTACK_SECRET_KEY;
+    const flutterwaveKey = process.env.FLUTTERWAVE_SECRET_KEY;
+    const monnifyKey = process.env.MONNIFY_API_KEY;
+    const monnifySecret = process.env.MONNIFY_SECRET_KEY;
+
+    const checks: Record<string, Promise<DiagnosticResult>> = {
+      database: prisma.$queryRaw`SELECT 1`
+        .then(() => ({ status: "healthy" as const, message: "Database query succeeded" }))
+        .catch(() => ({ status: "error" as const, message: "Database query failed" })),
+      redis: (async () => {
+        if (!isRedisConfigured()) return missingDiagnostic();
+        try {
+          const redis = getRedis();
+          if (!redis || (await redis.ping()) !== "PONG") {
+            return { status: "error", message: "Redis did not answer PING" };
+          }
+          return { status: "healthy", message: "Redis answered PING" };
+        } catch {
+          return { status: "error", message: "Redis did not answer PING" };
+        }
+      })(),
+      whatsapp:
+        token && phoneNumberId
+          ? probeExternalService(
+              `https://graph.facebook.com/v21.0/${encodeURIComponent(phoneNumberId)}?fields=id`,
+              { headers: { Authorization: `Bearer ${token}` } },
+            )
+          : Promise.resolve(missingDiagnostic()),
+      groq: groqKey
+        ? probeExternalService("https://api.groq.com/openai/v1/models", {
+            headers: { Authorization: `Bearer ${groqKey}` },
+          })
+        : Promise.resolve(missingDiagnostic()),
+      paystack: paystackKey
+        ? probeExternalService("https://api.paystack.co/balance", {
+            headers: { Authorization: `Bearer ${paystackKey}` },
+          })
+        : Promise.resolve(missingDiagnostic()),
+      flutterwave: flutterwaveKey
+        ? probeExternalService("https://api.flutterwave.com/v3/balances/NGN", {
+            headers: { Authorization: `Bearer ${flutterwaveKey}` },
+          })
+        : Promise.resolve(missingDiagnostic()),
+      monnify:
+        monnifyKey && monnifySecret
+          ? (() => {
+              const configuredBase = process.env.MONNIFY_BASE_URL ?? "https://sandbox.monnify.com";
+              let host: string;
+              try {
+                const parsed = new URL(configuredBase);
+                if (
+                  parsed.protocol !== "https:" ||
+                  !["api.monnify.com", "sandbox.monnify.com"].includes(parsed.hostname)
+                ) {
+                  return Promise.resolve({
+                    status: "error",
+                    message: "Monnify base URL is not an approved HTTPS host",
+                  });
+                }
+                host = parsed.origin;
+              } catch {
+                return Promise.resolve({
+                  status: "error",
+                  message: "Monnify base URL is invalid",
+                });
+              }
+              const authorization = Buffer.from(`${monnifyKey}:${monnifySecret}`).toString(
+                "base64",
+              );
+              return probeExternalService(`${host}/api/v1/auth/login`, {
+                method: "POST",
+                headers: {
+                  Authorization: `Basic ${authorization}`,
+                  "Content-Type": "application/json",
+                },
+                body: "{}",
+              });
+            })()
+          : Promise.resolve(missingDiagnostic()),
+    };
+
+    const entries = await Promise.all(
+      Object.entries(checks).map(async ([name, check]) => [name, await check] as const),
+    );
+    const results = Object.fromEntries(entries) as Record<string, DiagnosticResult>;
+    await writePlatformAudit({
+      actorId: actor.id,
+      actorPhone: actor.phone,
+      actorRole: actor.role,
+      action: "diagnostics.check",
+      targetType: "platform_integrations",
+      targetId: "all",
+      detail: JSON.stringify(
+        Object.fromEntries(
+          Object.entries(results).map(([name, result]) => [
+            name,
+            { status: result.status, statusCode: result.statusCode },
+          ]),
+        ),
+      ),
+    });
+    return { checkedAt: new Date().toISOString(), results };
   });
 
   app.all("/api/developer/*", async (_req, reply) => {

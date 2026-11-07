@@ -205,6 +205,42 @@ The platform console is the cross-cooperative control plane for platform staff.
 A DB failure during bootstrap is logged but does not block startup; retry by
 restarting once the database is reachable.
 
+### Operations pages
+
+The console's **Liquidity**, **Scheduler**, **Diagnostics**, **Webhooks**, and
+**Bot Sandbox** pages are available from the sidebar after login.
+
+- **Liquidity** aggregates cooperative balances and pending outflows. PAR 30/90
+  are estimates based on each loan's recorded due date and full outstanding
+  balance; they are not installment-level regulatory calculations. Reserve
+  fund balances are shown, but the platform does not currently configure a
+  statutory reserve threshold.
+- **Scheduler** reads BullMQ v6 job-scheduler metadata from Redis. A platform
+  owner can queue loan repayment reminders for one cooperative. The full
+  scheduler tick is intentionally not exposed as a manual action because it
+  includes direct-debit and other external workflows.
+- **Diagnostics** is owner-only. It checks database and Redis connectivity and
+  validates configured provider credentials without displaying credentials or
+  provider response bodies. Checks make requests to external providers.
+- **Webhooks** shows inbound failures and provider-event metadata. Request
+  payloads are not retained, so replay is intentionally unavailable. Do not
+  replay a payment delivery by bypassing its existing idempotency record.
+- **Bot Sandbox** provisions an isolated `SANDBOX` cooperative with synthetic
+  personas and runs the normal conversation handler in-process. Owner and
+  developer roles can send test turns and reset fixtures; support is read-only.
+  WhatsApp/Telegram sends are captured, payment and insurance adapters return
+  simulated results, email is marked simulated, and object-storage uploads are
+  blocked. Enabling Groq permits a real provider request and uses configured
+  API quota. Sandbox records are excluded from platform aggregates, scheduler
+  targets, liquidity metrics, and regulator reports. Apply the
+  `sandbox_cooperative` Prisma migration before enabling this page in a deployed
+  environment.
+
+The job manager follows BullMQ's current [Job Schedulers API](https://docs.bullmq.io/guide/job-schedulers),
+not the removed legacy repeatable-job APIs. WhatsApp webhook records should be
+treated as event metadata, consistent with Meta's
+[webhook documentation](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/overview).
+
 ---
 
 ## Local Development

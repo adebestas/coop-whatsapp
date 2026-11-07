@@ -65,27 +65,31 @@ vi.mock("../src/lib/messaging.js", async (importOriginal) => {
 vi.mock("../src/services/payments/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/services/payments/index.js")>();
   const { paymentState } = await import("./payment-state.js");
+  const { isSandboxMode } = await import("../src/lib/sandbox.js");
   return {
     ...actual,
-    resolveProvider: vi.fn(() => ({
-      name: "monnify",
-      createVirtualAccount: vi.fn(async () => ({ accountNumber: "1234567890" })),
-      payout: vi.fn(async () =>
-        paymentState.payoutFails
-          ? { ok: false, error: "insufficient balance" }
-          : paymentState.payoutPending
-            ? { ok: false, pending: true, error: "awaiting authorization" }
-            : { ok: true, providerRef: "trx-1" },
-      ),
-      resolveAccount: vi.fn(async () =>
-        paymentState.resolveFails
-          ? { ok: false, error: "account not found" }
-          : { ok: true, name: paymentState.resolveName },
-      ),
-      getTransferStatus: vi.fn(async () => ({ status: paymentState.transferStatus })),
-      verifyWebhook: () => true,
-      parseNotification: () => null,
-    })),
+    resolveProvider: vi.fn(async (preferred?: string, currency?: string) => {
+      if (isSandboxMode()) return actual.resolveProvider(preferred, currency);
+      return {
+        name: "monnify",
+        createVirtualAccount: vi.fn(async () => ({ accountNumber: "1234567890" })),
+        payout: vi.fn(async () =>
+          paymentState.payoutFails
+            ? { ok: false, error: "insufficient balance" }
+            : paymentState.payoutPending
+              ? { ok: false, pending: true, error: "awaiting authorization" }
+              : { ok: true, providerRef: "trx-1" },
+        ),
+        resolveAccount: vi.fn(async () =>
+          paymentState.resolveFails
+            ? { ok: false, error: "account not found" }
+            : { ok: true, name: paymentState.resolveName },
+        ),
+        getTransferStatus: vi.fn(async () => ({ status: paymentState.transferStatus })),
+        verifyWebhook: () => true,
+        parseNotification: () => null,
+      };
+    }),
     isProviderAvailable: vi.fn().mockResolvedValue(true),
     markProviderDown: vi.fn(),
     markProviderUp: vi.fn(),

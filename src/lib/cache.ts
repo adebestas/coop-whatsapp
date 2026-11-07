@@ -356,6 +356,22 @@ export async function resetRateLimit(key: string): Promise<void> {
   inMemoryRateLimits.delete(key);
 }
 
+/** Reset all rate-limit entries whose logical key begins with `prefix`. */
+export async function resetRateLimitPrefix(prefix: string): Promise<void> {
+  const client = getRedis();
+  if (client) {
+    let cursor = "0";
+    do {
+      const [nextCursor, keys] = await client.scan(cursor, "MATCH", `rl:${prefix}*`, "COUNT", 100);
+      cursor = nextCursor;
+      if (keys.length > 0) await client.del(...keys);
+    } while (cursor !== "0");
+  }
+  for (const key of inMemoryRateLimits.keys()) {
+    if (key.startsWith(prefix)) inMemoryRateLimits.delete(key);
+  }
+}
+
 /**
  * OTP rate limiting:
  * - 60s cooldown between OTP generations per phone

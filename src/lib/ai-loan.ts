@@ -18,6 +18,7 @@ import {
   GUARDRAIL_PREFIX,
   GUARDRAIL_SUFFIX,
 } from "./ai-guardrails.js";
+import { noteSandboxAiPath } from "./sandbox.js";
 
 export interface LoanIntent {
   /** Requested principal in naira (null when the message didn't state one). */
@@ -82,8 +83,10 @@ function sanitizeGuarantors(raw: unknown): string[] {
 export async function extractLoanRequest(text: string): Promise<LoanIntent | null> {
   if (!groqAvailable() || !text || text.length > 300) return null;
   // Guardrail: reject prompt injections and off-topic requests immediately
-  if (isInjectionAttempt(text) || !isInScope(text)) return null;
-
+  if (isInjectionAttempt(text) || !isInScope(text)) {
+    noteSandboxAiPath("guardrail");
+    return null;
+  }
   const cleanText = sanitiseUserInput(text, 300);
 
   try {
@@ -103,6 +106,7 @@ export async function extractLoanRequest(text: string): Promise<LoanIntent | nul
       signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
     });
     if (!res.ok) return null;
+    noteSandboxAiPath("ai");
     const body = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };

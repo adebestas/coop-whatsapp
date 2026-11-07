@@ -23,6 +23,7 @@ model Cooperative {
   locale             String              @default("en") // default member language
   adminPhone         String? // WhatsApp number of the coop super admin
   status             String              @default("active") // active | suspended
+  isSandbox          Boolean             @default(false) // developer-console sandbox tenant; excluded from platform aggregates
   loanInterestRate   Float               @default(2) // fallback monthly % charged on loans (percentage)
   dailyPayoutLimit   Int                 @default(100000000) // fraud guard: max total money-out per day in kobo (₦1M)
   reserveFundBalance Int                 @default(0) // statutory reserve fund balance in kobo
@@ -114,6 +115,7 @@ subscription       Subscription?
 
   @@index([status])
   @@index([code])
+  @@index([isSandbox])
   }
 
 // ---- Wallet-bank reconciliation logs ----

@@ -19,6 +19,7 @@ export interface CoopStats {
   code: string;
   plan: string;
   status: string;
+  isSandbox: boolean;
   memberCount: number;
   membersByStatus: Record<string, number>;
   loanCount: number;
@@ -139,6 +140,7 @@ export async function coopStats(coopId: string): Promise<CoopStats> {
       code: coop?.code ?? "",
       plan: subscription?.plan ?? "free",
       status: coop?.status ?? "unknown",
+      isSandbox: coop?.isSandbox ?? false,
       memberCount,
       membersByStatus: byStatus,
       loanCount: loans.length,
@@ -261,11 +263,12 @@ export async function platformOverview(): Promise<PlatformOverview> {
     coops.push(await coopStats(id));
   }
 
+  const aggregateCoops = coops.filter((coop) => !coop.isSandbox);
   const rls = await rlsEnforcementStatus();
   const alerts: Alert[] = [];
-  for (const c of coops) alerts.push(...alertsFor(c));
+  for (const c of aggregateCoops) alerts.push(...alertsFor(c));
   const rlsIssue = rlsAlert(rls.enforced);
   if (rlsIssue) alerts.push(rlsIssue);
 
-  return { totals: sumTotals(coops), coops, alerts };
+  return { totals: sumTotals(aggregateCoops), coops, alerts };
 }

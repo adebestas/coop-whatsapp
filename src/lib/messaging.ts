@@ -20,6 +20,7 @@ const WHATSAPP_SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WHATSAPP_PACING_MS = process.env.NODE_ENV === "test" ? 0 : 1500;
 
 export interface SimulatorMessage {
+  to: string;
   type: "text" | "document" | "buttons" | "flow";
   text?: string;
   filename?: string;
@@ -40,8 +41,8 @@ const simulatorStore = new AsyncLocalStorage<SimulatorStore>();
 
 /**
  * Execute a conversation turn within an isolated simulator capture scope.
- * Any outbound messages to `phone` will be recorded and returned without
- * issuing real external WhatsApp/Telegram network calls.
+ * Every outbound message is recorded and returned without issuing real external
+ * WhatsApp/Telegram network calls.
  */
 export function runInSimulatorScope<T>(
   phone: string,
@@ -81,8 +82,9 @@ async function sendTextNow(params: { to: string; text: string }): Promise<boolea
 
   // Simulator capture hook: capture in-memory and return immediately
   const sim = simulatorStore.getStore();
-  if (sim && sim.phone === to) {
+  if (sim) {
     sim.messages.push({
+      to,
       type: "text",
       text,
       timestamp: new Date().toISOString(),
@@ -132,8 +134,9 @@ export async function sendDocument(params: SendDocumentParams): Promise<boolean>
 async function sendDocumentNow(params: SendDocumentParams): Promise<boolean> {
   const { to, filename, mimeType, data, caption } = params;
   const sim = simulatorStore.getStore();
-  if (sim && sim.phone === to) {
+  if (sim) {
     sim.messages.push({
+      to,
       type: "document",
       filename,
       mimeType,
@@ -166,8 +169,9 @@ export async function sendSecurePrompt(params: {
   const { to, text, flowToken } = params;
 
   const sim = simulatorStore.getStore();
-  if (sim && sim.phone === to) {
+  if (sim) {
     sim.messages.push({
+      to,
       type: "flow",
       text,
       timestamp: new Date().toISOString(),
@@ -211,8 +215,9 @@ export async function sendButtonsPrompt(params: {
   const { to, text, buttons, header, footer } = params;
 
   const sim = simulatorStore.getStore();
-  if (sim && sim.phone === to) {
+  if (sim) {
     sim.messages.push({
+      to,
       type: "buttons",
       text,
       header,

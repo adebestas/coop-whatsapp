@@ -130,9 +130,9 @@ export function initQueueProcessors(): void {
   });
 
   // Scheduler queue — repeatable jobs registered by scheduleSchedulerJobs().
-  processQueue<{ job: string }>(QUEUE_NAMES.SCHEDULER, async (job) => {
+  processQueue<{ job: string; cooperativeId?: string }>(QUEUE_NAMES.SCHEDULER, async (job) => {
     const { runSchedulerJob } = await import("../services/scheduler.js");
-    await runSchedulerJob(job.data.job);
+    await runSchedulerJob(job.data.job, job.data.cooperativeId);
   });
 
   // NOTE: Payments, exports, backups and digests are executed synchronously by

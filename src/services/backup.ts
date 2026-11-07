@@ -1,6 +1,7 @@
 import { mkdir, writeFile, readdir, unlink, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ownerPrisma } from "../lib/prisma.js";
+import { blockSandboxExternal, isSandboxMode } from "../lib/sandbox.js";
 
 export const BACKUP_DIR = process.env.BACKUP_DIR ?? "backups";
 const KEEP_BACKUPS = Number(process.env.BACKUP_KEEP ?? "14");
@@ -199,6 +200,10 @@ async function uploadToS3(filePath: string, key: string): Promise<boolean> {
  * This JSON export is the secondary, portable safety net.
  */
 export async function runBackup(): Promise<{ ok: boolean; message: string; file?: string }> {
+  if (isSandboxMode()) {
+    blockSandboxExternal("backup");
+    return { ok: false, message: "Backups are disabled in the sandbox" };
+  }
   try {
     const plan = planBackupStorage({
       nodeEnv: process.env.NODE_ENV,

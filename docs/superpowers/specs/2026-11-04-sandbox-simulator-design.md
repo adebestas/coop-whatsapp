@@ -112,7 +112,6 @@ No other tables are added in v1. There is deliberately no `SandboxTurn` model.
 The sandbox cooperative is excluded from:
 
 - `platformOverview()` totals and alerts.
-- `listCooperativeIds()` by default, and therefore every tenant-wide job.
 - `listActiveCooperativeIds()` unconditionally, and therefore every scheduler job
   (loan reminders, auto-save, statements, digests, reconciliation).
 - Regulator packs, SCUML/compliance register counts.
@@ -120,10 +119,11 @@ The sandbox cooperative is excluded from:
 - `createCoop`/`setCoopConfig` may never set `isSandbox`; only the sandbox
   provisioner creates it. Config PATCH ignores/rejects an `isSandbox` field.
 
-`listCooperativeIds()` gains an `{ includeSandbox?: boolean }` argument (default
-`false`). `listActiveCooperativeIds()` always excludes sandbox. `listCoops()` passes
-`includeSandbox: true` so the sandbox remains visible in the Cooperatives list with a
-`sandbox: true` flag and a **Sandbox** badge; it is never counted in overview cards.
+`listActiveCooperativeIds()` skips cooperatives whose `isSandbox` flag is true,
+and `platformOverview()` excludes them from totals and alerts while still
+returning them in its `coops` list so the console can show a badge.
+`listCoops()` includes them with a `sandbox` flag. The PostgreSQL
+`app.list_cooperative_ids()` function is unchanged.
 
 ## Sandbox runtime
 

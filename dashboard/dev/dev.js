@@ -31,13 +31,19 @@
   let policiesData = [];
   let ruleByKey = {};
   let loaderCount = 0;
+  let sandboxOverview = null;
+  let sandboxPersonaId = "active_saver";
+  let sandboxState = null;
+  let sandboxAiEnabled = true;
+  const sandboxTranscripts = {};
+  const sandboxTurnMeta = {};
 
   // ---- Init ----
   document.addEventListener("DOMContentLoaded", init);
 
   // ---- Delegated handlers (CSP: no inline scripts) ----
   function runAction(el, event) {
-    const fn = window[el.dataset.action];
+    const fn = window[el.dataset.action || el.dataset.actionChange];
     if (typeof fn !== "function") return;
     if (el.dataset.arg1 !== undefined || el.dataset.arg2 !== undefined) {
       fn(el.dataset.arg1, el.dataset.arg2, event, el);
@@ -236,6 +242,11 @@
       create: "Create Cooperative",
       policies: "Platform Policies",
       admins: "Platform Admins",
+      liquidity: "Liquidity",
+      jobs: "Scheduler",
+      diagnostics: "API & Gateway Diagnostics",
+      webhooks: "Webhook Monitor",
+      sandbox: "Bot Sandbox",
     };
     setText("pageTitle", titles[page] || "Platform Console");
     const content = document.getElementById("pageContent");
@@ -257,6 +268,21 @@
         break;
       case "admins":
         isOwner ? renderAdmins(content) : renderDenied(content);
+        break;
+      case "liquidity":
+        renderLiquidity(content);
+        break;
+      case "jobs":
+        renderJobs(content);
+        break;
+      case "diagnostics":
+        renderDiagnostics(content);
+        break;
+      case "webhooks":
+        renderWebhooks(content);
+        break;
+      case "sandbox":
+        renderSandbox(content);
         break;
       default:
         renderOverview(content);
@@ -506,7 +532,7 @@
             ${coops
               .map(
                 (c) => `<tr class="row-link" data-action="openCoop" data-arg="${esc(c.id)}">
-                <td class="font-bold">${esc(c.name || "—")}<div class="text-muted text-sm font-mono">${esc(c.code || "")}</div></td>
+                <td class="font-bold">${esc(c.name || "—")}${c.isSandbox ? '<span class="sandbox-list-tag">Sandbox</span>' : ""}<div class="text-muted text-sm font-mono">${esc(c.code || "")}</div></td>
                 <td>${esc(c.plan || "free")}</td>
                 <td>${coopStatusBadge(c.status)}</td>
                 <td class="font-mono">${fmt(c.memberCount)}</td>
@@ -574,6 +600,7 @@
             <button class="btn btn-ghost btn-sm" data-action="backToCoops">← Back</button>
             <span class="card-title">${esc(coop.name || "—")}</span>
             <span class="dev-code">${esc(coop.code || "")}</span>
+            ${coopDetail.stats?.isSandbox ? '<span class="sandbox-list-tag">Sandbox</span>' : ""}
             ${coopStatusBadge(coop.status)}
             <span class="badge badge-gray">${esc((coopDetail.stats || {}).plan || "—")}</span>
           </div>
@@ -1844,6 +1871,409 @@
       toast("Clipboard unavailable", "error");
     }
   };
+
+  // ============================================================
+  //  Developer operations
+  // ============================================================
+  async function renderSandbox(el) {
+    el.innerHTML = `<div class="card"><div class="card-body"><div class="skeleton" style="height:320px;"></div></div></div>`;
+    try {
+      sandboxOverview = await api("/sandbox");
+      if (!sandboxOverview.personas.some((persona) => persona.id === sandboxPersonaId)) {
+        sandboxPersonaId = sandboxOverview.personas[0]?.id || "active_saver";
+      }
+      const state = await api(`/sandbox/state?personaId=${encodeURIComponent(sandboxPersonaId)}`);
+      sandboxState = state.state;
+      renderSandboxContent(el);
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Sandbox unavailable</h3><p>${esc(err.message)}</p></div>`;
+    }
+  }
+
+  function renderSandboxContent(el) {
+    if (!sandboxOverview) return;
+    const personas = sandboxOverview.personas || [];
+    const selected = personas.find((persona) => persona.id === sandboxPersonaId);
+    if (!selected) return;
+    const writable = me && (me.role === "owner" || me.role === "developer");
+    const transcript = sandboxTranscripts[sandboxPersonaId] || [];
+    const meta = sandboxTurnMeta[sandboxPersonaId];
+    const state = sandboxState || { session: null, wallet: null, loans: [] };
+    const loans = state.loans || [];
+    const sessionData = state.session?.data
+      ? JSON.stringify(state.session.data, null, 2)
+      : "No active session data";
+
+    el.innerHTML = `
+      <div class="sandbox-banner">
+        <div><strong>Isolated bot environment</strong><span>Messages, payments, insurance, email and storage are simulated. Only the optional Groq AI request can use the network.</span></div>
+        <div class="sandbox-health"><span class="sandbox-health-dot ${sandboxOverview.cooperative?.status === "active" ? "online" : ""}"></span>${esc(sandboxOverview.cooperative?.code || "SANDBOX")}</div>
+      </div>
+      <div class="sandbox-layout">
+        <aside class="card sandbox-personas">
+          <div class="card-header"><div><span class="card-title">Test identities</span><small>${esc(sandboxOverview.cooperative?.name || "Sandbox Cooperative")}</small></div></div>
+          <div class="sandbox-persona-list">
+            ${personas.map((persona) => {
+              const isSelected = persona.id === sandboxPersonaId;
+              const balance = isSelected && state.wallet
+                ? state.wallet.balanceKobo
+                : persona.walletKobo;
+              return `<button class="sandbox-persona ${isSelected ? "active" : ""}" data-action="selectSandboxPersona" data-arg="${esc(persona.id)}">
+                <span class="sandbox-avatar">${esc(persona.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2))}</span>
+                <span class="sandbox-persona-info"><strong>${esc(persona.name)}</strong><small>${esc(persona.label)} · ${esc(persona.role)}</small><small>${esc(formatPhone(persona.phone))}</small></span>
+                <span class="sandbox-persona-balance">${balance == null ? "—" : currency(balance)}</span>
+              </button>`;
+            }).join("")}
+          </div>
+          <div class="sandbox-persona-footer">
+            <button class="btn btn-secondary btn-sm" data-action="resetSandbox" ${writable ? "" : "disabled"}>Reset sandbox</button>
+            ${writable ? "" : '<small>Read-only access</small>'}
+          </div>
+        </aside>
+
+        <section class="card sandbox-chat">
+          <div class="card-header sandbox-chat-header">
+            <div><span class="card-title">${esc(selected.name)}</span><small>${esc(selected.description)}</small></div>
+            <span class="sandbox-safe-tag">SIMULATED</span>
+          </div>
+          <div class="sandbox-quick-actions">
+            ${["menu", "balance", "save 2000", "loan 50000 3", "myloans", "trend", "help"].map((command) =>
+              `<button class="sandbox-quick" data-action="sendSandboxQuick" data-arg="${esc(command)}" ${writable ? "" : "disabled"}>${esc(command)}</button>`,
+            ).join("")}
+          </div>
+          <div class="sandbox-transcript" id="sandboxTranscript">
+            ${transcript.length
+              ? transcript.map((message) => renderSandboxMessage(message, selected)).join("")
+              : '<div class="sandbox-empty"><span>↗</span><strong>Start a conversation</strong><small>Send a message as this persona. The bot runs its regular state machine against isolated fixtures.</small></div>'}
+          </div>
+          <div class="sandbox-composer">
+            <textarea id="sandboxComposer" rows="2" maxlength="500" placeholder="${writable ? "Type a WhatsApp message…" : "Support access is read-only"}" ${writable ? "" : "disabled"}></textarea>
+            <div class="sandbox-composer-actions">
+              <label class="sandbox-ai-toggle" title="Allow the real Groq API for this turn">
+                <input type="checkbox" data-action-change="toggleSandboxAi" ${sandboxAiEnabled ? "checked" : ""} ${sandboxOverview.ai?.available && writable ? "" : "disabled"}>
+                <span>Groq AI ${sandboxOverview.ai?.available ? "" : "(not configured)"}</span>
+              </label>
+              <span class="sandbox-char-count">500 char max</span>
+              <button class="btn btn-primary" data-action="sendSandboxMessage" ${writable ? "" : "disabled"}>Send <span aria-hidden="true">↗</span></button>
+            </div>
+          </div>
+        </section>
+
+        <aside class="card sandbox-inspector">
+          <div class="card-header"><span class="card-title">Live state</span></div>
+          <div class="sandbox-inspector-body">
+            <div class="sandbox-state-block">
+              <span class="sandbox-label">Conversation</span>
+              <strong>${esc(state.session?.state || "Not started")}</strong>
+              <pre>${esc(sessionData)}</pre>
+            </div>
+            <div class="sandbox-state-block">
+              <span class="sandbox-label">Wallet</span>
+              <strong>${state.wallet ? currency(state.wallet.balanceKobo) : "Not provisioned"}</strong>
+              <small>Total saved ${state.wallet ? currency(state.wallet.totalSavedKobo) : "—"}</small>
+            </div>
+            <div class="sandbox-state-block">
+              <span class="sandbox-label">Loans (${loans.length})</span>
+              ${loans.length ? `<div class="sandbox-loans">${loans.map((loan) => `<div><span>${esc(loan.status)}${loan.dueDate && new Date(loan.dueDate) < new Date() ? '<i class="sandbox-overdue">OVERDUE</i>' : ""}</span><strong>${currency(loan.balanceKobo)}</strong><small>Principal ${currency(loan.amountKobo)} · due ${date(loan.dueDate)}</small></div>`).join("")}</div>` : '<small>No loans</small>'}
+            </div>
+            <div class="sandbox-state-block">
+              <span class="sandbox-label">Last turn</span>
+              ${meta ? `<strong class="sandbox-ai-path ${esc(meta.path)}">${esc(meta.path === "ai" ? "Live AI" : meta.path === "guardrail" ? "Guardrail" : "Deterministic")}</strong><small>${fmt(meta.durationMs)} ms · ${esc(dateTime(meta.at))}</small>` : "<small>No turns yet</small>"}
+            </div>
+            <div class="sandbox-inspector-foot">Sandbox fixtures are excluded from platform totals and scheduled jobs.</div>
+          </div>
+        </aside>
+      </div>`;
+    const transcriptEl = document.getElementById("sandboxTranscript");
+    if (transcriptEl) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  function renderSandboxMessage(message, selected) {
+    if (message.kind === "inbound") {
+      return `<div class="sandbox-message-row inbound"><div class="sandbox-message"><span class="sandbox-message-author">${esc(selected.name)} · ${esc(selected.role)}</span><p>${esc(message.text)}</p><time>${esc(dateTime(message.timestamp))}</time></div></div>`;
+    }
+    const isCrossPersona = message.to && message.to !== selected.phone;
+    const content = message.type === "document"
+      ? `<div class="sandbox-file"><span>▤</span><div><strong>${esc(message.filename || "Document")}</strong><small>${esc(message.mimeType || "File")}</small></div></div>${message.caption ? `<p>${esc(message.caption)}</p>` : ""}`
+      : message.type === "buttons"
+        ? `${message.text ? `<p>${esc(message.text)}</p>` : ""}<div class="sandbox-button-chips">${(message.buttons || []).map((button) => `<span>${esc(button.title)}</span>`).join("")}</div>`
+        : message.type === "flow"
+          ? `<strong>${esc(message.header || "Secure form")}</strong>${message.text ? `<p>${esc(message.text)}</p>` : ""}${message.footer ? `<small>${esc(message.footer)}</small>` : ""}`
+          : `<p>${esc(message.text || "")}</p>`;
+    return `<div class="sandbox-message-row outbound ${isCrossPersona ? "cross-persona" : ""}"><div class="sandbox-message">
+      ${isCrossPersona ? `<span class="sandbox-cross-tag">To ${esc(message.toName || message.to)}</span>` : ""}
+      ${content}<time>${esc(dateTime(message.timestamp))}</time></div></div>`;
+  }
+
+  function dateTime(value) {
+    if (!value) return "—";
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  async function loadSandboxPersona(personaId) {
+    sandboxPersonaId = personaId;
+    try {
+      const result = await api(`/sandbox/state?personaId=${encodeURIComponent(personaId)}`);
+      sandboxState = result.state;
+      renderSandboxContent(document.getElementById("pageContent"));
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  window.selectSandboxPersona = function (personaId) {
+    if (personaId) loadSandboxPersona(personaId);
+  };
+
+  window.toggleSandboxAi = function (arg, event, el) {
+    sandboxAiEnabled = Boolean(el.checked);
+  };
+
+  async function sendSandboxText(text, composer) {
+    if (!sandboxOverview || !text.trim()) return;
+    const value = text.trim();
+    if (composer) composer.disabled = true;
+    try {
+      const result = await api("/sandbox/message", {
+        method: "POST",
+        body: { personaId: sandboxPersonaId, text: value, aiEnabled: sandboxAiEnabled },
+      });
+      const history = sandboxTranscripts[sandboxPersonaId] || (sandboxTranscripts[sandboxPersonaId] = []);
+      history.push({ kind: "inbound", text: value, timestamp: new Date().toISOString() });
+      history.push(...(result.messages || []));
+      sandboxState = result.state;
+      sandboxTurnMeta[sandboxPersonaId] = { ...result.ai, durationMs: result.durationMs, at: new Date().toISOString() };
+      if (composer) composer.value = "";
+      renderSandboxContent(document.getElementById("pageContent"));
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      const currentComposer = document.getElementById("sandboxComposer");
+      if (currentComposer) {
+        currentComposer.disabled = false;
+        currentComposer.focus();
+      }
+    }
+  }
+
+  window.sendSandboxMessage = function () {
+    const composer = document.getElementById("sandboxComposer");
+    if (composer) sendSandboxText(composer.value, composer);
+  };
+
+  window.sendSandboxQuick = function (text) {
+    if (text) sendSandboxText(text);
+  };
+
+  window.resetSandbox = async function () {
+    if (!window.confirm("Reset all sandbox conversations and fixtures? This cannot be undone.")) return;
+    try {
+      await api("/sandbox/reset", { method: "POST", body: {} });
+      Object.keys(sandboxTranscripts).forEach((key) => delete sandboxTranscripts[key]);
+      Object.keys(sandboxTurnMeta).forEach((key) => delete sandboxTurnMeta[key]);
+      toast("Sandbox reset and fixtures reseeded", "success");
+      await renderSandbox(document.getElementById("pageContent"));
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  };
+
+  document.addEventListener("keydown", (event) => {
+    if (event.target?.id === "sandboxComposer" && event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      window.sendSandboxMessage();
+    }
+  });
+
+  async function renderLiquidity(el) {
+    el.innerHTML = `<div class="stats-grid">${skeletonCards(6)}</div>
+      <div class="card"><div class="card-header"><span class="card-title">Cooperative exposure</span></div>
+      <div class="card-body"><div class="skeleton" style="height:180px;"></div></div></div>`;
+    try {
+      const { totals, coops, reserveTargetConfigured } = await api("/ops/liquidity");
+      el.innerHTML = `
+        <div class="ops-note">All amounts are shown in naira. PAR estimates use the recorded loan due date and full outstanding balance. Validate against installment-level schedules before using them for regulatory reporting.</div>
+        <div class="stats-grid ops-stats">
+          ${statCard("indigo", "Cooperatives", fmt(totals.cooperativeCount))}
+          ${statCard("green", "Member deposits", currency(totals.savingsTotal))}
+          ${statCard("blue", "Loans outstanding", currency(totals.loanOutstanding))}
+          ${statCard("gold", "Pending outflows", currency(totals.pendingOutflows))}
+          ${statCard("red", "PAR 30 estimate", `${currency(totals.par30Amount)} <small>${fmt(totals.par30Pct)}%</small>`)}
+          ${statCard("red", "PAR 90 estimate", `${currency(totals.par90Amount)} <small>${fmt(totals.par90Pct)}%</small>`)}
+          ${statCard("green", "Reserve funds", currency(totals.reserveFundBalance))}
+          ${statCard("indigo", "Reserve / deposits", `${fmt(totals.reserveToSavingsPct)}%`)}
+        </div>
+        <div class="callout ops-callout">
+          ${reserveTargetConfigured
+            ? "Reserve levels can be compared with the configured statutory target."
+            : "Reserve balances are reported from cooperative records. No statutory reserve threshold is configured, so this is not a compliance assessment."}
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">Cooperative cash flow</span><span class="text-muted text-sm">${fmt(coops.length)} cooperatives</span></div>
+          <div class="card-body flush ops-table-wrap">
+            ${coops.length ? `<table class="ops-table"><thead><tr><th>Cooperative</th><th>Members</th><th>Deposits</th><th>Loan book</th><th>Pending outflows</th><th>Reserve</th></tr></thead>
+              <tbody>${coops.map((coop) => `<tr>
+                <td><strong>${esc(coop.name)}</strong><small>${esc(coop.code)}</small></td>
+                <td>${fmt(coop.memberCount)}</td><td>${currency(coop.savingsTotal)}</td>
+                <td>${currency(coop.loanOutstanding)}</td><td>${currency(coop.pendingOutflows)}</td>
+                <td>${currency(coop.reserveFundBalance)}</td>
+              </tr>`).join("")}</tbody></table>` : '<div class="empty-state"><h3>No cooperative data</h3><p>Platform aggregates will appear when cooperatives are active.</p></div>'}
+          </div>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Liquidity data unavailable</h3><p>${esc(err.message)}</p></div>`;
+    }
+  }
+
+  async function renderJobs(el) {
+    el.innerHTML = `<div class="card"><div class="card-header"><span class="card-title">Background jobs</span></div>
+      <div class="card-body"><div class="skeleton" style="height:220px;"></div></div></div>`;
+    try {
+      const [data, liquidity] = await Promise.all([api("/ops/jobs"), api("/ops/liquidity")]);
+      if (!data.connected) {
+        el.innerHTML = `<div class="empty-state"><h3>Scheduler unavailable</h3>
+          <p>${data.configured ? "Redis is configured but not connected." : "Redis is not configured, so BullMQ jobs cannot be inspected or queued."}</p></div>`;
+        return;
+      }
+      const labels = {
+        tick: ["Scheduler tick", "Runs reminders, retention, compliance follow-ups and other scheduled workflows."],
+        backup: ["Database backup", "Creates the scheduled backup."],
+        reconcile: ["Payment reconciliation", "Checks provider transfers and settlement records."],
+        digest: ["Savings digests", "Sends scheduled movement and savings summaries."],
+        poller: ["Transfer status poller", "Checks pending provider transfer statuses."],
+      };
+      const schedulers = data.schedulers || [];
+      const cooperativeOptions = (liquidity.coops || []).map((coop) =>
+        `<option value="${esc(coop.id)}">${esc(coop.name)} (${esc(coop.code)})</option>`,
+      ).join("");
+      el.innerHTML = `
+        <div class="callout ops-callout">
+          Manual execution is limited to loan reminders for one cooperative. The full scheduler tick can initiate direct-debit collections and other external actions.
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">Recurring schedules</span><span class="badge badge-green">Redis connected</span></div>
+          <div class="card-body flush ops-table-wrap">${schedulers.length ? `<table class="ops-table">
+            <thead><tr><th>Job</th><th>Cadence</th><th>Next run</th><th>Control</th></tr></thead><tbody>
+              ${schedulers.map((job) => {
+                const [label, description] = labels[job.name] || [job.name, "Registered BullMQ scheduler"];
+                const runnable = job.name === "loan_reminders" && isOwner;
+                return `<tr><td><strong>${esc(label)}</strong><small>${esc(description)}</small></td>
+                  <td>${job.everyMs ? esc(formatInterval(job.everyMs)) : esc(job.pattern || "Configured")}</td>
+                  <td>${job.nextAt ? esc(new Date(job.nextAt).toLocaleString()) : "Not reported"}</td>
+                  <td>${runnable ? '<button class="btn btn-secondary btn-sm" data-action="runManualJob">Run reminders</button>' : '<span class="text-muted text-sm">Scheduled only</span>'}</td></tr>`;
+              }).join("")}
+            </tbody></table>` : '<div class="empty-state"><h3>No recurring schedules found</h3><p>Check that the application registered its BullMQ schedulers.</p></div>'}</div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">Run loan reminders now</span></div>
+          <div class="card-body">
+            <p class="text-muted">This sends due and overdue repayment notices to members and guarantors in one cooperative. Existing reminder claims prevent duplicate sends.</p>
+            <div class="form-inline ops-run-form">
+              <div class="form-field"><label for="jobCooperative">Cooperative</label><select id="jobCooperative" class="toolbar-select">${cooperativeOptions || '<option value="">No cooperatives available</option>'}</select></div>
+              <button class="btn btn-primary" data-action="runManualJob" ${!isOwner || !cooperativeOptions ? "disabled" : ""}>Queue reminder run</button>
+            </div>
+            ${!isOwner ? '<p class="text-muted text-sm mt-2">Only platform owners can queue a manual run.</p>' : ""}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">Recent runs</span></div>
+          <div class="card-body flush ops-table-wrap">${(data.recentRuns || []).length ? `<table class="ops-table">
+            <thead><tr><th>Job</th><th>Scope</th><th>Status</th><th>Finished</th></tr></thead><tbody>
+              ${data.recentRuns.map((run) => `<tr><td>${esc(run.job)}</td><td>${esc(run.cooperativeId || "Platform")}</td>
+                <td>${statusBadge(run.status)}</td><td>${run.finishedAt ? esc(new Date(run.finishedAt).toLocaleString()) : "In progress"}</td></tr>`).join("")}
+            </tbody></table>` : '<div class="empty-state"><p>No recent scheduler runs are retained in the queue.</p></div>'}</div>
+        </div>`;
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Scheduler data unavailable</h3><p>${esc(err.message)}</p></div>`;
+    }
+  }
+
+  function formatInterval(milliseconds) {
+    if (milliseconds % 86400000 === 0) return `${milliseconds / 86400000} day${milliseconds === 86400000 ? "" : "s"}`;
+    if (milliseconds % 3600000 === 0) return `${milliseconds / 3600000} hour${milliseconds === 3600000 ? "" : "s"}`;
+    if (milliseconds % 60000 === 0) return `${milliseconds / 60000} minutes`;
+    return `${Math.round(milliseconds / 1000)} seconds`;
+  }
+
+  window.runManualJob = async function () {
+    if (!isOwner) return toast("Only platform owners can queue manual jobs", "error");
+    const cooperativeId = document.getElementById("jobCooperative")?.value;
+    if (!cooperativeId) return toast("Choose a cooperative first", "error");
+    if (!window.confirm("Queue loan reminders for this cooperative? Members and guarantors may receive WhatsApp messages.")) return;
+    try {
+      const result = await api("/ops/jobs/run", {
+        method: "POST",
+        body: { job: "loan_reminders", cooperativeId },
+      });
+      toast(`Reminder run queued: ${result.jobId}`, "success");
+      renderJobs(document.getElementById("pageContent"));
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  };
+
+  async function renderDiagnostics(el) {
+    el.innerHTML = `
+      <div class="ops-intro"><h2>Check service connections</h2>
+        <p>Checks use read-only provider endpoints where available. Responses and credentials are never displayed or stored.</p>
+        ${isOwner
+          ? '<button class="btn btn-primary" data-action="runDiagnostics">Run checks</button>'
+          : '<p class="text-muted text-sm">Only platform owners can send credential validation requests.</p>'}
+      </div>
+      <div id="diagnosticResults" class="diagnostic-grid">
+        <div class="empty-state"><h3>No recent check</h3><p>Run checks to inspect database, Redis and configured provider connectivity.</p></div>
+      </div>`;
+  }
+
+  window.runDiagnostics = async function () {
+    if (!isOwner) return toast("Only platform owners can run diagnostics", "error");
+    const results = document.getElementById("diagnosticResults");
+    if (results) results.innerHTML = `<div class="card"><div class="card-body"><div class="skeleton" style="height:170px;"></div></div></div>`;
+    try {
+      const data = await api("/ops/diagnostics/check", { method: "POST", body: {} });
+      const entries = Object.entries(data.results || {});
+      if (results) {
+        results.innerHTML = entries.map(([name, result]) => `
+          <div class="diagnostic-row">
+            <div><strong>${esc(name)}</strong><small>${esc(result.message)}</small></div>
+            <span class="badge badge-${result.status === "healthy" ? "green" : result.status === "error" ? "red" : "gray"}">${esc(result.status.replace("_", " "))}</span>
+            <small>${result.durationMs == null ? "" : `${fmt(result.durationMs)} ms`}</small>
+          </div>`).join("") || '<div class="empty-state"><p>No checks returned.</p></div>';
+      }
+      toast("Diagnostics completed", "success");
+    } catch (err) {
+      if (results) results.innerHTML = `<div class="empty-state"><h3>Diagnostics failed</h3><p>${esc(err.message)}</p></div>`;
+      toast(err.message, "error");
+    }
+  };
+
+  async function renderWebhooks(el) {
+    el.innerHTML = `<div class="card"><div class="card-header"><span class="card-title">Recent webhook events</span></div>
+      <div class="card-body"><div class="skeleton" style="height:240px;"></div></div></div>`;
+    try {
+      const data = await api("/ops/webhooks?take=50");
+      el.innerHTML = `
+        <div class="callout ops-callout">${esc(data.replayDisabledReason)}</div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">Webhook deliveries</span><span class="text-muted text-sm">${fmt((data.events || []).length)} records</span></div>
+          <div class="card-body flush ops-table-wrap">${data.events?.length ? `<table class="ops-table">
+            <thead><tr><th>Source</th><th>Event</th><th>Status</th><th>Reference</th><th>Received</th><th>Replay</th></tr></thead>
+            <tbody>${data.events.map((event) => `<tr>
+              <td><strong>${esc(event.source)}</strong></td><td>${esc(event.kind)}</td>
+              <td>${statusBadge(event.status)}</td>
+              <td><code>${esc(truncate(event.reference, 28))}</code>${event.payloadHash ? `<small>Payload hash: ${esc(truncate(event.payloadHash, 18))}</small>` : ""}
+                ${event.detail ? `<small class="ops-event-detail">${esc(event.detail)}</small>` : ""}
+              </td>
+              <td>${esc(new Date(event.receivedAt).toLocaleString())}</td>
+              <td><button class="btn btn-secondary btn-sm" disabled title="Raw payloads are not retained">Unavailable</button></td>
+            </tr>`).join("")}</tbody></table>` : '<div class="empty-state"><h3>No webhook events</h3><p>Failed inbound deliveries and provider webhook events will appear here.</p></div>'}</div>
+        </div>
+        <p class="text-muted text-sm ops-footnote">For failed WhatsApp inbound messages, ask the member to resend. Payment webhook reprocessing needs an audited, idempotent recovery workflow.</p>`;
+    } catch (err) {
+      el.innerHTML = `<div class="empty-state"><h3>Webhook events unavailable</h3><p>${esc(err.message)}</p></div>`;
+    }
+  }
 
   // ============================================================
   //  Helpers

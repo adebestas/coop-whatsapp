@@ -14,6 +14,7 @@ import {
   GUARDRAIL_PREFIX,
   GUARDRAIL_SUFFIX,
 } from "./ai-guardrails.js";
+import { noteSandboxAiPath } from "./sandbox.js";
 
 /**
  * Commands a member may be nudged toward by the AI. The AI suggestion is NEVER
@@ -166,8 +167,10 @@ export function aiEnabled(): boolean {
 export async function suggestCommand(text: string): Promise<Suggestion | null> {
   if (!aiEnabled() || !text || text.length > 300) return null;
   // Guardrail: reject prompt injections and off-topic queries immediately
-  if (isInjectionAttempt(text) || !isInScope(text)) return null;
-
+  if (isInjectionAttempt(text) || !isInScope(text)) {
+    noteSandboxAiPath("guardrail");
+    return null;
+  }
   const cleanText = sanitiseUserInput(text, 300);
 
   try {
@@ -187,6 +190,7 @@ export async function suggestCommand(text: string): Promise<Suggestion | null> {
       signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
     });
     if (!res.ok) return null;
+    noteSandboxAiPath("ai");
     const body = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };

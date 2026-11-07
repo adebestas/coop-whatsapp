@@ -439,6 +439,6 @@ describe("exports", () => {
 describe("provider default", () => {
   it("defaults to monnify as the primary provider", async () => {
     const { resolveProvider } = await import("../src/services/payments/index.js");
-    expect(resolveProvider().name).toBe("monnify");
+    expect((await resolveProvider()).name).toBe("monnify");
   });
 });

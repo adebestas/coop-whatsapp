@@ -29,10 +29,12 @@ import { formatBalance } from "./money.js";
 import { getLocale } from "./runtime-context.js";
 import {
   isInjectionAttempt,
+  isInScope,
   guardCheck,
   GUARDRAIL_PREFIX,
   GUARDRAIL_SUFFIX,
 } from "./ai-guardrails.js";
+import { noteSandboxAiPath } from "./sandbox.js";
 
 export type AIQueryType =
   | "member_balance"
@@ -363,7 +365,12 @@ export async function handleAIQuery(
 ): Promise<string | null> {
   const guard = guardCheck(text, 500);
   if (!guard.allowed) {
+    noteSandboxAiPath("guardrail");
     return guard.refusal;
+  }
+  if (isInjectionAttempt(text) || !isInScope(text)) {
+    noteSandboxAiPath("guardrail");
+    return null;
   }
   const cleanText = guard.sanitised;
 
