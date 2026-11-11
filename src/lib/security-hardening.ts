@@ -100,9 +100,33 @@ export async function recordSuspiciousEvent(params: {
   memberPhone: string;
   event: string;
   detail: string;
+  /**
+   * Set false on paths an unauthenticated caller can drive (e.g. failed admin
+   * logins): the event is still audited and superadmins are still alerted at
+   * the threshold, but the account is never suspended. Otherwise anyone who
+   * knows an admin's phone number can lock that admin out with 3 wrong PINs.
+   */
+  autoFreeze?: boolean;
 }): Promise<{ frozen: boolean; reason?: string }> {
-  const { memberId, cooperativeId, memberPhone, event, detail } = params;
+  const { memberId, cooperativeId, memberPhone, event, detail, autoFreeze = true } = params;
   const cacheKey = `suspicious:${memberId}`;
+
+  const alertSuperadmins = async (headline: string, body: string): Promise<void> => {
+    const superadmins = await prisma.member.findMany({
+      where: { cooperativeId, role: "superadmin" },
+      select: { phone: true, name: true },
+    });
+    const member = await prisma.member.findUnique({
+      where: { id: memberId },
+      select: { name: true, phone: true },
+    });
+    for (const sa of superadmins) {
+      await sendText({
+        to: sa.phone,
+        text: `${headline}\n\nMember: ${member?.name ?? memberId}\nPhone: ${member?.phone ?? "unknown"}\n${body}`,
+      });
+    }
+  };
 
   try {
     const { getRedis } = await import("./cache.js");
@@ -131,24 +155,23 @@ export async function recordSuspiciousEvent(params: {
       });
 
       if (count >= SUSPICIOUS_THRESHOLD) {
+        if (!autoFreeze) {
+          if (count === SUSPICIOUS_THRESHOLD) {
+            await alertSuperadmins(
+              "⚠️ Repeated failed sign-in attempts",
+              `Reason: ${SUSPICIOUS_THRESHOLD}+ "${event}" events in 1 hour\n\nThe account was NOT suspended (to avoid a lockout). Review the audit log.`,
+            );
+          }
+          return { frozen: false };
+        }
         await prisma.member.update({
           where: { id: memberId },
           data: { status: "suspended" },
         });
-        const superadmins = await prisma.member.findMany({
-          where: { cooperativeId, role: "superadmin" },
-          select: { phone: true, name: true },
-        });
-        const member = await prisma.member.findUnique({
-          where: { id: memberId },
-          select: { name: true, phone: true },
-        });
-        for (const sa of superadmins) {
-          await sendText({
-            to: sa.phone,
-            text: `🚨 AUTO-FREEZE ACTIVATED 🚨\n\nMember: ${member?.name ?? memberId}\nPhone: ${member?.phone ?? "unknown"}\nReason: ${SUSPICIOUS_THRESHOLD}+ suspicious events in 1 hour\n\nAccount has been suspended. Use "unsuspend ${memberId.slice(0, 8)}" to review and restore.`,
-          });
-        }
+        await alertSuperadmins(
+          "🚨 AUTO-FREEZE ACTIVATED 🚨",
+          `Reason: ${SUSPICIOUS_THRESHOLD}+ suspicious events in 1 hour\n\nAccount has been suspended. Use "unsuspend ${memberId.slice(0, 8)}" to review and restore.`,
+        );
         return { frozen: true, reason: "Account auto-frozen due to suspicious activity" };
       }
       return { frozen: false };
@@ -173,6 +196,16 @@ export async function recordSuspiciousEvent(params: {
     });
 
     if (count >= SUSPICIOUS_THRESHOLD) {
+      if (!autoFreeze) {
+        if (count === SUSPICIOUS_THRESHOLD) {
+          await alertSuperadmins(
+            "⚠️ Repeated failed sign-in attempts",
+            `Reason: ${SUSPICIOUS_THRESHOLD}+ "${event}" events in 1 hour\n\nThe account was NOT suspended (to avoid a lockout). Review the audit log.`,
+          );
+        }
+        return { frozen: false };
+      }
+
       // Auto-freeze the member
       await prisma.member.update({
         where: { id: memberId },
@@ -180,21 +213,10 @@ export async function recordSuspiciousEvent(params: {
       });
 
       // Alert superadmins
-      const superadmins = await prisma.member.findMany({
-        where: { cooperativeId, role: "superadmin" },
-        select: { phone: true, name: true },
-      });
-      const member = await prisma.member.findUnique({
-        where: { id: memberId },
-        select: { name: true, phone: true },
-      });
-
-      for (const sa of superadmins) {
-        await sendText({
-          to: sa.phone,
-          text: `🚨 AUTO-FREEZE ACTIVATED 🚨\n\nMember: ${member?.name ?? memberId}\nPhone: ${member?.phone ?? "unknown"}\nReason: ${SUSPICIOUS_THRESHOLD}+ suspicious events in 1 hour\n\nAccount has been suspended. Use "unsuspend ${memberId.slice(0, 8)}" to review and restore.`,
-        });
-      }
+      await alertSuperadmins(
+        "🚨 AUTO-FREEZE ACTIVATED 🚨",
+        `Reason: ${SUSPICIOUS_THRESHOLD}+ suspicious events in 1 hour\n\nAccount has been suspended. Use "unsuspend ${memberId.slice(0, 8)}" to review and restore.`,
+      );
 
       // Clear the counter
       await redis.del(cacheKey);

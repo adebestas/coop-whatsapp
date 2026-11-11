@@ -16,6 +16,7 @@ import { prisma } from "./lib/prisma.js";
 import { isRedisConnected } from "./lib/cache.js";
 import { incCounter, renderMetrics } from "./lib/metrics.js";
 import { isInsecureRequest } from "./lib/http-guards.js";
+import { resolveTrustProxy } from "./lib/trust-proxy.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -44,8 +45,10 @@ export function resolveDashboardDir(): string {
 export function buildApp() {
   const app = Fastify({
     logger: true,
-    // Trust the reverse proxy (nginx/caddy) for correct client IPs in rate limits.
-    trustProxy: true,
+    // Trust only the reverse proxy in front of the app. `true` would trust any
+    // X-Forwarded-For hop, letting a client forge its IP and bypass IP-based
+    // rate limits. See TRUST_PROXY_HOPS for non-standard topologies.
+    trustProxy: resolveTrustProxy(process.env.TRUST_PROXY_HOPS),
     bodyLimit: 256 * 1024, // 256 KB
     requestTimeout: 30_000,
     // Force-close keep-alive sockets on app.close() so graceful shutdown can't
@@ -113,7 +116,9 @@ export function buildApp() {
   // application layer when behind a reverse proxy that sets x-forwarded-proto.
   if (process.env.NODE_ENV === "production") {
     app.addHook("onRequest", async (req, reply) => {
-      if (isInsecureRequest(req.url, req.headers["x-forwarded-proto"] as string | undefined)) {
+      // `req.protocol` honours `trustProxy`; reading X-Forwarded-Proto directly
+      // would let a caller forge `https` on a plain-HTTP connection.
+      if (isInsecureRequest(req.url, req.protocol)) {
         return reply.code(403).send({ error: "HTTPS required" });
       }
     });
@@ -142,14 +147,21 @@ export function buildApp() {
     }
   });
 
-  // Prometheus-format metrics. Protect with METRICS_TOKEN when set.
+  // Prometheus-format metrics. Exposes request volumes, job names and process
+  // internals, so in production it is only served when METRICS_TOKEN is set.
+  // Protecting it with a token when configured was already the behaviour; the
+  // fail-closed default closes the "forgot to set the token" hole.
   app.get("/metrics", async (req, reply) => {
     const token = process.env.METRICS_TOKEN;
-    if (token) {
-      const auth = req.headers.authorization;
-      if (auth !== `Bearer ${token}`) {
-        return reply.code(401).send({ error: "unauthorized" });
+    if (!token) {
+      if (process.env.NODE_ENV === "production") {
+        return reply.code(404).send({ error: "not found" });
       }
+      return reply.type("text/plain; version=0.0.4").send(renderMetrics());
+    }
+    const auth = req.headers.authorization;
+    if (auth !== `Bearer ${token}`) {
+      return reply.code(401).send({ error: "unauthorized" });
     }
     return reply.type("text/plain; version=0.0.4").send(renderMetrics());
   });
@@ -176,7 +188,15 @@ export function buildApp() {
     console.warn(`[app] Dashboard directory not found at ${dashboardDir} — static files disabled`);
   } else {
     console.log(`[app] Serving dashboard from ${dashboardDir}`);
-    void app.register(fastifyStatic, { root: dashboardDir, prefix: "/dashboard/" });
+    void app.register(fastifyStatic, {
+      root: dashboardDir,
+      prefix: "/dashboard/",
+      setHeaders: (res, filePath) => {
+        // Operator consoles must never be indexed or cached by intermediaries.
+        res.header("X-Robots-Tag", "noindex, nofollow");
+        if (filePath.endsWith(".html")) res.header("Cache-Control", "no-cache");
+      },
+    });
     // Redirect /dashboard to /dashboard/ so index.html is served
     app.get("/dashboard", async (_, reply) => reply.redirect("/dashboard/"));
   }

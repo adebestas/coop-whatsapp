@@ -16,3 +16,12 @@ coverage/
 .vscode/
 .idea/
 render.yaml
+# Local-only data and secrets that must never be baked into an image.
+prisma/dev.db
+prisma/*.db*
+platform-owner-pin.txt
+baseline.sql
+backups/
+exports/
+test-*.txt
+debug-*

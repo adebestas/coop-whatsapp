@@ -35,6 +35,28 @@ function webServiceBlocks(source: string): string[] {
   return blocks;
 }
 
+describe("docker build context", () => {
+  it("excludes the local dev database, dumps, local exports and the bootstrap PIN", () => {
+    const ignored = readFileSync(path.join(repoRoot, ".dockerignore"), "utf8")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !line.startsWith("#"));
+    // `COPY prisma ./prisma/` in the production stage would otherwise bake the
+    // laptop SQLite database (member phone numbers + PIN hashes) into the image.
+    for (const entry of [
+      "prisma/dev.db",
+      "prisma/*.db*",
+      "platform-owner-pin.txt",
+      "baseline.sql",
+      "backups/",
+      "exports/",
+      "test-*.txt",
+    ]) {
+      expect(ignored).toContain(entry);
+    }
+  });
+});
+
 describe("render.yaml deployment wiring", () => {
   it("wires the migration pre-deploy command on every web service", () => {
     const blocks = webServiceBlocks(renderYaml);
