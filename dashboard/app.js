@@ -224,6 +224,12 @@
       contributions: 'Contributions',
       payouts: 'Payouts',
       withdrawals: 'Withdrawals',
+      savings: 'Savings',
+      insurance: 'Insurance',
+      meetings: 'Meetings & Committees',
+      dataprotection: 'Data Protection',
+      risk: 'Risk & Reconciliation',
+      referrals: 'Referrals & Refunds',
       polls: 'Buy Polls',
       elections: 'Elections',
       grievances: 'Grievances',
@@ -248,6 +254,12 @@
       case 'contributions': renderContributions(content); break;
       case 'payouts': renderPayouts(content); break;
       case 'withdrawals': renderWithdrawals(content); break;
+      case 'savings': renderSavings(content); break;
+      case 'insurance': renderInsurance(content); break;
+      case 'meetings': renderMeetings(content); break;
+      case 'dataprotection': renderDataProtection(content); break;
+      case 'risk': renderRisk(content); break;
+      case 'referrals': renderReferrals(content); break;
       case 'polls': renderPolls(content); break;
       case 'elections': renderElections(content); break;
       case 'grievances': renderGrievances(content); break;
@@ -1768,6 +1780,704 @@
     }
   }
 
+  // ---- Savings Products & Accounts ----
+  const SAVINGS_TYPES = [
+    { value: 'goal', label: 'Goal savings' },
+    { value: 'fixed', label: 'Fixed deposit' },
+    { value: 'seasonal', label: 'Seasonal savings' },
+    { value: 'junior', label: 'Junior / guardian' },
+  ];
+
+  async function renderSavings(el) {
+    const canManage = isSuperAdmin();
+    el.innerHTML = `
+      <div class="stats-grid" id="savingsStats">
+        ${skeletonCards(4)}
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header">
+          <span class="card-title">Savings Products</span>
+          <div>
+            ${canManage ? '<button class="btn btn-secondary btn-sm" data-action="openSavingsAccountModal">Open Account</button> ' : ''}
+            ${canManage ? '<button class="btn btn-primary btn-sm" data-action="openSavingsProductModal">New Product</button>' : ''}
+          </div>
+        </div>
+        <div class="card-body flush" id="savingsProducts">
+          <div class="empty-state"><p class="text-muted">Loading...</p></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Member Accounts</span></div>
+        <div class="card-body flush" id="savingsAccounts">
+          <div class="empty-state"><p class="text-muted">Loading...</p></div>
+        </div>
+      </div>
+      <div id="savingsModalHost"></div>`;
+
+    try {
+      const [productsRes, accountsRes] = await Promise.all([
+        api('/savings/products'),
+        api('/savings/accounts'),
+      ]);
+      const products = productsRes.products || [];
+      const accounts = accountsRes.accounts || [];
+      const totals = accountsRes.totals || { accounts: 0, balance: 0 };
+
+      document.getElementById('savingsStats').innerHTML = `
+        <div class="stat-card"><div class="stat-label">Products</div><div class="stat-value">${fmt(products.length)}</div></div>
+        <div class="stat-card"><div class="stat-label">Active Products</div><div class="stat-value">${fmt(products.filter(p => p.active).length)}</div></div>
+        <div class="stat-card"><div class="stat-label">Member Accounts</div><div class="stat-value">${fmt(totals.accounts)}</div></div>
+        <div class="stat-card"><div class="stat-label">Total Savings Held</div><div class="stat-value">${currency(totals.balance)}</div></div>`;
+
+      const productsTable = document.getElementById('savingsProducts');
+      if (!products.length) {
+        productsTable.innerHTML = `<div class="empty-state"><h3>No savings products yet</h3><p class="text-muted">Create a product so members can open savings accounts from WhatsApp.</p></div>`;
+      } else {
+        productsTable.innerHTML = `
+          <div class="table-wrapper"><table>
+            <thead><tr><th>Product</th><th>Type</th><th>Rate</th><th>Term</th><th>Minimum</th><th>Accounts</th><th>Balance</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+              ${products.map(p => `<tr>
+                <td class="font-bold">${esc(p.name)}</td>
+                <td>${esc(SAVINGS_TYPES.find(t => t.value === p.type)?.label || p.type)}</td>
+                <td class="font-mono">${Number(p.interestRate) || 0}%</td>
+                <td>${p.termMonths ? `${p.termMonths} mo` : '—'}</td>
+                <td class="font-mono">${currency(p.minAmount)}</td>
+                <td class="font-mono">${fmt(p.accountCount)}</td>
+                <td class="font-mono">${currency(p.totalBalance)}</td>
+                <td>${statusBadge(p.active ? 'active' : 'closed')}</td>
+                <td>${canManage ? `<button class="btn btn-outline btn-xs" data-action="toggleSavingsProduct" data-arg="${esc(p.id)}" data-active="${p.active ? 'true' : 'false'}">${p.active ? 'Close' : 'Reopen'}</button>` : ''}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table></div>`;
+      }
+
+      const accountsTable = document.getElementById('savingsAccounts');
+      if (!accounts.length) {
+        accountsTable.innerHTML = `<div class="empty-state"><h3>No accounts opened yet</h3><p class="text-muted">Members open savings accounts from WhatsApp, or the super admin can open one above.</p></div>`;
+      } else {
+        accountsTable.innerHTML = `
+          <div class="table-wrapper"><table>
+            <thead><tr><th>Member</th><th>Product</th><th>Balance</th><th>Target / Progress</th><th>Status</th><th>Opened</th><th>Matures</th></tr></thead>
+            <tbody>
+              ${accounts.map(a => {
+                const pct = a.targetAmount > 0 ? Math.min(100, Math.round((a.balance / a.targetAmount) * 100)) : null;
+                return `<tr>
+                  <td class="font-bold">${esc(a.memberName || '—')}<div class="text-muted text-sm">${esc(formatPhone(a.memberPhone))}</div></td>
+                  <td>${esc(a.productName)}<div class="text-muted text-sm">${esc(SAVINGS_TYPES.find(t => t.value === a.type)?.label || a.type)}</div></td>
+                  <td class="font-mono">${currency(a.balance)}</td>
+                  <td>${pct === null ? '—' : `${currency(a.targetAmount)}<div class="text-muted text-sm">${pct}%</div>`}</td>
+                  <td>${statusBadge(a.status)}</td>
+                  <td class="text-muted text-sm">${date(a.openedAt)}</td>
+                  <td class="text-muted text-sm">${date(a.maturesAt)}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table></div>`;
+      }
+    } catch (err) {
+      el.innerHTML += `<div class="card" style="margin-top:16px;"><div class="empty-state"><h3>Failed to load savings</h3><p>${esc(err.message)}</p></div></div>`;
+    }
+  }
+
+  window.openSavingsProductModal = function () {
+    const host = document.getElementById('savingsModalHost');
+    if (!host) return;
+    host.innerHTML = `
+      <div class="modal-overlay" data-action="closeSavingsModalOnBackdrop">
+        <div class="modal" role="dialog" aria-modal="true">
+          <div class="modal-header">
+            <span class="card-title">New Savings Product</span>
+            <button class="btn btn-ghost btn-xs" data-action="closeSavingsModal">&times;</button>
+          </div>
+          <div class="modal-body">
+            <div class="form-group">
+              <label for="spType">Type *</label>
+              <select id="spType" style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
+                ${SAVINGS_TYPES.map(t => `<option value="${t.value}">${esc(t.label)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="spName">Name *</label>
+              <input type="text" id="spName" maxlength="60" placeholder="e.g. School fees" style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
+            </div>
+            <div class="form-group">
+              <label for="spRate">Interest rate (% p.a.)</label>
+              <input type="number" id="spRate" min="0" max="100" step="0.1" value="0" style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
+            </div>
+            <div class="form-group">
+              <label for="spTerm">Term (months, leave blank for open-ended)</label>
+              <input type="number" id="spTerm" min="1" max="120" step="1" style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
+            </div>
+            <div class="form-group">
+              <label for="spMin">Minimum deposit (naira)</label>
+              <input type="number" id="spMin" min="0" step="0.01" value="0" style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" data-action="closeSavingsModal">Cancel</button>
+            <button class="btn btn-primary" data-action="createSavingsProduct">Create Product</button>
+          </div>
+        </div>
+      </div>`;
+  };
+
+  window.closeSavingsModal = function () {
+    const host = document.getElementById('savingsModalHost');
+    if (host) host.innerHTML = '';
+  };
+
+  window.closeSavingsModalOnBackdrop = function (_arg, event, el) {
+    if (event.target === el) window.closeSavingsModal();
+  };
+
+  window.createSavingsProduct = async function () {
+    const type = document.getElementById('spType').value;
+    const name = document.getElementById('spName').value.trim();
+    if (!name) { toast('Product name is required', 'error'); return; }
+    const rate = parseFloat(document.getElementById('spRate').value || '0');
+    const termRaw = document.getElementById('spTerm').value;
+    const minNaira = parseFloat(document.getElementById('spMin').value || '0');
+    const body = {
+      type,
+      name,
+      interestRate: Number.isFinite(rate) ? Math.round(rate) : 0,
+      termMonths: termRaw ? Number(termRaw) : null,
+      minAmount: Number.isFinite(minNaira) ? Math.round(minNaira * 100) : 0,
+    };
+    try {
+      const result = await api('/savings/products', { method: 'POST', body });
+      toast(result.message || 'Product created', 'success');
+      window.closeSavingsModal();
+      renderSavings(document.getElementById('pageContent'));
+    } catch (err) { toast(err.message || 'Failed to create product', 'error'); }
+  };
+
+  window.toggleSavingsProduct = async function (id, _event, el) {
+    const active = el && el.dataset.active !== 'true';
+    try {
+      await api(`/savings/products/${encodeURIComponent(id)}`, { method: 'PATCH', body: { active } });
+      toast(active ? 'Product reopened' : 'Product closed', 'success');
+      renderSavings(document.getElementById('pageContent'));
+    } catch (err) { toast(err.message || 'Failed to update product', 'error'); }
+  };
+
+  window.openSavingsAccountModal = async function () {
+    const host = document.getElementById('savingsModalHost');
+    if (!host) return;
+    host.innerHTML = '<div class="modal-overlay"><div class="modal"><div class="modal-body"><div class="empty-state"><p class="text-muted">Loading members...</p></div></div></div></div>';
+    try {
+      const [membersRes, productsRes] = await Promise.all([
+        api('/members?limit=100'),
+        api('/savings/products'),
+      ]);
+      const members = (membersRes.members || []).filter(m => m.status === 'active');
+      const products = (productsRes.products || []).filter(p => p.active);
+      if (!products.length) { host.innerHTML = ''; toast('Create an active savings product first', 'error'); return; }
+      host.innerHTML = `
+        <div class="modal-overlay" data-action="closeSavingsModalOnBackdrop">
+          <div class="modal" role="dialog" aria-modal="true">
+            <div class="modal-header">
+              <span class="card-title">Open Savings Account</span>
+              <button class="btn btn-ghost btn-xs" data-action="closeSavingsModal">&times;</button>
+            </div>
+            <div class="modal-body">
+              <div class="form-group">
+                <label for="saMember">Member *</label>
+                <select id="saMember" style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
+                  ${members.map(m => `<option value="${esc(m.id)}">${esc(m.name)} — ${esc(m.code || '')}</option>`).join('')}
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="saProduct">Product *</label>
+                <select id="saProduct" style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
+                  ${products.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="saTarget">Target amount (naira, optional)</label>
+                <input type="number" id="saTarget" min="0" step="0.01" style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-card); color:var(--text);">
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-ghost" data-action="closeSavingsModal">Cancel</button>
+              <button class="btn btn-primary" data-action="createSavingsAccount">Open Account</button>
+            </div>
+          </div>
+        </div>`;
+    } catch (err) {
+      host.innerHTML = '';
+      toast(err.message || 'Failed to load members', 'error');
+    }
+  };
+
+  window.createSavingsAccount = async function () {
+    const memberId = document.getElementById('saMember').value;
+    const productId = document.getElementById('saProduct').value;
+    const targetNaira = parseFloat(document.getElementById('saTarget').value || '0');
+    const body = { memberId, productId };
+    if (Number.isFinite(targetNaira) && targetNaira > 0) {
+      body.targetAmount = Math.round(targetNaira * 100);
+    }
+    try {
+      const result = await api('/savings/accounts', { method: 'POST', body });
+      toast(result.message || 'Account opened', 'success');
+      window.closeSavingsModal();
+      renderSavings(document.getElementById('pageContent'));
+    } catch (err) { toast(err.message || 'Failed to open account', 'error'); }
+  };
+
+  // ---- Insurance Policies & Claims ----
+  async function renderInsurance(el) {
+    const canManage = isSuperAdmin();
+    el.innerHTML = `
+      <div class="stats-grid" id="insuranceStats">${skeletonCards(3)}</div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Policies</span></div>
+        <div class="card-body flush" id="insurancePolicies">
+          <div class="empty-state"><p class="text-muted">Loading...</p></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Claims</span></div>
+        <div class="card-body flush" id="insuranceClaims">
+          <div class="empty-state"><p class="text-muted">Loading...</p></div>
+        </div>
+      </div>`;
+
+    try {
+      const [policiesRes, claimsRes] = await Promise.all([
+        api('/insurance/policies'),
+        api('/insurance/claims'),
+      ]);
+      const policies = policiesRes.policies || [];
+      const claims = claimsRes.claims || [];
+      const activePolicies = policies.filter(p => p.status === 'active');
+      const coverage = activePolicies.reduce((sum, p) => sum + (p.coverageKobo || 0), 0);
+      const pendingClaims = claims.filter(c => c.status === 'pending' || c.status === 'approved');
+
+      document.getElementById('insuranceStats').innerHTML = `
+        <div class="stat-card"><div class="stat-label">Active Policies</div><div class="stat-value">${fmt(activePolicies.length)}</div></div>
+        <div class="stat-card"><div class="stat-label">Coverage in Force</div><div class="stat-value">${currency(coverage)}</div></div>
+        <div class="stat-card"><div class="stat-label">Claims Awaiting Action</div><div class="stat-value">${fmt(pendingClaims.length)}</div></div>`;
+
+      const policiesTable = document.getElementById('insurancePolicies');
+      if (!policies.length) {
+        policiesTable.innerHTML = `<div class="empty-state"><h3>No insurance policies</h3><p class="text-muted">Members buy cover from WhatsApp; policies will appear here.</p></div>`;
+      } else {
+        policiesTable.innerHTML = `
+          <div class="table-wrapper"><table>
+            <thead><tr><th>Member</th><th>Plan</th><th>Premium</th><th>Coverage</th><th>Period</th><th>Claims</th><th>Status</th></tr></thead>
+            <tbody>
+              ${policies.map(p => `<tr>
+                <td class="font-bold">${esc(p.memberName || '—')}<div class="text-muted text-sm">${esc(formatPhone(p.memberPhone))}</div></td>
+                <td>${esc(p.productCode)}<div class="text-muted text-sm">${esc(p.planCode)}</div></td>
+                <td class="font-mono">${currency(p.premiumKobo)}</td>
+                <td class="font-mono">${currency(p.coverageKobo)}</td>
+                <td class="text-muted text-sm">${date(p.startDate)} → ${date(p.endDate)}</td>
+                <td class="font-mono">${fmt(p.claimCount)}</td>
+                <td>${statusBadge(p.status)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table></div>`;
+      }
+
+      const claimsTable = document.getElementById('insuranceClaims');
+      if (!claims.length) {
+        claimsTable.innerHTML = `<div class="empty-state"><h3>No claims filed</h3><p class="text-muted">Member claims will appear here for review.</p></div>`;
+      } else {
+        claimsTable.innerHTML = `
+          <div class="table-wrapper"><table>
+            <thead><tr><th>Member</th><th>Claim</th><th>Amount</th><th>Filed</th><th>Status</th>${canManage ? '<th></th>' : ''}</tr></thead>
+            <tbody>
+              ${claims.map(c => `<tr>
+                <td class="font-bold">${esc(c.memberName || '—')}<div class="text-muted text-sm">${esc(formatPhone(c.memberPhone))}</div></td>
+                <td>${esc(c.claimType)}<div class="text-muted text-sm">${esc(c.productCode)} · ${esc(c.planCode)}</div></td>
+                <td class="font-mono">${currency(c.amountKobo)}</td>
+                <td class="text-muted text-sm">${date(c.createdAt)}</td>
+                <td>${statusBadge(c.status)}</td>
+                ${canManage ? `<td style="white-space:nowrap;">
+                  ${c.status !== 'paid' && c.status !== 'rejected'
+                    ? `<button class="btn btn-primary btn-xs" data-action="approveInsuranceClaimUI" data-arg="${esc(c.id)}">Approve &amp; Pay</button>
+                       <button class="btn btn-outline btn-xs" data-action="rejectInsuranceClaimUI" data-arg="${esc(c.id)}">Reject</button>`
+                    : ''}
+                </td>` : ''}
+              </tr>`).join('')}
+            </tbody>
+          </table></div>`;
+      }
+    } catch (err) {
+      el.innerHTML += `<div class="card" style="margin-top:16px;"><div class="empty-state"><h3>Failed to load insurance</h3><p>${esc(err.message)}</p></div></div>`;
+    }
+  }
+
+  window.approveInsuranceClaimUI = async function (id) {
+    if (!confirm('Approve this claim? This credits the member\'s wallet from insurance payable.')) return;
+    try {
+      const result = await api(`/insurance/claims/${encodeURIComponent(id)}/approve`, { method: 'POST' });
+      toast(result.message || 'Claim approved', 'success');
+      renderInsurance(document.getElementById('pageContent'));
+    } catch (err) { toast(err.message || 'Failed to approve claim', 'error'); }
+  };
+
+  window.rejectInsuranceClaimUI = async function (id) {
+    if (!confirm('Reject this claim? This cannot be undone from the dashboard.')) return;
+    try {
+      const result = await api(`/insurance/claims/${encodeURIComponent(id)}/reject`, { method: 'POST' });
+      toast(result.message || 'Claim rejected', 'success');
+      renderInsurance(document.getElementById('pageContent'));
+    } catch (err) { toast(err.message || 'Failed to reject claim', 'error'); }
+  };
+
+  // ---- Meetings & Committees ----
+  async function renderMeetings(el) {
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header"><span class="card-title">General Meetings</span></div>
+        <div class="card-body flush" id="meetingsTable">
+          <div class="empty-state"><p class="text-muted">Loading...</p></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Committees</span></div>
+        <div class="card-body flush" id="committeesTable">
+          <div class="empty-state"><p class="text-muted">Loading...</p></div>
+        </div>
+      </div>
+      <div id="meetingsModalHost"></div>`;
+
+    try {
+      const [meetingsRes, committeesRes] = await Promise.all([
+        api('/meetings'),
+        api('/committees'),
+      ]);
+      const meetings = meetingsRes.meetings || [];
+      const committees = committeesRes.committees || [];
+
+      const meetingsTable = document.getElementById('meetingsTable');
+      if (!meetings.length) {
+        meetingsTable.innerHTML = `<div class="empty-state"><h3>No meetings scheduled</h3><p class="text-muted">AGMs and SGMs called from WhatsApp will appear here.</p></div>`;
+      } else {
+        meetingsTable.innerHTML = `
+          <div class="table-wrapper"><table>
+            <thead><tr><th>Meeting</th><th>Type</th><th>Scheduled</th><th>Quorum</th><th>Attendance</th><th>Motions</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+              ${meetings.map(m => `<tr>
+                <td class="font-bold">${esc(m.title)}</td>
+                <td>${esc(String(m.type).toUpperCase())}</td>
+                <td class="text-muted text-sm">${date(m.scheduledAt)}</td>
+                <td class="font-mono">${fmt(m.quorumPercent)}%</td>
+                <td class="font-mono">${fmt(m.attendanceCount)}</td>
+                <td class="font-mono">${fmt(m.motionCount)}</td>
+                <td>${statusBadge(m.status)}</td>
+                <td><button class="btn btn-outline btn-xs" data-action="viewMeeting" data-arg="${esc(m.id)}">View</button></td>
+              </tr>`).join('')}
+            </tbody>
+          </table></div>`;
+      }
+
+      const committeesTable = document.getElementById('committeesTable');
+      if (!committees.length) {
+        committeesTable.innerHTML = `<div class="empty-state"><h3>No committees appointed</h3><p class="text-muted">Credit, supervisory and board committees appear here.</p></div>`;
+      } else {
+        committeesTable.innerHTML = `
+          <div class="table-wrapper"><table>
+            <thead><tr><th>Committee</th><th>Members</th><th>Pending Decisions</th></tr></thead>
+            <tbody>
+              ${committees.map(c => `<tr>
+                <td class="font-bold">${esc(c.name)}<div class="text-muted text-sm">${esc(c.type)} · size ${fmt(c.size)}</div></td>
+                <td>${c.members.length
+                  ? c.members.map(m => `<span class="badge badge-${m.active ? 'blue' : 'gray'}" style="margin:2px;">${esc(m.name)}${m.role === 'chair' ? ' (chair)' : ''}</span>`).join(' ')
+                  : '<span class="text-muted text-sm">No members appointed</span>'}</td>
+                <td class="font-mono">${fmt(c.pendingDecisions)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table></div>`;
+      }
+    } catch (err) {
+      el.innerHTML += `<div class="card" style="margin-top:16px;"><div class="empty-state"><h3>Failed to load meetings</h3><p>${esc(err.message)}</p></div></div>`;
+    }
+  }
+
+  window.viewMeeting = async function (id) {
+    const host = document.getElementById('meetingsModalHost');
+    if (!host) return;
+    try {
+      const detail = await api(`/meetings/${encodeURIComponent(id)}`);
+      const m = detail.meeting;
+      const q = detail.quorum;
+      host.innerHTML = `
+        <div class="modal-overlay" data-action="closeMeetingsModalOnBackdrop">
+          <div class="modal modal-lg" role="dialog" aria-modal="true">
+            <div class="modal-header">
+              <span class="card-title">${esc(m.title)}</span>
+              <button class="btn btn-ghost btn-xs" data-action="closeMeetingsModal">&times;</button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted text-sm">${esc(String(m.type).toUpperCase())} · ${esc(m.status)} · scheduled ${date(m.scheduledAt)}</p>
+              <p><strong>Quorum:</strong> ${fmt(q.present)}/${fmt(q.eligible)} present (${fmt(q.required)} required, ${fmt(q.quorumPercent)}%) — ${q.met ? '<span class="badge badge-green">Met</span>' : '<span class="badge badge-red">Not met</span>'}</p>
+              <h4 style="margin:16px 0 8px;">Attendance (${detail.attendance.length})</h4>
+              ${detail.attendance.length ? `<ul style="margin:0; padding-left:18px;">
+                ${detail.attendance.map(a => `<li>${esc(a.memberName)} (${esc(a.memberCode || '')})${a.proxyForName ? ` — proxy for ${esc(a.proxyForName)}` : ''}</li>`).join('')}
+              </ul>` : '<p class="text-muted text-sm">No attendance recorded.</p>'}
+              <h4 style="margin:16px 0 8px;">Motions (${detail.motions.length})</h4>
+              ${detail.motions.length ? `<div class="table-wrapper"><table>
+                <thead><tr><th>Motion</th><th>Kind</th><th>Yes</th><th>No</th><th>Abstain</th><th>Status</th></tr></thead>
+                <tbody>${detail.motions.map(mo => `<tr>
+                  <td>${esc(mo.title)}<div class="text-muted text-sm">${esc(mo.description)}</div></td>
+                  <td>${esc(mo.kind)}</td>
+                  <td class="font-mono">${fmt(mo.yes)}</td>
+                  <td class="font-mono">${fmt(mo.no)}</td>
+                  <td class="font-mono">${fmt(mo.abstain)}</td>
+                  <td>${statusBadge(mo.status)}</td>
+                </tr>`).join('')}</tbody>
+              </table></div>` : '<p class="text-muted text-sm">No motions tabled.</p>'}
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-ghost" data-action="closeMeetingsModal">Close</button>
+            </div>
+          </div>
+        </div>`;
+    } catch (err) {
+      toast(err.message || 'Failed to load meeting', 'error');
+    }
+  };
+
+  window.closeMeetingsModal = function () {
+    const host = document.getElementById('meetingsModalHost');
+    if (host) host.innerHTML = '';
+  };
+
+  window.closeMeetingsModalOnBackdrop = function (_arg, event, el) {
+    if (event.target === el) window.closeMeetingsModal();
+  };
+
+  // ---- Data Protection ----
+  async function renderDataProtection(el) {
+    el.innerHTML = `
+      <div class="stats-grid" id="dpStats">${skeletonCards(3)}</div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Data Protection Impact Assessments</span></div>
+        <div class="card-body flush" id="dpiaTable"><div class="empty-state"><p class="text-muted">Loading...</p></div></div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Breach Register</span></div>
+        <div class="card-body flush" id="breachesTable"><div class="empty-state"><p class="text-muted">Loading...</p></div></div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Consent Summary</span></div>
+        <div class="card-body flush" id="consentsTable"><div class="empty-state"><p class="text-muted">Loading...</p></div></div>
+      </div>`;
+
+    try {
+      const [dpiaRes, breachesRes, consentsRes] = await Promise.all([
+        api('/data-protection/dpia'),
+        api('/data-protection/breaches'),
+        api('/data-protection/consents'),
+      ]);
+      const records = dpiaRes.records || [];
+      const breaches = breachesRes.breaches || [];
+      const consents = consentsRes.consents || [];
+      const openBreaches = breaches.filter(b => b.status !== "closed" && b.status !== "contained").length;
+      const consentTotal = consents.reduce((sum, c) => sum + c.granted + c.denied, 0);
+
+      document.getElementById('dpStats').innerHTML = `
+        <div class="stat-card"><div class="stat-label">DPIAs</div><div class="stat-value">${fmt(records.length)}</div><div class="stat-sub">${fmt(records.filter(r => r.status === "approved").length)} approved</div></div>
+        <div class="stat-card"><div class="stat-label">Open Breaches</div><div class="stat-value">${fmt(openBreaches)}</div><div class="stat-sub">${fmt(breaches.length)} on record</div></div>
+        <div class="stat-card"><div class="stat-label">Consent Records</div><div class="stat-value">${fmt(consentTotal)}</div><div class="stat-sub">${fmt(consents.length)} consent types</div></div>`;
+
+      const dpiaTable = document.getElementById('dpiaTable');
+      dpiaTable.innerHTML = records.length ? `
+        <div class="table-wrapper"><table>
+          <thead><tr><th>Title</th><th>Activity</th><th>Owner</th><th>Status</th><th>Next Review</th></tr></thead>
+          <tbody>${records.map(r => `<tr>
+            <td class="font-bold">${esc(r.title)}</td>
+            <td>${esc(r.activity)}</td>
+            <td>${esc(r.ownerName || '—')}</td>
+            <td>${statusBadge(r.status)}</td>
+            <td class="text-muted text-sm">${r.nextReviewAt ? date(r.nextReviewAt) : '—'}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : `<div class="empty-state"><h3>No DPIAs recorded</h3><p class="text-muted">Register high-risk processing activities here.</p></div>`;
+
+      const breachesTable = document.getElementById('breachesTable');
+      breachesTable.innerHTML = breaches.length ? `
+        <div class="table-wrapper"><table>
+          <thead><tr><th>Reference</th><th>Title</th><th>Discovered</th><th>Affected</th><th>NDPC</th><th>Status</th></tr></thead>
+          <tbody>${breaches.map(b => `<tr>
+            <td class="font-mono text-sm">${esc(b.reference)}</td>
+            <td>${esc(b.title)}</td>
+            <td class="text-muted text-sm">${date(b.discoveredAt)}</td>
+            <td class="font-mono">${b.affectedCount == null ? '—' : fmt(b.affectedCount)}</td>
+            <td>${b.ndpcNotifiedAt ? `<span class="badge badge-green">notified ${date(b.ndpcNotifiedAt)}</span>` : '<span class="badge badge-gray">not notified</span>'}</td>
+            <td>${statusBadge(b.status)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : `<div class="empty-state"><h3>No breaches recorded</h3><p class="text-muted">Good news — nothing on the register.</p></div>`;
+
+      const consentsTable = document.getElementById('consentsTable');
+      consentsTable.innerHTML = consents.length ? `
+        <div class="table-wrapper"><table>
+          <thead><tr><th>Consent Type</th><th>Granted</th><th>Denied</th></tr></thead>
+          <tbody>${consents.map(c => `<tr>
+            <td class="font-bold">${esc(c.consentType)}</td>
+            <td class="font-mono">${fmt(c.granted)}</td>
+            <td class="font-mono">${fmt(c.denied)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : `<div class="empty-state"><h3>No consent records</h3><p class="text-muted">Consents captured at registration appear here.</p></div>`;
+    } catch (err) {
+      el.innerHTML += `<div class="card" style="margin-top:16px;"><div class="empty-state"><h3>Failed to load data protection</h3><p>${esc(err.message)}</p></div></div>`;
+    }
+  }
+
+  // ---- Risk & Reconciliation ----
+  async function renderRisk(el) {
+    el.innerHTML = `
+      <div class="stats-grid" id="riskStats">${skeletonCards(2)}</div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Loan-Loss Provision Runs</span></div>
+        <div class="card-body flush" id="provisionRuns"><div class="empty-state"><p class="text-muted">Loading...</p></div></div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Wallet Reconciliation History</span></div>
+        <div class="card-body flush" id="reconLogs"><div class="empty-state"><p class="text-muted">Loading...</p></div></div>
+      </div>`;
+
+    try {
+      const [provRes, reconRes] = await Promise.all([api('/provisions'), api('/reconciliation')]);
+      const runs = provRes.runs || [];
+      const logs = reconRes.logs || [];
+      const lastRun = runs[0];
+
+      document.getElementById('riskStats').innerHTML = `
+        <div class="stat-card"><div class="stat-label">Provision Balance</div><div class="stat-value">${currency(provRes.balance || 0)}</div><div class="stat-sub">${fmt(runs.length)} runs recorded</div></div>
+        <div class="stat-card"><div class="stat-label">Last Reconciliation</div><div class="stat-value">${logs.length ? statusBadge(logs[0].status) : '—'}</div><div class="stat-sub">${logs.length ? date(logs[0].createdAt) : 'never run'}</div></div>`;
+
+      const provisionRuns = document.getElementById('provisionRuns');
+      provisionRuns.innerHTML = runs.length ? `
+        <div class="table-wrapper"><table>
+          <thead><tr><th>Period</th><th>Entries</th><th>Provision</th><th>Run At</th></tr></thead>
+          <tbody>${runs.map(r => `<tr>
+            <td class="font-bold">${esc(r.period)}</td>
+            <td class="font-mono">${fmt(r.entryCount)}</td>
+            <td class="font-mono">${currency(r.totalProvision)}</td>
+            <td class="text-muted text-sm">${date(r.createdAt)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : `<div class="empty-state"><h3>No provision runs</h3><p class="text-muted">PAR-based provisioning appears here after the first run.</p></div>`;
+
+      const reconLogs = document.getElementById('reconLogs');
+      reconLogs.innerHTML = logs.length ? `
+        <div class="table-wrapper"><table>
+          <thead><tr><th>Checked</th><th>Wallet Total</th><th>Bank Balance</th><th>Discrepancy</th><th>Members</th><th>Status</th></tr></thead>
+          <tbody>${logs.map(l => `<tr>
+            <td class="text-muted text-sm">${date(l.createdAt)}</td>
+            <td class="font-mono">${currency(l.totalWalletBalances)}</td>
+            <td class="font-mono">${currency(l.bankBalance)}</td>
+            <td class="font-mono">${currency(l.discrepancy)}</td>
+            <td class="font-mono">${fmt(l.memberCount)}</td>
+            <td>${statusBadge(l.status)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : `<div class="empty-state"><h3>No reconciliation runs</h3><p class="text-muted">Scheduled wallet checks will appear here.</p></div>`;
+    } catch (err) {
+      el.innerHTML += `<div class="card" style="margin-top:16px;"><div class="empty-state"><h3>Failed to load risk data</h3><p>${esc(err.message)}</p></div></div>`;
+    }
+  }
+
+  // ---- Referrals & Refunds ----
+  async function renderReferrals(el) {
+    el.innerHTML = `
+      <div class="stats-grid" id="refStats">${skeletonCards(4)}</div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Referral Programme</span></div>
+        <div class="card-body flush" id="refTable"><div class="empty-state"><p class="text-muted">Loading...</p></div></div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Referral Withdrawals</span></div>
+        <div class="card-body flush" id="refWithdrawals"><div class="empty-state"><p class="text-muted">Loading...</p></div></div>
+      </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header"><span class="card-title">Refund Requests</span></div>
+        <div class="card-body flush" id="refundsTable"><div class="empty-state"><p class="text-muted">Loading...</p></div></div>
+      </div>`;
+
+    try {
+      const [refRes, refundsRes] = await Promise.all([api('/referrals'), api('/refunds')]);
+      const summary = refRes.summary || {};
+      const referrals = refRes.referrals || [];
+      const withdrawals = refRes.withdrawals || [];
+      const refunds = refundsRes.refunds || [];
+
+      document.getElementById('refStats').innerHTML = `
+        <div class="stat-card"><div class="stat-label">Total Referrals</div><div class="stat-value">${fmt(summary.total || 0)}</div><div class="stat-sub">${fmt(summary.pending || 0)} pending</div></div>
+        <div class="stat-card"><div class="stat-label">Qualified</div><div class="stat-value">${fmt(summary.qualified || 0)}</div><div class="stat-sub">${fmt(summary.rewarded || 0)} rewarded</div></div>
+        <div class="stat-card"><div class="stat-label">Pending Refunds</div><div class="stat-value">${fmt(refunds.filter(r => r.status === "pending").length)}</div><div class="stat-sub">${fmt(refunds.length)} on record</div></div>
+        <div class="stat-card"><div class="stat-label">Withdrawals</div><div class="stat-value">${fmt(withdrawals.length)}</div><div class="stat-sub">${currency(withdrawals.reduce((s, w) => s + (w.amount || 0), 0))} paid</div></div>`;
+
+      const refTable = document.getElementById('refTable');
+      refTable.innerHTML = referrals.length ? `
+        <div class="table-wrapper"><table>
+          <thead><tr><th>Referrer</th><th>Referred</th><th>Code</th><th>Reward</th><th>Status</th><th>Created</th></tr></thead>
+          <tbody>${referrals.map(r => `<tr>
+            <td class="font-bold">${esc(r.referrerName)}</td>
+            <td>${esc(r.referredName)}</td>
+            <td class="font-mono text-sm">${esc(r.code)}</td>
+            <td class="font-mono">${r.rewardAmount == null ? '—' : currency(r.rewardAmount)}${r.rewardType ? `<div class="text-muted text-sm">${esc(r.rewardType)}</div>` : ''}</td>
+            <td>${statusBadge(r.status)}</td>
+            <td class="text-muted text-sm">${date(r.createdAt)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : `<div class="empty-state"><h3>No referrals yet</h3><p class="text-muted">Member-get-member referrals appear here.</p></div>`;
+
+      const refWithdrawals = document.getElementById('refWithdrawals');
+      refWithdrawals.innerHTML = withdrawals.length ? `
+        <div class="table-wrapper"><table>
+          <thead><tr><th>Member</th><th>Amount</th><th>Destination</th><th>Status</th><th>Created</th></tr></thead>
+          <tbody>${withdrawals.map(w => `<tr>
+            <td class="font-bold">${esc(w.memberName)}</td>
+            <td class="font-mono">${currency(w.amount)}</td>
+            <td>${esc(w.destination)}${w.phone ? `<div class="text-muted text-sm">${esc(w.phone)}</div>` : ''}</td>
+            <td>${statusBadge(w.status)}</td>
+            <td class="text-muted text-sm">${date(w.createdAt)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : `<div class="empty-state"><h3>No referral withdrawals</h3><p class="text-muted">Bonus payouts appear here.</p></div>`;
+
+      const refundsTable = document.getElementById('refundsTable');
+      refundsTable.innerHTML = refunds.length ? `
+        <div class="table-wrapper"><table>
+          <thead><tr><th>Member</th><th>Amount</th><th>Reason</th><th>Status</th><th>Requested</th><th></th></tr></thead>
+          <tbody>${refunds.map(r => `<tr>
+            <td class="font-bold">${esc(r.memberName)}</td>
+            <td class="font-mono">${currency(r.amount)}</td>
+            <td>${esc(r.reason)}</td>
+            <td>${statusBadge(r.status)}</td>
+            <td class="text-muted text-sm">${date(r.createdAt)}</td>
+            <td>${r.status === "pending" && isSuperAdmin()
+              ? `<button class="btn btn-danger btn-xs" data-action="rejectRefundUI" data-arg="${esc(r.id)}">Reject</button>`
+              : ''}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>` : `<div class="empty-state"><h3>No refund requests</h3><p class="text-muted">Double-payment refunds appear here.</p></div>`;
+    } catch (err) {
+      el.innerHTML += `<div class="card" style="margin-top:16px;"><div class="empty-state"><h3>Failed to load referrals</h3><p>${esc(err.message)}</p></div></div>`;
+    }
+  }
+
+  async function rejectRefundUI(id) {
+    const reason = prompt("Reason for rejecting this refund:");
+    if (reason === null) return;
+    if (reason.trim().length < 3) {
+      toast("Give a short reason (at least 3 characters).", "error");
+      return;
+    }
+    if (!confirm("Reject this refund request?")) return;
+    try {
+      await api(`/refunds/${encodeURIComponent(id)}/reject`, {
+        method: "POST",
+        body: { reason: reason.trim() },
+      });
+      toast("Refund rejected", "success");
+      renderPage("referrals");
+    } catch (err) {
+      toast(err.message || "Failed to reject refund", "error");
+    }
+  }
+
   // ---- Helpers ----
   function fmt(n) {
     return Number(n).toLocaleString('en-NG');
@@ -1816,6 +2526,7 @@
   function statusBadge(status) {
     const map = {
       confirmed: 'green', completed: 'green', approved: 'green', repaid: 'green',
+      active: 'green', matured: 'blue', closed: 'gray',
       pending: 'gold', guaranteed: 'blue', processing: 'blue',
       rejected: 'red', defaulted: 'red', failed: 'red',
       disbursed: 'purple'
