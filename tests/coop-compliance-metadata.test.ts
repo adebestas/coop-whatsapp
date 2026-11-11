@@ -70,6 +70,8 @@ describe("PATCH /api/developer/coops/:id", () => {
         role: "owner",
         pin: hashPin("123456"),
         mustChangePin: false,
+        totpSecret: "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+        totpEnabled: true,
       },
     });
     const token = signPlatformToken({

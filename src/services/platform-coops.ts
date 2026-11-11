@@ -182,6 +182,7 @@ export async function setCoopStatus(
   id: string,
   status: "active" | "suspended",
   actor?: PlatformActor,
+  reason?: string,
 ): Promise<void> {
   await withCoopContext(id, () => prisma.cooperative.update({ where: { id }, data: { status } }));
   if (actor) {
@@ -193,7 +194,7 @@ export async function setCoopStatus(
       cooperativeId: id,
       targetType: "cooperative",
       targetId: id,
-      detail: JSON.stringify({ status }),
+      detail: JSON.stringify({ status, reason: reason ? reason.slice(0, 500) : null }),
     });
   }
 }

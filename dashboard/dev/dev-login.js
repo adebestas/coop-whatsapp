@@ -1,9 +1,10 @@
 /* ============================================================
    Platform Console — Login
    POST /api/developer/login, then /api/developer/change-pin when the
-   account is still on its temporary PIN. The session is an httpOnly
-   cookie (coop_dev_token) set by the server; JS only stores the
-   non-sensitive admin profile for header display.
+   account is still on its temporary PIN, then /api/developer/setup-2fa
+   when an owner/developer has not enrolled yet. The session is an
+   httpOnly cookie (coop_dev_token) set by the server; JS only stores
+   the non-sensitive admin profile for header display.
    ============================================================ */
 
 (function () {
@@ -14,16 +15,27 @@
 
   const loginForm = document.getElementById('loginForm');
   const changePinForm = document.getElementById('changePinForm');
+  const setup2faForm = document.getElementById('setup2faForm');
   const phoneInput = document.getElementById('phone');
   const pinInput = document.getElementById('pin');
   const totpGroup = document.getElementById('totpGroup');
   const totpInput = document.getElementById('totp');
   const toggle2fa = document.getElementById('toggle2fa');
   const newPinInput = document.getElementById('newPin');
+  const secretEl = document.getElementById('totpSecret');
+  const copySecretBtn = document.getElementById('copySecret');
+  const setupCodeInput = document.getElementById('setupCode');
   const errorEl = document.getElementById('loginError');
   const changeErrorEl = document.getElementById('changePinError');
+  const setupErrorEl = document.getElementById('setup2faError');
   const loginBtn = document.getElementById('loginBtn');
   const changePinBtn = document.getElementById('changePinBtn');
+  const setup2faBtn = document.getElementById('setup2faBtn');
+
+  // Needed again for the step-up checks on change-pin and setup-2fa.
+  let knownPin = '';
+  let knownTotp = '';
+  let pendingSecret = '';
 
   // A logged-in operator who opens this page simply sees the form; we do NOT
   // auto-redirect to index.html (a temporary-PIN session would bounce back here
@@ -34,6 +46,18 @@
     totpGroup.hidden = showing;
     toggle2fa.textContent = showing ? 'Use a 2FA code' : 'Hide 2FA code';
     if (!showing) totpInput.focus();
+  });
+
+  copySecretBtn.addEventListener('click', function () {
+    if (!pendingSecret) return;
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(pendingSecret).then(
+        () => {
+          copySecretBtn.textContent = 'Copied';
+        },
+        () => {},
+      );
+    }
   });
 
   loginForm.addEventListener('submit', async function (e) {
@@ -80,11 +104,19 @@
         return;
       }
 
+      knownPin = pin;
+      knownTotp = totp;
+
       if (data.mustChangePin) {
         // Temporary PIN: the server set the cookie, now force a reset.
         loginForm.hidden = true;
         changePinForm.hidden = false;
         newPinInput.focus();
+        return;
+      }
+
+      if (data.mustSetup2fa) {
+        beginSetup2fa();
         return;
       }
 
@@ -116,11 +148,21 @@
           'Content-Type': 'application/json',
           'X-Requested-With': 'XMLHttpRequest',
         },
-        body: JSON.stringify({ newPin }),
+        body: JSON.stringify({
+          currentPin: knownPin,
+          newPin,
+          totp: knownTotp || undefined,
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         showChangeError(data.error || 'Could not set PIN');
+        return;
+      }
+      knownPin = newPin;
+      knownTotp = '';
+      if (data.mustSetup2fa) {
+        beginSetup2fa();
         return;
       }
       window.location.href = 'index.html';
@@ -131,6 +173,74 @@
     }
   });
 
+  setup2faForm.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    setupErrorEl.hidden = true;
+    const code = setupCodeInput.value.trim();
+    if (!/^\d{6}$/.test(code)) {
+      showSetupError('Enter the 6-digit code from your authenticator app');
+      return;
+    }
+
+    setLoading(setup2faBtn, true, 'Enable 2FA & Continue');
+    try {
+      const res = await fetch(`${API_BASE}/setup-2fa`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: JSON.stringify({
+          secret: pendingSecret,
+          code,
+          currentPin: knownPin,
+          totp: knownTotp || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showSetupError(data.error || 'Could not enable 2FA');
+        return;
+      }
+      window.location.href = 'index.html';
+    } catch {
+      showSetupError('Network error. Please try again.');
+    } finally {
+      setLoading(setup2faBtn, false, 'Enable 2FA & Continue');
+    }
+  });
+
+  function beginSetup2fa() {
+    pendingSecret = generateBase32Secret();
+    secretEl.textContent = pendingSecret;
+    copySecretBtn.textContent = 'Copy key';
+    loginForm.hidden = true;
+    changePinForm.hidden = true;
+    setup2faForm.hidden = false;
+    setupCodeInput.focus();
+  }
+
+  // 20 random bytes encoded as RFC 4648 base32 (matches the server's decoder).
+  function generateBase32Secret() {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    const bytes = new Uint8Array(20);
+    window.crypto.getRandomValues(bytes);
+    let bits = 0;
+    let value = 0;
+    let out = '';
+    for (const byte of bytes) {
+      value = (value << 8) | byte;
+      bits += 8;
+      while (bits >= 5) {
+        out += alphabet[(value >>> (bits - 5)) & 31];
+        bits -= 5;
+      }
+    }
+    if (bits > 0) out += alphabet[(value << (5 - bits)) & 31];
+    return out;
+  }
+
   function showError(msg) {
     errorEl.textContent = msg;
     errorEl.hidden = false;
@@ -138,6 +248,10 @@
   function showChangeError(msg) {
     changeErrorEl.textContent = msg;
     changeErrorEl.hidden = false;
+  }
+  function showSetupError(msg) {
+    setupErrorEl.textContent = msg;
+    setupErrorEl.hidden = false;
   }
   function setLoading(btn, loading, label) {
     btn.disabled = loading;
