@@ -1,8 +1,10 @@
 import Fastify from "fastify";
+import type { FastifyError } from "fastify";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import fastifyStatic from "@fastify/static";
 import rateLimit from "@fastify/rate-limit";
+import compress from "@fastify/compress";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -55,6 +57,26 @@ export function buildApp() {
     // hang waiting on idle client connections (OPS-1).
     forceCloseConnections: true,
   });
+
+  // One error shape for every route. 5xx responses are generic (no SQL or
+  // provider detail leaks) and always carry the request id, so a member's
+  // "it just said error" can be found in the logs in one search.
+  app.setErrorHandler((err: FastifyError, req, reply) => {
+    const status = err.statusCode && err.statusCode >= 400 ? err.statusCode : 500;
+    if (status >= 500) {
+      req.log.error({ err, reqId: req.id }, "unhandled request error");
+    } else {
+      req.log.warn({ err, reqId: req.id }, "request rejected");
+    }
+    return reply.code(status).send({
+      error: status >= 500 ? "Something went wrong. Please try again." : err.message,
+      requestId: req.id,
+    });
+  });
+
+  // Compress text responses (dashboard bundles, JSON). The WhatsApp webhook is
+  // small, but a branch-office admin on 3G downloads app.js on every visit.
+  void app.register(compress, { global: true, threshold: 1024 });
 
   // Capture the RAW request body before JSON parsing — provider webhook
   // signatures are computed over the exact bytes sent, so we keep them.
@@ -123,6 +145,22 @@ export function buildApp() {
       }
     });
   }
+
+  // CSRF defense in depth for the operator consoles. The auth cookie is
+  // SameSite=Strict, but a mutating request carrying a foreign Origin is
+  // refused outright. Browser clients always send Origin on POST; CLI/provider
+  // callers using bearer tokens send none and are unaffected.
+  const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+  app.addHook("onRequest", async (req, reply) => {
+    if (!MUTATING_METHODS.has(req.method)) return;
+    if (!req.url.startsWith("/api/admin") && !req.url.startsWith("/api/developer")) return;
+    const origin = req.headers.origin;
+    if (!origin) return;
+    const sameHost = `${req.protocol}://${req.headers.host}`;
+    if (origin !== sameHost && origin !== process.env.DASHBOARD_ORIGIN) {
+      return reply.code(403).send({ error: "Cross-site request blocked" });
+    }
+  });
 
   // Rate limiting — blunt-force protection on every public route.
   // Providers retry aggressively, so webhooks get a generous but bounded
@@ -194,7 +232,13 @@ export function buildApp() {
       setHeaders: (res, filePath) => {
         // Operator consoles must never be indexed or cached by intermediaries.
         res.header("X-Robots-Tag", "noindex, nofollow");
-        if (filePath.endsWith(".html")) res.header("Cache-Control", "no-cache");
+        // The HTML shell must revalidate so a deploy is visible immediately;
+        // the unhashed JS/CSS can be cached briefly, which removes a full
+        // bundle re-download on every navigation.
+        res.header(
+          "Cache-Control",
+          filePath.endsWith(".html") ? "no-cache" : "public, max-age=3600",
+        );
       },
     });
     // Redirect /dashboard to /dashboard/ so index.html is served

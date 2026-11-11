@@ -2,7 +2,8 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { withCoopContext, resolveCoopByPhone } from "../lib/tenant-context.js";
 import { verifyPin } from "../lib/security.js";
-import { checkRateLimit } from "../lib/cache.js";
+import { verifyTotp } from "../lib/totp.js";
+import { checkRateLimit, claimOnce } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 import { approveLoan } from "../services/loans.js";
 import { computePearls } from "../services/provisioning.js";
@@ -105,7 +106,7 @@ function readAuthToken(req: FastifyRequest): string | null {
 
 export async function adminApiRoutes(app: FastifyInstance) {
   app.post("/api/admin/login", async (req, reply) => {
-    const body = req.body as { phone?: string; pin?: string };
+    const body = req.body as { phone?: string; pin?: string; totp?: string };
     const phone = body.phone?.replace(/[^0-9]/g, "");
     const pin = body.pin;
     const ip = req.ip;
@@ -164,6 +165,50 @@ export async function adminApiRoutes(app: FastifyInstance) {
         autoFreeze: false,
       });
       return reply.code(403).send({ error: "Account is not active" });
+    }
+
+    // Second factor: an enrolled admin must present a live authenticator code.
+    // Enrolment is done from WhatsApp (`enable2fa`); TWO_FA_REQUIRED=1 makes it
+    // mandatory to mint a dashboard session at all.
+    if (member.totpSecret) {
+      if (!body.totp) {
+        return reply
+          .code(401)
+          .send({ error: "Enter your 6-digit authenticator code", code: "totp_required" });
+      }
+      if (!verifyTotp(member.totpSecret, body.totp)) {
+        await recordSuspiciousEvent({
+          memberId: member.id,
+          cooperativeId: member.cooperativeId,
+          memberPhone: phone,
+          event: "admin_login_failed_totp",
+          detail: `Invalid 2FA code from IP ${ip}`,
+          autoFreeze: false,
+        });
+        return reply.code(401).send({ error: "invalid credentials" });
+      }
+      // A TOTP stays valid for ~90 seconds. Without this claim the same code
+      // can mint a second session after the password is re-entered, so an
+      // observer who captures one code can replay it.
+      if (!(await claimOnce("totp-login", `${member.id}:${body.totp}`, 90))) {
+        await recordSuspiciousEvent({
+          memberId: member.id,
+          cooperativeId: member.cooperativeId,
+          memberPhone: phone,
+          event: "admin_login_totp_replay",
+          detail: `Replayed 2FA code from IP ${ip}`,
+          autoFreeze: false,
+        });
+        return reply.code(401).send({
+          error: "That code was already used. Enter the next code from your authenticator.",
+          code: "totp_reused",
+        });
+      }
+    } else if (process.env.TWO_FA_REQUIRED === "1") {
+      return reply.code(403).send({
+        error: "2FA enrolment required. Reply *enable2fa* on WhatsApp, then sign in again.",
+        code: "2fa_setup_required",
+      });
     }
 
     const token = sign(phone, member.cooperative.id, member.role);

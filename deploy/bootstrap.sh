@@ -90,6 +90,7 @@ gen REDIS_PASSWORD
 gen SESSION_SECRET
 gen ADMIN_JWT_SECRET
 gen COOP_APP_PASSWORD
+gen BACKUP_ENCRYPTION_KEY
 
 # The .env holds every secret in this stack; root-only, always.
 chmod 600 .env

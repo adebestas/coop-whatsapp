@@ -1,6 +1,6 @@
 {
   "name": "coop-whatsapp",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "WhatsApp cooperative banking platform — save, borrow, and manage cooperatives via chat (Xara-style, Nigeria-first)",
   "type": "module",
@@ -29,6 +29,7 @@
     "seed:ombudsman": "npx tsx src/seed.ts --ombudsman"
   },
   "dependencies": {
+    "@fastify/compress": "^8.3.1",
     "@fastify/cors": "^10.0.1",
     "@fastify/env": "^5.0.2",
     "@fastify/helmet": "^13.1.1",
@@ -61,7 +62,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.67.0",
-    "vitest": "^3.2.7"
+    "vitest": "^5.1.0"
   },
   "overrides": {
     "deepmerge-ts": "^8.0.2",

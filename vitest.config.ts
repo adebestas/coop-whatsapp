@@ -19,11 +19,9 @@ export default defineConfig({
     // spurious 120s timeouts). One long-lived fork with per-file isolation keeps the
     // footprint flat and the results deterministic.
     pool: "forks",
-    poolOptions: {
-      forks: {
-        singleFork: true,
-      },
-    },
+    // Vitest 4 removed `poolOptions`; one worker keeps the same single-fork,
+    // low-memory footprint (fileParallelism is already disabled above).
+    maxWorkers: 1,
     setupFiles: [path.resolve(__dirname, "tests/setup.ts")],
     env: {
       NODE_ENV: "test",

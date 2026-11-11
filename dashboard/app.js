@@ -2561,6 +2561,7 @@
     const container = document.getElementById('toastContainer');
     const t = document.createElement('div');
     t.className = `toast ${type}`;
+    t.setAttribute('role', type === 'error' ? 'alert' : 'status');
     t.textContent = msg;
     container.appendChild(t);
     setTimeout(() => { t.remove(); }, 3500);
