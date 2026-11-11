@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { verifyAdminToken, isTokenRevoked, requireLiveAdmin, getRedis } from "../lib/admin-auth.js";
+import { audit } from "../services/audit.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
 const MAX_EXPORTS = 14; // keep 14 most recent exports; older ones are pruned
@@ -92,6 +93,15 @@ export const serveExportFile = (app: FastifyInstance): void => {
     } catch {
       return reply.code(404).send({ error: "Export expired or missing" });
     }
+    await audit({
+      cooperativeId: payload.cooperativeId,
+      actorPhone: payload.phone,
+      actorRole: payload.role,
+      action: "data.export_download",
+      targetType: "export",
+      targetId: filename,
+      detail: `Downloaded ${filename}`,
+    });
     const mime = filename.endsWith(".pdf")
       ? "application/pdf"
       : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";

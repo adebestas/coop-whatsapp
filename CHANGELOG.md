@@ -20,6 +20,11 @@ version jumps from 0.1.0.
 - Logger redacts phone numbers, PINs, tokens, secrets, passwords, BVN/NIN,
   account numbers, and OTP/TOTP values from structured metadata.
 - Error responses and logs are covered by regression tests.
+- Alternate-channel lookups are scoped to the caller's cooperative and refuse
+  ambiguous matches, so a shared alerts phone cannot resolve to another coop.
+- Failed audit-trail writes raise a throttled critical alert to superadmins,
+  and every export download is recorded in the audit log.
+- Translation-cache entries expire after 10 minutes (values are PII-derived).
 - Dependency audit (production), secret scan (gitleaks), and post-deploy health
   smoke checks are part of CI.
 
