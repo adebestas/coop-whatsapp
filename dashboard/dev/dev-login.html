@@ -71,6 +71,26 @@
         </button>
       </form>
 
+      <form id="setup2faForm" class="login-form" hidden>
+        <div class="form-group">
+          <span>Authenticator key</span>
+          <div id="totpSecret" class="temp-pin" aria-live="polite">Generating…</div>
+          <p class="dev-hint">Add this key to your authenticator app, then enter the 6-digit code it shows.</p>
+          <button type="button" id="copySecret" class="btn btn-secondary btn-xs">Copy key</button>
+        </div>
+        <div class="form-group">
+          <label for="setupCode">6-digit code</label>
+          <input type="text" id="setupCode" name="setupCode" placeholder="000000" required maxlength="6" pattern="[0-9]{6}" inputmode="numeric" autocomplete="one-time-code">
+        </div>
+        <div id="setup2faError" class="form-error" hidden></div>
+        <button type="submit" id="setup2faBtn" class="btn btn-primary btn-full">
+          <span class="btn-text">Enable 2FA &amp; Continue</span>
+          <span class="btn-loader" hidden>
+            <svg class="spinner" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" stroke-dasharray="31.4 31.4" stroke-linecap="round"/></svg>
+          </span>
+        </button>
+      </form>
+
       <p class="login-footer">Authorised platform operators only. Activity is audited.</p>
     </div>
 

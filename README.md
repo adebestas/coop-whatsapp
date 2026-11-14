@@ -904,3 +904,32 @@ money movement (`DIGEST_HOUR`). During the pilot, `PILOT_FLOAT_CAP` caps total
 monthly money-out per cooperative as a hard brake.
 
 See `.env.example` and AUDIT.md ("Deployment checklist") before going live.
+
+## Support and incident response
+
+Members raise issues in WhatsApp with `support <issue>`; the `support` role sees
+them with `tickets` and closes them with `resolve <id> <note>`. Administrators
+can also read the Support Tickets page in the dashboard.
+
+Operators must publish two channels before the pilot and keep them staffed in
+West Africa business hours (WAT), plus an on-call rota for money-out failures:
+
+- a member-facing WhatsApp number for account, payout, and PIN problems;
+- an internal escalation channel that receives the operational alerts produced
+  by the app (`ALERT_TELEGRAM_CHAT_ID`; email digests when configured).
+
+Triage rules:
+
+1. **Money-out stuck or wrong amount** — check the payout status in the
+   dashboard and the provider reference before retrying. Never ask a member for
+   their PIN or a one-time code. Escalate to the on-call engineer immediately.
+2. **Suspected account takeover** — use the member erasure/lock actions and
+   revoke sessions; preserve the audit trail.
+3. **Suspected personal-data breach** — record it in the developer console's
+   breach register, notify the DPO, and follow the NDPC 72-hour notification
+   path in `docs/NIGERIA-COOPERATIVE-COMPLIANCE.md`. Do not delete evidence.
+4. **Service down** — `/health` returning non-200 is the trigger; check the
+   Render status, the latest deploy, and database/Redis connectivity.
+
+Do not use personal WhatsApp accounts for production support, and never send
+temporary PINs in a group chat.

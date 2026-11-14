@@ -14,6 +14,27 @@ const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 } as const;
 export type LogLevel = keyof typeof LOG_LEVELS;
 const CURRENT_LOG_LEVEL: LogLevel = (process.env.LOG_LEVEL as LogLevel) ?? "info";
 
+// Log metadata is the easiest place to leak PII and credentials by accident.
+// Key names that end in a sensitive term are replaced wholesale; the message
+// text is left alone so operators can still describe what happened.
+const SENSITIVE_KEY =
+  /(phone|pin|token|secret|password|authorization|bvn|nin|account\w*|otp|totp)$/i;
+
+export function redact(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (seen.has(value)) return "[circular]";
+  seen.add(value);
+  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Error) return { name: value.name, message: value.message };
+  if (Array.isArray(value)) return value.map((v) => redact(v, seen));
+
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value)) {
+    out[key] = SENSITIVE_KEY.test(key) ? "[redacted]" : redact(val, seen);
+  }
+  return out;
+}
+
 function emit(level: LogLevel, message: string, meta?: Record<string, unknown>): void {
   if (LOG_LEVELS[level] > LOG_LEVELS[CURRENT_LOG_LEVEL]) return;
   const entry = {
@@ -21,7 +42,7 @@ function emit(level: LogLevel, message: string, meta?: Record<string, unknown>):
     level,
     message,
     pid: process.pid,
-    ...(meta ? { meta } : {}),
+    ...(meta ? { meta: redact(meta) } : {}),
   };
   const line = JSON.stringify(entry);
   if (level === "error") {

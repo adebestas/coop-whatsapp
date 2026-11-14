@@ -515,32 +515,46 @@ export async function handleDeleteAccountPin(
     return;
   }
 
-  // Anonymize personal data (retain transaction history for regulatory compliance)
-  await prisma.member.update({
-    where: { id: member.id },
-    data: {
-      name: "Deleted Member",
-      phone: `deleted:${member.id}`,
-      contactPhone: null,
-      pin: null,
-      bankAccountNumber: null,
-      bankCode: null,
-      bankName: null,
-      bvn: null,
-      nin: null,
-      kycStatus: "unset",
-      kycVerifiedAt: null,
-      email: null,
-      nextOfKinName: null,
-      nextOfKinPhone: null,
-      dateOfBirth: null,
-      status: "suspended",
-    },
-  });
-
-  // Clear any in-flight session state: Session.data can hold mid-flow PII
-  // (e.g. a name being captured) and is keyed by the member's old phone number.
-  await prisma.session.deleteMany({ where: { phone } });
+  // Anonymize personal data (retain transaction history for regulatory compliance).
+  // Everything linked to this member that holds identifiers the member would not
+  // expect us to keep is removed in the same transaction: beneficial owners'
+  // NIN/BVN, saved payees and bank accounts, phone-change history, and the
+  // phone number attached to failed webhooks. Audit entries stay for the
+  // tamper-evident trail; the erasure entry below deliberately pseudonymizes
+  // the actor phone instead of writing the raw number back.
+  await prisma.$transaction([
+    prisma.memberBeneficialOwner.deleteMany({ where: { memberId: member.id } }),
+    prisma.beneficiary.deleteMany({ where: { memberId: member.id } }),
+    prisma.favoritePayee.deleteMany({ where: { memberId: member.id } }),
+    prisma.phoneChangeRequest.deleteMany({
+      where: {
+        OR: [{ memberId: member.id }, { oldPhone: phone }, { newPhone: phone }],
+      },
+    }),
+    prisma.webhookFailure.deleteMany({ where: { phone } }),
+    prisma.session.deleteMany({ where: { phone } }),
+    prisma.member.update({
+      where: { id: member.id },
+      data: {
+        name: "Deleted Member",
+        phone: `deleted:${member.id}`,
+        contactPhone: null,
+        pin: null,
+        bankAccountNumber: null,
+        bankCode: null,
+        bankName: null,
+        bvn: null,
+        nin: null,
+        kycStatus: "unset",
+        kycVerifiedAt: null,
+        email: null,
+        nextOfKinName: null,
+        nextOfKinPhone: null,
+        dateOfBirth: null,
+        status: "suspended",
+      },
+    }),
+  ]);
 
   // Record the member's consent for erasure. `granted: true` — the member
   // requested (consented to) deletion and we performed it; a `false` here would
@@ -554,10 +568,11 @@ export async function handleDeleteAccountPin(
   });
 
   // Append an immutable audit entry so the erasure is traceable (a self-service
-  // deletion must not be invisible to the compliance trail).
+  // deletion must not be invisible to the compliance trail). The actor phone is
+  // pseudonymized because the whole point of this action is to stop storing it.
   await audit({
     cooperativeId: member.cooperativeId,
-    actorPhone: phone,
+    actorPhone: `deleted:${member.id}`,
     actorId: member.id,
     action: "member.data_erasure",
     targetType: "member",

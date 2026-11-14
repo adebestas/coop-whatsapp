@@ -2,10 +2,15 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
 import { withCoopContext, resolveCoopByPhone } from "../lib/tenant-context.js";
 import { verifyPin } from "../lib/security.js";
-import { checkRateLimit } from "../lib/cache.js";
+import { verifyTotp } from "../lib/totp.js";
+import { checkRateLimit, claimOnce } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 import { approveLoan } from "../services/loans.js";
 import { computePearls } from "../services/provisioning.js";
+import { createProduct, openProduct } from "../services/savings-products.js";
+import { approveInsuranceClaim, rejectInsuranceClaim } from "../services/insurance/index.js";
+import { quorumMet } from "../services/meetings.js";
+import { rejectRefund } from "../services/refunds.js";
 import { audit } from "../services/audit.js";
 import { notifyMember } from "../lib/messaging.js";
 import {
@@ -101,7 +106,7 @@ function readAuthToken(req: FastifyRequest): string | null {
 
 export async function adminApiRoutes(app: FastifyInstance) {
   app.post("/api/admin/login", async (req, reply) => {
-    const body = req.body as { phone?: string; pin?: string };
+    const body = req.body as { phone?: string; pin?: string; totp?: string };
     const phone = body.phone?.replace(/[^0-9]/g, "");
     const pin = body.pin;
     const ip = req.ip;
@@ -139,6 +144,8 @@ export async function adminApiRoutes(app: FastifyInstance) {
           memberPhone: phone,
           event: "admin_login_failed",
           detail: `Failed login from IP ${ip}`,
+          // Never let an unauthenticated caller suspend an admin account.
+          autoFreeze: false,
         });
       }
       return reply.code(401).send({ error: "invalid credentials" });
@@ -155,8 +162,53 @@ export async function adminApiRoutes(app: FastifyInstance) {
         memberPhone: phone,
         event: "admin_login_inactive",
         detail: `Inactive admin (${member.status}) login attempt from IP ${ip}`,
+        autoFreeze: false,
       });
       return reply.code(403).send({ error: "Account is not active" });
+    }
+
+    // Second factor: an enrolled admin must present a live authenticator code.
+    // Enrolment is done from WhatsApp (`enable2fa`); TWO_FA_REQUIRED=1 makes it
+    // mandatory to mint a dashboard session at all.
+    if (member.totpSecret) {
+      if (!body.totp) {
+        return reply
+          .code(401)
+          .send({ error: "Enter your 6-digit authenticator code", code: "totp_required" });
+      }
+      if (!verifyTotp(member.totpSecret, body.totp)) {
+        await recordSuspiciousEvent({
+          memberId: member.id,
+          cooperativeId: member.cooperativeId,
+          memberPhone: phone,
+          event: "admin_login_failed_totp",
+          detail: `Invalid 2FA code from IP ${ip}`,
+          autoFreeze: false,
+        });
+        return reply.code(401).send({ error: "invalid credentials" });
+      }
+      // A TOTP stays valid for ~90 seconds. Without this claim the same code
+      // can mint a second session after the password is re-entered, so an
+      // observer who captures one code can replay it.
+      if (!(await claimOnce("totp-login", `${member.id}:${body.totp}`, 90))) {
+        await recordSuspiciousEvent({
+          memberId: member.id,
+          cooperativeId: member.cooperativeId,
+          memberPhone: phone,
+          event: "admin_login_totp_replay",
+          detail: `Replayed 2FA code from IP ${ip}`,
+          autoFreeze: false,
+        });
+        return reply.code(401).send({
+          error: "That code was already used. Enter the next code from your authenticator.",
+          code: "totp_reused",
+        });
+      }
+    } else if (process.env.TWO_FA_REQUIRED === "1") {
+      return reply.code(403).send({
+        error: "2FA enrolment required. Reply *enable2fa* on WhatsApp, then sign in again.",
+        code: "2fa_setup_required",
+      });
     }
 
     const token = sign(phone, member.cooperative.id, member.role);
@@ -260,6 +312,685 @@ export async function adminApiRoutes(app: FastifyInstance) {
           value: a.shares * sharePrice,
         })),
       };
+    }),
+  );
+
+  app.get(
+    "/api/admin/savings/products",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const products = await prisma.savingsProduct.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: [{ active: "desc" }, { createdAt: "desc" }],
+        include: { accounts: { select: { balance: true } } },
+      });
+      return {
+        ok: true,
+        products: products.map((p) => ({
+          id: p.id,
+          type: p.type,
+          name: p.name,
+          interestRate: p.interestRate,
+          termMonths: p.termMonths,
+          minAmount: p.minAmount,
+          active: p.active,
+          accountCount: p.accounts.length,
+          totalBalance: p.accounts.reduce((sum, a) => sum + a.balance, 0),
+        })),
+      };
+    }),
+  );
+
+  app.post(
+    "/api/admin/savings/products",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can create savings products." });
+      const coopId = req.adminCoopId!;
+      const body = (req.body ?? {}) as {
+        type?: string;
+        name?: string;
+        interestRate?: number;
+        termMonths?: number | null;
+        minAmount?: number;
+      };
+      if (!body.type || !body.name?.trim())
+        return reply.code(400).send({ error: "Product type and name are required" });
+
+      const result = await createProduct(
+        coopId,
+        String(body.type),
+        String(body.name),
+        {
+          interestRate: body.interestRate,
+          termMonths: body.termMonths,
+          minAmount: body.minAmount,
+        },
+        { id: superAuth.actorId!, phone: superAuth.phone!, role: "superadmin" },
+      );
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, productId: result.productId, message: result.message };
+    }),
+  );
+
+  app.patch(
+    "/api/admin/savings/products/:id",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can update savings products." });
+      const coopId = req.adminCoopId!;
+      const { id } = req.params as { id: string };
+      const body = (req.body ?? {}) as { active?: unknown };
+      if (typeof body.active !== "boolean")
+        return reply.code(400).send({ error: "active must be a boolean" });
+
+      const existing = await prisma.savingsProduct.findFirst({
+        where: { id, cooperativeId: coopId },
+      });
+      if (!existing) return reply.code(404).send({ error: "Savings product not found" });
+
+      const product = await prisma.savingsProduct.update({
+        where: { id },
+        data: { active: body.active },
+      });
+      await audit({
+        cooperativeId: coopId,
+        actorId: superAuth.actorId,
+        actorPhone: superAuth.phone!,
+        actorRole: "superadmin",
+        action: "savings.product_update",
+        targetType: "SavingsProduct",
+        targetId: id,
+        detail: `active=${body.active}`,
+      });
+      return {
+        ok: true,
+        product: {
+          id: product.id,
+          type: product.type,
+          name: product.name,
+          interestRate: product.interestRate,
+          termMonths: product.termMonths,
+          minAmount: product.minAmount,
+          active: product.active,
+        },
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/savings/accounts",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const accounts = await prisma.savingsAccount.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: { createdAt: "desc" },
+        include: {
+          member: { select: { name: true, phone: true } },
+          product: { select: { name: true, type: true, interestRate: true } },
+        },
+      });
+      return {
+        ok: true,
+        accounts: accounts.map((a) => ({
+          id: a.id,
+          memberId: a.memberId,
+          memberName: a.member.name,
+          memberPhone: a.member.phone,
+          productId: a.productId,
+          productName: a.product.name,
+          type: a.product.type,
+          interestRate: a.product.interestRate,
+          balance: a.balance,
+          targetAmount: a.targetAmount,
+          status: a.status,
+          openedAt: a.openedAt,
+          maturesAt: a.maturesAt,
+        })),
+        totals: {
+          accounts: accounts.length,
+          balance: accounts.reduce((sum, a) => sum + a.balance, 0),
+        },
+      };
+    }),
+  );
+
+  app.post(
+    "/api/admin/savings/accounts",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can open savings accounts." });
+      const coopId = req.adminCoopId!;
+      const body = (req.body ?? {}) as {
+        memberId?: string;
+        productId?: string;
+        targetAmount?: number;
+      };
+      if (!body.memberId || !body.productId)
+        return reply.code(400).send({ error: "memberId and productId are required" });
+
+      const member = await prisma.member.findFirst({
+        where: { id: body.memberId, cooperativeId: coopId },
+      });
+      if (!member) return reply.code(404).send({ error: "Member not found" });
+
+      const result = await openProduct(
+        coopId,
+        body.productId,
+        body.memberId,
+        typeof body.targetAmount === "number" ? body.targetAmount : undefined,
+      );
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, accountId: result.accountId, message: result.message };
+    }),
+  );
+
+  // ---- Insurance policies & claims ----
+  app.get(
+    "/api/admin/insurance/policies",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const policies = await prisma.insurancePolicy.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: { createdAt: "desc" },
+        include: {
+          member: { select: { name: true, phone: true } },
+          _count: { select: { claims: true } },
+        },
+      });
+      return {
+        ok: true,
+        policies: policies.map((p) => ({
+          id: p.id,
+          memberId: p.memberId,
+          memberName: p.member.name,
+          memberPhone: p.member.phone,
+          productCode: p.productCode,
+          planCode: p.planCode,
+          status: p.status,
+          premiumKobo: p.premiumKobo,
+          coverageKobo: p.coverageKobo,
+          startDate: p.startDate,
+          endDate: p.endDate,
+          autoRenew: p.autoRenew,
+          claimCount: p._count.claims,
+        })),
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/insurance/claims",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const query = req.query as { status?: string };
+      const status = query.status?.trim();
+      const claims = await prisma.insuranceClaim.findMany({
+        where: { cooperativeId: coopId, ...(status ? { status } : {}) },
+        orderBy: { createdAt: "desc" },
+        include: {
+          member: { select: { name: true, phone: true } },
+          policy: { select: { productCode: true, planCode: true } },
+        },
+      });
+      return {
+        ok: true,
+        claims: claims.map((c) => ({
+          id: c.id,
+          memberId: c.memberId,
+          memberName: c.member.name,
+          memberPhone: c.member.phone,
+          policyId: c.policyId,
+          productCode: c.policy.productCode,
+          planCode: c.policy.planCode,
+          claimType: c.claimType,
+          amountKobo: c.amountKobo,
+          status: c.status,
+          payoutKobo: c.payoutKobo,
+          description: c.description,
+          createdAt: c.createdAt,
+          processedAt: c.processedAt,
+          paidAt: c.paidAt,
+        })),
+      };
+    }),
+  );
+
+  app.post(
+    "/api/admin/insurance/claims/:id/approve",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can approve claims." });
+      const coopId = req.adminCoopId!;
+      const { id } = req.params as { id: string };
+      const claim = await prisma.insuranceClaim.findFirst({
+        where: { id, cooperativeId: coopId },
+      });
+      if (!claim) return reply.code(404).send({ error: "Insurance claim not found" });
+
+      const result = await approveInsuranceClaim(id, coopId);
+      const updated = await prisma.insuranceClaim.findUnique({ where: { id } });
+      if (updated?.status !== "paid")
+        return reply.code(400).send({ error: result.message, message: result.message });
+      return { ok: true, message: result.message };
+    }),
+  );
+
+  app.post(
+    "/api/admin/insurance/claims/:id/reject",
+    withTenant(async (req, reply) => {
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok)
+        return reply.code(403).send({ error: "Only the super admin can reject claims." });
+      const coopId = req.adminCoopId!;
+      const { id } = req.params as { id: string };
+      const claim = await prisma.insuranceClaim.findFirst({
+        where: { id, cooperativeId: coopId },
+      });
+      if (!claim) return reply.code(404).send({ error: "Insurance claim not found" });
+
+      const result = await rejectInsuranceClaim(id, coopId);
+      await audit({
+        cooperativeId: coopId,
+        actorId: superAuth.actorId,
+        actorPhone: superAuth.phone!,
+        actorRole: "superadmin",
+        action: "insurance.claim.reject",
+        targetType: "InsuranceClaim",
+        targetId: id,
+        amount: claim.amountKobo,
+        detail: result.message,
+      });
+      return { ok: true, message: result.message };
+    }),
+  );
+
+  // ---- General meetings & committees ----
+  app.get(
+    "/api/admin/meetings",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const meetings = await prisma.meeting.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: { scheduledAt: "desc" },
+        take: 50,
+        include: { _count: { select: { attendance: true, motions: true } } },
+      });
+      return {
+        ok: true,
+        meetings: meetings.map((m) => ({
+          id: m.id,
+          type: m.type,
+          title: m.title,
+          status: m.status,
+          scheduledAt: m.scheduledAt,
+          openedAt: m.openedAt,
+          closedAt: m.closedAt,
+          quorumPercent: m.quorumPercent,
+          attendanceCount: m._count.attendance,
+          motionCount: m._count.motions,
+        })),
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/meetings/:id",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const { id } = req.params as { id: string };
+      const meeting = await prisma.meeting.findFirst({
+        where: { id, cooperativeId: coopId },
+        include: {
+          attendance: {
+            orderBy: { createdAt: "asc" },
+            include: {
+              member: { select: { name: true, code: true, phone: true } },
+              proxyForMember: { select: { name: true } },
+            },
+          },
+          motions: {
+            orderBy: { createdAt: "asc" },
+            include: { votes: { select: { choice: true } } },
+          },
+        },
+      });
+      if (!meeting) return reply.code(404).send({ error: "Meeting not found" });
+
+      const quorum = await quorumMet(coopId, meeting.id);
+      return {
+        ok: true,
+        meeting: {
+          id: meeting.id,
+          type: meeting.type,
+          title: meeting.title,
+          status: meeting.status,
+          scheduledAt: meeting.scheduledAt,
+          openedAt: meeting.openedAt,
+          closedAt: meeting.closedAt,
+          quorumPercent: meeting.quorumPercent,
+        },
+        attendance: meeting.attendance.map((a) => ({
+          id: a.id,
+          memberId: a.memberId,
+          memberName: a.member.name,
+          memberCode: a.member.code,
+          memberPhone: a.member.phone,
+          present: a.present,
+          proxyForMemberId: a.proxyForMemberId,
+          proxyForName: a.proxyForMember?.name ?? null,
+          createdAt: a.createdAt,
+        })),
+        motions: meeting.motions.map((m) => ({
+          id: m.id,
+          title: m.title,
+          description: m.description,
+          kind: m.kind,
+          status: m.status,
+          createdAt: m.createdAt,
+          closedAt: m.closedAt,
+          yes: m.votes.filter((v) => v.choice === "yes").length,
+          no: m.votes.filter((v) => v.choice === "no").length,
+          abstain: m.votes.filter((v) => v.choice === "abstain").length,
+        })),
+        quorum: {
+          met: quorum.met,
+          present: quorum.present,
+          eligible: quorum.eligible,
+          required: quorum.required,
+          quorumPercent: quorum.quorumPercent,
+        },
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/committees",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const committees = await prisma.committee.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: { type: "asc" },
+        include: {
+          members: {
+            orderBy: { appointedAt: "asc" },
+            include: { member: { select: { name: true, phone: true, code: true } } },
+          },
+          decisions: { where: { status: "pending" }, select: { id: true } },
+        },
+      });
+      return {
+        ok: true,
+        committees: committees.map((c) => ({
+          id: c.id,
+          type: c.type,
+          name: c.name,
+          size: c.size,
+          createdAt: c.createdAt,
+          pendingDecisions: c.decisions.length,
+          members: c.members.map((m) => ({
+            id: m.id,
+            memberId: m.memberId,
+            name: m.member.name,
+            phone: m.member.phone,
+            code: m.member.code,
+            role: m.role,
+            active: m.active,
+            appointedAt: m.appointedAt,
+            termEndsAt: m.termEndsAt,
+          })),
+        })),
+      };
+    }),
+  );
+
+  // ---- Data-protection register (NDPA) ----
+  app.get(
+    "/api/admin/data-protection/dpia",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const records = await prisma.dpiaRecord.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: { createdAt: "desc" },
+      });
+      return {
+        ok: true,
+        records: records.map((r) => ({
+          id: r.id,
+          title: r.title,
+          activity: r.activity,
+          dataCategories: r.dataCategories,
+          status: r.status,
+          ownerName: r.ownerName,
+          reviewedAt: r.reviewedAt,
+          nextReviewAt: r.nextReviewAt,
+          createdAt: r.createdAt,
+        })),
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/data-protection/breaches",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const breaches = await prisma.dataBreach.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: { discoveredAt: "desc" },
+      });
+      return {
+        ok: true,
+        breaches: breaches.map((b) => ({
+          id: b.id,
+          reference: b.reference,
+          title: b.title,
+          description: b.description,
+          discoveredAt: b.discoveredAt,
+          occurredAt: b.occurredAt,
+          affectedCount: b.affectedCount,
+          dataCategories: b.dataCategories,
+          containment: b.containment,
+          status: b.status,
+          ndpcNotifiedAt: b.ndpcNotifiedAt,
+          ndpcReference: b.ndpcReference,
+          subjectsNotifiedAt: b.subjectsNotifiedAt,
+          createdAt: b.createdAt,
+        })),
+      };
+    }),
+  );
+
+  app.get(
+    "/api/admin/data-protection/consents",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const rows = await prisma.dataConsent.groupBy({
+        by: ["consentType", "granted"],
+        where: { member: { cooperativeId: coopId } },
+        _count: { _all: true },
+      });
+      const byType = new Map<string, { consentType: string; granted: number; denied: number }>();
+      for (const row of rows) {
+        const entry = byType.get(row.consentType) ?? {
+          consentType: row.consentType,
+          granted: 0,
+          denied: 0,
+        };
+        if (row.granted) entry.granted += row._count._all;
+        else entry.denied += row._count._all;
+        byType.set(row.consentType, entry);
+      }
+      return { ok: true, consents: Array.from(byType.values()) };
+    }),
+  );
+
+  // ---- Loan-loss provisions ----
+  app.get(
+    "/api/admin/provisions",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const [coop, runs] = await Promise.all([
+        prisma.cooperative.findUnique({
+          where: { id: coopId },
+          select: { loanLossProvisionBalance: true },
+        }),
+        prisma.provisionRun.findMany({
+          where: { cooperativeId: coopId },
+          orderBy: { createdAt: "desc" },
+          take: 50,
+          include: { _count: { select: { entries: true } } },
+        }),
+      ]);
+      return {
+        ok: true,
+        balance: coop?.loanLossProvisionBalance ?? 0,
+        runs: runs.map((r) => ({
+          id: r.id,
+          period: r.period,
+          totalProvision: r.totalProvision,
+          entryCount: r._count.entries,
+          createdAt: r.createdAt,
+        })),
+      };
+    }),
+  );
+
+  // ---- Wallet reconciliation history ----
+  app.get(
+    "/api/admin/reconciliation",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const logs = await prisma.reconciliationLog.findMany({
+        where: { cooperativeId: coopId },
+        orderBy: { createdAt: "desc" },
+        take: 50,
+      });
+      return { ok: true, logs };
+    }),
+  );
+
+  // ---- Referral programme ----
+  app.get(
+    "/api/admin/referrals",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const [referrals, withdrawals] = await Promise.all([
+        prisma.referral.findMany({
+          where: { cooperativeId: coopId },
+          orderBy: { createdAt: "desc" },
+          take: 100,
+          include: {
+            referrer: { select: { name: true, phone: true } },
+            referredMember: { select: { name: true, phone: true } },
+          },
+        }),
+        prisma.referralWithdrawal.findMany({
+          where: { cooperativeId: coopId },
+          orderBy: { createdAt: "desc" },
+          take: 100,
+          include: { member: { select: { name: true } } },
+        }),
+      ]);
+      const summary = {
+        total: referrals.length,
+        pending: 0,
+        qualified: 0,
+        rewarded: 0,
+        rejected: 0,
+      };
+      for (const r of referrals) {
+        if (r.status in summary) summary[r.status as keyof typeof summary] += 1;
+      }
+      return {
+        ok: true,
+        summary,
+        referrals: referrals.map((r) => ({
+          id: r.id,
+          referrerName: r.referrer.name,
+          referrerPhone: r.referrer.phone,
+          referredName: r.referredMember.name,
+          referredPhone: r.referredMember.phone,
+          code: r.code,
+          status: r.status,
+          rewardType: r.rewardType,
+          rewardAmount: r.rewardAmount,
+          qualifiedAt: r.qualifiedAt,
+          rewardedAt: r.rewardedAt,
+          createdAt: r.createdAt,
+        })),
+        withdrawals: withdrawals.map((w) => ({
+          id: w.id,
+          memberName: w.member.name,
+          amount: w.amount,
+          destination: w.destination,
+          phone: w.phone,
+          status: w.status,
+          note: w.note,
+          paidAt: w.paidAt,
+          createdAt: w.createdAt,
+        })),
+      };
+    }),
+  );
+
+  // ---- Refund requests (maker/checker) ----
+  app.get(
+    "/api/admin/refunds",
+    withTenant(async (req) => {
+      const coopId = req.adminCoopId!;
+      const { status } = req.query as { status?: string };
+      const trimmed = status?.trim();
+      const refunds = await prisma.refundRequest.findMany({
+        where: { cooperativeId: coopId, ...(trimmed ? { status: trimmed } : {}) },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+        include: { member: { select: { name: true, phone: true } } },
+      });
+      return {
+        ok: true,
+        refunds: refunds.map((r) => ({
+          id: r.id,
+          memberId: r.memberId,
+          memberName: r.member.name,
+          memberPhone: r.member.phone,
+          amount: r.amount,
+          reason: r.reason,
+          status: r.status,
+          createdAt: r.createdAt,
+          approvedAt: r.approvedAt,
+          paidAt: r.paidAt,
+          payoutRef: r.payoutRef,
+        })),
+      };
+    }),
+  );
+
+  app.post(
+    "/api/admin/refunds/:id/reject",
+    withTenant(async (req, reply) => {
+      const coopId = req.adminCoopId!;
+      const phone = req.adminPhone!;
+      const superAuth = await requireSuper(req);
+      if (!superAuth.ok) {
+        return reply.code(403).send({ error: "Only super admins can reject refunds." });
+      }
+      const { id } = req.params as { id: string };
+      const { reason: rawReason } = (req.body ?? {}) as { reason?: string };
+      const reason = (rawReason ?? "").trim();
+      if (reason.length < 3) {
+        return reply.code(400).send({ error: "Give a short reason for rejecting the refund." });
+      }
+      const result = await rejectRefund(coopId, id, reason, {
+        id: superAuth.actorId!,
+        phone,
+        role: "superadmin",
+      });
+      if (!result.ok) return reply.code(400).send({ error: result.message });
+      return { ok: true, message: result.message };
     }),
   );
 

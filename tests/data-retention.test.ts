@@ -93,6 +93,68 @@ describe("7-year PII retention", () => {
     expect(recent.name).toBe(suspendedRecent.name);
   });
 
+  it("purges linked PII when a member is anonymized", async () => {
+    const coop = await makeCoop("RET05");
+    const member = await makeMember(coop.id, {
+      status: "suspended",
+      createdAt: EIGHT_YEARS_AGO,
+    });
+    const phone = member.phone;
+
+    await prisma.memberBeneficialOwner.create({
+      data: {
+        cooperativeId: coop.id,
+        memberId: member.id,
+        name: "Old Beneficial",
+        ownershipPct: 50,
+        idType: "bvn",
+        idNumber: "22222222222",
+      },
+    });
+    await prisma.beneficiary.create({
+      data: {
+        cooperativeId: coop.id,
+        memberId: member.id,
+        accountNumber: "1111222233",
+        bankCode: "058",
+      },
+    });
+    await prisma.favoritePayee.create({
+      data: {
+        memberId: member.id,
+        name: "Old Payee",
+        accountNumber: "3333444455",
+        bankCode: "058",
+      },
+    });
+    await prisma.phoneChangeRequest.create({
+      data: {
+        memberId: member.id,
+        cooperativeId: coop.id,
+        oldPhone: phone,
+        newPhone: "2348077776666",
+      },
+    });
+    await prisma.session.create({ data: { phone } });
+    await prisma.webhookFailure.create({
+      data: { channel: "whatsapp", phone, error: "failed" },
+    });
+
+    const result = await runDataRetention(JOB_NOW);
+    expect(result.anonymized).toBe(1);
+
+    expect(
+      await prisma.memberBeneficialOwner.count({ where: { memberId: member.id } }),
+    ).toBe(0);
+    expect(await prisma.beneficiary.count({ where: { memberId: member.id } })).toBe(0);
+    expect(await prisma.favoritePayee.count({ where: { memberId: member.id } })).toBe(0);
+    expect(
+      await prisma.phoneChangeRequest.count({ where: { memberId: member.id } }),
+    ).toBe(0);
+    expect(await prisma.session.count({ where: { phone } })).toBe(0);
+    expect(await prisma.webhookFailure.count({ where: { phone } })).toBe(0);
+  });
+
   it("purges sessions older than 30 days but keeps recent ones", async () => {
     await makeCoop("RET02");
     const oldSession = await prisma.session.create({
@@ -119,6 +181,45 @@ describe("self-service account erasure", () => {
       data: { phone, state: "awaiting_name", data: JSON.stringify({ name: "Ada" }) },
     });
 
+    // Linked PII that the old erasure path left behind.
+    await prisma.memberBeneficialOwner.create({
+      data: {
+        cooperativeId: coop.id,
+        memberId: member.id,
+        name: "Ada Beneficial",
+        ownershipPct: 100,
+        idType: "nin",
+        idNumber: "12345678901",
+      },
+    });
+    await prisma.beneficiary.create({
+      data: {
+        cooperativeId: coop.id,
+        memberId: member.id,
+        accountNumber: "0123456789",
+        bankCode: "058",
+      },
+    });
+    await prisma.favoritePayee.create({
+      data: {
+        memberId: member.id,
+        name: "Mama Ngozi",
+        accountNumber: "9876543210",
+        bankCode: "058",
+      },
+    });
+    await prisma.phoneChangeRequest.create({
+      data: {
+        memberId: member.id,
+        cooperativeId: coop.id,
+        oldPhone: phone,
+        newPhone: "2348099998888",
+      },
+    });
+    await prisma.webhookFailure.create({
+      data: { channel: "whatsapp", phone, error: "boom" },
+    });
+
     await handleDeleteAccountPin(phone, "1234", coop.id);
 
     const updated = await prisma.member.findUniqueOrThrow({ where: { id: member.id } });
@@ -129,6 +230,25 @@ describe("self-service account erasure", () => {
 
     // The session (which could carry PII) is gone.
     expect(await prisma.session.findUnique({ where: { phone } })).toBeNull();
+
+    // ...and so is every linked record that holds PII the member did not
+    // expect to keep: beneficial owners' NIN/BVN, saved bank accounts, phone
+    // change history, and failed-webhook phone numbers.
+    expect(
+      await prisma.memberBeneficialOwner.count({ where: { memberId: member.id } }),
+    ).toBe(0);
+    expect(await prisma.beneficiary.count({ where: { memberId: member.id } })).toBe(0);
+    expect(await prisma.favoritePayee.count({ where: { memberId: member.id } })).toBe(0);
+    expect(
+      await prisma.phoneChangeRequest.count({ where: { memberId: member.id } }),
+    ).toBe(0);
+    expect(await prisma.webhookFailure.count({ where: { phone } })).toBe(0);
+
+    // The erasure record itself must not re-introduce the raw phone number.
+    const eraseAudit = await prisma.auditLog.findFirstOrThrow({
+      where: { action: "member.data_erasure" },
+    });
+    expect(eraseAudit.actorPhone).toBe(`deleted:${member.id}`);
 
     // The erasure is traceable in the audit trail.
     const audits = await prisma.auditLog.findMany({ where: { action: "member.data_erasure" } });

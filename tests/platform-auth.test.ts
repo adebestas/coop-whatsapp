@@ -11,11 +11,14 @@ const app = buildApp();
 let ownerId: string;
 beforeEach(async () => {
   await prisma.platformAdmin.deleteMany();
+  await prisma.platformAuditLog.deleteMany();
   // Login no longer resets the shared per-IP limiter on success (that let any one
   // valid account keep the bucket at zero). Isolate each case explicitly instead.
   await resetRateLimit("devlogin:127.0.0.1");
   await resetRateLimit("devacct:2348000000001");
   await resetRateLimit("devacct:2348000000002");
+  await resetRateLimit("devacct:2348000000003");
+  await resetRateLimit("devacct:2348000000004");
   const owner = await prisma.platformAdmin.create({
     data: {
       name: "Owner",
@@ -148,10 +151,223 @@ describe("platform auth", () => {
     const changed = await app.inject({
       method: "POST",
       url: "/api/developer/change-pin",
-      payload: { newPin: "654321" },
+      payload: { currentPin: "123456", newPin: "654321" },
       headers: mutate,
     });
     expect(changed.statusCode).toBe(200);
+
+    const noToken = await app.inject({
+      method: "POST",
+      url: "/api/developer/login",
+      payload: { phone: "2348000000001", pin: "123456" },
+    });
+    expect(JSON.parse(noToken.body).token).toBeUndefined();
+  });
+
+  it("confines an owner without 2FA to enrolment", async () => {
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/developer/login",
+      payload: { phone: "2348000000001", pin: "123456" },
+    });
+    expect(login.statusCode).toBe(200);
+    expect(JSON.parse(login.body).mustSetup2fa).toBe(true);
+    const cookie = (login.headers["set-cookie"] as string).split(";")[0];
+
+    const blocked = await app.inject({
+      method: "GET",
+      url: "/api/developer/coops",
+      headers: { cookie },
+    });
+    expect(blocked.statusCode).toBe(403);
+    expect(JSON.parse(blocked.body).error).toBe("two_factor_setup_required");
+
+    const { generateTotpSecret, totpAt } = await import("../src/lib/totp.js");
+    const secret = generateTotpSecret();
+    const missingPin = await app.inject({
+      method: "POST",
+      url: "/api/developer/setup-2fa",
+      payload: { secret, code: totpAt(secret) },
+      headers: { cookie, "x-requested-with": "xmlhttprequest" },
+    });
+    expect(missingPin.statusCode).toBe(400);
+
+    const wrongPin = await app.inject({
+      method: "POST",
+      url: "/api/developer/setup-2fa",
+      payload: { secret, code: totpAt(secret), currentPin: "000000" },
+      headers: { cookie, "x-requested-with": "xmlhttprequest" },
+    });
+    expect(wrongPin.statusCode).toBe(401);
+
+    const enrolled = await app.inject({
+      method: "POST",
+      url: "/api/developer/setup-2fa",
+      payload: { secret, code: totpAt(secret), currentPin: "123456" },
+      headers: { cookie, "x-requested-with": "xmlhttprequest" },
+    });
+    expect(enrolled.statusCode).toBe(200);
+
+    const allowed = await app.inject({
+      method: "GET",
+      url: "/api/developer/coops",
+      headers: { cookie },
+    });
+    expect(allowed.statusCode).toBe(200);
+  });
+
+  it("requires the current PIN to change the PIN and revokes old sessions", async () => {
+    await prisma.platformAdmin.update({
+      where: { id: ownerId },
+      data: { mustChangePin: true },
+    });
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/developer/login",
+      payload: { phone: "2348000000001", pin: "123456" },
+    });
+    const oldCookie = (login.headers["set-cookie"] as string).split(";")[0];
+    const mutate = { cookie: oldCookie, "x-requested-with": "xmlhttprequest" };
+
+    const missing = await app.inject({
+      method: "POST",
+      url: "/api/developer/change-pin",
+      payload: { newPin: "654321" },
+      headers: mutate,
+    });
+    expect(missing.statusCode).toBe(400);
+
+    const wrong = await app.inject({
+      method: "POST",
+      url: "/api/developer/change-pin",
+      payload: { currentPin: "000000", newPin: "654321" },
+      headers: mutate,
+    });
+    expect(wrong.statusCode).toBe(401);
+
+    const changed = await app.inject({
+      method: "POST",
+      url: "/api/developer/change-pin",
+      payload: { currentPin: "123456", newPin: "654321" },
+      headers: mutate,
+    });
+    expect(changed.statusCode).toBe(200);
+    const newCookie = (changed.headers["set-cookie"] as string).split(";")[0];
+    expect(newCookie).not.toBe(oldCookie);
+
+    const stale = await app.inject({
+      method: "GET",
+      url: "/api/developer/me",
+      headers: { cookie: oldCookie },
+    });
+    expect(stale.statusCode).toBe(401);
+
+    const fresh = await app.inject({
+      method: "GET",
+      url: "/api/developer/me",
+      headers: { cookie: newCookie },
+    });
+    expect(fresh.statusCode).toBe(200);
+  });
+
+  it("revokes the previous token when refreshing", async () => {
+    await prisma.platformAdmin.create({
+      data: {
+        name: "S",
+        phone: "2348000000003",
+        role: "support",
+        pin: hashPin("123456"),
+        mustChangePin: false,
+      },
+    });
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/developer/login",
+      payload: { phone: "2348000000003", pin: "123456" },
+    });
+    const oldCookie = (login.headers["set-cookie"] as string).split(";")[0];
+    const refresh = await app.inject({
+      method: "POST",
+      url: "/api/developer/refresh",
+      headers: { cookie: oldCookie, "x-requested-with": "xmlhttprequest" },
+    });
+    expect(refresh.statusCode).toBe(200);
+    const newCookie = (refresh.headers["set-cookie"] as string).split(";")[0];
+
+    const stale = await app.inject({
+      method: "GET",
+      url: "/api/developer/me",
+      headers: { cookie: oldCookie },
+    });
+    expect(stale.statusCode).toBe(401);
+
+    const fresh = await app.inject({
+      method: "GET",
+      url: "/api/developer/me",
+      headers: { cookie: newCookie },
+    });
+    expect(fresh.statusCode).toBe(200);
+  });
+
+  it("writes auth events to the platform audit log", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/developer/login",
+      payload: { phone: "2348000000001", pin: "000000" },
+    });
+    expect(
+      await prisma.platformAuditLog.count({ where: { action: "auth.login_failed" } }),
+    ).toBeGreaterThan(0);
+
+    await app.inject({
+      method: "POST",
+      url: "/api/developer/login",
+      payload: { phone: "2348000000001", pin: "123456" },
+    });
+    expect(
+      await prisma.platformAuditLog.count({ where: { action: "auth.login_success" } }),
+    ).toBeGreaterThan(0);
+  });
+
+  it("lets an owner reset another admin's 2FA with step-up auth", async () => {
+    const { generateTotpSecret, totpAt } = await import("../src/lib/totp.js");
+    const ownerSecret = generateTotpSecret();
+    await prisma.platformAdmin.update({
+      where: { id: ownerId },
+      data: { totpSecret: ownerSecret, totpEnabled: true },
+    });
+    const target = await prisma.platformAdmin.create({
+      data: {
+        name: "Dev",
+        phone: "2348000000004",
+        role: "developer",
+        pin: hashPin("123456"),
+        mustChangePin: false,
+        totpSecret: generateTotpSecret(),
+        totpEnabled: true,
+      },
+    });
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/developer/login",
+      payload: { phone: "2348000000001", pin: "123456", totp: totpAt(ownerSecret) },
+    });
+    expect(login.statusCode).toBe(200);
+    const cookie = (login.headers["set-cookie"] as string).split(";")[0];
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/developer/admins/${target.id}/reset-2fa`,
+      payload: { confirmPin: "123456", totp: totpAt(ownerSecret) },
+      headers: { cookie, "x-requested-with": "xmlhttprequest" },
+    });
+    expect(res.statusCode).toBe(200);
+    const updated = await prisma.platformAdmin.findUnique({ where: { id: target.id } });
+    expect(updated?.totpEnabled).toBe(false);
+    expect(updated?.totpSecret).toBeNull();
+    expect(
+      await prisma.platformAuditLog.count({ where: { action: "platform_admin.reset_2fa" } }),
+    ).toBe(1);
   });
   it("blocks the support role from mutating", async () => {
     await prisma.platformAdmin.create({

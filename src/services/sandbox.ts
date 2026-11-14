@@ -162,6 +162,34 @@ export async function getSandboxOverview(): Promise<{
   ai: { available: boolean; provider: string };
 }> {
   const { cooperativeId } = await ensureSandbox();
+  return sandboxOverviewFor(cooperativeId);
+}
+
+/**
+ * Read-only overview: returns null when the sandbox has not been provisioned.
+ * GET handlers use this so a page view never mutates platform state.
+ */
+export async function getSandboxOverviewIfProvisioned(): Promise<Awaited<
+  ReturnType<typeof getSandboxOverview>
+> | null> {
+  const coop = await ownerPrisma.cooperative.findUnique({
+    where: { code: SANDBOX_CODE },
+    select: { id: true, isSandbox: true },
+  });
+  if (!coop?.isSandbox) return null;
+  return sandboxOverviewFor(coop.id);
+}
+
+async function sandboxOverviewFor(cooperativeId: string): Promise<{
+  cooperative: { id: string; name: string; code: string; status: string };
+  personas: Array<
+    SandboxPersona & {
+      walletKobo: number | null;
+      loan: { count: number; overdue: number };
+    }
+  >;
+  ai: { available: boolean; provider: string };
+}> {
   const [cooperative, personaData] = await Promise.all([
     ownerPrisma.cooperative.findUnique({
       where: { id: cooperativeId },
@@ -215,7 +243,17 @@ export async function getSandboxState(
 ): Promise<{ state: SandboxState; ai: { available: boolean; provider: string } }> {
   const persona = getSandboxPersona(personaId);
   if (!persona) throw new Error("unknown sandbox persona");
-  const { cooperativeId } = await ensureSandbox();
+  const coop = await ownerPrisma.cooperative.findUnique({
+    where: { code: SANDBOX_CODE },
+    select: { id: true, isSandbox: true },
+  });
+  if (!coop?.isSandbox) {
+    return {
+      state: { session: null, wallet: null, loans: [] },
+      ai: { available: groqAvailable(), provider: "groq" },
+    };
+  }
+  const cooperativeId = coop.id;
   const state = await withCoopContext(cooperativeId, async () => {
     const member = persona.member
       ? await prisma.member.findUnique({
