@@ -6,6 +6,19 @@ import { forEachCoop } from "../lib/tenant-context.js";
 
 // ===== AML/STR Constants =====
 
+/**
+ * Mask a phone number to protect PII in generated AML / STR / CTR reports
+ * in accordance with NDPR/NDPA 2023 regulations (e.g. +23480*****123).
+ */
+export function maskPhone(phone: string): string {
+  if (!phone) return "";
+  const cleaned = phone.trim();
+  if (cleaned.length <= 7) return `****${cleaned.slice(-3)}`;
+  const prefix = cleaned.startsWith("+") ? cleaned.slice(0, 6) : cleaned.slice(0, 5);
+  const suffix = cleaned.slice(-3);
+  return `${prefix}*****${suffix}`;
+}
+
 /** Single transaction above this amount (kobo) triggers a large-transaction alert. */
 export const LARGE_TX_THRESHOLD = 500_000_000; // ₦5,000,000
 
@@ -405,10 +418,11 @@ export async function generateSTR(
   const reportTitle = suspicious
     ? "SUSPICIOUS TRANSACTION REPORT (STR)"
     : "CURRENCY TRANSACTION REPORT (CTR)";
+  const maskedPhone = maskPhone(member.phone);
   const summary =
     `=== ${reportTitle} ===\n` +
     `Date: ${timestamp}\n` +
-    `Member: ${member.name} (${member.phone})\n` +
+    `Member: ${member.name} (${maskedPhone})\n` +
     `Cooperative: ${member.cooperative.name}\n` +
     `Member ID: ${member.id}\n` +
     `Member Code: ${member.code}\n\n` +
@@ -419,7 +433,7 @@ export async function generateSTR(
 
   return {
     memberName: member.name,
-    memberPhone: member.phone,
+    memberPhone: maskedPhone,
     cooperativeName: member.cooperative.name,
     transactions: allTx,
     reasons: uniqueReasons,
@@ -443,7 +457,7 @@ export async function handleSTR(
 
   const str = await generateSTR(cleaned, cooperativeId);
   if (!str) {
-    return { ok: false, message: `No member found with phone ${cleaned} in your cooperative.` };
+    return { ok: false, message: "No member found with that phone number in your cooperative." };
   }
 
   if (str.reasons.length === 0) {
