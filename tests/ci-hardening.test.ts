@@ -27,6 +27,13 @@ describe("CI hardening", () => {
     expect(ci).toMatch(/npm audit --omit=dev --audit-level=high/);
   });
 
+  it("verifies every pull request regardless of its base branch", () => {
+    const start = ci.indexOf("  pull_request:");
+    expect(start).toBeGreaterThan(-1);
+    const block = ci.slice(start, ci.indexOf("\nenv:", start));
+    expect(block).not.toMatch(/branches:/);
+  });
+
   it("configures Dependabot for npm and github-actions", () => {
     expect(dependabot).toMatch(/package-ecosystem:\s*"npm"/);
     expect(dependabot).toMatch(/package-ecosystem:\s*"github-actions"/);
