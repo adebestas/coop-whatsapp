@@ -12,6 +12,7 @@ import { ensureBeneficiaryAllowed } from "./beneficiaries.js";
 import { LIMITS } from "../lib/money.js";
 import { flagTransaction } from "./aml.js";
 import { screenAndRecord, isBlocking } from "./screening.js";
+import { blockSandboxExternal, sandboxBlocksProvider } from "../lib/sandbox.js";
 
 export interface PayAnyoneResult {
   ok: boolean;
@@ -301,6 +302,22 @@ async function payExternal(
 
   const provider = await resolveProvider(undefined, getCurrency());
   const reference = `PAYANY-${payment.id.slice(-8)}`;
+
+  if (sandboxBlocksProvider(provider.name)) {
+    blockSandboxExternal("payment");
+    await prisma.externalPayment.updateMany({
+      where: { id: payment.id, status: "processing" },
+      data: {
+        status: "approved2",
+        approved3ById: null,
+        payoutReference: "held: sandbox blocked live provider",
+      },
+    });
+    return {
+      ok: false,
+      message: "Sandbox mode: refusing to call a live payment provider. Money NOT sent.",
+    };
+  }
 
   if (!provider.payout) {
     await prisma.externalPayment.updateMany({

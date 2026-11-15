@@ -40,6 +40,17 @@ export function blockSandboxExternal(service: string): void {
 }
 
 /**
+ * Backstop for money paths: true when a live provider must not be called
+ * because a sandbox turn is active. `resolveProvider` already swaps in the
+ * sandbox adapter, so this only trips if a code path resolves a provider on
+ * its own or that swap regresses.
+ */
+export function sandboxBlocksProvider(providerName: string | undefined): boolean {
+  if (!isSandboxMode()) return false;
+  return providerName !== "sandbox";
+}
+
+/**
  * Run a function inside a sandbox scope. Nested scopes inherit the parent's
  * AI toggle and can only turn AI off, never back on.
  */
