@@ -9,6 +9,7 @@
  */
 
 import { groqAvailable, groqModel, GROQ_TIMEOUT_MS, groqFetch } from "./groq.js";
+import { isInjectionAttempt, buildHardenedMessages } from "./ai-guardrails.js";
 
 /** Strip anything that could break out of the prompt or the message. */
 function sanitize(value: string, maxLen = 60): string {
@@ -34,28 +35,27 @@ export async function accountMismatchWarning(
   memberName: string,
   accountName: string,
 ): Promise<string> {
+  // If either name contains injection patterns, fail-closed to static fallback
+  if (isInjectionAttempt(memberName) || isInjectionAttempt(accountName)) {
+    return fallback(memberName, accountName);
+  }
   if (!groqAvailable()) return fallback(memberName, accountName);
   try {
+    const callerPrompt =
+      `You write short, friendly WhatsApp alerts for a Nigerian cooperative banking app. ` +
+      `The member's bank account resolved to a name that does not match their registered name. ` +
+      `Write a 2-3 sentence warning that calls their attention to the mismatch, shows both names, ` +
+      `and tells them they can reply *yes* to continue anyway or *cancel* to re-enter their details. ` +
+      `Never invent facts.`;
+    const userContent = `registered name: ${sanitize(memberName)}\naccount name: ${sanitize(accountName)}`;
+    const messages = buildHardenedMessages(callerPrompt, userContent);
+
     const res = await groqFetch(
       {
         model: groqModel(),
         temperature: 0.3,
         max_tokens: 120,
-        messages: [
-          {
-            role: "system",
-            content:
-              `You write short, friendly WhatsApp alerts for a Nigerian cooperative banking app. ` +
-              `The member's bank account resolved to a name that does not match their registered name. ` +
-              `Write a 2-3 sentence warning that calls their attention to the mismatch, shows both names, ` +
-              `and tells them they can reply *yes* to continue anyway or *cancel* to re-enter their details. ` +
-              `Never invent facts.`,
-          },
-          {
-            role: "user",
-            content: `registered name: ${sanitize(memberName)}\naccount name: ${sanitize(accountName)}`,
-          },
-        ],
+        messages,
       },
       GROQ_TIMEOUT_MS,
     );
