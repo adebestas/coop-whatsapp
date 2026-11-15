@@ -422,6 +422,7 @@ describe("platform auth", () => {
     await prisma.platformAdmin.deleteMany();
     process.env.PLATFORM_OWNER_PHONE = "2348099999999";
     process.env.PLATFORM_OWNER_NAME = "Boss";
+    process.env.PLATFORM_OWNER_PIN = "123456";
     try {
       await ensurePlatformOwner();
       await ensurePlatformOwner();
@@ -432,6 +433,7 @@ describe("platform auth", () => {
     } finally {
       delete process.env.PLATFORM_OWNER_PHONE;
       delete process.env.PLATFORM_OWNER_NAME;
+      delete process.env.PLATFORM_OWNER_PIN;
     }
   });
 });
