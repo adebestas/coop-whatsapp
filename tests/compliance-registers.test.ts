@@ -30,19 +30,29 @@ import {
 } from "../src/services/beneficial-owners.js";
 import { handleAdminCommand } from "../src/services/admin.js";
 import { vi } from "vitest";
+import { totpAt } from "../src/lib/totp.js";
 
 process.env.ADMIN_JWT_SECRET ||= "test-platform-secret-0123456789";
 const app = buildApp();
+const TEST_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
 
 async function login(phone: string): Promise<string> {
   await prisma.platformAdmin.create({
-    data: { name: "owner", phone, role: "owner", pin: hashPin("123456"), mustChangePin: false },
+    data: {
+      name: "owner",
+      phone,
+      role: "owner",
+      pin: hashPin("123456"),
+      mustChangePin: false,
+      totpSecret: TEST_TOTP_SECRET,
+      totpEnabled: true,
+    },
   });
   await resetRateLimit("devlogin:127.0.0.1");
   const res = await app.inject({
     method: "POST",
     url: "/api/developer/login",
-    payload: { phone, pin: "123456" },
+    payload: { phone, pin: "123456", totp: totpAt(TEST_TOTP_SECRET) },
   });
   expect(res.statusCode).toBe(200);
   return (res.headers["set-cookie"] as string).split(";")[0];

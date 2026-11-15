@@ -60,7 +60,7 @@ export async function listPlatformAdmins(): Promise<PlatformAdminView[]> {
   return rows.map(toView);
 }
 
-/** Create a platform admin with a random 4-digit temp PIN (must be changed on first login). */
+/** Create a platform admin with a random 6-digit temp PIN (must be changed on first login). */
 export async function createPlatformAdmin(
   input: CreatePlatformAdminInput,
   actor?: PlatformActor,
@@ -68,7 +68,7 @@ export async function createPlatformAdmin(
   const role = input.role && ROLES.has(input.role) ? input.role : "developer";
   const phone = normalizePhone(input.phone);
   if (!phone) throw new Error("invalid phone number");
-  const tempPin = String(randomInt(1000, 9000));
+  const tempPin = String(randomInt(100000, 1000000));
   const admin = await prisma.platformAdmin.create({
     data: {
       name: input.name,

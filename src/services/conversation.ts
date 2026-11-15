@@ -45,7 +45,7 @@ import {
   repay,
 } from "./federation/index.js";
 import { detectLocale, localeFromLanguageCode, t, LOCALES, type Locale } from "../lib/i18n.js";
-import { runWithLocale, getLocale } from "../lib/runtime-context.js";
+import { runWithLocale, getLocale, getCoopId } from "../lib/runtime-context.js";
 import { translateToEnglish } from "../lib/translate.js";
 import { submitNin, isValidNin } from "./kyc.js";
 import { getMemberReceiptData, sendReceipt } from "./receipt.js";
@@ -814,7 +814,16 @@ async function handleMessageInner(
   }
 
   if (!member) {
-    const altOwner = await prisma.member.findFirst({ where: { altChannelId: phone } });
+    // Scope the lookup to the active cooperative when known, and require a
+    // single match otherwise. `altChannelId` is not unique, so an unscoped
+    // findFirst could hand a shared alerts phone to another coop's member.
+    const coopId = getCoopId();
+    const altMatches = await prisma.member.findMany({
+      where: { altChannelId: phone, ...(coopId ? { cooperativeId: coopId } : {}) },
+      select: { id: true, phone: true, cooperativeId: true, preferredChannel: true },
+      take: 2,
+    });
+    const altOwner = altMatches.length === 1 ? altMatches[0] : null;
     if (altOwner) {
       const pref = platformOf(phone);
       if (altOwner.preferredChannel !== pref) {

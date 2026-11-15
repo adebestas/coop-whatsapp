@@ -13,10 +13,12 @@ import { normalizePhone } from "../lib/phones.js";
  * - no-op when an owner already exists (never logs the temp PIN twice);
  * - a unique-phone race (P2002) is treated as already-bootstrapped.
  *
- * The owner is created with a random 6-digit temp PIN and mustChangePin=true,
- * so the PIN can only be used to reach the change-pin flow. The plaintext PIN is
- * written once to a 0600 file (never to stdout/logs) — logs are shipped, mirrored
- * and often over-readable, which is not acceptable for a platform-owner secret.
+ * The owner is created with a 6-digit temp PIN and mustChangePin=true, so the
+ * PIN can only be used to reach the change-pin flow. Supply the PIN through
+ * PLATFORM_OWNER_PIN (never printed), or point PLATFORM_OWNER_PIN_FILE at a
+ * root-only path for a generated one. Without one of the two the owner is NOT
+ * created: silently dropping a plaintext PIN in the working directory is how
+ * secrets end up in backups and images.
  */
 export async function ensurePlatformOwner(): Promise<void> {
   const raw = process.env.PLATFORM_OWNER_PHONE?.trim();
@@ -32,7 +34,24 @@ export async function ensurePlatformOwner(): Promise<void> {
   const existing = await prisma.platformAdmin.findFirst({ where: { role: "owner" } });
   if (existing) return;
 
-  const tempPin = String(randomInt(100000, 1000000));
+  const suppliedPin = process.env.PLATFORM_OWNER_PIN?.trim();
+  if (suppliedPin && !/^\d{6}$/.test(suppliedPin)) {
+    console.error(
+      `[platform-bootstrap] PLATFORM_OWNER_PIN must be exactly 6 digits; owner not created.`,
+    );
+    return;
+  }
+  const pinFileEnv = process.env.PLATFORM_OWNER_PIN_FILE?.trim();
+  if (!suppliedPin && !pinFileEnv) {
+    console.error(
+      `[platform-bootstrap] Refusing to create the platform owner: set PLATFORM_OWNER_PIN ` +
+        `(6 digits) or PLATFORM_OWNER_PIN_FILE to a root-only path. ` +
+        `No PIN file is written by default.`,
+    );
+    return;
+  }
+
+  const tempPin = suppliedPin ?? String(randomInt(100000, 1000000));
   try {
     await prisma.platformAdmin.create({
       data: {
@@ -49,7 +68,15 @@ export async function ensurePlatformOwner(): Promise<void> {
     throw err;
   }
 
-  const pinFile = resolve(process.env.PLATFORM_OWNER_PIN_FILE || "platform-owner-pin.txt");
+  if (suppliedPin) {
+    console.log(
+      `[platform-bootstrap] Platform owner created for ${phone} using PLATFORM_OWNER_PIN. ` +
+        `Change it on first login at /dashboard/dev/, enable 2FA, then unset PLATFORM_OWNER_PIN.`,
+    );
+    return;
+  }
+
+  const pinFile = resolve(pinFileEnv!);
   try {
     writeFileSync(pinFile, `${tempPin}\n`, { mode: 0o600 });
   } catch (err) {

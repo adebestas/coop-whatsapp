@@ -35,6 +35,28 @@ function webServiceBlocks(source: string): string[] {
   return blocks;
 }
 
+describe("docker build context", () => {
+  it("excludes the local dev database, dumps, local exports and the bootstrap PIN", () => {
+    const ignored = readFileSync(path.join(repoRoot, ".dockerignore"), "utf8")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !line.startsWith("#"));
+    // `COPY prisma ./prisma/` in the production stage would otherwise bake the
+    // laptop SQLite database (member phone numbers + PIN hashes) into the image.
+    for (const entry of [
+      "prisma/dev.db",
+      "prisma/*.db*",
+      "platform-owner-pin.txt",
+      "baseline.sql",
+      "backups/",
+      "exports/",
+      "test-*.txt",
+    ]) {
+      expect(ignored).toContain(entry);
+    }
+  });
+});
+
 describe("render.yaml deployment wiring", () => {
   it("wires the migration pre-deploy command on every web service", () => {
     const blocks = webServiceBlocks(renderYaml);
@@ -45,6 +67,32 @@ describe("render.yaml deployment wiring", () => {
       // pre-deploy command rather than relying on the image CMD.
       expect(block).toMatch(/runtime:\s*node/);
       expect(block).toMatch(/preDeployCommand:\s*node scripts\/db-migrate\.mjs/);
+    }
+  });
+});
+
+describe("hardening: compiled output and backups", () => {
+  it("does not ship source maps", () => {
+    const tsconfig = JSON.parse(
+      readFileSync(path.join(repoRoot, "tsconfig.json"), "utf8"),
+    ) as { compilerOptions?: { sourceMap?: boolean } };
+    expect(tsconfig.compilerOptions?.sourceMap).toBe(false);
+  });
+
+  it("encrypts backups when configured and refuses plaintext in production", () => {
+    const script = readFileSync(path.join(repoRoot, "deploy", "backup.sh"), "utf8");
+    expect(script).toContain("BACKUP_ENCRYPTION_KEY");
+    expect(script).toMatch(/openssl enc -aes-256-cbc/);
+    expect(script).toContain("REQUIRE_ENCRYPTED_BACKUPS");
+    expect(script).toMatch(/\.dump\.enc/);
+  });
+
+  it("documents the off-instance backup variables the app requires in production", () => {
+    const envExample = readFileSync(path.join(repoRoot, "deploy", ".env.example"), "utf8");
+    const deployDoc = readFileSync(path.join(repoRoot, "DEPLOY.md"), "utf8");
+    for (const variable of ["BACKUP_BUCKET", "BACKUP_KEY", "BACKUP_SECRET"]) {
+      expect(envExample).toContain(variable);
+      expect(deployDoc).toContain(variable);
     }
   });
 });

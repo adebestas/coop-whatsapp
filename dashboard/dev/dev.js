@@ -150,7 +150,16 @@
         showChangePinView();
         throw new Error("PIN change required");
       }
-      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+      if (res.status === 403 && data.error === "two_factor_setup_required") {
+        window.location.href = "dev-login.html";
+        throw new Error("Two-factor enrolment required");
+      }
+      if (!res.ok) {
+        const error = new Error(data.error || `Request failed (${res.status})`);
+        error.code = data.code;
+        error.status = res.status;
+        throw error;
+      }
       return data;
     } finally {
       hideLoader();
@@ -213,6 +222,8 @@
     document.querySelectorAll(".nav-item[data-page]").forEach((el) => {
       const on = el.dataset.page === page || (page === "coop" && el.dataset.page === "coops");
       el.classList.toggle("active", on);
+      if (on) el.setAttribute("aria-current", "page");
+      else el.removeAttribute("aria-current");
     });
     document.getElementById("sidebar").classList.remove("open");
     document.getElementById("sidebarOverlay").classList.remove("open");
@@ -304,11 +315,19 @@
       <div class="card" style="max-width:480px;">
         <div class="card-header"><span class="card-title">Set a new PIN</span></div>
         <div class="card-body">
-          <p class="text-muted">Your account is still on a temporary PIN. Set a new 6-digit PIN to continue.</p>
+          <p class="text-muted">Your account is still on a temporary PIN. Confirm the current PIN and set a new 6-digit PIN to continue.</p>
+          <div class="form-field mt-4">
+            <label>Current PIN</label>
+            <input id="currentPin" class="policy-input" inputmode="numeric" maxlength="6" autocomplete="current-password">
+          </div>
           <div class="form-field mt-4">
             <label>New 6-digit PIN</label>
-            <input id="newPin" class="policy-input" inputmode="numeric" maxlength="6" autocomplete="off">
+            <input id="newPin" class="policy-input" inputmode="numeric" maxlength="6" autocomplete="new-password">
           </div>
+          ${me?.totpEnabled ? `<div class="form-field mt-4">
+            <label>Authenticator code</label>
+            <input id="changePinTotp" class="policy-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+          </div>` : ""}
           <div id="changePinResult" class="mt-4"></div>
           <div class="flex gap-2 mt-4">
             <button class="btn btn-primary" data-action="changePinSubmit">Set PIN &amp; Continue</button>
@@ -318,16 +337,21 @@
   }
 
   window.changePinSubmit = async function () {
-    const input = document.getElementById("newPin");
+    const newPin = (document.getElementById("newPin")?.value || "").trim();
+    const currentPin = (document.getElementById("currentPin")?.value || "").trim();
+    const totp = (document.getElementById("changePinTotp")?.value || "").trim();
     const result = document.getElementById("changePinResult");
-    const newPin = (input?.value || "").trim();
+    if (!/^\d{4,6}$/.test(currentPin)) {
+      if (result) result.innerHTML = '<span class="text-red">Enter your current PIN.</span>';
+      return;
+    }
     if (!/^\d{6}$/.test(newPin)) {
       if (result)
         result.innerHTML = '<span class="text-red">New PIN must be exactly 6 digits.</span>';
       return;
     }
     try {
-      await api("/change-pin", { method: "POST", body: { newPin } });
+      await api("/change-pin", { method: "POST", body: { currentPin, newPin, totp } });
       window.location.reload();
     } catch (err) {
       if (result) result.innerHTML = `<span class="text-red">${esc(err.message)}</span>`;
@@ -645,7 +669,7 @@
       ? '<span class="text-muted text-sm">Support role is read-only.</span>'
       : coop.status === "suspended"
         ? `<button class="btn btn-success btn-sm" data-action="reactivateCoop" data-arg="${esc(coop.id)}">Reactivate</button>`
-        : `<button class="btn btn-danger btn-sm" data-action="suspendCoop" data-arg="${esc(coop.id)}">Suspend</button>
+        : `<button class="btn btn-danger btn-sm" data-action="suspendCoop" data-arg="${esc(coop.id)}" data-name="${esc(coop.name || "")}">Suspend</button>
            <button class="btn btn-secondary btn-sm" data-action="revokeSessions" data-arg="${esc(coop.id)}">Revoke sessions</button>`;
     return `
       <div class="stats-grid">
@@ -1285,10 +1309,20 @@
     }
   };
 
-  window.suspendCoop = async function (id) {
-    if (!confirm("Suspend this cooperative? Members will be blocked from operations.")) return;
+  window.suspendCoop = async function (id, _event, el) {
+    const name = el?.dataset.name || "";
+    const expected = name || "SUSPEND";
+    const typed = prompt(
+      `Suspending blocks all member operations for this cooperative.\n\nType ${expected} to confirm:`,
+    );
+    if (typed === null) return;
+    if (typed.trim() !== expected) {
+      toast("Suspension cancelled: confirmation did not match", "error");
+      return;
+    }
+    const reason = prompt("Reason for suspension (recorded in the audit log):") || "";
     try {
-      await api(`/coops/${id}/suspend`, { method: "POST" });
+      await api(`/coops/${id}/suspend`, { method: "POST", body: { reason } });
       toast("Cooperative suspended", "success");
       renderCoopDetail(id);
     } catch (err) {
@@ -1779,6 +1813,11 @@
                       <td class="text-muted text-sm">${date(a.lastLoginAt)}</td>
                       <td>
                         <button class="btn ${a.active ? "btn-danger" : "btn-success"} btn-xs" data-action="togglePlatformAdminActive" data-arg="${esc(a.id)}" data-active="${a.active}">${a.active ? "Disable" : "Enable"}</button>
+                        ${
+                          a.totpEnabled && a.id !== me?.id
+                            ? `<button class="btn btn-secondary btn-xs" data-action="resetPlatformAdmin2fa" data-arg="${esc(a.id)}" data-name="${esc(a.name || a.phone)}">Reset 2FA</button>`
+                            : ""
+                        }
                       </td>
                     </tr>`,
                       )
@@ -1858,6 +1897,24 @@
     }
   };
 
+  window.resetPlatformAdmin2fa = async function (id, _event, el) {
+    const name = el?.dataset.name || "this admin";
+    const confirmPin = prompt(`Confirm your own PIN to reset 2FA for ${name}:`);
+    if (!confirmPin) return;
+    const totp = me?.totpEnabled ? prompt("Enter your authenticator code to confirm:") || "" : "";
+    if (me?.totpEnabled && !totp) return;
+    try {
+      await api(`/admins/${id}/reset-2fa`, {
+        method: "POST",
+        body: { confirmPin, totp: totp || undefined },
+      });
+      toast("2FA reset; the admin must re-enrol at next sign-in", "success");
+      renderAdmins(document.getElementById("pageContent"));
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  };
+
   window.copyText = function (id) {
     const el = document.getElementById(id);
     if (!el) return;
@@ -1886,9 +1943,27 @@
       sandboxState = state.state;
       renderSandboxContent(el);
     } catch (err) {
+      if (err.code === "sandbox_not_provisioned") {
+        el.innerHTML = `<div class="empty-state">
+          <h3>Sandbox not provisioned</h3>
+          <p>Provisioning creates a dedicated sandbox cooperative with synthetic personas.</p>
+          <button class="btn btn-primary btn-sm" data-action="provisionSandbox">Provision sandbox</button>
+        </div>`;
+        return;
+      }
       el.innerHTML = `<div class="empty-state"><h3>Sandbox unavailable</h3><p>${esc(err.message)}</p></div>`;
     }
   }
+
+  window.provisionSandbox = async function () {
+    try {
+      await api("/sandbox/ensure", { method: "POST", body: {} });
+      toast("Sandbox provisioned", "success");
+      renderSandbox(document.getElementById("pageContent"));
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  };
 
   function renderSandboxContent(el) {
     if (!sandboxOverview) return;
@@ -2008,7 +2083,14 @@
   function dateTime(value) {
     if (!value) return "—";
     const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return Number.isNaN(parsed.getTime())
+      ? "—"
+      : parsed.toLocaleString([], {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
   }
 
   async function loadSandboxPersona(personaId) {
@@ -2379,6 +2461,7 @@
     if (!container) return;
     const t = document.createElement("div");
     t.className = `toast ${type}`;
+    t.setAttribute("role", type === "error" ? "alert" : "status");
     // Service messages use WhatsApp *bold* markers; the console renders plain text.
     t.textContent = String(msg).replace(/\*([^*]+)\*/g, "$1");
     container.appendChild(t);

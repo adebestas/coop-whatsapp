@@ -35,6 +35,7 @@ async function makeAdmin(coopId: string, phone: string) {
 describe("GET /api/export/:filename (coop scoping)", () => {
   beforeEach(async () => {
     process.env.ADMIN_JWT_SECRET = "test-admin-secret";
+    await prisma.auditLog.deleteMany();
     await prisma.wallet.deleteMany();
     await prisma.member.deleteMany();
     await prisma.cooperative.deleteMany();
@@ -67,6 +68,10 @@ describe("GET /api/export/:filename (coop scoping)", () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(ok.statusCode).toBe(200);
+    const downloadAudit = await prisma.auditLog.findFirst({
+      where: { cooperativeId: coopA.id, action: "data.export_download", targetId: own },
+    });
+    expect(downloadAudit).not.toBeNull();
 
     const cross = await app.inject({
       method: "GET",

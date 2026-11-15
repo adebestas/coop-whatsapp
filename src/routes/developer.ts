@@ -67,7 +67,9 @@ import {
 } from "../services/compliance-registers.js";
 import { getSanctionsRefreshStatus, refreshSanctionsList } from "../services/sanctions-refresh.js";
 import {
+  ensureSandbox,
   getSandboxOverview,
+  getSandboxOverviewIfProvisioned,
   getSandboxState,
   isSandboxPersonaId,
   runSandboxTurn,
@@ -81,12 +83,56 @@ const IP_WINDOW_SECONDS = 60;
 const MAX_ACCOUNT_ATTEMPTS = 10;
 const ACCOUNT_WINDOW_SECONDS = 15 * 60;
 
+// A valid scrypt hash used to keep login timing uniform when the account does
+// not exist, so response latency cannot be used to enumerate admin phones.
+const DUMMY_PIN_HASH = hashPin("000000");
+
+const TOTP_ROLES = new Set(["owner", "developer"]);
+
 function setPlatformCookie(reply: FastifyReply, token: string): void {
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
   reply.header(
     "Set-Cookie",
     `${PLATFORM_COOKIE}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${Math.floor(PLATFORM_TTL_MS / 1000)}${secure}`,
   );
+}
+
+async function auditAuth(
+  action: string,
+  phone: string | null,
+  admin?: { id: string; phone: string; role: string },
+  detail?: Record<string, unknown>,
+): Promise<void> {
+  await writePlatformAudit({
+    actorId: admin?.id ?? null,
+    actorPhone: admin?.phone ?? phone ?? "unknown",
+    actorRole: admin?.role ?? "unknown",
+    action,
+    targetType: "platform_admin",
+    targetId: admin?.id ?? null,
+    detail: detail ? JSON.stringify(detail) : null,
+  });
+}
+
+/** Strip credentials before operator-facing error text leaves the server. */
+function redactErrorDetail(value: unknown, max = 500): string | null {
+  if (value === null || value === undefined) return null;
+  let text = typeof value === "string" ? value : JSON.stringify(value);
+  if (!text) return null;
+  text = text
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]")
+    .replace(/\b(?:sk|pk|rk|whsec)_[A-Za-z0-9_]+\b/g, "[redacted]")
+    .replace(/([?&](?:token|key|secret|signature|access_token)=)[^&\s"']+/gi, "$1[redacted]");
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function safeVerifyTotp(secret: string | null | undefined, code: string | undefined): boolean {
+  if (!secret || !code) return false;
+  try {
+    return verifyTotp(secret, code);
+  } catch {
+    return false;
+  }
 }
 
 function clearPlatformCookie(reply: FastifyReply): void {
@@ -238,11 +284,51 @@ export async function developerApiRoutes(app: FastifyInstance) {
       }
     }
 
-    if (live.role === "support" && method !== "GET" && method !== "HEAD") {
+    // Owner and developer accounts carry provisioning authority, so they must
+    // complete TOTP enrolment before the rest of the console unlocks.
+    if (!live.totpEnabled && TOTP_ROLES.has(live.role)) {
+      const isSetup = method === "POST" && req.url === "/api/developer/setup-2fa";
+      const isChangePin = method === "POST" && req.url === "/api/developer/change-pin";
+      const isLogout = method === "POST" && req.url === "/api/developer/logout";
+      const isMe = method === "GET" && req.url === "/api/developer/me";
+      if (!isSetup && !isChangePin && !isLogout && !isMe) {
+        return reply.code(403).send({ error: "two_factor_setup_required" });
+      }
+    }
+
+    const isSessionAction =
+      method === "POST" &&
+      (req.url === "/api/developer/refresh" ||
+        req.url === "/api/developer/logout" ||
+        req.url === "/api/developer/change-pin" ||
+        req.url === "/api/developer/setup-2fa");
+    if (live.role === "support" && method !== "GET" && method !== "HEAD" && !isSessionAction) {
       return reply.code(403).send({ error: "support role is read-only" });
     }
 
     req.platformAdmin = { id: live.id, phone: live.phone, role: live.role };
+  });
+
+  // Operator responses contain cross-tenant data; never let a proxy cache them.
+  app.addHook("onSend", async (_req, reply, payload) => {
+    reply.header("Cache-Control", "no-store");
+    reply.header("Pragma", "no-cache");
+    return payload;
+  });
+
+  // Lightweight operator action trail (method, route, status, actor) — no bodies.
+  app.addHook("onResponse", async (req, reply) => {
+    req.log.info(
+      {
+        adminId: req.platformAdmin?.id ?? null,
+        role: req.platformAdmin?.role ?? null,
+        method: req.method,
+        url: req.url,
+        status: reply.statusCode,
+        ms: Math.round(reply.elapsedTime),
+      },
+      "developer api",
+    );
   });
 
   app.post("/api/developer/login", async (req, reply) => {
@@ -275,14 +361,19 @@ export async function developerApiRoutes(app: FastifyInstance) {
     }
 
     const admin = await prisma.platformAdmin.findUnique({ where: { phone } });
-    if (!admin || !admin.active || !admin.pin || !verifyPin(pin, admin.pin)) {
+    const pinOk = admin?.pin ? verifyPin(pin, admin.pin) : false;
+    if (!admin?.pin) {
+      // Burn the same scrypt work so a missing account is indistinguishable by timing.
+      verifyPin(pin, DUMMY_PIN_HASH);
+    }
+    if (!admin || !admin.active || !pinOk) {
+      await auditAuth("auth.login_failed", phone, undefined, { reason: "credentials" });
       return reply.code(401).send({ error: "invalid credentials" });
     }
 
-    if (admin.totpEnabled) {
-      if (!admin.totpSecret || !body.totp || !verifyTotp(admin.totpSecret, body.totp)) {
-        return reply.code(401).send({ error: "invalid 2FA code" });
-      }
+    if (admin.totpEnabled && !safeVerifyTotp(admin.totpSecret, body.totp)) {
+      await auditAuth("auth.login_failed", phone, admin, { reason: "totp" });
+      return reply.code(401).send({ error: "invalid 2FA code" });
     }
 
     await resetRateLimit(`devacct:${phone}`);
@@ -294,41 +385,115 @@ export async function developerApiRoutes(app: FastifyInstance) {
     const token = signPlatformToken({ id: admin.id, phone: admin.phone, role: admin.role });
     setPlatformCookie(reply, token);
 
+    const mustSetup2fa = !admin.totpEnabled && TOTP_ROLES.has(admin.role);
+    await auditAuth("auth.login_success", phone, admin, { totp: admin.totpEnabled });
+
     if (admin.mustChangePin) {
-      return { mustChangePin: true, token };
+      return { mustChangePin: true, mustSetup2fa };
     }
-    return { admin: { id: admin.id, name: admin.name, phone: admin.phone, role: admin.role } };
+    return {
+      admin: {
+        id: admin.id,
+        name: admin.name,
+        phone: admin.phone,
+        role: admin.role,
+        totpEnabled: admin.totpEnabled,
+      },
+      mustSetup2fa,
+    };
   });
 
   app.post("/api/developer/change-pin", async (req, reply) => {
     const platformAdmin = req.platformAdmin!;
-    const body = (req.body ?? {}) as { newPin?: string };
+    const body = (req.body ?? {}) as { currentPin?: string; newPin?: string; totp?: string };
     const newPin = String(body.newPin ?? "");
     if (!/^\d{6}$/.test(newPin)) {
       return reply.code(400).send({ error: "newPin must be exactly 6 digits" });
     }
+    if (!body.currentPin) {
+      return reply.code(400).send({ error: "currentPin required" });
+    }
+
+    const admin = await prisma.platformAdmin.findUnique({ where: { id: platformAdmin.id } });
+    if (!admin) return reply.code(401).send({ error: "unauthorized" });
+
+    const currentOk = admin.pin ? verifyPin(body.currentPin, admin.pin) : false;
+    if (!currentOk) {
+      await auditAuth("auth.pin_change_failed", admin.phone, admin, { reason: "current_pin" });
+      return reply.code(401).send({ error: "invalid current PIN" });
+    }
+    if (admin.totpEnabled && !safeVerifyTotp(admin.totpSecret, body.totp)) {
+      await auditAuth("auth.pin_change_failed", admin.phone, admin, { reason: "totp" });
+      return reply.code(401).send({ error: "invalid 2FA code" });
+    }
+    if (admin.pin && verifyPin(newPin, admin.pin)) {
+      return reply.code(400).send({ error: "new PIN must differ from the current PIN" });
+    }
+
+    const now = new Date();
     await prisma.platformAdmin.update({
-      where: { id: platformAdmin.id },
-      data: { pin: hashPin(newPin), mustChangePin: false },
+      where: { id: admin.id },
+      data: { pin: hashPin(newPin), mustChangePin: false, tokensValidAfter: now },
     });
-    return { ok: true };
+
+    const rawToken = readPlatformToken(req);
+    if (rawToken) {
+      try {
+        await revokePlatformToken(rawToken);
+      } catch (err) {
+        console.error("[developer] change-pin revoke failed", err);
+      }
+    }
+    // iat must sort after the tokensValidAfter cutoff we just wrote.
+    const token = signPlatformToken(
+      { id: admin.id, phone: admin.phone, role: admin.role },
+      now.getTime() + 1000,
+    );
+    setPlatformCookie(reply, token);
+
+    await auditAuth("auth.pin_changed", admin.phone, admin);
+    return { ok: true, mustSetup2fa: !admin.totpEnabled && TOTP_ROLES.has(admin.role) };
   });
 
   app.post("/api/developer/setup-2fa", async (req, reply) => {
     const platformAdmin = req.platformAdmin!;
-    const body = (req.body ?? {}) as { secret?: string; code?: string };
+    const body = (req.body ?? {}) as {
+      secret?: string;
+      code?: string;
+      currentPin?: string;
+      totp?: string;
+    };
     const secret = String(body.secret ?? "")
       .replace(/\s/g, "")
       .toUpperCase();
     const code = String(body.code ?? "");
-    if (!secret || !code || !verifyTotp(secret, code)) {
+    if (!body.currentPin) {
+      return reply.code(400).send({ error: "currentPin required" });
+    }
+
+    const admin = await prisma.platformAdmin.findUnique({ where: { id: platformAdmin.id } });
+    if (!admin) return reply.code(401).send({ error: "unauthorized" });
+    const pinOk = admin.pin ? verifyPin(body.currentPin, admin.pin) : false;
+    if (!pinOk) {
+      await auditAuth("auth.2fa_setup_failed", admin.phone, admin, { reason: "current_pin" });
+      return reply.code(401).send({ error: "invalid current PIN" });
+    }
+    // Re-enrolment must prove possession of the existing second factor.
+    if (admin.totpEnabled && !safeVerifyTotp(admin.totpSecret, body.totp)) {
+      await auditAuth("auth.2fa_setup_failed", admin.phone, admin, { reason: "totp" });
+      return reply.code(401).send({ error: "invalid 2FA code" });
+    }
+
+    if (!safeVerifyTotp(secret, code)) {
       return reply.code(400).send({ error: "invalid 2FA code" });
     }
+
     await prisma.platformAdmin.update({
-      where: { id: platformAdmin.id },
+      where: { id: admin.id },
       data: { totpSecret: secret, totpEnabled: true },
     });
-    return { ok: true, otpauthUri: platformOtpauthUri(secret, platformAdmin.phone) };
+    await auditAuth("auth.2fa_enabled", admin.phone, admin);
+    return { ok: true, otpauthUri: platformOtpauthUri(secret, admin.phone) };
   });
 
   app.post("/api/developer/logout", async (req, reply) => {
@@ -340,18 +505,31 @@ export async function developerApiRoutes(app: FastifyInstance) {
         console.error("[developer] logout revoke failed", err);
       }
     }
+    const admin = req.platformAdmin;
+    if (admin) {
+      await auditAuth("auth.logout", admin.phone, admin);
+    }
     clearPlatformCookie(reply);
     return reply.code(200).send({ ok: true });
   });
 
   app.post("/api/developer/refresh", async (req, reply) => {
     const platformAdmin = req.platformAdmin!;
+    const rawToken = readPlatformToken(req);
+    if (rawToken) {
+      try {
+        await revokePlatformToken(rawToken);
+      } catch (err) {
+        console.error("[developer] refresh revoke failed", err);
+      }
+    }
     const token = signPlatformToken({
       id: platformAdmin.id,
       phone: platformAdmin.phone,
       role: platformAdmin.role,
     });
     setPlatformCookie(reply, token);
+    await auditAuth("auth.refresh", platformAdmin.phone, platformAdmin);
     return { ok: true };
   });
 
@@ -361,7 +539,17 @@ export async function developerApiRoutes(app: FastifyInstance) {
     if (!admin) {
       return reply.code(401).send({ error: "unauthorized" });
     }
-    return { admin: { id: admin.id, name: admin.name, phone: admin.phone, role: admin.role } };
+    return {
+      admin: {
+        id: admin.id,
+        name: admin.name,
+        phone: admin.phone,
+        role: admin.role,
+        totpEnabled: admin.totpEnabled,
+      },
+      mustChangePin: admin.mustChangePin,
+      mustSetup2fa: !admin.totpEnabled && TOTP_ROLES.has(admin.role),
+    };
   });
 
   // ---- Cooperative provisioning & control (developer/owner) ----
@@ -789,10 +977,12 @@ export async function developerApiRoutes(app: FastifyInstance) {
 
   app.post("/api/developer/coops/:id/suspend", async (req, reply) => {
     const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { reason?: string };
     if (!(await coopExists(id))) {
       return reply.code(404).send({ error: "cooperative not found" });
     }
-    await setCoopStatus(id, "suspended", actorOf(req));
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    await setCoopStatus(id, "suspended", actorOf(req), reason || undefined);
     return { ok: true, status: "suspended" };
   });
 
@@ -893,13 +1083,77 @@ export async function developerApiRoutes(app: FastifyInstance) {
     }
   });
 
+  // Lockout recovery for a lost authenticator: an owner must re-authenticate
+  // with their own PIN (and TOTP, when enabled) before clearing another admin's.
+  app.post("/api/developer/admins/:id/reset-2fa", async (req, reply) => {
+    if (!requireOwner(req, reply)) return;
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { confirmPin?: string; totp?: string };
+    const actor = actorOf(req);
+    if (id === actor.id) {
+      return reply.code(400).send({ error: "you cannot reset your own 2FA" });
+    }
+
+    const owner = await prisma.platformAdmin.findUnique({ where: { id: actor.id } });
+    if (!owner) return reply.code(401).send({ error: "unauthorized" });
+    const pinOk = owner.pin && body.confirmPin ? verifyPin(body.confirmPin, owner.pin) : false;
+    if (!pinOk) {
+      await auditAuth("platform_admin.reset_2fa_failed", owner.phone, owner, { reason: "pin", id });
+      return reply.code(401).send({ error: "invalid confirmation PIN" });
+    }
+    if (owner.totpEnabled && !safeVerifyTotp(owner.totpSecret, body.totp)) {
+      await auditAuth("platform_admin.reset_2fa_failed", owner.phone, owner, {
+        reason: "totp",
+        id,
+      });
+      return reply.code(401).send({ error: "invalid 2FA code" });
+    }
+
+    const target = await prisma.platformAdmin.findUnique({ where: { id } });
+    if (!target) return reply.code(404).send({ error: "admin not found" });
+    await prisma.platformAdmin.update({
+      where: { id },
+      data: { totpEnabled: false, totpSecret: null, tokensValidAfter: new Date() },
+    });
+    await auditAuth("platform_admin.reset_2fa", owner.phone, owner, { targetId: id });
+    return { ok: true };
+  });
+
   // ---- Developer operations ----
 
   app.get("/api/developer/sandbox", async (req, reply) => {
     try {
-      return await getSandboxOverview();
+      const overview = await getSandboxOverviewIfProvisioned();
+      if (!overview) {
+        return reply.code(404).send({
+          error: "Sandbox has not been provisioned",
+          code: "sandbox_not_provisioned",
+        });
+      }
+      return overview;
     } catch (err) {
       req.log.error({ err }, "Could not load sandbox overview");
+      return reply.code(503).send({ error: "Sandbox is unavailable; check its configuration" });
+    }
+  });
+
+  // Provisioning is a write, so it is an explicit POST instead of a GET side effect.
+  app.post("/api/developer/sandbox/ensure", async (req, reply) => {
+    if (!requireSandboxWriter(req, reply)) return;
+    try {
+      const { cooperativeId } = await ensureSandbox();
+      await writePlatformAudit({
+        actorId: req.platformAdmin!.id,
+        actorPhone: req.platformAdmin!.phone,
+        actorRole: req.platformAdmin!.role,
+        action: "sandbox.provision",
+        targetType: "cooperative",
+        targetId: cooperativeId,
+        detail: null,
+      });
+      return await getSandboxOverview();
+    } catch (err) {
+      req.log.error({ err }, "Could not provision sandbox");
       return reply.code(503).send({ error: "Sandbox is unavailable; check its configuration" });
     }
   });
@@ -1115,7 +1369,7 @@ export async function developerApiRoutes(app: FastifyInstance) {
             typeof job.data?.cooperativeId === "string" ? job.data.cooperativeId : null,
           status: failed.includes(job) ? "failed" : "completed",
           finishedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : null,
-          failedReason: failed.includes(job) ? "The worker reported a failed run" : null,
+          failedReason: failed.includes(job) ? redactErrorDetail(job.failedReason, 240) : null,
         }))
         .sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""))
         .slice(0, 12);
@@ -1235,7 +1489,7 @@ export async function developerApiRoutes(app: FastifyInstance) {
           status: "failed",
           reference: event.messageId,
           receivedAt: event.createdAt,
-          detail: event.error.slice(0, 240),
+          detail: redactErrorDetail(event.error, 500),
           canReplay: false,
         })),
         ...providerEvents.map((event) => ({
@@ -1262,8 +1516,12 @@ export async function developerApiRoutes(app: FastifyInstance) {
   app.post("/api/developer/ops/diagnostics/check", async (req, reply) => {
     if (!requireOwner(req, reply)) return;
     const actor = actorOf(req);
-    if (!(await checkRateLimit(`dev-diagnostics:${actor.id}`, 3, 60))) {
-      return reply.code(429).send({ error: "Diagnostic check limit reached; try again later" });
+    const diagLimit = await checkRateLimit(`dev-diagnostics:${actor.id}`, 3, 60);
+    if (!diagLimit.allowed) {
+      return reply.code(429).send({
+        error: "Diagnostic check limit reached; try again later",
+        retryAfter: diagLimit.retryAfter,
+      });
     }
 
     const token = process.env.WHATSAPP_TOKEN;

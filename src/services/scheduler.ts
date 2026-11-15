@@ -717,9 +717,19 @@ export async function runDataRetention(
         createdAt: { lt: sevenYearsAgo },
         status: { in: ["suspended", "deceased"] },
       },
-      select: { id: true },
+      select: { id: true, phone: true },
     });
     for (const m of staleMembers) {
+      await prisma.memberBeneficialOwner.deleteMany({ where: { memberId: m.id } });
+      await prisma.beneficiary.deleteMany({ where: { memberId: m.id } });
+      await prisma.favoritePayee.deleteMany({ where: { memberId: m.id } });
+      await prisma.phoneChangeRequest.deleteMany({
+        where: {
+          OR: [{ memberId: m.id }, { oldPhone: m.phone }, { newPhone: m.phone }],
+        },
+      });
+      await prisma.webhookFailure.deleteMany({ where: { phone: m.phone } });
+      await prisma.session.deleteMany({ where: { phone: m.phone } });
       await prisma.member.update({
         where: { id: m.id },
         data: {
@@ -740,6 +750,10 @@ export async function runDataRetention(
   const { count: deleted } = await prisma.session.deleteMany({
     where: { updatedAt: { lt: thirtyDaysAgo } },
   });
+
+  // Failed-webhook rows carry the sender's phone; keep them only long enough to
+  // debug a delivery incident.
+  await prisma.webhookFailure.deleteMany({ where: { createdAt: { lt: thirtyDaysAgo } } });
 
   if (anonymized > 0 || deleted > 0) {
     console.log(

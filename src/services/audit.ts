@@ -103,6 +103,21 @@ export async function audit(entry: AuditEntry): Promise<void> {
     });
   } catch (err) {
     console.error("[audit] failed to record", entry.action, err);
+    // A failed audit write is a compliance incident, not just a log line.
+    // Alert the supers, throttled per cooperative so a broken DB cannot spam.
+    try {
+      const { claimOnce } = await import("../lib/cache.js");
+      if (await claimOnce("audit-write-failure", entry.cooperativeId, 300)) {
+        const { logAndAlert } = await import("../lib/alerting.js");
+        await logAndAlert(
+          entry.cooperativeId,
+          `Audit trail write failed for action "${entry.action}" — the audit log may be incomplete`,
+          err,
+        );
+      }
+    } catch {
+      // Never let alerting failures mask or break the caller's transaction.
+    }
   }
 }
 

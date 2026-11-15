@@ -3,8 +3,10 @@ import { prisma } from "./setup.js";
 import { buildApp } from "../src/app.js";
 import { hashPin } from "../src/lib/security.js";
 import { resetRateLimit } from "../src/lib/cache.js";
+import { totpAt } from "../src/lib/totp.js";
 process.env.ADMIN_JWT_SECRET ||= "test-platform-secret-0123456789";
 const app = buildApp();
+const TEST_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
 let cookie: string;
 beforeEach(async () => {
   await prisma.platformAdmin.deleteMany();
@@ -16,12 +18,14 @@ beforeEach(async () => {
       role: "owner",
       pin: hashPin("123456"),
       mustChangePin: false,
+      totpSecret: TEST_TOTP_SECRET,
+      totpEnabled: true,
     },
   });
   const r = await app.inject({
     method: "POST",
     url: "/api/developer/login",
-    payload: { phone: "2348000000001", pin: "123456" },
+    payload: { phone: "2348000000001", pin: "123456", totp: totpAt(TEST_TOTP_SECRET) },
   });
   cookie = (r.headers["set-cookie"] as string).split(";")[0];
 });
@@ -103,13 +107,15 @@ describe("platform provisioning routes", () => {
         role: "developer",
         pin: hashPin("123456"),
         mustChangePin: false,
+        totpSecret: TEST_TOTP_SECRET,
+        totpEnabled: true,
       },
     });
     expect(dev.role).toBe("developer");
     const login = await app.inject({
       method: "POST",
       url: "/api/developer/login",
-      payload: { phone: "2348000000099", pin: "123456" },
+      payload: { phone: "2348000000099", pin: "123456", totp: totpAt(TEST_TOTP_SECRET) },
     });
     const devCookie = (login.headers["set-cookie"] as string).split(";")[0];
 

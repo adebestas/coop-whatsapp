@@ -18,13 +18,16 @@ function secret(): string {
   return s;
 }
 
-export function signPlatformToken(admin: { id: string; phone: string; role: string }): string {
+export function signPlatformToken(
+  admin: { id: string; phone: string; role: string },
+  iatMs = Date.now(),
+): string {
   const payload: PlatformTokenPayload = {
     scope: "platform",
     adminId: admin.id,
     phone: admin.phone,
     role: admin.role,
-    iat: Date.now(),
+    iat: iatMs,
   };
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const mac = createHmac("sha256", secret()).update(body).digest("hex");
@@ -66,9 +69,13 @@ export async function isPlatformTokenRevoked(token: string): Promise<boolean> {
   return (await r.exists(key)) === 1;
 }
 
-export async function requireLivePlatformAdmin(
-  payload: PlatformTokenPayload,
-): Promise<{ id: string; phone: string; role: string; mustChangePin: boolean } | null> {
+export async function requireLivePlatformAdmin(payload: PlatformTokenPayload): Promise<{
+  id: string;
+  phone: string;
+  role: string;
+  mustChangePin: boolean;
+  totpEnabled: boolean;
+} | null> {
   const { prisma } = await import("./prisma.js");
   const admin = await prisma.platformAdmin.findUnique({ where: { id: payload.adminId } });
   if (!admin || !admin.active) return null;
@@ -78,5 +85,6 @@ export async function requireLivePlatformAdmin(
     phone: admin.phone,
     role: admin.role,
     mustChangePin: admin.mustChangePin,
+    totpEnabled: admin.totpEnabled,
   };
 }

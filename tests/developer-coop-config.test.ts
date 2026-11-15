@@ -3,6 +3,7 @@ import { prisma, createTestCoop } from "./setup.js";
 import { buildApp } from "../src/app.js";
 import { hashPin } from "../src/lib/security.js";
 import { resetRateLimit } from "../src/lib/cache.js";
+import { totpAt } from "../src/lib/totp.js";
 import {
   setCoopConfig,
   getCoopDetail,
@@ -12,19 +13,32 @@ import { setPlatformPolicy } from "../src/services/platform-policy.js";
 
 process.env.ADMIN_JWT_SECRET ||= "test-platform-secret-0123456789";
 const app = buildApp();
+const TEST_TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
 
 async function loginDev(
   phone: string,
   role: "owner" | "developer" | "support" = "owner",
 ): Promise<string> {
   await prisma.platformAdmin.create({
-    data: { name: role, phone, role, pin: hashPin("123456"), mustChangePin: false },
+    data: {
+      name: role,
+      phone,
+      role,
+      pin: hashPin("123456"),
+      mustChangePin: false,
+      totpSecret: role === "support" ? null : TEST_TOTP_SECRET,
+      totpEnabled: role !== "support",
+    },
   });
   await resetRateLimit("devlogin:127.0.0.1");
   const res = await app.inject({
     method: "POST",
     url: "/api/developer/login",
-    payload: { phone, pin: "123456" },
+    payload: {
+      phone,
+      pin: "123456",
+      totp: role === "support" ? undefined : totpAt(TEST_TOTP_SECRET),
+    },
   });
   expect(res.statusCode).toBe(200);
   return (res.headers["set-cookie"] as string).split(";")[0];
