@@ -6,7 +6,10 @@ import { Queue } from "bullmq";
 import { prisma } from "../lib/prisma.js";
 import { checkRateLimit, getRedis, isRedisConfigured, resetRateLimit } from "../lib/cache.js";
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES } from "../lib/queue.js";
-import { listCooperativeIds, withCoopContext } from "../lib/tenant-context.js";
+import { listCooperativeIds, resolveCoopsByPhone, withCoopContext } from "../lib/tenant-context.js";
+import { runInSandbox } from "../lib/sandbox.js";
+import { runInSimulatorScope } from "../lib/messaging.js";
+import { handleMessage } from "../services/conversation.js";
 import { hashPin, verifyPin } from "../lib/security.js";
 import { normalizePhone } from "../lib/phones.js";
 import { verifyTotp, otpauthUri } from "../lib/totp.js";
@@ -682,6 +685,150 @@ export async function developerApiRoutes(app: FastifyInstance) {
       req.log.error(err);
       return reply.code(500).send({ error: "failed to update cooperative configuration" });
     }
+  });
+
+  // ---- Cooperative WhatsApp/Telegram Bot Simulator ----
+  //
+  // A simulated turn runs the real conversation engine, so it performs real
+  // database writes (session state, loan requests, approvals, wallet debits).
+  // It is therefore confined to the developer sandbox cooperative and to
+  // owner/developer roles: pointing it at a live cooperative would let
+  // platform staff move member money through the bot, and the member list
+  // exposes PII. `runInSandbox` additionally swaps in the sandbox payment
+  // adapter and blocks storage/backup/email/insurance side effects.
+
+  app.get("/api/developer/coops/:id/simulate/members", async (req, reply) => {
+    if (!requireSandboxWriter(req, reply)) return;
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    if (!(await isSandboxCoop(id))) {
+      return reply
+        .code(403)
+        .send({ error: "simulation is available only for the sandbox cooperative" });
+    }
+
+    const members = await withCoopContext(id, async () => {
+      return prisma.member.findMany({
+        where: { cooperativeId: id, status: "active" },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          code: true,
+          role: true,
+          status: true,
+          wallet: { select: { balance: true, totalSaved: true } },
+        },
+        orderBy: [{ role: "desc" }, { createdAt: "desc" }],
+        take: 25,
+      });
+    });
+
+    return {
+      members: members.map((m) => ({
+        id: m.id,
+        name: m.name,
+        phone: m.phone,
+        code: m.code,
+        role: m.role,
+        status: m.status,
+        balance: m.wallet?.balance ?? 0,
+        totalSaved: m.wallet?.totalSaved ?? 0,
+      })),
+    };
+  });
+
+  app.post("/api/developer/coops/:id/simulate", async (req, reply) => {
+    if (!requireSandboxWriter(req, reply)) return;
+    const { id } = req.params as { id: string };
+    if (!(await coopExists(id))) return reply.code(404).send({ error: "cooperative not found" });
+    if (!(await isSandboxCoop(id))) {
+      return reply
+        .code(403)
+        .send({ error: "simulation is available only for the sandbox cooperative" });
+    }
+
+    const body = (req.body ?? {}) as {
+      phone?: string;
+      text?: string;
+      channel?: "whatsapp" | "telegram";
+    };
+
+    const text = String(body.text ?? "").trim();
+    if (!text) {
+      return reply.code(400).send({ error: "text message is required" });
+    }
+    if (text.length > 1000) {
+      return reply.code(400).send({ error: "text must be 1000 characters or fewer" });
+    }
+
+    let phone = String(body.phone ?? "").trim();
+    if (!phone) {
+      const firstMember = await withCoopContext(id, () =>
+        prisma.member.findFirst({
+          where: { cooperativeId: id, status: "active" },
+          select: { phone: true },
+        }),
+      );
+      if (!firstMember) {
+        return reply.code(400).send({ error: "no active member to simulate" });
+      }
+      phone = firstMember.phone;
+    }
+
+    // The conversation engine resolves the cooperative from the phone number,
+    // not from the outer tenant context. Refuse phones that are not exclusively
+    // this cooperative's, so a turn can never execute against another tenant.
+    const coops = await resolveCoopsByPhone(phone);
+    if (coops.length !== 1 || coops[0].id !== id) {
+      return reply
+        .code(400)
+        .send({ error: "phone does not belong exclusively to this cooperative" });
+    }
+
+    const admin = req.platformAdmin!;
+    const rateLimit = await checkRateLimit(`sandbox:rl:simulate:${admin.id}`, 60, 60);
+    if (!rateLimit.allowed) {
+      return reply
+        .code(429)
+        .send({ error: "Simulator turn limit reached", retryAfter: rateLimit.retryAfter });
+    }
+
+    // Run within isolated simulator capture + sandbox scope + tenant context.
+    const simResult = await runInSimulatorScope(phone, () =>
+      runInSandbox(id, () => withCoopContext(id, () => handleMessage(phone, text))),
+    );
+
+    // Inspect post-turn state for this phone
+    const [member, session] = await Promise.all([
+      withCoopContext(id, () =>
+        prisma.member.findFirst({
+          where: { phone, cooperativeId: id },
+          include: { wallet: true },
+        }),
+      ),
+      prisma.session.findUnique({ where: { phone } }),
+    ]);
+
+    return {
+      ok: true,
+      phone,
+      input: text,
+      messages: simResult.messages,
+      state: {
+        member: member
+          ? {
+              id: member.id,
+              name: member.name,
+              code: member.code,
+              role: member.role,
+              balance: member.wallet?.balance ?? 0,
+              totalSaved: member.wallet?.totalSaved ?? 0,
+            }
+          : null,
+        botState: session?.state ?? "idle",
+      },
+    };
   });
 
   // ---- Regulator returns (developer/owner) ----
