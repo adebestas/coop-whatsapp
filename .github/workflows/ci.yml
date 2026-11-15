@@ -8,8 +8,9 @@ name: CI
 on:
   push:
     branches: [staging, main]
+  # Every pull request is verified, regardless of its base branch. A stacked PR
+  # based on a feature branch otherwise gets no checks at all.
   pull_request:
-    branches: [staging, main]
 
 env:
   NODE_VERSION: "22"

@@ -22,7 +22,8 @@ export async function checkDailyPayoutLimit(
   amount: number,
 ): Promise<{ ok: boolean; message?: string; warning?: string }> {
   const coop = await prisma.cooperative.findUnique({ where: { id: cooperativeId } });
-  const limit = coop?.dailyPayoutLimit ?? 1_000_000;
+  // Default is 100,000,000 kobo (₦1,000,000), matching schema.prisma default.
+  const limit = coop?.dailyPayoutLimit ?? 100_000_000;
 
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
@@ -34,41 +35,23 @@ export async function checkDailyPayoutLimit(
   // daily/monthly ceiling (a fraud-control bypass). The few extra reads are
   // cheap relative to the money-out write path this guards.
   //
-  // NOTE: The `payout` table covers provider bank transfers including loan disbursements
-  // (idempotency key `TFR-LOAN-<loanId>`), direct bank payouts, and dividend distributions.
-  const [payouts, withdrawals, externals, monthPayouts, monthWithdrawals, monthExternals] =
-    await Promise.all([
-      prisma.payout.aggregate({
-        where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
-        _sum: { amount: true },
-      }),
-      prisma.withdrawalRequest.aggregate({
-        where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfDay } },
-        _sum: { amount: true },
-      }),
-      prisma.externalPayment.aggregate({
-        where: { cooperativeId, status: "paid", updatedAt: { gte: startOfDay } },
-        _sum: { amount: true },
-      }),
-      prisma.payout.aggregate({
-        where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
-        _sum: { amount: true },
-      }),
-      prisma.withdrawalRequest.aggregate({
-        where: { cooperativeId, status: "paid", finalizedAt: { gte: startOfMonth } },
-        _sum: { amount: true },
-      }),
-      prisma.externalPayment.aggregate({
-        where: { cooperativeId, status: "paid", updatedAt: { gte: startOfMonth } },
-        _sum: { amount: true },
-      }),
-    ]);
-  const spentToday =
-    (payouts._sum.amount ?? 0) + (withdrawals._sum.amount ?? 0) + (externals._sum.amount ?? 0);
-  const monthTotal =
-    (monthPayouts._sum.amount ?? 0) +
-    (monthWithdrawals._sum.amount ?? 0) +
-    (monthExternals._sum.amount ?? 0);
+  // NOTE: The `payout` table is the single source of truth for all outgoing bank transfers
+  // including loan disbursements (idempotency key `TFR-LOAN-<loanId>`), member withdrawals
+  // (`TFR-WDR-<withdrawalId>`), external payments (`PAY-<reference>`), and direct payouts.
+  // Every successful provider disbursement records a `payout` row with status "successful".
+  // Aggregating `payout` directly prevents double-counting withdrawals and external payments.
+  const [payouts, monthPayouts] = await Promise.all([
+    prisma.payout.aggregate({
+      where: { cooperativeId, status: "successful", createdAt: { gte: startOfDay } },
+      _sum: { amount: true },
+    }),
+    prisma.payout.aggregate({
+      where: { cooperativeId, status: "successful", createdAt: { gte: startOfMonth } },
+      _sum: { amount: true },
+    }),
+  ]);
+  const spentToday = payouts._sum.amount ?? 0;
+  const monthTotal = monthPayouts._sum.amount ?? 0;
 
   if (spentToday + amount > limit) {
     return {

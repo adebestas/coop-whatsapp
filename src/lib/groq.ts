@@ -9,7 +9,9 @@ export const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 export function groqAvailable(): boolean {
   if (isSandboxMode() && !sandboxAiEnabled()) return false;
-  return !!process.env.GROQ_API_KEY;
+  const key = process.env.GROQ_API_KEY;
+  if (!key || key.startsWith("gsk_test_0000")) return false;
+  return true;
 }
 
 export function groqModel(): string {

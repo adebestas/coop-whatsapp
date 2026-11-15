@@ -144,12 +144,13 @@ describe("AML large-transaction threshold", () => {
 });
 
 describe("pilot float cap covers all money-out", () => {
-  it("counts paid withdrawals toward the monthly PILOT_FLOAT_CAP", async () => {
-    process.env.PILOT_FLOAT_CAP = "100000"; // ₦1,000
+  it("counts each successful payout once, even when a paid withdrawal row exists", async () => {
+    process.env.PILOT_FLOAT_CAP = "100000"; // 1,000 naira
     const coop = await makeCoop("FRAUD01");
     const member = await makeMember(MEMBER, coop.id);
 
-    // A paid withdrawal this month (₦800) — before the fix, only payouts counted.
+    // A paid withdrawal (800 naira) and its single payout ledger row. The fraud
+    // guard aggregates payouts, so the withdrawal row must not count again.
     await prisma.withdrawalRequest.create({
       data: {
         amount: 80000,
@@ -161,8 +162,23 @@ describe("pilot float cap covers all money-out", () => {
         cooperativeId: coop.id,
       },
     });
+    await prisma.payout.create({
+      data: {
+        amount: 80000,
+        reference: "TFR-WDR-FRAUD01",
+        idempotencyKey: "TFR-WDR-FRAUD01",
+        status: "successful",
+        provider: "sandbox",
+        memberId: member.id,
+        cooperativeId: coop.id,
+      },
+    });
 
-    // ₦300 more would push month total to ₦1,100 > the ₦1,000 cap.
+    // 100 naira more is under the 1,000 cap; double counting would block it.
+    const small = await checkDailyPayoutLimit(coop.id, 10000);
+    expect(small.ok).toBe(true);
+
+    // 300 naira more pushes the month to 1,100 and must be blocked.
     const res = await checkDailyPayoutLimit(coop.id, 30000);
     expect(res.ok).toBe(false);
     expect(res.message).toContain("Pilot safety cap");

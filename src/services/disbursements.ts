@@ -13,6 +13,7 @@ import { maskId } from "../lib/security.js";
 import { recordLedger } from "./ledger.js";
 import { postJournal } from "./journal.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
+import { blockSandboxExternal, sandboxBlocksProvider } from "../lib/sandbox.js";
 import { screenAndRecord, isBlocking } from "./screening.js";
 
 export interface DisbursementResult {
@@ -115,6 +116,10 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
   if (!member) return { ok: false, status: "failed", message: "Member not found." };
 
   const provider = await resolveProvider(undefined, getCurrency());
+  if (sandboxBlocksProvider(provider.name)) {
+    await opts.onFailure?.("failed", "sandbox blocked live provider");
+    return sandboxProviderRefusal();
+  }
   if (!provider.resolveAccount) {
     if (opts.skipNameCheck) {
       return payOut(opts, member, null);
@@ -166,6 +171,15 @@ export async function sendToBank(opts: SendToBankOpts): Promise<DisbursementResu
   return { ok: false, status: "failed", message: msg };
 }
 
+function sandboxProviderRefusal(): DisbursementResult {
+  blockSandboxExternal("payment");
+  return {
+    ok: false,
+    status: "failed",
+    message: "Sandbox mode: refusing to call a live payment provider.",
+  };
+}
+
 async function payOut(
   opts: SendToBankOpts,
   member: {
@@ -178,6 +192,10 @@ async function payOut(
   verifiedName: string | null,
 ): Promise<DisbursementResult> {
   const provider = await resolveProvider(undefined, getCurrency());
+  if (sandboxBlocksProvider(provider.name)) {
+    await opts.onFailure?.("failed", "sandbox blocked live provider");
+    return sandboxProviderRefusal();
+  }
   // Deterministic reference: retries reuse the SAME key, so the provider and
   // our own unique constraint both reject a second execution.
   const reference = opts.idempotencyKey ?? `TFR-${opts.memberId.slice(-8)}-${Date.now()}`;
