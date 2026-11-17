@@ -77,7 +77,10 @@ export function processQueue<T>(queueName: string, handler: (job: Job<T>) => Pro
       }
     },
     {
-      connection: redis,
+      // BullMQ blocking commands require maxRetriesPerRequest: null. The shared
+      // cache client deliberately sets 3 for fail-fast reads, so the worker must
+      // use its own duplicate instead of that client.
+      connection: redis.duplicate({ maxRetriesPerRequest: null, lazyConnect: false }),
       concurrency: 5,
       // Worker-level keep/eviction defaults. Retry counts are NOT settable here —
       // they are per-job via DEFAULT_JOB_OPTIONS.attempts.

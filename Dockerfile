@@ -8,7 +8,7 @@ COPY package*.json ./
 COPY prisma ./prisma/
 
 # Install dependencies
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci --fetch-retries=8 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=180000 --fetch-timeout=600000
 
 # Generate Prisma client
 RUN npx prisma generate
@@ -31,11 +31,12 @@ RUN apk add --no-cache dumb-init
 RUN addgroup -g 1001 -S coop && \
     adduser -S coop -u 1001
 
-# Copy package files
-COPY package*.json ./
-
-# Install production dependencies only
-RUN npm ci --omit=dev
+# Reuse the builder's dependency tree instead of resolving the registry a
+# second time: prune dev dependencies locally. This removes one full npm
+# install from the build and avoids flaky-network stalls on large tarballs.
+COPY --from=builder /app/package.json /app/package-lock.json ./
+COPY --from=builder /app/node_modules ./node_modules
+RUN npm prune --omit=dev
 
 # Copy Prisma schema and generate client
 COPY prisma ./prisma/
