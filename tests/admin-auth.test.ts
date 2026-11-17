@@ -44,9 +44,7 @@ describe("admin token lifetime + refresh", () => {
       headers: { cookie: `coop_token=${token}`, "x-requested-with": "XMLHttpRequest" },
     });
     expect(refresh.statusCode).toBe(200);
-    const newToken = String(refresh.headers["set-cookie"])
-      .split("coop_token=")[1]
-      .split(";")[0];
+    const newToken = String(refresh.headers["set-cookie"]).split("coop_token=")[1].split(";")[0];
     expect(verifyAdminToken(newToken)?.cooperativeId).toBe(coop.id);
   });
 
@@ -58,5 +56,29 @@ describe("admin token lifetime + refresh", () => {
       headers: { "x-requested-with": "XMLHttpRequest" },
     });
     expect(res.statusCode).toBe(401);
+  });
+  it("does not lock a member out of their own account after successful logins", async () => {
+    const { resetRateLimitPrefix } = await import("../src/lib/cache.js");
+    await resetRateLimitPrefix("login:");
+
+    const app = await createTestApp();
+    const coop = await createTestCoop("ADMPERM");
+    const admin = await createTestMember(coop.id, {
+      role: "admin",
+      phone: "2348090000399",
+      pin: "1234",
+    });
+
+    // The per-IP window allows 5 attempts per minute. Repeated *successful*
+    // logins must not count towards that budget, otherwise a dashboard user
+    // (or everyone behind one office NAT) is locked out by their own activity.
+    for (let i = 0; i < 6; i++) {
+      const login = await app.inject({
+        method: "POST",
+        url: "/api/admin/login",
+        payload: { phone: admin.phone, pin: "1234" },
+      });
+      expect(login.statusCode, `login ${i + 1} of 6`).toBe(200);
+    }
   });
 });

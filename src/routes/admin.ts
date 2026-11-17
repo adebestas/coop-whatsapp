@@ -3,7 +3,7 @@ import { prisma } from "../lib/prisma.js";
 import { withCoopContext, resolveCoopByPhone } from "../lib/tenant-context.js";
 import { verifyPin } from "../lib/security.js";
 import { verifyTotp } from "../lib/totp.js";
-import { checkRateLimit, claimOnce } from "../lib/cache.js";
+import { checkRateLimit, claimOnce, resetRateLimit } from "../lib/cache.js";
 import { recordSuspiciousEvent } from "../lib/security-hardening.js";
 import { approveLoan } from "../services/loans.js";
 import { computePearls } from "../services/provisioning.js";
@@ -210,6 +210,12 @@ export async function adminApiRoutes(app: FastifyInstance) {
         code: "2fa_setup_required",
       });
     }
+
+    // A successful login proves the caller is not the attacker: clear the
+    // counters this account and IP accumulated, so ordinary dashboard use
+    // (and every member behind one office NAT) cannot lock itself out.
+    await resetRateLimit(`login:acct:${phone}`);
+    await resetRateLimit(`login:ip:${ip}`);
 
     const token = sign(phone, member.cooperative.id, member.role);
     setAuthCookie(reply, token);
