@@ -6,7 +6,11 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_TRUST_PROXY, resolveTrustProxy } from "../src/lib/trust-proxy.js";
+import {
+  DEFAULT_TRUST_PROXY,
+  resolveTrustProxy,
+  resolveTrustProxyFromEnv,
+} from "../src/lib/trust-proxy.js";
 
 describe("resolveTrustProxy", () => {
   it("trusts only loopback / link-local / private proxy addresses by default", () => {
@@ -32,5 +36,31 @@ describe("resolveTrustProxy", () => {
     // make the production HTTPS guard reject every request — so never use it.
     expect(resolveTrustProxy("1")).toBe(DEFAULT_TRUST_PROXY);
     expect(resolveTrustProxy("2")).toBe(DEFAULT_TRUST_PROXY);
+  });
+});
+
+describe("resolveTrustProxyFromEnv", () => {
+  it("honours the documented TRUST_PROXY name", () => {
+    expect(resolveTrustProxyFromEnv({ TRUST_PROXY: "127.0.0.1/32" })).toBe("127.0.0.1/32");
+  });
+
+  it("keeps TRUST_PROXY_HOPS working as an alias", () => {
+    expect(resolveTrustProxyFromEnv({ TRUST_PROXY_HOPS: "linklocal" })).toBe("linklocal");
+  });
+
+  it("prefers TRUST_PROXY when both are set", () => {
+    expect(
+      resolveTrustProxyFromEnv({ TRUST_PROXY: "uniquelocal", TRUST_PROXY_HOPS: "10.0.0.0/8" }),
+    ).toBe("uniquelocal");
+  });
+
+  it("ignores a blank TRUST_PROXY and still reads the alias", () => {
+    expect(resolveTrustProxyFromEnv({ TRUST_PROXY: "  ", TRUST_PROXY_HOPS: "loopback" })).toBe(
+      "loopback",
+    );
+  });
+
+  it("falls back to the safe default when neither is set", () => {
+    expect(resolveTrustProxyFromEnv({})).toBe(DEFAULT_TRUST_PROXY);
   });
 });
