@@ -18,3 +18,11 @@ baseline.sql
 
 # Platform-owner bootstrap PIN (read once, then delete)
 platform-owner-pin.txt
+.env.docker
+run-local.ps1
+docker-compose.test.yml
+app.log
+tunnel.log
+*.pid
+cookies.txt
+tunnel.err
