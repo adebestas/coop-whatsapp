@@ -158,6 +158,13 @@ jobs:
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/coop_test
 
+      # Release gate: pool budget vs max_connections, RLS on tenant tables,
+      # no dirty migrations, Redis reachability. Fails the job on a hard error.
+      - name: Production preflight
+        run: npm run preflight
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/coop_test
+
       - name: Run RLS isolation tests (non-owner role, PostgreSQL)
         run: npx vitest run tests/rls-isolation.test.ts
         env:

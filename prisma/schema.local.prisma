@@ -203,6 +203,7 @@ model Member {
   entityType              String              @default("individual") // individual | corporate
   rcNumber                String? // CAC RC number when the member is a corporate body
   kycVerifiedAt           DateTime?
+  kycSubmittedAt          DateTime? // when the NIN was last submitted; pruned after 90 unverified days
   role                    String              @default("member") // member | admin | superadmin
   state                   String? // member's home state/LGA grouping
   lga                     String?
@@ -585,12 +586,18 @@ model WebhookEvent {
   provider    String
   kind        String? // credit | payout_update
   payloadHash String
-  status      String    @default("received") // received | processed | failed
+  status      String    @default("received") // received | processed | failed | dead
   error       String?
   receivedAt  DateTime  @default(now())
   processedAt DateTime?
+  endpoint    String? // credit | payout | insurance - which pipeline owns this body
+  payload     String? // raw body, kept only so a failed delivery can be replayed
+  attempts    Int       @default(0) // replay attempts made by the retry worker
+  nextAttemptAt DateTime?
+  deadAt      DateTime? // set once attempts are exhausted; no further retries
 
   @@index([provider, receivedAt])
+  @@index([status, nextAttemptAt])
 }
 
 // ---- Double-entry journal (accounting source of truth) ----

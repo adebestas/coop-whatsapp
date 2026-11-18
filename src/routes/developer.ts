@@ -1624,6 +1624,10 @@ export async function developerApiRoutes(app: FastifyInstance) {
           payloadHash: true,
           receivedAt: true,
           processedAt: true,
+          endpoint: true,
+          attempts: true,
+          nextAttemptAt: true,
+          deadAt: true,
         },
       }),
     ]);
