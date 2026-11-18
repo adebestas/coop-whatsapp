@@ -10,7 +10,7 @@
  * networks). Internet clients cannot present those source addresses, so their
  * X-Forwarded-* values are never trusted.
  *
- * Set TRUST_PROXY to override:
+ * Set TRUST_PROXY to override (TRUST_PROXY_HOPS is still accepted as an alias\n * for deployments configured against the older variable name):
  *   - "false" / "0"        → trust nothing
  *   - "true"               → trust everything (explicit opt-in; only when the
  *                            app is unreachable except through your proxy)
@@ -27,4 +27,17 @@ export function resolveTrustProxy(raw: string | undefined): boolean | string {
   // A bare number is not a supported trust spec here (and would fail closed).
   if (/^\d+$/.test(value)) return DEFAULT_TRUST_PROXY;
   return raw.trim();
+}
+export type TrustProxyEnv = { TRUST_PROXY?: string; TRUST_PROXY_HOPS?: string };
+
+/**
+ * Read the override from the environment. TRUST_PROXY is the documented
+ * name; TRUST_PROXY_HOPS is kept as an alias so existing deployments keep
+ * their topology. A blank TRUST_PROXY is treated as unset rather than as
+ * "trust nothing", because that is what an unset variable means.
+ */
+export function resolveTrustProxyFromEnv(env: TrustProxyEnv = process.env): boolean | string {
+  const primary = env.TRUST_PROXY;
+  if (primary !== undefined && primary.trim() !== "") return resolveTrustProxy(primary);
+  return resolveTrustProxy(env.TRUST_PROXY_HOPS);
 }

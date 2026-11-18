@@ -18,7 +18,7 @@ import { prisma } from "./lib/prisma.js";
 import { isRedisConnected } from "./lib/cache.js";
 import { incCounter, renderMetrics } from "./lib/metrics.js";
 import { isInsecureRequest } from "./lib/http-guards.js";
-import { resolveTrustProxy } from "./lib/trust-proxy.js";
+import { resolveTrustProxyFromEnv } from "./lib/trust-proxy.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -33,7 +33,7 @@ declare module "fastify" {
  * Directory holding the admin dashboard static files.
  *
  * Previously hardcoded to `/app/dashboard`, which only exists inside the Docker
- * image — every non-container deploy (and the test suite) silently served no
+ * image ??? every non-container deploy (and the test suite) silently served no
  * dashboard. Resolve relative to this module (`<root>/dashboard` when built to
  * `dist/app.js`, `<root>/dashboard` from source) so it works everywhere, with
  * `DASHBOARD_DIR` as an explicit override.
@@ -49,8 +49,9 @@ export function buildApp() {
     logger: true,
     // Trust only the reverse proxy in front of the app. `true` would trust any
     // X-Forwarded-For hop, letting a client forge its IP and bypass IP-based
-    // rate limits. See TRUST_PROXY_HOPS for non-standard topologies.
-    trustProxy: resolveTrustProxy(process.env.TRUST_PROXY_HOPS),
+    // rate limits. TRUST_PROXY describes the topology (TRUST_PROXY_HOPS is kept
+    // as an alias).
+    trustProxy: resolveTrustProxyFromEnv(),
     bodyLimit: 256 * 1024, // 256 KB
     requestTimeout: 30_000,
     // Force-close keep-alive sockets on app.close() so graceful shutdown can't
@@ -78,7 +79,7 @@ export function buildApp() {
   // small, but a branch-office admin on 3G downloads app.js on every visit.
   void app.register(compress, { global: true, threshold: 1024 });
 
-  // Capture the RAW request body before JSON parsing — provider webhook
+  // Capture the RAW request body before JSON parsing ??? provider webhook
   // signatures are computed over the exact bytes sent, so we keep them.
   app.addContentTypeParser<string | Buffer>(
     ["application/json", "text/plain"],
@@ -106,7 +107,7 @@ export function buildApp() {
     credentials: true,
   });
 
-  // Security headers — defense in depth against XSS, clickjacking, etc.
+  // Security headers ??? defense in depth against XSS, clickjacking, etc.
   void app.register(helmet, {
     contentSecurityPolicy: {
       directives: {
@@ -134,7 +135,7 @@ export function buildApp() {
     },
   });
 
-  // HTTPS enforcement in production — reject plain HTTP requests at the
+  // HTTPS enforcement in production ??? reject plain HTTP requests at the
   // application layer when behind a reverse proxy that sets x-forwarded-proto.
   if (process.env.NODE_ENV === "production") {
     app.addHook("onRequest", async (req, reply) => {
@@ -162,7 +163,7 @@ export function buildApp() {
     }
   });
 
-  // Rate limiting — blunt-force protection on every public route.
+  // Rate limiting ??? blunt-force protection on every public route.
   // Providers retry aggressively, so webhooks get a generous but bounded
   // budget; everything else is tight.
   const isTest = process.env.NODE_ENV === "test";
@@ -220,10 +221,12 @@ export function buildApp() {
   void app.register(serveExportFile);
   void app.register(certificateRoutes);
 
-  // Serve static files — admin dashboard
+  // Serve static files ??? admin dashboard
   const dashboardDir = resolveDashboardDir();
   if (!fs.existsSync(dashboardDir)) {
-    console.warn(`[app] Dashboard directory not found at ${dashboardDir} — static files disabled`);
+    console.warn(
+      `[app] Dashboard directory not found at ${dashboardDir} ??? static files disabled`,
+    );
   } else {
     console.log(`[app] Serving dashboard from ${dashboardDir}`);
     void app.register(fastifyStatic, {
