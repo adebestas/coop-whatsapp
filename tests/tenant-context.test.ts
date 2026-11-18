@@ -11,6 +11,7 @@ import {
   listCooperativeIds,
   forEachCoop,
   withCoopContext,
+  withCoopGuc,
   rlsEnforcementStatus,
 } from "../src/lib/tenant-context.js";
 import { withDeferredSends, enqueueDeferredSend } from "../src/lib/deferred.js";
@@ -178,5 +179,66 @@ describe("tenant-context resolvers (SQLite fallback)", () => {
       where: { cooperativeId_phone: { cooperativeId: coop.id, phone } },
     });
     expect(found).toBeNull();
+  });
+});
+
+/**
+ * The GUC save/restore is Postgres-only, so it cannot run against the SQLite
+ * test database. A fake transaction records what `set_config` would have been
+ * given and lets us pin the nesting contract: the inner tenant must always be
+ * undone, including when there was no outer tenant to restore.
+ */
+describe("withCoopGuc restores the tenant GUC (Postgres path)", () => {
+  function fakeTx(previous: string | null) {
+    const writes: string[] = [];
+    return {
+      writes,
+      tx: {
+        $queryRaw: async () => [{ cur: previous }],
+        $executeRaw: async (_query: TemplateStringsArray, ...values: unknown[]) => {
+          writes.push(String(values[0]));
+          return 1;
+        },
+      },
+    };
+  }
+
+  async function asPostgres<T>(run: () => Promise<T>): Promise<T> {
+    const original = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://user:pass@localhost:5432/coop";
+    try {
+      return await run();
+    } finally {
+      if (original === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = original;
+    }
+  }
+
+  it("clears the GUC when no tenant was set before the nested call", async () => {
+    await asPostgres(async () => {
+      const { tx, writes } = fakeTx(null);
+      await withCoopGuc(tx as never, "coop-inner", async () => undefined);
+      expect(writes).toEqual(["coop-inner", ""]);
+    });
+  });
+
+  it("restores the outer tenant after the nested call", async () => {
+    await asPostgres(async () => {
+      const { tx, writes } = fakeTx("coop-outer");
+      await withCoopGuc(tx as never, "coop-inner", async () => undefined);
+      expect(writes).toEqual(["coop-inner", "coop-outer"]);
+    });
+  });
+
+  it("restores the previous tenant even when the callback throws", async () => {
+    await asPostgres(async () => {
+      const { tx, writes } = fakeTx(null);
+      await expect(
+        withCoopGuc(tx as never, "coop-inner", async () => {
+          throw new Error("boom");
+        }),
+      ).rejects.toThrow("boom");
+      expect(writes).toEqual(["coop-inner", ""]);
+    });
   });
 });

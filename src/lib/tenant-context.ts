@@ -86,11 +86,14 @@ export async function withCoopGuc<T>(
   try {
     return await fn();
   } finally {
-    if (previous) {
-      await tx.$executeRaw`SELECT set_config('app.current_cooperative_id', ${previous}, true)`.catch(
-        () => {},
-      );
-    }
+    // An unset GUC reads as NULL, but the RLS predicate is
+    // `NULLIF(current_setting(...), '')`, so an empty string is exactly as
+    // "no tenant" as NULL. Always restore: leaving the inner tenant set would
+    // silently widen the outer scope to cooperatives it never asked for.
+    const restore = previous ?? "";
+    await tx.$executeRaw`SELECT set_config('app.current_cooperative_id', ${restore}, true)`.catch(
+      () => {},
+    );
   }
 }
 
