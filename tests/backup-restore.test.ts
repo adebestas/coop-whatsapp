@@ -66,9 +66,15 @@ describe("backup restore smoke test", () => {
 
     // Read the snapshot back from disk — this is the "restore" half of the round trip.
     const raw = await readFile(join("backups", res.file!), "utf8");
-    const snapshot = JSON.parse(raw) as { version: number; tables: Record<string, unknown[]> };
+    const snapshot = JSON.parse(raw) as {
+      version: number;
+      redactedFields: Record<string, readonly string[]>;
+      tables: Record<string, unknown[]>;
+    };
 
-    expect(snapshot.version).toBe(3);
+    expect(snapshot.version).toBe(4);
+    expect(snapshot.redactedFields.members).toContain("pin");
+    expect(snapshot.redactedFields.members).toContain("totpSecret");
 
     // Every table must be present in the dump (no silent omissions).
     for (const table of EXPECTED_TABLES) {
@@ -84,6 +90,11 @@ describe("backup restore smoke test", () => {
     expect(snapshot.tables.wallets).toHaveLength(liveWalletCount);
     expect(snapshot.tables.contributions).toHaveLength(liveContributionCount);
     expect(snapshot.tables.contributions).toHaveLength(1);
+
+    // Member credentials are gone even though the row count is unchanged.
+    const dumpedMember = snapshot.tables.members[0] as { pin: string; name: string };
+    expect(dumpedMember.pin).toBe("[redacted]");
+    expect(dumpedMember.name).toBe("Backup Member");
 
     // The money row survived intact with its kobo amount.
     const contribution = snapshot.tables.contributions[0] as { amount: number };
