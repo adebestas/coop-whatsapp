@@ -16,6 +16,7 @@
     "prisma:push": "prisma db push",
     "prisma:push:local": "prisma db push --schema prisma/schema.local.prisma",
     "typecheck": "tsc --noEmit",
+    "preflight": "node scripts/production-preflight.mjs",
     "pretest": "node scripts/prisma-generate.mjs --local",
     "test": "vitest run",
     "lint": "eslint src/",
