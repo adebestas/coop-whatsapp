@@ -1595,6 +1595,10 @@ export async function runSchedulerTick(): Promise<void> {
   await pruneWebhookFailures().catch((err) =>
     log.error("[scheduler] webhook failure prune failed", { err: String(err) }),
   );
+  const { retryDueWebhookEvents } = await import("./webhooks.js");
+  await retryDueWebhookEvents().catch((err) =>
+    log.error("[scheduler] webhook retry sweep failed", { err: String(err) }),
+  );
   await runDataRetention().catch((err) =>
     log.error("[scheduler] data retention failed", { err: String(err) }),
   );
@@ -1692,6 +1696,11 @@ export async function runSchedulerJob(name: string, cooperativeId?: string): Pro
       return runPollerJob();
     case "digest":
       return runDigestJob();
+    case "webhook_retry": {
+      const { retryDueWebhookEvents } = await import("./webhooks.js");
+      await retryDueWebhookEvents();
+      return;
+    }
     case "loan_reminders":
       if (cooperativeId) {
         return withCoopContext(cooperativeId, () =>

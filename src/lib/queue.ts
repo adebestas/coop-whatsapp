@@ -33,6 +33,7 @@ export const QUEUE_NAMES = {
   BACKUPS: "backups",
   DIGEST: "digest",
   SCHEDULER: "scheduler",
+  WEBHOOK_RETRIES: "webhook-retries",
 } as const;
 
 // ===== Job Types =====
@@ -138,6 +139,13 @@ export function initQueueProcessors(): void {
     await runSchedulerJob(job.data.job, job.data.cooperativeId);
   });
 
+  // Webhook retries: replay a delivery that was verified but failed to process.
+  // The DB row is the source of truth; this queue only supplies the delay.
+  processQueue<{ eventId: string }>(QUEUE_NAMES.WEBHOOK_RETRIES, async (job) => {
+    const { replayStoredWebhook } = await import("../services/webhooks.js");
+    await replayStoredWebhook(job.data.eventId);
+  });
+
   // NOTE: Payments, exports, backups and digests are executed synchronously by
   // their own services (disbursement/status-poller, export routes, backup
   // scheduler, digest scheduler). No code enqueues to those queues, so they
@@ -166,6 +174,10 @@ export async function scheduleSchedulerJobs(): Promise<void> {
     { name: "backup", every: 24 * 60 * 60 * 1000 },
     { name: "reconcile", every: 24 * 60 * 60 * 1000 },
     { name: "digest", every: 15 * 60 * 1000 },
+    // Backstop for webhook retries whose BullMQ job was lost with Redis. The
+    // worker replays any DB row that is due, so a flushed Redis cannot strand a
+    // verified-but-uncredited payment.
+    { name: "webhook_retry", every: 5 * 60 * 1000 },
   ];
   if (pollMs > 0) jobs.push({ name: "poller", every: pollMs });
 

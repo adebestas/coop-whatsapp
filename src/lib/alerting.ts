@@ -1,6 +1,8 @@
 import { notifyMember } from "./messaging.js";
 import { prisma } from "./prisma.js";
 import { maskId } from "./security.js";
+import { log } from "./logger.js";
+import { sendTelegramMessage } from "./telegram.js";
 
 /**
  * Alert severity levels
@@ -119,4 +121,24 @@ export async function notifyWithAlert(
   } catch (err) {
     await logAndAlert(cooperativeId, context, err, severity);
   }
+}
+
+/**
+ * Alert the engineering/ops channel, not a cooperative's admins.
+ *
+ * `log.error` is forwarded to ERROR_WEBHOOK_URL (Slack/Discord compatible), so
+ * that alone reaches a channel; OPS_ALERT_TELEGRAM_CHAT_ID adds a direct
+ * Telegram ping for alerts that must not sit unread (e.g. money stuck in a
+ * dead-letter queue). Never throws.
+ */
+export async function alertDevelopers(context: string, error?: unknown): Promise<void> {
+  const detail =
+    error instanceof Error ? `${error.name}: ${error.message}` : error ? String(error) : "";
+  log.error(`[ops-alert] ${context}`, detail ? { error: detail } : undefined);
+
+  const chatId = process.env.OPS_ALERT_TELEGRAM_CHAT_ID;
+  if (!chatId) return;
+  await sendTelegramMessage(chatId, `[ALERT] ${context}${detail ? `\n\n${detail}` : ""}`).catch(
+    (err) => console.error("[Alert] Failed to reach ops Telegram chat:", err),
+  );
 }
