@@ -2,11 +2,10 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import type { FastifyInstance } from "fastify";
-import { verifyAdminToken, isTokenRevoked, requireLiveAdmin, getRedis } from "../lib/admin-auth.js";
+import { verifyAdminToken, isTokenRevoked, requireLiveAdmin } from "../lib/admin-auth.js";
 import { audit } from "../services/audit.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
-const MAX_EXPORTS = 14; // keep 14 most recent exports; older ones are pruned
 
 /**
  * Generate an export filename that embeds the cooperative ID,
@@ -17,24 +16,7 @@ export function exportFilename(coopId: string, type: string): string {
   return `${coopId}-${type}-${hex}.${type === "members" || type === "transactions" || type === "pnl" ? "xlsx" : "pdf"}`;
 }
 
-/**
- * Keep only the latest `MAX_EXPORTS` export files; delete older ones.
- * Uses Redis when available; falls back to no-op when unavailable.
- */
-export async function pruneExports(maxExports: number = MAX_EXPORTS): Promise<void> {
-  const client = getRedis();
-  if (!client) return;
-  try {
-    const keys = await client.lrange(`exports:list`, 0, -1);
-    if (keys.length > maxExports) {
-      const toDelete = keys.slice(0, keys.length - maxExports);
-      await client.del(...toDelete);
-      await client.ltrim(`exports:list`, -maxExports, -1);
-    }
-  } catch (err) {
-    console.error("[exports] pruneExports error:", err);
-  }
-}
+export { MAX_EXPORTS, pruneExports } from "../services/exports.js";
 
 /**
  * Serves generated export files (Excel/PDF). Requires an ACTIVE admin token:

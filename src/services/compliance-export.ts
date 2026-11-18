@@ -7,6 +7,7 @@ import PDFDocument from "pdfkit";
 import { prisma } from "../lib/prisma.js";
 import { formatBalance } from "./cooperative.js";
 import { audit } from "./audit.js";
+import { pruneExports } from "./exports.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
 
@@ -128,6 +129,8 @@ export async function runComplianceExport(
     `${coop?.name ?? "Cooperative"} — ${kind.toUpperCase()} compliance export`,
     sheet,
   );
+
+  await pruneExports();
 
   const links = [`📊 Excel: /api/export/${xlsxName}`, `📄 PDF: /api/export/${pdfName}`];
 

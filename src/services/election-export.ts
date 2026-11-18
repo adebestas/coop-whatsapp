@@ -4,6 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import PDFDocument from "pdfkit";
 import { prisma } from "../lib/prisma.js";
+import { pruneExports } from "./exports.js";
 
 const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
 
@@ -77,6 +78,8 @@ export async function exportElectionPdf(
   const path = join(EXPORT_DIR, pdfName);
 
   await writeElectionPdf(path, vote, unitName, tally, totalVotes, winner, voters, channelCount);
+  await pruneExports();
+
   return {
     ok: true,
     message: `📄 Election results PDF ready.\nDownload: /api/export/${pdfName}`,
