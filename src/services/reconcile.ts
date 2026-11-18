@@ -4,6 +4,7 @@ import { formatBalance } from "./cooperative.js";
 import { trialBalance } from "./journal.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { withCoopContext, listActiveCooperativeIds } from "../lib/tenant-context.js";
+import { runWalletReconciliation } from "./reconciliation.js";
 
 /**
  * Nightly reconciliation: data-integrity checks that alert super admins.
@@ -115,6 +116,15 @@ export async function runReconciliation(): Promise<string[]> {
       if (tb.debits !== tb.credits) {
         alerts.push(
           `🚨 Ledger out of balance for *${coopName}*: debits ${formatBalance(tb.debits)} vs credits ${formatBalance(tb.credits)} (diff ${formatBalance(Math.abs(tb.debits - tb.credits))}).`,
+        );
+      }
+
+      // 7. Wallet-to-Bank balance equation reconciliation.
+      //    Verifies that: Expected (Member Wallets + Statutory Funds + Outstanding Loans) == Actual Assets:Bank.
+      const walletRecon = await runWalletReconciliation(coopId, "system");
+      if (walletRecon.discrepancy !== 0) {
+        alerts.push(
+          `🚨 Balance discrepancy detected for *${coopName}*: Gap of ${formatBalance(Math.abs(walletRecon.discrepancy))} between expected funds and bank balance! Investigate immediately.`,
         );
       }
 
