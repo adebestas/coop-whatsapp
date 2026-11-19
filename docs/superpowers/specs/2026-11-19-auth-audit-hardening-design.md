@@ -1,4 +1,4 @@
-# Auth, audit and edge hardening — design
+# Auth, audit and edge hardening â€” design
 
 Status: awaiting review. No code written.
 
@@ -22,7 +22,7 @@ through the existing `alertDevelopers()` helper.
 | Concern | Already present |
 | --- | --- |
 | ORM | Prisma, PG in prod, SQLite for tests, `prisma/migrations/*`, RLS job in CI |
-| Login throttling | `checkLoginRateLimit` — 5/min IP, 10/15 min account (`src/routes/admin.ts:32`) |
+| Login throttling | `checkLoginRateLimit` â€” 5/min IP, 10/15 min account (`src/routes/admin.ts:32`) |
 | TOTP | enrolment via chat, replay claim via `claimOnce` (`admin.ts:193`) |
 | Audit | hash-chained `AuditLog` per cooperative; `PlatformAuditLog` for dashboard operators |
 | Alerts | `alertSupers`, `alertAdmin`, `alertDevelopers` (`src/lib/alerting.ts`) |
@@ -30,7 +30,7 @@ through the existing `alertDevelopers()` helper.
 | Reconciliation | `runReconcileJob` + repeatable `reconcile` job, 24 h rolling |
 | Preflight | `npm run preflight`, now wired into the CI `postgres-migrations` job |
 
-## Phase 1 — Login lockout, generic error IDs, magic links
+## Phase 1 â€” Login lockout, generic error IDs, magic links
 
 ### 1.1 Persistent lockout
 
@@ -54,27 +54,27 @@ model LoginAttempt {
 
 Lockout policy (computed from `LoginAttempt`, evaluated before credential check):
 
-- 10 failures / 15 min for one account → lock 30 min.
+- 10 failures / 15 min for one account â†’ lock 30 min.
 - Each further lock within 24 h doubles the duration, cap 24 h.
-- 30 failures / 15 min from one IP → IP lock 1 h (affects both surfaces).
-- Stored on `Member.pinLockedUntil`? **No** — that field is shared with chat PIN
+- 30 failures / 15 min from one IP â†’ IP lock 1 h (affects both surfaces).
+- Stored on `Member.pinLockedUntil`? **No** â€” that field is shared with chat PIN
   entry, and locking a member out of WhatsApp because of a dashboard attack is a
   self-inflicted outage. Lock state is derived from the ledger; a short-lived Redis
   key (`lock:<surface>:<phone>`) carries the hot path.
 - Unlock: automatic expiry, or a superadmin action `POST /api/admin/unlock` which
   writes an audit entry and an ops alert.
 
-### 1.2 Generic errors with error IDs
+### 1.2 Generic errors with request IDs
 
-New `src/lib/error-id.ts`:
+The app already returns `{ error: "Something went wrong. Please try again.", requestId }`
+for 5xx and logs the full error (`src/app.ts`). Reuse that id; do not add a new format.
 
-- `errorId()` → `ERR-<base36 time>-<4 random base36>`.
-- `fail(reply, status, publicMessage, err?, context)` → logs
-  `{ errorId, err, route, method, ip, actorId, ipUa }` at error level (full detail,
-  including stack), returns `{ error: publicMessage, errorId }` to the client.
-- Never echoes `err.message`, SQL, provider payloads, or phone numbers.
-- Applied to both login surfaces first; then to every 5xx in `src/routes/*` via a
-  Fastify `setErrorHandler` that assigns an `errorId` when one is missing.
+- Login/auth failures return `{ error: <generic text>, requestId }` for 401, 403, 429
+  and locked responses. Never reveal whether the phone exists, is locked, or the PIN
+  was wrong.
+- `req.log.error({ err, requestId, route, ip, actorId })` carries the full detail; the
+  client only ever sees the opaque id.
+- No provider payloads, SQL, or phone numbers in the response body.
 
 Verification-response timing stays constant: keep the existing dummy-hash pattern and
 extend it to the lockout path (locked accounts still pay one scrypt verification).
@@ -108,23 +108,23 @@ Flow:
 
 1. `POST /api/admin/magic-link/request { email }` (and `/api/developer/magic-link/request`).
    - Look up an admin/superadmin (or owner/developer) by verified email.
-   - Always return 202 `{ ok: true, errorId }` — identical response whether the account
+   - Always return 202 `{ ok: true, errorId }` â€” identical response whether the account
      exists, is locked, has no email, or email delivery fails. Error details go to logs
      under the `errorId`.
    - On success: revoke (not delete) any unused tokens for that member, create a new one,
      send `{PUBLIC_BASE_URL}/login/magic?t=<token>` with a 15-minute notice via the
      existing SMTP sender for statements.
-2. `GET /login/magic?t=` — a static dashboard page that POSTs the token.
+2. `GET /login/magic?t=` â€” a static dashboard page that POSTs the token.
 3. `POST /api/admin/magic-link/consume { token }`.
    - Single-use: `updateMany({ where: { tokenHash, usedAt: null, revokedAt: null,
-     expiresAt: { gt: now } }, data: { usedAt: now, usedIp: ip } })`. `count === 0` →
+     expiresAt: { gt: now } }, data: { usedAt: now, usedIp: ip } })`. `count === 0` â†’
      generic 401 + `errorId`; the token is dead after the first attempt regardless of
      outcome (claim-then-validate, never validate-then-claim).
    - Bind: token only mints a session for the member it was issued to; role and status
-     are re-checked live (suspended/deceased → inert).
+     are re-checked live (suspended/deceased â†’ inert).
    - TOTP: if the account has `totpSecret`, consumption requires `totp` in the same
      request; no session without it.
-   - Success: `sign()` + `setAuthCookie()` — identical cookie path as PIN login — and
+   - Success: `sign()` + `setAuthCookie()` â€” identical cookie path as PIN login â€” and
      audit `auth.magic_link.consume`.
 4. Session revocation: `revokeToken()` on the current session is already supported;
    password/PIN change additionally revokes all `MagicLinkToken`s and bumps a
@@ -133,7 +133,7 @@ Flow:
 Rate limits: 3 requests / 15 min per account and 10 / hour per IP; both recorded in
 `LoginAttempt` (`outcome = magic_link_requested`).
 
-## Phase 2 — Audit coverage and anomaly alerts
+## Phase 2 â€” Audit coverage and anomaly alerts
 
 ### 2.1 Schema
 
@@ -159,18 +159,18 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
 
 ### 2.3 Anomaly rules (evaluated on write, alert through `alertDevelopers`)
 
-- `auth.login.lockout_triggered` — always alert.
-- ≥3 accounts locked from one IP in 10 min.
+- `auth.login.lockout_triggered` â€” always alert.
+- â‰¥3 accounts locked from one IP in 10 min.
 - Successful login from an IP never seen for that member in 90 days.
-- Admin/owner login outside 06:00–22:00 Africa/Lagos.
+- Admin/owner login outside 06:00â€“22:00 Africa/Lagos.
 - `admin.wallet.adjust` or `role.set` outside business hours, or above
   `ALERT_WALLET_THRESHOLD_KOBO`.
 - PIN/password change followed by a payout within 30 min.
-- Magic-link token replay (`usedAt` already set) — always alert.
+- Magic-link token replay (`usedAt` already set) â€” always alert.
 - Thresholds live in one `src/services/anomaly-rules.ts` with unit tests; each alert is
   deduplicated with `claimOnce` (1 h window) so a burst is one Telegram message.
 
-## Phase 3 — Edge and repository hardening
+## Phase 3 â€” Edge and repository hardening
 
 - `deploy/Caddyfile`:
   - `@dotfiles path /.* /.env* /.git* /.htaccess /.htpasswd /credentials* /.*`
@@ -189,7 +189,7 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
   header; a repo test asserting `.env` is ignored and no `.env*` file except
   `.env.example`, `deploy/.env.example` and `docker-compose` templates is tracked.
 
-## Phase 4 — Identity quality
+## Phase 4 â€” Identity quality
 
 - Disposable email: `src/lib/disposable-emails.ts`, a curated static domain list plus
   `DISPOSABLE_EMAIL_DOMAINS` (comma separated) merged at boot. Applied wherever an
@@ -200,7 +200,7 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
   before a magic link is issued; OTPs are hashed, 10-minute TTL, 5 attempts, single
   use. Members are unaffected (their channel identity is already the verified phone).
 
-## Phase 5 — Input-surface audit (mass assignment)
+## Phase 5 â€” Input-surface audit (mass assignment)
 
 - Enumerate every `prisma.*.create/update` whose `data` derives from `req.body`.
 - Replace loose spreads with an explicit allow-list per endpoint via a shared
@@ -211,20 +211,20 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
   asserts the stored record is unchanged (`tests/mass-assignment.test.ts`).
 - Report of endpoints inspected is committed to `docs/security/input-surface.md`.
 
-## Phase 6 — Agent artifacts and reconciliation
+## Phase 6 â€” Agent artifacts and reconciliation
 
 - `AGENTS.md` at repo root: stack, commands, folder map, forbidden actions (no prod
   writes, no data deletion, no secrets in code, no schema edits without sync), and the
   instruction to read `CODEBASE_MAP.md` before planning.
-- `CODEBASE_MAP.md`: one page — request entry points, services, Prisma models, jobs,
+- `CODEBASE_MAP.md`: one page â€” request entry points, services, Prisma models, jobs,
   dashboards, deploy scripts, "do not touch" zones.
-- `npm run check`: typecheck → lint → format:check (widened to tests/scripts) →
-  vitest → `npm audit --omit=dev`; CI runs it verbatim; a task is not "done" without
+- `npm run check`: typecheck â†’ lint â†’ format:check (widened to tests/scripts) â†’
+  vitest â†’ `npm audit --omit=dev`; CI runs it verbatim; a task is not "done" without
   pasted output.
 - Reconciliation extension: `runReconcileJob` additionally fetches provider balances
   (Monnify/Paystack/Flutterwave) when keys exist, compares to the `assets:bank` journal
   balance, writes `ReconciliationLog` with `source = "provider"`, and alerts via
-  `alertDevelopers` on drift above `RECONCILE_DRIFT_THRESHOLD_KOBO` (default ₦1).
+  `alertDevelopers` on drift above `RECONCILE_DRIFT_THRESHOLD_KOBO` (default â‚¦1).
   The job name and 24 h cadence stay unchanged; the env var makes the tick configurable.
 
 ## Testing and rollout per phase
@@ -237,10 +237,20 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
 5. Each phase is its own commit; PR #27 stays the integration branch unless told
    otherwise.
 
+## Approved decisions (2026-11-19)
+
+- Lockout: 5 failures / 15 min -> 15 min, doubling, cap 8 h (owner choice).
+- Magic link: additional login method; dashboard phone+PIN stays; TOTP still required when enrolled.
+- Error IDs: reuse the Fastify request id (`requestId`) already returned by `setErrorHandler`; no separate module.
+- Headers: helmet already hides x-powered-by; add Caddy dotfile deny/header-strip plus a regression test.
+- Email: extract the nodemailer transport out of exports.ts into src/lib/email.ts before Phase 1 routes.
+- PlatformAdmin gains email + emailVerifiedAt; Member gains emailVerifiedAt; links only for verified addresses.
+- Unwired cleanup approved: delete scripts/load-smoke.js, fail the smoke step on main when the base URL is unset, widen lint/format to tests+scripts, remove the 5 dead env vars, keep the DLQ endpoint API-only, document loan_reminders.
+
 ## Risks / open questions
 
 - **Email deliverability**: magic links depend on SMTP; if SMTP is unset the request
-  endpoint returns 202 and logs `errorId` — it will silently never work in that
+  endpoint returns 202 and logs `errorId` â€” it will silently never work in that
   environment. Preflight should warn when SMTP is missing but magic links are enabled.
 - **Shared office NAT**: IP-based lockout can lock a whole branch office. The account
   lock is the primary control; the IP lock is 1 h and skips known-good admin IPs if
@@ -248,4 +258,4 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
 - **`Server` header**: Caddy does not add one by default; the Caddyfile change is
   defence-in-depth for any future proxy.
 - **Session epoch**: revoking old sessions on PIN change requires a `sessionEpoch`
-  column on `Member` — included in the Phase 2 migration.
+  column on `Member` â€” included in the Phase 2 migration.
