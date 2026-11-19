@@ -803,6 +803,9 @@ model AuditLog {
   balanceBefore Int? // wallet balance before the operation in kobo
   balanceAfter  Int? // wallet balance after the operation in kobo
   detail        String? // human-readable summary
+  ip            String? // request IP at the time (not part of the hash payload)
+  userAgent     String? // truncated request User-Agent
+  errorId       String? // requestId when the action was triggered by a failure
     prevHash      String? // hash of the previous entry (tamper-evident chain)
     hash          String? // sha256 of this entry's content + prevHash
     seq           Int // per-cooperative monotonic sequence (deterministic chain order)
@@ -2354,6 +2357,9 @@ model PlatformAuditLog {
   targetType     String?
   targetId       String?
   detail         String?
+  ip             String?
+  userAgent      String?
+  errorId        String?
   createdAt      DateTime @default(now())
   @@index([action])
   @@index([cooperativeId, createdAt])

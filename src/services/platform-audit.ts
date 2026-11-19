@@ -1,4 +1,5 @@
 import { prisma } from "../lib/prisma.js";
+import { currentRequestContext } from "../lib/request-context.js";
 
 export interface PlatformAuditEntry {
   actorId?: string | null;
@@ -24,6 +25,9 @@ export async function writePlatformAudit(entry: PlatformAuditEntry): Promise<voi
         targetType: entry.targetType ?? null,
         targetId: entry.targetId ?? null,
         detail: entry.detail ?? null,
+        ip: currentRequestContext()?.ip ?? null,
+        userAgent: currentRequestContext()?.userAgent ?? null,
+        errorId: currentRequestContext()?.requestId ?? null,
       },
     });
   } catch (err) {

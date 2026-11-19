@@ -8,6 +8,7 @@ import compress from "@fastify/compress";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import { enterRequestContext } from "./lib/request-context.js";
 import { webhookRoutes } from "./routes/webhook.js";
 import { paymentWebhookRoutes } from "./routes/payments.js";
 import { adminApiRoutes } from "./routes/admin.js";
@@ -135,6 +136,11 @@ export function buildApp() {
     },
   });
 
+  // Request-scoped context for the audit trail: every audit row written while
+  // handling this request records the caller's IP, User-Agent and requestId.
+  app.addHook("onRequest", async (req) => {
+    enterRequestContext({ ip: req.ip, userAgent: req.headers["user-agent"], requestId: req.id });
+  });
   // HTTPS enforcement in production ??? reject plain HTTP requests at the
   // application layer when behind a reverse proxy that sets x-forwarded-proto.
   if (process.env.NODE_ENV === "production") {

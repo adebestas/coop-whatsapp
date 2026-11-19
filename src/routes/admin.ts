@@ -13,6 +13,8 @@ import { quorumMet } from "../services/meetings.js";
 import { rejectRefund } from "../services/refunds.js";
 import { audit } from "../services/audit.js";
 import { lockStatus, registerFailure, clearFailures } from "../lib/login-lockout.js";
+import { evaluateLoginAnomalies } from "../lib/login-anomaly.js";
+import { alertMagicLinkReplay } from "../lib/anomaly-rules.js";
 import { claimMagicLink, findLiveMagicLink, issueMemberMagicLink } from "../lib/magic-link.js";
 import { notifyMember } from "../lib/messaging.js";
 import {
@@ -258,7 +260,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     // (and every member behind one office NAT) cannot lock itself out.
     await resetRateLimit(`login:acct:${phone}`);
     await resetRateLimit(`login:ip:${ip}`);
-    await clearFailures("dashboard_admin", { phone, ip });
+    void evaluateLoginAnomalies({ surface: "dashboard_admin", phone, ip }).catch(() => undefined);
 
     const token = sign(phone, member.cooperative.id, member.role);
     setAuthCookie(reply, token);
@@ -392,6 +394,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     }
 
     if (!(await claimMagicLink(link.id, ip))) {
+      void alertMagicLinkReplay("dashboard_admin", ip).catch(() => undefined);
       return reply.code(401).send({
         error: "This sign-in link is invalid or has expired.",
         requestId: req.id,

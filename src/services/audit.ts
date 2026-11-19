@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { prisma, withTx } from "../lib/prisma.js";
+import { currentRequestContext } from "../lib/request-context.js";
+import { evaluateAdminAction } from "../lib/anomaly-rules.js";
 
 export interface AuditEntry {
   cooperativeId: string;
@@ -69,6 +71,7 @@ function withAuditSerialization<T>(coopId: string, fn: () => Promise<T>): Promis
  * concurrent writes cannot fork the chain and verification is deterministic.
  */
 export async function audit(entry: AuditEntry): Promise<void> {
+  void evaluateAdminAction({ action: entry.action, actorPhone: entry.actorPhone, amount: entry.amount }).catch(() => undefined);
   try {
     await withAuditSerialization(entry.cooperativeId, async () => {
       const last = await prisma.auditLog.findFirst({
@@ -90,11 +93,15 @@ export async function audit(entry: AuditEntry): Promise<void> {
         balanceAfter: entry.balanceAfter ?? null,
         detail: entry.detail?.slice(0, 500) ?? null,
       };
+      const ctx = currentRequestContext();
       await prisma.auditLog.create({
         data: {
           ...payload,
           cooperativeId: entry.cooperativeId,
           detail: entry.detail?.slice(0, 500),
+          ip: ctx?.ip ?? null,
+          userAgent: ctx?.userAgent ?? null,
+          errorId: ctx?.requestId ?? null,
           prevHash,
           hash: hashEntry(prevHash, payload),
           seq,

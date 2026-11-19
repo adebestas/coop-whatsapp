@@ -127,6 +127,8 @@ async function bumpLock(
  * Account: 5 failures / 15 min -> 15 min, doubling per lock within 24 h, cap 8 h.
  * IP: 30 failures / 15 min -> flat 1 h.
  */
+import { alertLockout } from "./anomaly-rules.js";
+
 export async function registerFailure(input: AttemptInput): Promise<LockStatus> {
   await recordLoginAttempt(input);
   const now = Date.now();
@@ -143,6 +145,7 @@ export async function registerFailure(input: AttemptInput): Promise<LockStatus> 
     );
     if (until) {
       await recordLoginAttempt({ ...input, outcome: "locked" });
+      void alertLockout(input.surface, input.phone, input.ip).catch(() => undefined);
       return { locked: true, subject: "account", retryAfter: retrySeconds(until, now) };
     }
   }
@@ -158,6 +161,7 @@ export async function registerFailure(input: AttemptInput): Promise<LockStatus> 
   );
   if (ipUntil) {
     await recordLoginAttempt({ ...input, outcome: "locked" });
+    void alertLockout(input.surface, `ip:${input.ip}`, input.ip).catch(() => undefined);
     return { locked: true, subject: "ip", retryAfter: retrySeconds(ipUntil, now) };
   }
   return FREE;

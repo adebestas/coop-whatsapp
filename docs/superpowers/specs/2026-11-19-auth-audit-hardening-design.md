@@ -159,16 +159,21 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
 
 ### 2.3 Anomaly rules (evaluated on write, alert through `alertDevelopers`)
 
-- `auth.login.lockout_triggered` â€” always alert.
-- â‰¥3 accounts locked from one IP in 10 min.
-- Successful login from an IP never seen for that member in 90 days.
-- Admin/owner login outside 06:00â€“22:00 Africa/Lagos.
-- `admin.wallet.adjust` or `role.set` outside business hours, or above
-  `ALERT_WALLET_THRESHOLD_KOBO`.
-- PIN/password change followed by a payout within 30 min.
-- Magic-link token replay (`usedAt` already set) â€” always alert.
-- Thresholds live in one `src/services/anomaly-rules.ts` with unit tests; each alert is
-  deduplicated with `claimOnce` (1 h window) so a burst is one Telegram message.
+- `auth.login.lockout_triggered` â€” always alert (deduped per subject, 1 h).
+- â‰¥5 distinct accounts failing from one IP in 15 min (`credential_stuffing`).
+- Successful login from an IP never seen for that account in 90 days (`new_ip`).
+- Successful login after â‰¥3 failures on that account in 24 h
+  (`recovery_after_failures`).
+- `admin.wallet.adjust` or `role.set` outside 06:00â€“22:00 Africa/Lagos, or at/above
+  `ALERT_WALLET_THRESHOLD_KOBO` (default â‚¦10,000).
+- Magic-link consume rejected (replay/expired/guess) â€” alert deduped per IP, 10 min.
+- Thresholds live in `src/lib/anomaly-rules.ts` (privileged actions, lockouts,
+  magic-link rejections) and `src/lib/login-anomaly.ts` (sign-in patterns) with unit
+  tests; each alert is deduplicated with `claimOnce` (1 h window, 10 min for
+  magic-link rejections) so a burst is one Telegram message.
+- `ip`/`userAgent`/`errorId` are stored **outside** the hash payload on purpose:
+  backfilling them would invalidate every historical chain, and the chain's job is
+  to prove the action fields were not edited.
 
 ## Phase 3 â€” Edge and repository hardening
 

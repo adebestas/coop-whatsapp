@@ -6,6 +6,8 @@ import { Queue } from "bullmq";
 import { prisma } from "../lib/prisma.js";
 import { checkRateLimit, getRedis, isRedisConfigured, resetRateLimit } from "../lib/cache.js";
 import { lockStatus, registerFailure, clearFailures } from "../lib/login-lockout.js";
+import { evaluateLoginAnomalies } from "../lib/login-anomaly.js";
+import { alertMagicLinkReplay } from "../lib/anomaly-rules.js";
 import { claimMagicLink, findLiveMagicLink, issuePlatformMagicLink } from "../lib/magic-link.js";
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES } from "../lib/queue.js";
 import { listCooperativeIds, resolveCoopsByPhone, withCoopContext } from "../lib/tenant-context.js";
@@ -431,7 +433,7 @@ export async function developerApiRoutes(app: FastifyInstance) {
     }
 
     await resetRateLimit(`devacct:${phone}`);
-    await clearFailures("dashboard_developer", { phone, ip });
+    void evaluateLoginAnomalies({ surface: "dashboard_developer", phone, ip }).catch(() => undefined);
     await prisma.platformAdmin.update({
       where: { id: admin.id },
       data: { lastLoginAt: new Date() },
@@ -536,6 +538,7 @@ export async function developerApiRoutes(app: FastifyInstance) {
     }
 
     if (!(await claimMagicLink(link.id, ip))) {
+      void alertMagicLinkReplay("dashboard_developer", ip).catch(() => undefined);
       return reply.code(401).send({
         error: "This sign-in link is invalid or has expired.",
         requestId: req.id,
