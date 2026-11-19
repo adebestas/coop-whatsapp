@@ -193,6 +193,7 @@ model Member {
   dateOfBirth             DateTime? // optional — used for birthday greetings (month/day only)
   nextOfKinName           String? // required for death claims
   nextOfKinPhone          String?
+  emailVerifiedAt         DateTime?
   phoneVerified           Boolean             @default(false) // OTP-verified real phone number
   nameVerified            Boolean             @default(false) // name confirmed by a super admin (maker-checker gate)
   name                    String
@@ -245,6 +246,7 @@ model Member {
   progress                MemberProgress?
   beneficialOwners        MemberBeneficialOwner[]
   consentAt               DateTime?           // when the member opted in to messages
+  magicLinks              MagicLinkToken[]
   aiConsentAt             DateTime?           // when the member consented to AI processing (voice transcription / translation via Groq)
   screeningStatus         String              @default("unset") // unset | clear | review | matched — sanctions/PEP screening of the member name
   screeningAt             DateTime?           // when the member name was last screened
@@ -2314,6 +2316,8 @@ model FxRate {
 model PlatformAdmin {
   id               String    @id @default(cuid())
   name             String
+  email            String?   @unique
+  emailVerifiedAt  DateTime?
   phone            String    @unique
   role             String    @default("developer") // owner | developer | support
   pin              String?   // hashed, "<salt>:<scrypthex>"
@@ -2324,6 +2328,7 @@ model PlatformAdmin {
   tokensValidAfter DateTime?
   createdById      String?
   lastLoginAt      DateTime?
+  magicLinks       MagicLinkToken[]
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 }
@@ -2526,4 +2531,58 @@ model DeductionShortfall {
 
   @@unique([batchId, memberId])
   @@index([cooperativeId, status])
+}
+
+// ---- Auth security: attempts, lockout state, magic links ----
+// LoginAttempt is the immutable ledger (audit + anomaly scoring); LoginLock is
+// the small mutable state used for lockout maths. Keeping them apart means the
+// ledger is never rewritten to clear a lock.
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  surface   String   // dashboard_admin | dashboard_developer
+  memberId  String?
+  phone     String?
+  ip        String
+  outcome   String   // success | bad_credentials | totp_failed | locked | unlocked
+  errorId   String?
+  createdAt DateTime @default(now())
+
+  @@index([surface, phone, createdAt])
+  @@index([surface, ip, createdAt])
+  @@index([createdAt])
+}
+
+model LoginLock {
+  id           String    @id @default(cuid())
+  surface      String
+  subject      String    // member phone, or "ip:<address>"
+  strikes      Int       @default(0)
+  lockCount    Int       @default(0)
+  lockedUntil  DateTime?
+  lastStrikeAt DateTime  @default(now())
+
+  @@unique([surface, subject])
+  @@index([lockedUntil])
+}
+
+model MagicLinkToken {
+  id              String        @id @default(cuid())
+  memberId        String?
+  member          Member?       @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  platformAdminId String?
+  platformAdmin   PlatformAdmin? @relation(fields: [platformAdminId], references: [id], onDelete: Cascade)
+  cooperativeId   String?
+  tokenHash       String        @unique // sha256(token); plaintext is never stored
+  purpose         String        @default("dashboard_login")
+  requestedIp     String
+  requestUaHash   String?
+  expiresAt       DateTime
+  usedAt          DateTime?
+  usedIp          String?
+  revokedAt       DateTime?
+  createdAt       DateTime      @default(now())
+
+  @@index([memberId, createdAt])
+  @@index([platformAdminId, createdAt])
+  @@index([expiresAt])
 }

@@ -5,6 +5,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { Queue } from "bullmq";
 import { prisma } from "../lib/prisma.js";
 import { checkRateLimit, getRedis, isRedisConfigured, resetRateLimit } from "../lib/cache.js";
+import { lockStatus, registerFailure, clearFailures } from "../lib/login-lockout.js";
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES } from "../lib/queue.js";
 import { listCooperativeIds, resolveCoopsByPhone, withCoopContext } from "../lib/tenant-context.js";
 import { runInSandbox } from "../lib/sandbox.js";
@@ -340,11 +341,22 @@ export async function developerApiRoutes(app: FastifyInstance) {
     const pin = body.pin;
     const ip = req.ip;
 
+    const lock = await lockStatus("dashboard_developer", { phone, ip });
+    if (lock.locked) {
+      return reply.code(429).send({
+        error: "Too many login attempts. Try again later.",
+        requestId: req.id,
+        retryAfter: lock.retryAfter,
+      });
+    }
+
     const ipLimit = await checkRateLimit(`devlogin:${ip}`, MAX_IP_ATTEMPTS, IP_WINDOW_SECONDS);
     if (!ipLimit.allowed) {
-      return reply
-        .code(429)
-        .send({ error: "Too many login attempts", retryAfter: ipLimit.retryAfter });
+      return reply.code(429).send({
+        error: "Too many login attempts. Try again later.",
+        requestId: req.id,
+        retryAfter: ipLimit.retryAfter,
+      });
     }
     if (phone) {
       const acctLimit = await checkRateLimit(
@@ -353,9 +365,11 @@ export async function developerApiRoutes(app: FastifyInstance) {
         ACCOUNT_WINDOW_SECONDS,
       );
       if (!acctLimit.allowed) {
-        return reply
-          .code(429)
-          .send({ error: "Too many login attempts", retryAfter: acctLimit.retryAfter });
+        return reply.code(429).send({
+          error: "Too many login attempts. Try again later.",
+          requestId: req.id,
+          retryAfter: acctLimit.retryAfter,
+        });
       }
     }
 
@@ -371,15 +385,46 @@ export async function developerApiRoutes(app: FastifyInstance) {
     }
     if (!admin || !admin.active || !pinOk) {
       await auditAuth("auth.login_failed", phone, undefined, { reason: "credentials" });
-      return reply.code(401).send({ error: "invalid credentials" });
+      const fail = await registerFailure({
+        surface: "dashboard_developer",
+        phone,
+        ip,
+        memberId: admin?.id ?? null,
+        outcome: "bad_credentials",
+        errorId: req.id,
+      });
+      if (fail.locked) {
+        return reply.code(429).send({
+          error: "Too many login attempts. Try again later.",
+          requestId: req.id,
+          retryAfter: fail.retryAfter,
+        });
+      }
+      return reply.code(401).send({ error: "invalid credentials", requestId: req.id });
     }
 
     if (admin.totpEnabled && !safeVerifyTotp(admin.totpSecret, body.totp)) {
       await auditAuth("auth.login_failed", phone, admin, { reason: "totp" });
-      return reply.code(401).send({ error: "invalid 2FA code" });
+      const fail = await registerFailure({
+        surface: "dashboard_developer",
+        phone,
+        ip,
+        memberId: admin.id,
+        outcome: "totp_failed",
+        errorId: req.id,
+      });
+      if (fail.locked) {
+        return reply.code(429).send({
+          error: "Too many login attempts. Try again later.",
+          requestId: req.id,
+          retryAfter: fail.retryAfter,
+        });
+      }
+      return reply.code(401).send({ error: "invalid 2FA code", requestId: req.id });
     }
 
     await resetRateLimit(`devacct:${phone}`);
+    await clearFailures("dashboard_developer", { phone, ip });
     await prisma.platformAdmin.update({
       where: { id: admin.id },
       data: { lastLoginAt: new Date() },

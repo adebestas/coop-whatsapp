@@ -4,7 +4,7 @@ import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
-import nodemailer from "nodemailer";
+import { sendEmail } from "../lib/email.js";
 import { prisma } from "../lib/prisma.js";
 import { computePnl } from "./ledger.js";
 import { uploadToS3 } from "../lib/s3.js";
@@ -585,25 +585,10 @@ export async function emailFiles(
     blockSandboxExternal("email");
     return true;
   }
-  try {
-    const transport = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT ?? "587"),
-      secure: process.env.SMTP_SECURE === "true",
-      auth: process.env.SMTP_USER
-        ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-        : undefined,
-    });
-    await transport.sendMail({
-      from: process.env.SMTP_FROM ?? process.env.SMTP_USER,
-      to,
-      subject,
-      text: body,
-      attachments: attachments.map((path) => ({ path })),
-    });
-    return true;
-  } catch (err) {
-    console.error("[exports] email failed:", err);
-    return false;
-  }
+  return sendEmail({
+    to,
+    subject,
+    text: body,
+    attachments: attachments.map((path) => ({ path })),
+  });
 }

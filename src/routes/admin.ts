@@ -12,6 +12,7 @@ import { approveInsuranceClaim, rejectInsuranceClaim } from "../services/insuran
 import { quorumMet } from "../services/meetings.js";
 import { rejectRefund } from "../services/refunds.js";
 import { audit } from "../services/audit.js";
+import { lockStatus, registerFailure, clearFailures } from "../lib/login-lockout.js";
 import { notifyMember } from "../lib/messaging.js";
 import {
   sign,
@@ -111,11 +112,21 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const pin = body.pin;
     const ip = req.ip;
 
+    const lock = await lockStatus("dashboard_admin", { phone, ip });
+    if (lock.locked) {
+      return reply.code(429).send({
+        error: "Too many login attempts. Try again later.",
+        requestId: req.id,
+        retryAfter: lock.retryAfter,
+      });
+    }
+
     // Rate limit: max 5 attempts per minute per IP, 10 per 15 min per account
     const rateLimit = await checkLoginRateLimit(ip, phone);
     if (!rateLimit.allowed) {
       return reply.code(429).send({
-        error: "Too many login attempts",
+        error: "Too many login attempts. Try again later.",
+        requestId: req.id,
         retryAfter: rateLimit.retryAfter,
       });
     }
@@ -148,7 +159,22 @@ export async function adminApiRoutes(app: FastifyInstance) {
           autoFreeze: false,
         });
       }
-      return reply.code(401).send({ error: "invalid credentials" });
+      const fail = await registerFailure({
+        surface: "dashboard_admin",
+        phone,
+        ip,
+        memberId: member?.id ?? null,
+        outcome: "bad_credentials",
+        errorId: req.id,
+      });
+      if (fail.locked) {
+        return reply.code(429).send({
+          error: "Too many login attempts. Try again later.",
+          requestId: req.id,
+          retryAfter: fail.retryAfter,
+        });
+      }
+      return reply.code(401).send({ error: "invalid credentials", requestId: req.id });
     }
 
     // Reject suspended/deceased admins outright — they must not be able to
@@ -185,7 +211,22 @@ export async function adminApiRoutes(app: FastifyInstance) {
           detail: `Invalid 2FA code from IP ${ip}`,
           autoFreeze: false,
         });
-        return reply.code(401).send({ error: "invalid credentials" });
+        const fail = await registerFailure({
+          surface: "dashboard_admin",
+          phone,
+          ip,
+          memberId: member.id,
+          outcome: "totp_failed",
+          errorId: req.id,
+        });
+        if (fail.locked) {
+          return reply.code(429).send({
+            error: "Too many login attempts. Try again later.",
+            requestId: req.id,
+            retryAfter: fail.retryAfter,
+          });
+        }
+        return reply.code(401).send({ error: "invalid credentials", requestId: req.id });
       }
       // A TOTP stays valid for ~90 seconds. Without this claim the same code
       // can mint a second session after the password is re-entered, so an
@@ -216,6 +257,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     // (and every member behind one office NAT) cannot lock itself out.
     await resetRateLimit(`login:acct:${phone}`);
     await resetRateLimit(`login:ip:${ip}`);
+    await clearFailures("dashboard_admin", { phone, ip });
 
     const token = sign(phone, member.cooperative.id, member.role);
     setAuthCookie(reply, token);
