@@ -56,6 +56,16 @@
         </button>
       </form>
 
+      <form id="magicForm" class="login-form" novalidate>
+        <div class="form-group">
+          <label for="magicEmail">Prefer a sign-in link?</label>
+          <input type="email" id="magicEmail" placeholder="operator@example.com" autocomplete="email">
+        </div>
+        <div id="magicError" class="form-error" role="alert" aria-live="assertive" hidden></div>
+        <div id="magicNote" class="login-footer" role="status" hidden></div>
+        <button type="submit" id="magicBtn" class="btn btn-full">Email me a sign-in link</button>
+      </form>
+
       <form id="changePinForm" class="login-form" hidden>
         <div class="form-group">
           <label for="newPin">Set a new 6-digit PIN</label>

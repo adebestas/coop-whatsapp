@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
-import { withCoopContext, resolveCoopByPhone } from "../lib/tenant-context.js";
+import { withCoopContext, resolveCoopByPhone, resolveCoopByEmail } from "../lib/tenant-context.js";
 import { verifyPin } from "../lib/security.js";
 import { verifyTotp } from "../lib/totp.js";
 import { checkRateLimit, claimOnce, resetRateLimit } from "../lib/cache.js";
@@ -13,6 +13,7 @@ import { quorumMet } from "../services/meetings.js";
 import { rejectRefund } from "../services/refunds.js";
 import { audit } from "../services/audit.js";
 import { lockStatus, registerFailure, clearFailures } from "../lib/login-lockout.js";
+import { claimMagicLink, findLiveMagicLink, issueMemberMagicLink } from "../lib/magic-link.js";
 import { notifyMember } from "../lib/messaging.js";
 import {
   sign,
@@ -279,9 +280,163 @@ export async function adminApiRoutes(app: FastifyInstance) {
     };
   });
 
+  // ---- Magic-link sign-in (additional method; PIN login still works) ----
+  const MAGIC_LINK_ACCEPTED =
+    "If that address belongs to a dashboard admin, a sign-in link is on its way.";
+
+  app.post("/api/admin/magic-link/request", async (req, reply) => {
+    const body = (req.body ?? {}) as { email?: string };
+    const email = String(body.email ?? "")
+      .trim()
+      .toLowerCase();
+    const ip = req.ip;
+    const limit = await checkRateLimit(`magicreq:${ip}`, 5, 900);
+
+    if (email.includes("@") && limit.allowed) {
+      try {
+        const coopId = await resolveCoopByEmail(email);
+        if (coopId) {
+          await withCoopContext(coopId, async () => {
+            const member = await prisma.member.findFirst({
+              where: {
+                email,
+                emailVerifiedAt: { not: null },
+                role: { in: ["admin", "superadmin"] },
+                status: "active",
+              },
+            });
+            if (!member) return;
+            await issueMemberMagicLink({
+              memberId: member.id,
+              cooperativeId: coopId,
+              email,
+              ip,
+              userAgent: req.headers["user-agent"] ?? null,
+            });
+            await audit({
+              cooperativeId: coopId,
+              actorPhone: member.phone,
+              actorId: member.id,
+              actorRole: member.role,
+              action: "auth.magic_link_requested",
+              targetType: "member",
+              targetId: member.id,
+              detail: "dashboard sign-in link requested",
+            });
+          });
+        }
+      } catch (err) {
+        // Never disclose whether the address exists.
+        req.log.error({ err, requestId: req.id }, "magic link request failed");
+      }
+    }
+    return reply.code(202).send({ ok: true, message: MAGIC_LINK_ACCEPTED });
+  });
+
+  app.post("/api/admin/magic-link/consume", async (req, reply) => {
+    const body = (req.body ?? {}) as { token?: string; totp?: string };
+    const ip = req.ip;
+    const link = await findLiveMagicLink(String(body.token ?? ""));
+    if (!link?.memberId || !link.cooperativeId) {
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    const member = await withCoopContext(link.cooperativeId, () =>
+      prisma.member.findUnique({
+        where: { id: link.memberId! },
+        include: { cooperative: true },
+      }),
+    );
+    if (
+      !member ||
+      member.status !== "active" ||
+      !["admin", "superadmin"].includes(member.role) ||
+      !member.emailVerifiedAt
+    ) {
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    // Possession of the link does not replace the second factor.
+    if (member.totpSecret) {
+      if (!body.totp) {
+        return reply.code(401).send({
+          error: "Enter your 6-digit authenticator code",
+          code: "totp_required",
+          requestId: req.id,
+        });
+      }
+      if (!verifyTotp(member.totpSecret, body.totp)) {
+        await registerFailure({
+          surface: "dashboard_admin",
+          phone: member.phone,
+          ip,
+          memberId: member.id,
+          outcome: "totp_failed",
+          errorId: req.id,
+        });
+        return reply.code(401).send({ error: "invalid credentials", requestId: req.id });
+      }
+      if (!(await claimOnce("totp-login", `${member.id}:${body.totp}`, 90))) {
+        return reply.code(401).send({
+          error: "That code was already used. Enter the next code from your authenticator.",
+          code: "totp_reused",
+          requestId: req.id,
+        });
+      }
+    }
+
+    if (!(await claimMagicLink(link.id, ip))) {
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    await clearFailures("dashboard_admin", { phone: member.phone, ip });
+    const token = sign(member.phone, member.cooperative.id, member.role);
+    setAuthCookie(reply, token);
+    await audit({
+      cooperativeId: member.cooperativeId,
+      actorPhone: member.phone,
+      actorId: member.id,
+      actorRole: member.role,
+      action: "auth.magic_link_used",
+      targetType: "member",
+      targetId: member.id,
+      detail: "dashboard sign-in link consumed",
+    });
+    return {
+      member: {
+        id: member.id,
+        name: member.name,
+        phone: member.phone,
+        role: member.role,
+        cooperative: {
+          id: member.cooperative.id,
+          name: member.cooperative.name,
+          code: member.cooperative.code,
+          state: member.cooperative.state,
+          country: member.cooperative.country,
+          currency: member.cooperative.currency,
+        },
+      },
+    };
+  });
+
   // ---- Authenticated routes below ----
   app.addHook("preHandler", async (req, reply) => {
-    if (req.url === "/api/admin/login") return;
+    if (
+      req.url === "/api/admin/login" ||
+      req.url === "/api/admin/magic-link/request" ||
+      req.url === "/api/admin/magic-link/consume"
+    )
+      return;
 
     // CSRF protection: non-GET requests must include X-Requested-With header
     const method = req.method.toUpperCase();

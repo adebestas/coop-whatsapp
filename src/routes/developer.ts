@@ -6,6 +6,7 @@ import { Queue } from "bullmq";
 import { prisma } from "../lib/prisma.js";
 import { checkRateLimit, getRedis, isRedisConfigured, resetRateLimit } from "../lib/cache.js";
 import { lockStatus, registerFailure, clearFailures } from "../lib/login-lockout.js";
+import { claimMagicLink, findLiveMagicLink, issuePlatformMagicLink } from "../lib/magic-link.js";
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES } from "../lib/queue.js";
 import { listCooperativeIds, resolveCoopsByPhone, withCoopContext } from "../lib/tenant-context.js";
 import { runInSandbox } from "../lib/sandbox.js";
@@ -241,6 +242,12 @@ function missingDiagnostic(): DiagnosticResult {
 export async function developerApiRoutes(app: FastifyInstance) {
   app.addHook("preHandler", async (req, reply) => {
     if (req.method === "POST" && req.url === "/api/developer/login") return;
+    if (
+      req.method === "POST" &&
+      (req.url === "/api/developer/magic-link/request" ||
+        req.url === "/api/developer/magic-link/consume")
+    )
+      return;
 
     const method = req.method.toUpperCase();
     if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
@@ -436,6 +443,115 @@ export async function developerApiRoutes(app: FastifyInstance) {
     const mustSetup2fa = !admin.totpEnabled && TOTP_ROLES.has(admin.role);
     await auditAuth("auth.login_success", phone, admin, { totp: admin.totpEnabled });
 
+    if (admin.mustChangePin) {
+      return { mustChangePin: true, mustSetup2fa };
+    }
+    return {
+      admin: {
+        id: admin.id,
+        name: admin.name,
+        phone: admin.phone,
+        role: admin.role,
+        totpEnabled: admin.totpEnabled,
+      },
+      mustSetup2fa,
+    };
+  });
+
+  // ---- Magic-link sign-in (additional method; PIN login still works) ----
+  app.post("/api/developer/magic-link/request", async (req, reply) => {
+    const body = (req.body ?? {}) as { email?: string };
+    const email = String(body.email ?? "")
+      .trim()
+      .toLowerCase();
+    const ip = req.ip;
+    const limit = await checkRateLimit(`devmagicreq:${ip}`, 5, 900);
+
+    if (email.includes("@") && limit.allowed) {
+      try {
+        const admin = await prisma.platformAdmin.findFirst({
+          where: { email, emailVerifiedAt: { not: null }, active: true },
+        });
+        if (admin?.email) {
+          await issuePlatformMagicLink({
+            platformAdminId: admin.id,
+            email: admin.email,
+            ip,
+            userAgent: req.headers["user-agent"] ?? null,
+          });
+          await auditAuth("auth.magic_link_requested", admin.phone, admin, {
+            surface: "developer",
+          });
+        }
+      } catch (err) {
+        req.log.error({ err, requestId: req.id }, "magic link request failed");
+      }
+    }
+    return reply.code(202).send({
+      ok: true,
+      message: "If that address belongs to an operator, a sign-in link is on its way.",
+    });
+  });
+
+  app.post("/api/developer/magic-link/consume", async (req, reply) => {
+    const body = (req.body ?? {}) as { token?: string; totp?: string };
+    const ip = req.ip;
+    const link = await findLiveMagicLink(String(body.token ?? ""));
+    if (!link?.platformAdminId) {
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    const admin = await prisma.platformAdmin.findUnique({
+      where: { id: link.platformAdminId },
+    });
+    if (!admin || !admin.active || !admin.emailVerifiedAt) {
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    if (admin.totpEnabled) {
+      if (!body.totp) {
+        return reply.code(401).send({
+          error: "Enter your 6-digit authenticator code",
+          code: "totp_required",
+          requestId: req.id,
+        });
+      }
+      if (!safeVerifyTotp(admin.totpSecret, body.totp)) {
+        await registerFailure({
+          surface: "dashboard_developer",
+          phone: admin.phone,
+          ip,
+          memberId: admin.id,
+          outcome: "totp_failed",
+          errorId: req.id,
+        });
+        return reply.code(401).send({ error: "invalid 2FA code", requestId: req.id });
+      }
+    }
+
+    if (!(await claimMagicLink(link.id, ip))) {
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    await clearFailures("dashboard_developer", { phone: admin.phone, ip });
+    await prisma.platformAdmin.update({
+      where: { id: admin.id },
+      data: { lastLoginAt: new Date() },
+    });
+    const token = signPlatformToken({ id: admin.id, phone: admin.phone, role: admin.role });
+    setPlatformCookie(reply, token);
+    await auditAuth("auth.magic_link_used", admin.phone, admin, { surface: "developer" });
+
+    const mustSetup2fa = !admin.totpEnabled && TOTP_ROLES.has(admin.role);
     if (admin.mustChangePin) {
       return { mustChangePin: true, mustSetup2fa };
     }
