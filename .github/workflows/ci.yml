@@ -321,7 +321,7 @@ jobs:
           BASE_URL: ${{ secrets.PRODUCTION_BASE_URL }}
         run: |
           if [ -z "$BASE_URL" ]; then
-            echo "PRODUCTION_BASE_URL is not configured — skipping smoke check."
-            exit 0
+            echo "PRODUCTION_BASE_URL must be configured - production smoke cannot be skipped." >&2
+            exit 1
           fi
           node scripts/smoke.mjs "$BASE_URL" --timeout=420

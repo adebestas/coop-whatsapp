@@ -186,13 +186,20 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
     conservative because the dashboard is served from the same origin.
 - Fastify: `onSend` hook deletes `x-powered-by` and `server` if any plugin adds them;
   `disableRequestLogging` untouched.
-- `.env.example` regenerated from the `envcheck.ts` registry plus the 36 currently
-  undocumented keys; the 5 never-read keys (`PAYMENT_PROVIDER`, `VTU_PROVIDER`,
-  `FLUTTERWAVE_PUBLIC_KEY`, `PAYSTACK_PREFERRED_BANK`, `PAYSTACK_TRANSFER_SOURCE`)
-  are removed with a CHANGELOG note.
+- `FLUTTERWAVE_PUBLIC_KEY` removed from `.env.example` (nothing reads it). The other
+  four keys previously believed dead are live: `PAYMENT_PROVIDER`
+  (`payments/index.ts`), `VTU_PROVIDER` (`payments/vtu.ts`),
+  `PAYSTACK_PREFERRED_BANK` and `PAYSTACK_TRANSFER_SOURCE` (`payments/paystack.ts`),
+  so they stay documented.
 - Tests: a vitest case that builds the app and asserts no `x-powered-by`/`server`
   header; a repo test asserting `.env` is ignored and no `.env*` file except
-  `.env.example`, `deploy/.env.example` and `docker-compose` templates is tracked.
+  `.env.example`, `deploy/.env.example` and `docker-compose` templates is tracked;
+  a Caddyfile regression test for the dotfile block and header stripping.
+- Dead smoke script removed; production deploy fails (instead of skipping) when
+  `PRODUCTION_BASE_URL` is unset; manual `loan_reminders` job documented in README.
+- Lint/format widening to `tests/` is **deferred**: the suite currently has 19
+  pre-existing `no-unused-vars` errors and 39 unformatted test files. Fixing them
+  is a mechanical follow-up commit so the CI contract does not change in this PR.
 
 ## Phase 4 â€” Identity quality
 

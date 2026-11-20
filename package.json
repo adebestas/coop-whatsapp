@@ -27,7 +27,11 @@
     "db:reset": "npx tsx src/scripts/db-reset.ts --confirm",
     "db:reset:seed": "npm run db:reset && npm run db:seed",
     "db:migrate-codes": "npx tsx src/scripts/migrate-member-codes.ts",
-    "seed:ombudsman": "npx tsx src/seed.ts --ombudsman"
+    "seed:ombudsman": "npx tsx src/seed.ts --ombudsman",
+    "check": "npm run typecheck && npm run lint && npm run audit:ci && npm run test:gate",
+    "audit:ci": "npm audit --omit=dev --audit-level=high",
+    "test:gate": "vitest run tests/admin-auth.test.ts tests/platform-auth.test.ts tests/admin-login-freeze.test.ts tests/login-lockout.test.ts tests/magic-link.test.ts tests/audit-context.test.ts tests/edge-hardening.test.ts tests/schema-sync.test.ts tests/webhook-dlq.test.ts tests/loan-repayment-reminders.test.ts tests/savings-products.test.ts tests/export-retention.test.ts",
+    "check:full": "npm run typecheck && npm run lint && npm run audit:ci && npm test"
   },
   "dependencies": {
     "@fastify/compress": "^8.3.1",
@@ -67,6 +71,7 @@
   },
   "overrides": {
     "deepmerge-ts": "^8.0.2",
-    "uuid": "^11.1.1"
+    "uuid": "^11.1.1",
+    "effect": "^3.22.5"
   }
 }

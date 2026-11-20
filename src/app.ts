@@ -179,6 +179,14 @@ export function buildApp() {
     timeWindow: "1 minute",
   });
 
+  // Frameworks and plugins announce themselves; the edge strips these too, but
+  // defence in depth keeps direct-to-origin deployments quiet as well.
+  app.addHook("onSend", async (_req, reply, payload) => {
+    reply.removeHeader("x-powered-by");
+    reply.removeHeader("server");
+    return payload;
+  });
+
   app.get("/health", async (req, reply) => {
     try {
       await prisma.$queryRaw`SELECT 1`;
