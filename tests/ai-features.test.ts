@@ -9,10 +9,7 @@ import {
   getSavingsTrend,
   getLoanPerformance,
 } from "../src/lib/ai-data.js";
-import {
-  generateFinancialInsights,
-  generateLoanRiskAssessment,
-} from "../src/lib/ai-insights.js";
+import { generateFinancialInsights, generateLoanRiskAssessment } from "../src/lib/ai-insights.js";
 import { generateSupportResponse, generateContextualHelp } from "../src/lib/ai-support.js";
 import {
   sendSavingsReminders,
@@ -27,15 +24,33 @@ beforeEach(async () => {
   vi.clearAllMocks();
   delete process.env.GROQ_API_KEY;
   // Clean up in order of dependencies (ignore errors from FK constraints)
-  try { await prisma.$executeRaw`DELETE FROM posting`; } catch {}
-  try { await prisma.$executeRaw`DELETE FROM "JournalEntry"`; } catch {}
-  try { await prisma.$executeRaw`DELETE FROM contribution`; } catch {}
-  try { await prisma.$executeRaw`DELETE FROM repayment`; } catch {}
-  try { await prisma.$executeRaw`DELETE FROM loan`; } catch {}
-  try { await prisma.$executeRaw`DELETE FROM wallet`; } catch {}
-  try { await prisma.$executeRaw`DELETE FROM member`; } catch {}
-  try { await prisma.$executeRaw`DELETE FROM cooperative`; } catch {}
-  try { await prisma.$executeRaw`DELETE FROM session`; } catch {}
+  try {
+    await prisma.$executeRaw`DELETE FROM posting`;
+  } catch {}
+  try {
+    await prisma.$executeRaw`DELETE FROM "JournalEntry"`;
+  } catch {}
+  try {
+    await prisma.$executeRaw`DELETE FROM contribution`;
+  } catch {}
+  try {
+    await prisma.$executeRaw`DELETE FROM repayment`;
+  } catch {}
+  try {
+    await prisma.$executeRaw`DELETE FROM loan`;
+  } catch {}
+  try {
+    await prisma.$executeRaw`DELETE FROM wallet`;
+  } catch {}
+  try {
+    await prisma.$executeRaw`DELETE FROM member`;
+  } catch {}
+  try {
+    await prisma.$executeRaw`DELETE FROM cooperative`;
+  } catch {}
+  try {
+    await prisma.$executeRaw`DELETE FROM session`;
+  } catch {}
 });
 
 afterEach(() => {

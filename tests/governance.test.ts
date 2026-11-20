@@ -333,7 +333,7 @@ describe("support tickets", () => {
 describe("voting engine", () => {
   it("elects a unit admin by ballot and installs the winner", async () => {
     const coop = await makeCoop("TEST39");
-    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const unit = await prisma.unit.create({
       data: { name: "Lagos Office", code: "LAG01", cooperativeId: coop.id },
     });
@@ -381,7 +381,7 @@ describe("voting engine", () => {
 
   it("runs a cooperative-wide executive election", async () => {
     const coop = await makeCoop("TEST40");
-    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const a = await makeMember(PHONE, coop.id);
     const b = await makeMember(G_PHONE, coop.id);
 

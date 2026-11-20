@@ -36,7 +36,12 @@ function log(msg) {
 
 function prisma(args, { allowFail = false } = {}) {
   log(`prisma ${args.join(" ")}`);
-  const res = spawnSync(npx, ["prisma", ...args], { cwd: root, stdio: "inherit", env: process.env, shell: process.platform === "win32" });
+  const res = spawnSync(npx, ["prisma", ...args], {
+    cwd: root,
+    stdio: "inherit",
+    env: process.env,
+    shell: process.platform === "win32",
+  });
   if (res.status !== 0 && !allowFail) {
     log(`FAILED (exit ${res.status})`);
     process.exit(1);
@@ -59,7 +64,11 @@ async function inspect() {
       );
       baselineRecorded = rows.length > 0;
     }
-    return { hasAppTables: names.has("Member"), hasHistory: names.has("_prisma_migrations"), baselineRecorded };
+    return {
+      hasAppTables: names.has("Member"),
+      hasHistory: names.has("_prisma_migrations"),
+      baselineRecorded,
+    };
   } finally {
     await client.$disconnect();
   }
@@ -78,30 +87,48 @@ async function main() {
     process.exit(1);
   }
   if (!process.env.DATABASE_URL.startsWith("postgres")) {
-    log(`DATABASE_URL is not a PostgreSQL URL (${process.env.DATABASE_URL.split(":")[0]}:...). Refusing: production schema is PostgreSQL.`);
+    log(
+      `DATABASE_URL is not a PostgreSQL URL (${process.env.DATABASE_URL.split(":")[0]}:...). Refusing: production schema is PostgreSQL.`,
+    );
     process.exit(1);
   }
 
   const state = await inspect();
-  log(`state: appTables=${state.hasAppTables} history=${state.hasHistory} baselineRecorded=${state.baselineRecorded}`);
+  log(
+    `state: appTables=${state.hasAppTables} history=${state.hasHistory} baselineRecorded=${state.baselineRecorded}`,
+  );
 
   if (state.hasAppTables && !state.baselineRecorded) {
-    log(`database has application tables but no '${BASELINE_MIGRATION}' record -> candidate for baselining`);
+    log(
+      `database has application tables but no '${BASELINE_MIGRATION}' record -> candidate for baselining`,
+    );
     if (process.env.DB_BASELINE_FORCE === "1") {
       log("DB_BASELINE_FORCE=1 set: skipping drift check");
     } else {
       if (!existsSync(BASELINE_SCHEMA)) {
-        log(`baseline schema missing at ${BASELINE_SCHEMA}; cannot verify drift. Refusing to boot.`);
+        log(
+          `baseline schema missing at ${BASELINE_SCHEMA}; cannot verify drift. Refusing to boot.`,
+        );
         process.exit(1);
       }
       // exit 0 = identical, 2 = differences, 1 = error
       const code = prisma(
-        ["migrate", "diff", "--from-url", process.env.DATABASE_URL, "--to-schema-datamodel", BASELINE_SCHEMA, "--exit-code"],
+        [
+          "migrate",
+          "diff",
+          "--from-url",
+          process.env.DATABASE_URL,
+          "--to-schema-datamodel",
+          BASELINE_SCHEMA,
+          "--exit-code",
+        ],
         { allowFail: true },
       );
       if (code === 2) {
         log("REFUSING TO BOOT: live schema differs from the 0_init baseline (diff printed above).");
-        log("Reconcile manually, then either fix the schema or re-run with DB_BASELINE_FORCE=1 once you have verified it.");
+        log(
+          "Reconcile manually, then either fix the schema or re-run with DB_BASELINE_FORCE=1 once you have verified it.",
+        );
         process.exit(1);
       }
       if (code !== 0) {

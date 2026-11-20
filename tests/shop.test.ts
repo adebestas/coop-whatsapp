@@ -5,7 +5,16 @@ import { notifyMember } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
 import { handleMessage } from "../src/services/conversation.js";
-import { installmentSchedule, shopEligibility, createShopItem, createShopOrder, approveShopOrder, rejectShopOrder, dispatchShopOrder, runShopInstallments } from "../src/services/shop.js";
+import {
+  installmentSchedule,
+  shopEligibility,
+  createShopItem,
+  createShopOrder,
+  approveShopOrder,
+  rejectShopOrder,
+  dispatchShopOrder,
+  runShopInstallments,
+} from "../src/services/shop.js";
 
 const PHONE = "2348070000001";
 
@@ -21,7 +30,16 @@ async function wipe(table: string) {
 }
 
 beforeEach(async () => {
-  for (const table of ["session", "shopOrder", "shopItem", "loanRepayment", "loan", "wallet", "member", "cooperative"]) {
+  for (const table of [
+    "session",
+    "shopOrder",
+    "shopItem",
+    "loanRepayment",
+    "loan",
+    "wallet",
+    "member",
+    "cooperative",
+  ]) {
     await wipe(table);
   }
   clearMemberCache();
@@ -30,7 +48,9 @@ beforeEach(async () => {
   vi.mocked(notifyMember).mockClear();
 });
 
-async function seedMember(opts: { totalSaved?: number; role?: string; frozenAt?: Date | null } = {}) {
+async function seedMember(
+  opts: { totalSaved?: number; role?: string; frozenAt?: Date | null } = {},
+) {
   const coop = await prisma.cooperative.create({
     data: { name: "Shop Test Coop", code: `SH${Date.now()}${Math.floor(Math.random() * 1000)}` },
   });
@@ -52,7 +72,16 @@ async function seedMember(opts: { totalSaved?: number; role?: string; frozenAt?:
   return { coop, member, wallet: member.wallet! };
 }
 
-async function seedItem(coopId: string, createdById: string, over: Partial<{ name: string; cashPrice: number; maxMonths: number; stockQty: number | null }> = {}) {
+async function seedItem(
+  coopId: string,
+  createdById: string,
+  over: Partial<{
+    name: string;
+    cashPrice: number;
+    maxMonths: number;
+    stockQty: number | null;
+  }> = {},
+) {
   return prisma.shopItem.create({
     data: {
       cooperativeId: coopId,
@@ -121,7 +150,16 @@ describe("eligibility", () => {
     const { coop, member } = await seedMember({ totalSaved: 5000000 });
     const item = await seedItem(coop.id, member.id);
     await prisma.shopOrder.create({
-      data: { ref: "shop-open1", cooperativeId: coop.id, memberId: member.id, itemId: item.id, cashPrice: 100000, months: 1, monthlyKobo: 100000, status: "pending" },
+      data: {
+        ref: "shop-open1",
+        cooperativeId: coop.id,
+        memberId: member.id,
+        itemId: item.id,
+        cashPrice: 100000,
+        months: 1,
+        monthlyKobo: 100000,
+        status: "pending",
+      },
     });
     const res = await shopEligibility(member.id, 100000);
     expect(res.ok).toBe(false);
@@ -207,19 +245,45 @@ describe("approval and dispatch", () => {
   it("approves a pending order and notifies the member", async () => {
     const { coop, member } = await seedMember({ totalSaved: 20000000, role: "admin" });
     const item = await seedItem(coop.id, member.id);
-    const created = await createShopOrder({ cooperativeId: coop.id, memberId: member.id, memberName: member.name, itemId: item.id, months: 3 });
-    const res = await approveShopOrder({ cooperativeId: coop.id, key: created.ref!, actorId: member.id, actorPhone: PHONE, actorRole: "admin" });
+    const created = await createShopOrder({
+      cooperativeId: coop.id,
+      memberId: member.id,
+      memberName: member.name,
+      itemId: item.id,
+      months: 3,
+    });
+    const res = await approveShopOrder({
+      cooperativeId: coop.id,
+      key: created.ref!,
+      actorId: member.id,
+      actorPhone: PHONE,
+      actorRole: "admin",
+    });
     expect(res.ok).toBe(true);
     const order = await prisma.shopOrder.findUnique({ where: { id: created.orderId! } });
     expect(order?.status).toBe("approved");
-    expect(vi.mocked(notifyMember).mock.calls.some((c) => String(c[1]).includes(created.ref!))).toBe(true);
+    expect(
+      vi.mocked(notifyMember).mock.calls.some((c) => String(c[1]).includes(created.ref!)),
+    ).toBe(true);
   });
 
   it("rejects an order with a reason", async () => {
     const { coop, member } = await seedMember({ totalSaved: 20000000, role: "admin" });
     const item = await seedItem(coop.id, member.id);
-    const created = await createShopOrder({ cooperativeId: coop.id, memberId: member.id, memberName: member.name, itemId: item.id, months: 1 });
-    const res = await rejectShopOrder({ cooperativeId: coop.id, key: created.ref!, reason: "KYC pending", actorId: member.id, actorPhone: PHONE });
+    const created = await createShopOrder({
+      cooperativeId: coop.id,
+      memberId: member.id,
+      memberName: member.name,
+      itemId: item.id,
+      months: 1,
+    });
+    const res = await rejectShopOrder({
+      cooperativeId: coop.id,
+      key: created.ref!,
+      reason: "KYC pending",
+      actorId: member.id,
+      actorPhone: PHONE,
+    });
     expect(res.ok).toBe(true);
     const order = await prisma.shopOrder.findUnique({ where: { id: created.orderId! } });
     expect(order?.status).toBe("rejected");
@@ -229,8 +293,19 @@ describe("approval and dispatch", () => {
   it("refuses dispatch before approval", async () => {
     const { coop, member } = await seedMember({ totalSaved: 20000000 });
     const item = await seedItem(coop.id, member.id);
-    const created = await createShopOrder({ cooperativeId: coop.id, memberId: member.id, memberName: member.name, itemId: item.id, months: 1 });
-    const res = await dispatchShopOrder({ cooperativeId: coop.id, key: created.ref!, actorId: member.id, actorPhone: PHONE });
+    const created = await createShopOrder({
+      cooperativeId: coop.id,
+      memberId: member.id,
+      memberName: member.name,
+      itemId: item.id,
+      months: 1,
+    });
+    const res = await dispatchShopOrder({
+      cooperativeId: coop.id,
+      key: created.ref!,
+      actorId: member.id,
+      actorPhone: PHONE,
+    });
     expect(res.ok).toBe(false);
     expect(res.message).toMatch(/must be approved/i);
   });
@@ -238,9 +313,25 @@ describe("approval and dispatch", () => {
   it("dispatches, creates an interest-free shop loan, decrements stock and books the ledger", async () => {
     const { coop, member } = await seedMember({ totalSaved: 20000000 });
     const item = await seedItem(coop.id, member.id, { stockQty: 2 });
-    const created = await createShopOrder({ cooperativeId: coop.id, memberId: member.id, memberName: member.name, itemId: item.id, months: 3 });
-    await approveShopOrder({ cooperativeId: coop.id, key: created.ref!, actorId: member.id, actorPhone: PHONE });
-    const res = await dispatchShopOrder({ cooperativeId: coop.id, key: created.ref!, actorId: member.id, actorPhone: PHONE });
+    const created = await createShopOrder({
+      cooperativeId: coop.id,
+      memberId: member.id,
+      memberName: member.name,
+      itemId: item.id,
+      months: 3,
+    });
+    await approveShopOrder({
+      cooperativeId: coop.id,
+      key: created.ref!,
+      actorId: member.id,
+      actorPhone: PHONE,
+    });
+    const res = await dispatchShopOrder({
+      cooperativeId: coop.id,
+      key: created.ref!,
+      actorId: member.id,
+      actorPhone: PHONE,
+    });
     expect(res.ok).toBe(true);
 
     const order = await prisma.shopOrder.findUnique({ where: { id: created.orderId! } });
@@ -339,7 +430,9 @@ describe("installment collection", () => {
     const next = after?.dueDate ?? new Date(0);
     const diffDays = Math.round((next.getTime() - dueDate.getTime()) / 86400000);
     expect(diffDays).toBe(7);
-    expect(vi.mocked(notifyMember).mock.calls.some((c) => String(c[1]).includes("still due"))).toBe(true);
+    expect(vi.mocked(notifyMember).mock.calls.some((c) => String(c[1]).includes("still due"))).toBe(
+      true,
+    );
   });
 
   it("records arrears without debiting when the wallet is empty", async () => {

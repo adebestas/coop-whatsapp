@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { prisma, cleanupDatabase, createTestCoop, createTestMember } from "./setup.js";
+import { cleanupDatabase, createTestCoop, createTestMember } from "./setup.js";
 import { maskPhone, generateSTR, handleSTR } from "../src/services/aml.js";
 
 beforeEach(async () => {
@@ -17,7 +17,7 @@ describe("NDPR / AML PII Masking (maskPhone & generateSTR)", () => {
 
   it("masks member phone numbers in generated STR summaries and report objects", async () => {
     const coop = await createTestCoop("STRMSK1");
-    const member = await createTestMember(coop.id, {
+    await createTestMember(coop.id, {
       phone: "2348012345678",
       name: "Tunde Privacy",
     });

@@ -335,7 +335,7 @@ describe("beneficial ownership", () => {
     vi.mocked(sendText).mockClear();
 
     await handleAdminCommand(admin.phone, "corporate", [target.code, "RC", "7654321"]);
-    let stored = await prisma.member.findUnique({ where: { id: target.id } });
+    const stored = await prisma.member.findUnique({ where: { id: target.id } });
     expect(stored?.entityType).toBe("corporate");
     expect(stored?.rcNumber).toBe("RC 7654321");
 

@@ -1,10 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  prisma,
-  createTestCoop,
-  createTestMember,
-  cleanupDatabase,
-} from "./setup.js";
+import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import {
   createGroup,
   joinGroup,
@@ -17,17 +12,18 @@ import {
   groupLoans,
 } from "../src/services/groups.js";
 import { approveLoan, totalRepayable } from "../src/services/loans.js";
-import {
-  scanGuarantorDefaults,
-  executeDueDeductions,
-} from "../src/services/guarantordeduction.js";
+import { scanGuarantorDefaults, executeDueDeductions } from "../src/services/guarantordeduction.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { clearMemberCache } from "../src/services/cooperative.js";
 import { handleAdminCommand } from "../src/services/admin.js";
 import { createUnit, setUnitAdmin } from "../src/services/units.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 
-const actor = (m: { id: string; phone: string; role: string }): {
+const actor = (m: {
+  id: string;
+  phone: string;
+  role: string;
+}): {
   id: string;
   phone: string;
   role: string;
@@ -64,15 +60,7 @@ describe("ROSCA groups", () => {
     const a = await createTestMember(coop.id, { phone: "2348000010002" });
     const b = await createTestMember(coop.id, { phone: "2348000010003" });
 
-    const created = await createGroup(
-      coop.id,
-      "rosca",
-      "Family",
-      "FAM1",
-      500000,
-      2,
-      actor(admin),
-    );
+    const created = await createGroup(coop.id, "rosca", "Family", "FAM1", 500000, 2, actor(admin));
     expect(created.ok).toBe(true);
     const groupId = created.groupId!;
 
@@ -256,9 +244,9 @@ describe("VSLA groups", () => {
     expect((await contributeToGroup(coop.id, groupId, b.id, 100000)).ok).toBe(true);
     const closed1 = await closeGroupCycle(coop.id, groupId, actor(admin));
     expect(closed1.shareOutAmount).toBe(400000);
-    expect((await prisma.groupMember.findMany({ where: { groupId } })).every((m) => m.shares === 0)).toBe(
-      true,
-    );
+    expect(
+      (await prisma.groupMember.findMany({ where: { groupId } })).every((m) => m.shares === 0),
+    ).toBe(true);
 
     // Cycle 2: both buy one share each. Only 200,000 is in the fresh pot.
     expect((await contributeToGroup(coop.id, groupId, a.id, 100000)).ok).toBe(true);
@@ -440,7 +428,9 @@ describe("joint-liability group loans", () => {
       expect(deductions.length).toBe(1);
       expect(deductions[0].guarantorId).toBe(b.id);
       expect(deductions.reduce((s, d) => s + d.amount, 0)).toBe(expectedShare);
-      expect(await prisma.guarantorDeduction.findFirst({ where: { loanId, guarantorId: a.id } })).toBeNull();
+      expect(
+        await prisma.guarantorDeduction.findFirst({ where: { loanId, guarantorId: a.id } }),
+      ).toBeNull();
       expect(deductions.every((d) => d.status === "notified")).toBe(true);
 
       const texts = vi

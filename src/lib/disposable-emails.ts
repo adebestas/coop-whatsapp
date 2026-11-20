@@ -67,11 +67,7 @@ const BUILTIN_DISPOSABLE_DOMAINS: readonly string[] = [
 let cached: Set<string> | null = null;
 
 function normalise(domain: string): string {
-  return domain
-    .trim()
-    .toLowerCase()
-    .replace(/^@+/, "")
-    .replace(/\.+$/, "");
+  return domain.trim().toLowerCase().replace(/^@+/, "").replace(/\.+$/, "");
 }
 
 /** Built-in list merged with DISPOSABLE_EMAIL_DOMAINS (read once at boot). */
@@ -110,7 +106,9 @@ export function isDisposableEmail(email: string): boolean {
  * Gate before an email is accepted for sign-in or identity. The rejection
  * message is deliberately vague so it does not read as a domain blocklist.
  */
-export function rejectDisposableEmail(email: string): { ok: true } | { ok: false; message: string } {
+export function rejectDisposableEmail(
+  email: string,
+): { ok: true } | { ok: false; message: string } {
   if (isDisposableEmail(email)) {
     return { ok: false, message: "Please use a different email address." };
   }

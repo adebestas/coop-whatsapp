@@ -16,7 +16,9 @@ function normalise(file: string): string {
     .replace(/\r\n/g, "\n")
     .split("\n")
     .filter((line) => !line.trimStart().startsWith("//"))
-    .map((line) => line.replace(/^\s*provider\s*=\s*"(postgresql|sqlite)"\s*$/, "  provider = <DB>"))
+    .map((line) =>
+      line.replace(/^\s*provider\s*=\s*"(postgresql|sqlite)"\s*$/, "  provider = <DB>"),
+    )
     .join("\n")
     .trim();
 }
@@ -24,7 +26,10 @@ function normalise(file: string): string {
 describe("prisma schema sync", () => {
   it("schema.prisma is PostgreSQL and schema.local.prisma is SQLite", () => {
     const prod = readFileSync(path.resolve(__dirname, "..", "prisma", "schema.prisma"), "utf8");
-    const local = readFileSync(path.resolve(__dirname, "..", "prisma", "schema.local.prisma"), "utf8");
+    const local = readFileSync(
+      path.resolve(__dirname, "..", "prisma", "schema.local.prisma"),
+      "utf8",
+    );
     expect(prod).toMatch(/datasource db \{[^}]*provider\s*=\s*"postgresql"/);
     expect(local).toMatch(/datasource db \{[^}]*provider\s*=\s*"sqlite"/);
   });
@@ -34,7 +39,10 @@ describe("prisma schema sync", () => {
   });
 
   it("migration_lock.toml is PostgreSQL", () => {
-    const lock = readFileSync(path.resolve(__dirname, "..", "prisma", "migrations", "migration_lock.toml"), "utf8");
+    const lock = readFileSync(
+      path.resolve(__dirname, "..", "prisma", "migrations", "migration_lock.toml"),
+      "utf8",
+    );
     expect(lock).toMatch(/provider\s*=\s*"postgresql"/);
   });
 });

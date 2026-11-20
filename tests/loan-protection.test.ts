@@ -117,12 +117,10 @@ describe("loan protection premium at disbursement", () => {
       .reduce((s, p) => s + p.amount, 0);
     expect(debit).toBe(1000);
     expect(credit).toBe(1000);
-    expect(
-      jr!.postings.find((p) => p.direction === "DEBIT")!.account,
-    ).toBe("assets:bank");
-    expect(
-      jr!.postings.find((p) => p.direction === "CREDIT")!.account,
-    ).toBe("liabilities:loan_protection_fund");
+    expect(jr!.postings.find((p) => p.direction === "DEBIT")!.account).toBe("assets:bank");
+    expect(jr!.postings.find((p) => p.direction === "CREDIT")!.account).toBe(
+      "liabilities:loan_protection_fund",
+    );
 
     expect((await trialBalance(coop.id)).balanced).toBe(true);
   });

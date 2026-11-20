@@ -31,11 +31,13 @@ describe("extractLoanRequest", () => {
     process.env.GROQ_API_KEY = "test-key";
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        groqReply(
-          '{"loan":{"amount":150000,"months":3,"guarantors":["08031234567","ABC123-XYZ"]}}',
+      vi
+        .fn()
+        .mockResolvedValue(
+          groqReply(
+            '{"loan":{"amount":150000,"months":3,"guarantors":["08031234567","ABC123-XYZ"]}}',
+          ),
         ),
-      ),
     );
 
     const result = await extractLoanRequest(
@@ -60,9 +62,9 @@ describe("extractLoanRequest", () => {
     process.env.GROQ_API_KEY = "test-key";
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        groqReply('{"loan":{"amount":"150000","months":"3","guarantors":[]}}'),
-      ),
+      vi
+        .fn()
+        .mockResolvedValue(groqReply('{"loan":{"amount":"150000","months":"3","guarantors":[]}}')),
     );
 
     expect(await extractLoanRequest("loan pls")).toEqual({
@@ -76,9 +78,7 @@ describe("extractLoanRequest", () => {
     process.env.GROQ_API_KEY = "test-key";
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        groqReply('{"loan":{"amount":-5,"months":24,"guarantors":[]}}'),
-      ),
+      vi.fn().mockResolvedValue(groqReply('{"loan":{"amount":-5,"months":24,"guarantors":[]}}')),
     );
 
     expect(await extractLoanRequest("loan")).toEqual({
@@ -92,11 +92,13 @@ describe("extractLoanRequest", () => {
     process.env.GROQ_API_KEY = "test-key";
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        groqReply(
-          '{"loan":{"amount":150000,"months":3,"guarantors":["ABC123-XYZ","ABC123-XYZ","bad\\nentry","/etc/passwd"]}}',
+      vi
+        .fn()
+        .mockResolvedValue(
+          groqReply(
+            '{"loan":{"amount":150000,"months":3,"guarantors":["ABC123-XYZ","ABC123-XYZ","bad\\nentry","/etc/passwd"]}}',
+          ),
         ),
-      ),
     );
 
     const result = await extractLoanRequest("loan");

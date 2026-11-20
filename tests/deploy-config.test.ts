@@ -73,9 +73,9 @@ describe("render.yaml deployment wiring", () => {
 
 describe("hardening: compiled output and backups", () => {
   it("does not ship source maps", () => {
-    const tsconfig = JSON.parse(
-      readFileSync(path.join(repoRoot, "tsconfig.json"), "utf8"),
-    ) as { compilerOptions?: { sourceMap?: boolean } };
+    const tsconfig = JSON.parse(readFileSync(path.join(repoRoot, "tsconfig.json"), "utf8")) as {
+      compilerOptions?: { sourceMap?: boolean };
+    };
     expect(tsconfig.compilerOptions?.sourceMap).toBe(false);
   });
 

@@ -53,7 +53,13 @@ describe("savings products", () => {
     const admin = await createTestMember(coop.id, { phone: "2348000020001", role: "superadmin" });
     const m = await createTestMember(coop.id, { phone: "2348000020002" });
 
-    const created = await createProduct(coop.id, "goal", "School Fees", { minAmount: 0 }, actor(admin));
+    const created = await createProduct(
+      coop.id,
+      "goal",
+      "School Fees",
+      { minAmount: 0 },
+      actor(admin),
+    );
     expect(created.ok).toBe(true);
     expect(created.productId).toBeTruthy();
 

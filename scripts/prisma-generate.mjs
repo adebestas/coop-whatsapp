@@ -26,7 +26,9 @@ else if (arg === "--prod") useLocal = false;
 else useLocal = (process.env.DATABASE_URL ?? "").startsWith("file:");
 
 const schema = useLocal ? "prisma/schema.local.prisma" : "prisma/schema.prisma";
-process.stdout.write(`[prisma-generate] ${useLocal ? "SQLite (local)" : "PostgreSQL (prod)"} -> ${schema}\n`);
+process.stdout.write(
+  `[prisma-generate] ${useLocal ? "SQLite (local)" : "PostgreSQL (prod)"} -> ${schema}\n`,
+);
 
 const npx = process.platform === "win32" ? "npx.cmd" : "npx";
 const res = spawnSync(npx, ["prisma", "generate", "--schema", schema], {

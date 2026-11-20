@@ -71,7 +71,11 @@ function withAuditSerialization<T>(coopId: string, fn: () => Promise<T>): Promis
  * concurrent writes cannot fork the chain and verification is deterministic.
  */
 export async function audit(entry: AuditEntry): Promise<void> {
-  void evaluateAdminAction({ action: entry.action, actorPhone: entry.actorPhone, amount: entry.amount }).catch(() => undefined);
+  void evaluateAdminAction({
+    action: entry.action,
+    actorPhone: entry.actorPhone,
+    amount: entry.amount,
+  }).catch(() => undefined);
   try {
     await withAuditSerialization(entry.cooperativeId, async () => {
       const last = await prisma.auditLog.findFirst({

@@ -143,14 +143,10 @@ describe("7-year PII retention", () => {
     const result = await runDataRetention(JOB_NOW);
     expect(result.anonymized).toBe(1);
 
-    expect(
-      await prisma.memberBeneficialOwner.count({ where: { memberId: member.id } }),
-    ).toBe(0);
+    expect(await prisma.memberBeneficialOwner.count({ where: { memberId: member.id } })).toBe(0);
     expect(await prisma.beneficiary.count({ where: { memberId: member.id } })).toBe(0);
     expect(await prisma.favoritePayee.count({ where: { memberId: member.id } })).toBe(0);
-    expect(
-      await prisma.phoneChangeRequest.count({ where: { memberId: member.id } }),
-    ).toBe(0);
+    expect(await prisma.phoneChangeRequest.count({ where: { memberId: member.id } })).toBe(0);
     expect(await prisma.session.count({ where: { phone } })).toBe(0);
     expect(await prisma.webhookFailure.count({ where: { phone } })).toBe(0);
   });
@@ -234,14 +230,10 @@ describe("self-service account erasure", () => {
     // ...and so is every linked record that holds PII the member did not
     // expect to keep: beneficial owners' NIN/BVN, saved bank accounts, phone
     // change history, and failed-webhook phone numbers.
-    expect(
-      await prisma.memberBeneficialOwner.count({ where: { memberId: member.id } }),
-    ).toBe(0);
+    expect(await prisma.memberBeneficialOwner.count({ where: { memberId: member.id } })).toBe(0);
     expect(await prisma.beneficiary.count({ where: { memberId: member.id } })).toBe(0);
     expect(await prisma.favoritePayee.count({ where: { memberId: member.id } })).toBe(0);
-    expect(
-      await prisma.phoneChangeRequest.count({ where: { memberId: member.id } }),
-    ).toBe(0);
+    expect(await prisma.phoneChangeRequest.count({ where: { memberId: member.id } })).toBe(0);
     expect(await prisma.webhookFailure.count({ where: { phone } })).toBe(0);
 
     // The erasure record itself must not re-introduce the raw phone number.

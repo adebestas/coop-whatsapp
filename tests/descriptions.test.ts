@@ -54,7 +54,9 @@ async function assertDescriptions(cooperativeId: string, expected?: Expectation)
     const d = (e.description ?? "").trim();
     expect(d, `journal entry ${e.txRef} must carry a description`).not.toBe("");
     expect(d.length, `journal entry ${e.txRef} description too small: "${d}"`).toBeGreaterThan(8);
-    expect(GENERIC.test(d), `journal entry ${e.txRef} has a generic description: "${d}"`).toBe(false);
+    expect(GENERIC.test(d), `journal entry ${e.txRef} has a generic description: "${d}"`).toBe(
+      false,
+    );
   }
 
   // The invariant must not pass vacuously: the flow has to have posted a journal.
@@ -201,7 +203,10 @@ describe("money descriptions are human-readable app-wide", () => {
 
   it("loan repayment names the installment and formats the amount", async () => {
     const coop = await createTestCoop("DESC-LOAN");
-    const member = await createTestMember(coop.id, { phone: "2348010000051", name: "Ada Borrower" });
+    const member = await createTestMember(coop.id, {
+      phone: "2348010000051",
+      name: "Ada Borrower",
+    });
     await fundWallet(member.id, 500000);
     const loan = await prisma.loan.create({
       data: {
@@ -240,7 +245,13 @@ describe("money descriptions are human-readable app-wide", () => {
     const recommendActor = { id: admin.id, phone: admin.phone, role: admin.role };
     const superActor = { id: superadmin.id, phone: superadmin.phone, role: superadmin.role };
 
-    const toPay = await recommendRefund(coop.id, member.id, 500000, "Double payment", recommendActor);
+    const toPay = await recommendRefund(
+      coop.id,
+      member.id,
+      500000,
+      "Double payment",
+      recommendActor,
+    );
     expect(toPay.ok).toBe(true);
     const paid = await approveRefund(coop.id, toPay.refundId!, superActor);
     expect(paid.ok).toBe(true);
@@ -365,7 +376,10 @@ describe("money descriptions are human-readable app-wide", () => {
     try {
       vi.setSystemTime(new Date("2026-03-01T10:00:00Z"));
       const coop = await createTestCoop("DESC-GUAR");
-      const borrower = await createTestMember(coop.id, { phone: "2348010000101", name: "Ada Debtor" });
+      const borrower = await createTestMember(coop.id, {
+        phone: "2348010000101",
+        name: "Ada Debtor",
+      });
       const g1 = await createTestMember(coop.id, { phone: "2348010000102", name: "Ada Guarantor" });
       await prisma.loan.create({
         data: {

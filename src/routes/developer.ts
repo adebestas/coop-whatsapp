@@ -436,7 +436,9 @@ export async function developerApiRoutes(app: FastifyInstance) {
     }
 
     await resetRateLimit(`devacct:${phone}`);
-    void evaluateLoginAnomalies({ surface: "dashboard_developer", phone, ip }).catch(() => undefined);
+    void evaluateLoginAnomalies({ surface: "dashboard_developer", phone, ip }).catch(
+      () => undefined,
+    );
     await prisma.platformAdmin.update({
       where: { id: admin.id },
       data: { lastLoginAt: new Date() },

@@ -97,11 +97,11 @@ must not import routes. Do not put SQL/Prisma writes directly in `routes/`.
 `npm run check` must exit 0 and its output pasted into the hand-off summary:
 
 1. `tsc --noEmit` (types)
-2. `eslint src/`
+2. `eslint src/ tests/ scripts/`
 3. `npm audit --omit=dev --audit-level=high` (dependency security)
 4. `npm run test:gate` — the curated vitest gate (auth, lockout, magic links,
-   audit context, edge hardening, schema sync, webhook DLQ, loans, savings,
-   exports).
+   audit context, identity quality, input surface, edge hardening, schema sync,
+   webhook DLQ, loans, savings, exports, provider reconciliation).
 
 `npm run check:full` runs the entire vitest suite instead of the gate. It takes
 well over an hour on an 8 GB machine and has historically hit SQLite

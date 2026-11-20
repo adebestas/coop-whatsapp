@@ -309,7 +309,10 @@ describe("meeting service", () => {
     expect(motions.message).toContain("Listed Motion");
 
     const actions = (
-      await prisma.auditLog.findMany({ where: { cooperativeId: coop.id }, select: { action: true } })
+      await prisma.auditLog.findMany({
+        where: { cooperativeId: coop.id },
+        select: { action: true },
+      })
     ).map((e) => e.action);
     expect(actions).toEqual(
       expect.arrayContaining(["meeting.schedule", "meeting.open", "motion.add"]),
@@ -432,13 +435,17 @@ describe("meeting chat commands", () => {
     expect(await prisma.motionVote.count()).toBe(1);
 
     await handleMessage(admin.phone, `closemotion ${mShort}`);
-    expect((await prisma.motion.findUnique({ where: { id: motion!.id } }))!.closedAt).not.toBeNull();
+    expect(
+      (await prisma.motion.findUnique({ where: { id: motion!.id } }))!.closedAt,
+    ).not.toBeNull();
 
     await handleMessage(admin.phone, `meetingminutes ${shortId}`);
     expect(textsSent().toLowerCase()).toContain("annual general meeting");
 
     await handleMessage(admin.phone, `closemeeting ${shortId}`);
-    expect((await prisma.meeting.findUnique({ where: { id: meeting!.id } }))!.status).toBe("closed");
+    expect((await prisma.meeting.findUnique({ where: { id: meeting!.id } }))!.status).toBe(
+      "closed",
+    );
 
     await handleMessage(a.phone, "meetings");
     expect(textsSent().toLowerCase()).toContain("annual general meeting");

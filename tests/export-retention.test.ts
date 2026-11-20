@@ -65,7 +65,10 @@ describe("export retention", () => {
   it("never unlinks a file created in the last minute", async () => {
     const hour = 60 * 60 * 1000;
     for (let i = 0; i < 15; i++) {
-      await seed(`coop1-transactions-00000000000000${String(i).padStart(2, "0")}.xlsx`, (15 - i) * hour);
+      await seed(
+        `coop1-transactions-00000000000000${String(i).padStart(2, "0")}.xlsx`,
+        (15 - i) * hour,
+      );
     }
     const fresh = "coop1-pnl-ffffffffffffffff.pdf";
     await seed(fresh, 0);

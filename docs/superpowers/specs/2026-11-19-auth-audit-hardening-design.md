@@ -198,9 +198,9 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
   a Caddyfile regression test for the dotfile block and header stripping.
 - Dead smoke script removed; production deploy fails (instead of skipping) when
   `PRODUCTION_BASE_URL` is unset; manual `loan_reminders` job documented in README.
-- Lint/format widening to `tests/` is **deferred**: the suite currently has 19
-  pre-existing `no-unused-vars` errors and 39 unformatted test files. Fixing them
-  is a mechanical follow-up commit so the CI contract does not change in this PR.
+- Lint/format widening to `tests/` and `scripts/` is **done** (2026-11-20): the
+  21 pre-existing errors were fixed and 39 files formatted. `RULES.md` section 6
+  now names `eslint src/ tests/ scripts/` as the gate.
 
 ## Phase 4 â€” Identity quality
 
@@ -287,8 +287,8 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
 
 Deferred, intentionally:
 
-- Widening eslint/prettier to `tests/` and `scripts/` (21 pre-existing errors,
-  39 unformatted test files). One mechanical commit; `RULES.md` section 6 says so.
+- Lint/format coverage of `tests/` and `scripts/` landed on 2026-11-20 (0 errors,
+  141 warnings).
 - `prisma format` cannot be used for edits on Prisma 6.19.3 (it rewrites the
   whole schema); schema changes are applied textually and the sync test guards
   field order and alignment.

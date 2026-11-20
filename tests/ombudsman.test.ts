@@ -18,7 +18,11 @@ import { sendToBank } from "../src/services/disbursements.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-async function createGrievance(coopId: string, memberId: string, message = "Loan rejected unfairly") {
+async function createGrievance(
+  coopId: string,
+  memberId: string,
+  message = "Loan rejected unfairly",
+) {
   return prisma.grievance.create({ data: { cooperativeId: coopId, memberId, message } });
 }
 
@@ -120,7 +124,9 @@ describe("ombudsman escalation", () => {
       escalatedBy: "member",
     };
     await prisma.ombudsmanCase.create({ data: dispute });
-    await expect(prisma.ombudsmanCase.create({ data: { ...dispute, summary: "b" } })).resolves.toBeTruthy();
+    await expect(
+      prisma.ombudsmanCase.create({ data: { ...dispute, summary: "b" } }),
+    ).resolves.toBeTruthy();
   });
 
   it("notifies active ombudsmen and ignores inactive ones", async () => {
@@ -429,9 +435,7 @@ describe("ombudsman decisions", () => {
     expect(c!.decisionById).toBe(ombudsman.id);
     expect(c!.decidedAt).toBeInstanceOf(Date);
     expect(c!.decidedAt!.getTime()).toBeGreaterThanOrEqual(before - 1000);
-    expect(c!.events.some((e) => e.action === "decided" && e.actorRole === "ombudsman")).toBe(
-      true,
-    );
+    expect(c!.events.some((e) => e.action === "decided" && e.actorRole === "ombudsman")).toBe(true);
 
     const recipients = [
       ...vi.mocked(sendText).mock.calls.map((call) => call[0].to),
@@ -611,7 +615,7 @@ describe("ombudsman remedies", () => {
   });
 
   it("refund creates a refund via the refund flow and pays the member's bank", async () => {
-    const { member, caseId, actor } = await seedRemedyCase({ bank: true });
+    const { caseId, actor } = await seedRemedyCase({ bank: true });
 
     const res = await applyRemedy(
       caseId,
@@ -694,7 +698,7 @@ describe("ombudsman remedies", () => {
   });
 
   it("atomically claims the case so concurrent remedies cause exactly one payout", async () => {
-    const { member, caseId, actor } = await seedRemedyCase({ bank: true });
+    const { caseId, actor } = await seedRemedyCase({ bank: true });
 
     const results = await Promise.all([
       applyRemedy(caseId, "refund", { amount: 500000, reason: "first" }, actor),
@@ -747,7 +751,7 @@ describe("ombudsman remedies", () => {
   });
 
   it("does not re-pay when the payout throws after the money may have moved", async () => {
-    const { member, caseId, actor } = await seedRemedyCase({ bank: true });
+    const { caseId, actor } = await seedRemedyCase({ bank: true });
 
     // Simulate a throw AFTER the provider accepted the transfer: run the real
     // sendToBank (which calls the provider and writes the Payout row), then throw

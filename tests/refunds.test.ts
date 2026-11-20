@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanupDatabase, createTestCoop, createTestMember, prisma } from "./setup.js";
-import { recommendRefund, approveRefund, rejectRefund, approveRefundAsOmbudsman } from "../src/services/refunds.js";
+import {
+  recommendRefund,
+  approveRefund,
+  rejectRefund,
+  approveRefundAsOmbudsman,
+} from "../src/services/refunds.js";
 import { resolveProvider } from "../src/services/payments/index.js";
 
 /**
@@ -149,13 +154,7 @@ describe("refund maker-checker", () => {
   it("rejects a refund reason over 200 characters", async () => {
     const { coop, member, recommendActor } = await setup();
 
-    const res = await recommendRefund(
-      coop.id,
-      member.id,
-      50000,
-      "x".repeat(201),
-      recommendActor,
-    );
+    const res = await recommendRefund(coop.id, member.id, 50000, "x".repeat(201), recommendActor);
 
     expect(res.ok).toBe(false);
     expect(await prisma.refundRequest.count()).toBe(0);

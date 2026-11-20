@@ -66,7 +66,12 @@ async function makeLedgerEntry(
 }
 
 /** A disbursed loan with `balance` kobo that came due `daysOverdue` days ago. */
-async function makeOverdueLoan(coopId: string, memberId: string, balance: number, daysOverdue: number) {
+async function makeOverdueLoan(
+  coopId: string,
+  memberId: string,
+  balance: number,
+  daysOverdue: number,
+) {
   const dueDate = new Date();
   dueDate.setDate(dueDate.getDate() - daysOverdue);
   return prisma.loan.create({
@@ -102,7 +107,12 @@ describe("provisionRates", () => {
   it("returns the cooperative's configured bucket rates", async () => {
     const coop = await makeCoop("PROV1");
     await setRates(coop.id, { "1-30": 1, "31-90": 5, "91-180": 20, "180+": 50 });
-    expect(await provisionRates(coop.id)).toEqual({ "1-30": 1, "31-90": 5, "91-180": 20, "180+": 50 });
+    expect(await provisionRates(coop.id)).toEqual({
+      "1-30": 1,
+      "31-90": 5,
+      "91-180": 20,
+      "180+": 50,
+    });
   });
 });
 
@@ -186,16 +196,18 @@ describe("runProvision", () => {
         account: { in: ["expense:loan_loss_provision", "assets:loan_loss_provision"] },
       },
     });
-    const debit = postings
-      .filter((p) => p.direction === "DEBIT")
-      .reduce((s, p) => s + p.amount, 0);
+    const debit = postings.filter((p) => p.direction === "DEBIT").reduce((s, p) => s + p.amount, 0);
     const credit = postings
       .filter((p) => p.direction === "CREDIT")
       .reduce((s, p) => s + p.amount, 0);
     expect(debit).toBe(5000);
     expect(credit).toBe(5000);
-    expect(postings.some((p) => p.account === "expense:loan_loss_provision" && p.direction === "DEBIT")).toBe(true);
-    expect(postings.some((p) => p.account === "assets:loan_loss_provision" && p.direction === "CREDIT")).toBe(true);
+    expect(
+      postings.some((p) => p.account === "expense:loan_loss_provision" && p.direction === "DEBIT"),
+    ).toBe(true);
+    expect(
+      postings.some((p) => p.account === "assets:loan_loss_provision" && p.direction === "CREDIT"),
+    ).toBe(true);
   });
 
   it("refuses a second run in the same period", async () => {
@@ -220,7 +232,11 @@ describe("runProvision", () => {
     await makeOverdueLoan(coop.id, member.id, 100000, 45);
     await setRates(coop.id, { "1-30": 1, "31-90": 5, "91-180": 20, "180+": 50 });
 
-    const result = await runProvision(coop.id, { id: member.id, phone: member.phone, role: member.role });
+    const result = await runProvision(coop.id, {
+      id: member.id,
+      phone: member.phone,
+      role: member.role,
+    });
     expect(result.ok).toBe(false);
     expect(result.runId).toBeUndefined();
     const run = await prisma.provisionRun.findFirst({ where: { cooperativeId: coop.id } });
