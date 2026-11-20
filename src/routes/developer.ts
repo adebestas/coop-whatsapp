@@ -9,6 +9,8 @@ import { lockStatus, registerFailure, clearFailures } from "../lib/login-lockout
 import { evaluateLoginAnomalies } from "../lib/login-anomaly.js";
 import { alertMagicLinkReplay } from "../lib/anomaly-rules.js";
 import { claimMagicLink, findLiveMagicLink, issuePlatformMagicLink } from "../lib/magic-link.js";
+import { requestPhoneOtp, verifyPhoneOtp } from "../lib/phone-otp.js";
+import { rejectDisposableEmail } from "../lib/disposable-emails.js";
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES } from "../lib/queue.js";
 import { listCooperativeIds, resolveCoopsByPhone, withCoopContext } from "../lib/tenant-context.js";
 import { runInSandbox } from "../lib/sandbox.js";
@@ -247,6 +249,7 @@ export async function developerApiRoutes(app: FastifyInstance) {
     if (
       req.method === "POST" &&
       (req.url === "/api/developer/magic-link/request" ||
+        req.url === "/api/developer/magic-link/verify-phone" ||
         req.url === "/api/developer/magic-link/consume")
     )
       return;
@@ -469,21 +472,33 @@ export async function developerApiRoutes(app: FastifyInstance) {
     const ip = req.ip;
     const limit = await checkRateLimit(`devmagicreq:${ip}`, 5, 900);
 
-    if (email.includes("@") && limit.allowed) {
+    if (email.includes("@") && limit.allowed && rejectDisposableEmail(email).ok) {
       try {
         const admin = await prisma.platformAdmin.findFirst({
           where: { email, emailVerifiedAt: { not: null }, active: true },
         });
         if (admin?.email) {
-          await issuePlatformMagicLink({
-            platformAdminId: admin.id,
-            email: admin.email,
-            ip,
-            userAgent: req.headers["user-agent"] ?? null,
-          });
-          await auditAuth("auth.magic_link_requested", admin.phone, admin, {
-            surface: "developer",
-          });
+          if (!admin.phoneVerified) {
+            const otp = await requestPhoneOtp({
+              subjectType: "platform_admin",
+              subjectId: admin.id,
+              phone: admin.phone,
+            });
+            await auditAuth("auth.phone_verification_sent", admin.phone, admin, {
+              surface: "developer",
+              sent: otp.sent,
+            });
+          } else {
+            await issuePlatformMagicLink({
+              platformAdminId: admin.id,
+              email: admin.email,
+              ip,
+              userAgent: req.headers["user-agent"] ?? null,
+            });
+            await auditAuth("auth.magic_link_requested", admin.phone, admin, {
+              surface: "developer",
+            });
+          }
         }
       } catch (err) {
         req.log.error({ err, requestId: req.id }, "magic link request failed");
@@ -492,6 +507,58 @@ export async function developerApiRoutes(app: FastifyInstance) {
     return reply.code(202).send({
       ok: true,
       message: "If that address belongs to an operator, a sign-in link is on its way.",
+    });
+  });
+
+  // Step two of a first magic-link sign-in: the account phone answers the OTP.
+  app.post("/api/developer/magic-link/verify-phone", async (req, reply) => {
+    const body = (req.body ?? {}) as { email?: string; code?: string };
+    const email = String(body.email ?? "")
+      .trim()
+      .toLowerCase();
+    const code = String(body.code ?? "").trim();
+    const ip = req.ip;
+    const limit = await checkRateLimit(`devmagicphone:${ip}`, 10, 900);
+
+    if (!email.includes("@") || !/^\d{6}$/.test(code) || !limit.allowed) {
+      return reply.code(401).send({
+        error: "That code is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    try {
+      const admin = await prisma.platformAdmin.findFirst({
+        where: { email, emailVerifiedAt: { not: null }, active: true },
+      });
+      if (admin?.email) {
+        const ok = await verifyPhoneOtp({
+          subjectType: "platform_admin",
+          subjectId: admin.id,
+          code,
+        });
+        if (ok) {
+          await issuePlatformMagicLink({
+            platformAdminId: admin.id,
+            email: admin.email,
+            ip,
+            userAgent: req.headers["user-agent"] ?? null,
+          });
+          await auditAuth("auth.phone_verified", admin.phone, admin, {
+            surface: "developer",
+          });
+          return reply.code(202).send({
+            ok: true,
+            message: "If that address belongs to an operator, a sign-in link is on its way.",
+          });
+        }
+      }
+    } catch (err) {
+      req.log.error({ err, requestId: req.id }, "phone verification failed");
+    }
+    return reply.code(401).send({
+      error: "That code is invalid or has expired.",
+      requestId: req.id,
     });
   });
 

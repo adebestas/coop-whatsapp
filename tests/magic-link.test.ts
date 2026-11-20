@@ -7,7 +7,7 @@ import {
   createTestMember,
   cleanupDatabase,
 } from "./setup.js";
-import { hashPin } from "../src/lib/security.js";
+import { hashOtp, hashPin } from "../src/lib/security.js";
 import { issueMemberMagicLink, issuePlatformMagicLink } from "../src/lib/magic-link.js";
 
 process.env.ADMIN_JWT_SECRET ||= "test-platform-secret-0123456789";
@@ -15,13 +15,14 @@ process.env.ADMIN_JWT_SECRET ||= "test-platform-secret-0123456789";
 beforeEach(async () => {
   await cleanupDatabase();
   await prisma.magicLinkToken.deleteMany();
+  await prisma.phoneOtp.deleteMany();
 });
 
 async function verifiedAdmin(coopId: string, email: string) {
   const member = await createTestMember(coopId, { role: "admin" });
   await prisma.member.update({
     where: { id: member.id },
-    data: { email, emailVerifiedAt: new Date() },
+    data: { email, emailVerifiedAt: new Date(), phoneVerified: true },
   });
   return member;
 }
@@ -171,6 +172,7 @@ describe("operator magic-link sign-in", () => {
         mustChangePin: false,
         email,
         emailVerifiedAt: new Date(),
+        phoneVerified: true,
       },
     });
   }
@@ -206,5 +208,120 @@ describe("operator magic-link sign-in", () => {
       payload: { token },
     });
     expect(second.statusCode).toBe(401);
+  });
+});
+
+describe("phone verification before a first magic link", () => {
+  async function seedCode(
+    subjectType: "member" | "platform_admin",
+    subjectId: string,
+    code: string,
+  ) {
+    await prisma.phoneOtp.updateMany({
+      where: { subjectType, subjectId, consumedAt: null },
+      data: { consumedAt: new Date() },
+    });
+    await prisma.phoneOtp.create({
+      data: {
+        subjectType,
+        subjectId,
+        codeHash: hashOtp(code),
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+      },
+    });
+  }
+
+  it("withholds the dashboard link until the account phone answers a code", async () => {
+    const app = await createTestApp();
+    const coop = await createTestCoop("MAGIC3");
+    const member = await createTestMember(coop.id, { role: "admin" });
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { email: "newadmin@example.com", emailVerifiedAt: new Date() },
+    });
+
+    const req = await app.inject({
+      method: "POST",
+      url: "/api/admin/magic-link/request",
+      payload: { email: "newadmin@example.com" },
+    });
+    expect(req.statusCode).toBe(202);
+    expect(await prisma.magicLinkToken.count()).toBe(0);
+    expect(await prisma.phoneOtp.count({ where: { subjectId: member.id } })).toBe(1);
+
+    const wrong = await app.inject({
+      method: "POST",
+      url: "/api/admin/magic-link/verify-phone",
+      payload: { email: "newadmin@example.com", code: "000000" },
+    });
+    expect(wrong.statusCode).toBe(401);
+    expect(await prisma.magicLinkToken.count()).toBe(0);
+
+    await seedCode("member", member.id, "123456");
+    const ok = await app.inject({
+      method: "POST",
+      url: "/api/admin/magic-link/verify-phone",
+      payload: { email: "newadmin@example.com", code: "123456" },
+    });
+    expect(ok.statusCode).toBe(202);
+    expect(await prisma.magicLinkToken.count()).toBe(1);
+    expect((await prisma.member.findUnique({ where: { id: member.id } }))?.phoneVerified).toBe(
+      true,
+    );
+  });
+
+  it("withholds the operator link until the operator phone answers a code", async () => {
+    const app = await createTestApp();
+    const admin = await prisma.platformAdmin.create({
+      data: {
+        name: "Unverified Operator",
+        phone: "2348099990001",
+        role: "developer",
+        pin: hashPin("123456"),
+        mustChangePin: false,
+        email: "fresh@example.com",
+        emailVerifiedAt: new Date(),
+      },
+    });
+
+    const req = await app.inject({
+      method: "POST",
+      url: "/api/developer/magic-link/request",
+      payload: { email: "fresh@example.com" },
+    });
+    expect(req.statusCode).toBe(202);
+    expect(await prisma.magicLinkToken.count()).toBe(0);
+    expect(await prisma.phoneOtp.count({ where: { subjectId: admin.id } })).toBe(1);
+
+    await seedCode("platform_admin", admin.id, "654321");
+    const ok = await app.inject({
+      method: "POST",
+      url: "/api/developer/magic-link/verify-phone",
+      payload: { email: "fresh@example.com", code: "654321" },
+    });
+    expect(ok.statusCode).toBe(202);
+    expect(await prisma.magicLinkToken.count()).toBe(1);
+    expect(
+      (await prisma.platformAdmin.findUnique({ where: { id: admin.id } }))?.phoneVerified,
+    ).toBe(true);
+  });
+
+  it("silently ignores disposable email domains", async () => {
+    const app = await createTestApp();
+    const coop = await createTestCoop("MAGIC4");
+    const member = await createTestMember(coop.id, { role: "admin" });
+    await prisma.member.update({
+      where: { id: member.id },
+      data: { email: "throwaway@mailinator.com", emailVerifiedAt: new Date(), phoneVerified: true },
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/magic-link/request",
+      payload: { email: "throwaway@mailinator.com" },
+    });
+    expect(res.statusCode).toBe(202);
+    expect(await prisma.magicLinkToken.count()).toBe(0);
+    expect(await prisma.phoneOtp.count()).toBe(0);
   });
 });

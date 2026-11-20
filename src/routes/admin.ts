@@ -16,6 +16,8 @@ import { lockStatus, registerFailure, clearFailures } from "../lib/login-lockout
 import { evaluateLoginAnomalies } from "../lib/login-anomaly.js";
 import { alertMagicLinkReplay } from "../lib/anomaly-rules.js";
 import { claimMagicLink, findLiveMagicLink, issueMemberMagicLink } from "../lib/magic-link.js";
+import { requestPhoneOtp, verifyPhoneOtp } from "../lib/phone-otp.js";
+import { rejectDisposableEmail } from "../lib/disposable-emails.js";
 import { notifyMember } from "../lib/messaging.js";
 import {
   sign,
@@ -294,7 +296,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const ip = req.ip;
     const limit = await checkRateLimit(`magicreq:${ip}`, 5, 900);
 
-    if (email.includes("@") && limit.allowed) {
+    if (email.includes("@") && limit.allowed && rejectDisposableEmail(email).ok) {
       try {
         const coopId = await resolveCoopByEmail(email);
         if (coopId) {
@@ -308,6 +310,29 @@ export async function adminApiRoutes(app: FastifyInstance) {
               },
             });
             if (!member) return;
+
+            // Email possession alone is not enough while the channel number
+            // has never answered a code: a reassigned phone would otherwise
+            // hand the account to whoever holds the old SIM.
+            if (!member.phoneVerified) {
+              const otp = await requestPhoneOtp({
+                subjectType: "member",
+                subjectId: member.id,
+                phone: member.phone,
+              });
+              await audit({
+                cooperativeId: coopId,
+                actorPhone: member.phone,
+                actorId: member.id,
+                actorRole: member.role,
+                action: "auth.phone_verification_sent",
+                targetType: "member",
+                targetId: member.id,
+                detail: otp.sent ? "code sent to account phone" : "code issued; delivery failed",
+              });
+              return;
+            }
+
             await issueMemberMagicLink({
               memberId: member.id,
               cooperativeId: coopId,
@@ -333,6 +358,77 @@ export async function adminApiRoutes(app: FastifyInstance) {
       }
     }
     return reply.code(202).send({ ok: true, message: MAGIC_LINK_ACCEPTED });
+  });
+
+  // Step two of a first magic-link sign-in: the account phone answers the OTP.
+  // Slots between request and consume so the link is only minted after the
+  // phone is proven, and the response is identical whether or not the address
+  // exists.
+  app.post("/api/admin/magic-link/verify-phone", async (req, reply) => {
+    const body = (req.body ?? {}) as { email?: string; code?: string };
+    const email = String(body.email ?? "")
+      .trim()
+      .toLowerCase();
+    const code = String(body.code ?? "").trim();
+    const ip = req.ip;
+    const limit = await checkRateLimit(`magicphone:${ip}`, 10, 900);
+
+    if (!email.includes("@") || !/^\d{6}$/.test(code) || !limit.allowed) {
+      return reply.code(401).send({
+        error: "That code is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    try {
+      const coopId = await resolveCoopByEmail(email);
+      if (coopId) {
+        const issued = await withCoopContext(coopId, async () => {
+          const member = await prisma.member.findFirst({
+            where: {
+              email,
+              emailVerifiedAt: { not: null },
+              role: { in: ["admin", "superadmin"] },
+              status: "active",
+            },
+          });
+          if (!member) return false;
+          const ok = await verifyPhoneOtp({
+            subjectType: "member",
+            subjectId: member.id,
+            code,
+          });
+          if (!ok) return false;
+          await issueMemberMagicLink({
+            memberId: member.id,
+            cooperativeId: coopId,
+            email,
+            ip,
+            userAgent: req.headers["user-agent"] ?? null,
+          });
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: member.phone,
+            actorId: member.id,
+            actorRole: member.role,
+            action: "auth.phone_verified",
+            targetType: "member",
+            targetId: member.id,
+            detail: "account phone confirmed; sign-in link issued",
+          });
+          return true;
+        });
+        if (issued) {
+          return reply.code(202).send({ ok: true, message: MAGIC_LINK_ACCEPTED });
+        }
+      }
+    } catch (err) {
+      req.log.error({ err, requestId: req.id }, "phone verification failed");
+    }
+    return reply.code(401).send({
+      error: "That code is invalid or has expired.",
+      requestId: req.id,
+    });
   });
 
   app.post("/api/admin/magic-link/consume", async (req, reply) => {
@@ -437,6 +533,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     if (
       req.url === "/api/admin/login" ||
       req.url === "/api/admin/magic-link/request" ||
+      req.url === "/api/admin/magic-link/verify-phone" ||
       req.url === "/api/admin/magic-link/consume"
     )
       return;
