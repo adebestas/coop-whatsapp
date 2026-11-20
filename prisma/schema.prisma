@@ -127,6 +127,7 @@ model ReconciliationLog {
   bankBalance         Int      // cooperative's bank balance from journal in kobo
   discrepancy         Int      // difference (bankBalance - totalWalletBalances) in kobo
   status              String   // ok | discrepancy | investigating
+  source              String   @default("internal") // internal | provider
   notes               String?
   performedBy         String   // admin phone
   memberCount         Int      // number of members in the cooperative

@@ -2,9 +2,84 @@ import { prisma } from "../lib/prisma.js";
 import { verifyAuditChain } from "./audit.js";
 import { formatBalance } from "./cooperative.js";
 import { trialBalance } from "./journal.js";
-import { alertSupers, AlertSeverity } from "../lib/alerting.js";
+import { alertDevelopers, alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { withCoopContext, listActiveCooperativeIds } from "../lib/tenant-context.js";
 import { runWalletReconciliation } from "./reconciliation.js";
+import { providerBalances } from "./provider-balances.js";
+
+async function bankBalanceFor(cooperativeId: string): Promise<number> {
+  const rows = await prisma.posting.groupBy({
+    by: ["direction"],
+    where: { entry: { cooperativeId }, account: "assets:bank" },
+    _sum: { amount: true },
+  });
+  const debits = rows.find((r) => r.direction === "DEBIT")?._sum.amount ?? 0;
+  const credits = rows.find((r) => r.direction === "CREDIT")?._sum.amount ?? 0;
+  return debits - credits;
+}
+
+/**
+ * Provider-balance reconciliation: compare what the payment providers say they
+ * hold against the sum of every cooperative's `assets:bank` journal balance.
+ *
+ * The provider accounts are platform-wide, so the comparison (and the log row)
+ * is platform-scoped; the row is anchored to the first active cooperative
+ * because `ReconciliationLog.cooperativeId` is required. Skipped entirely when
+ * no provider keys are configured or every provider call failed.
+ */
+export async function reconcileProviderBalances(): Promise<string[]> {
+  const balances = await providerBalances();
+  const usable = balances.filter((b) => b.configured && b.kobo !== null);
+  if (usable.length === 0) return [];
+
+  const coopIds = await listActiveCooperativeIds();
+  if (coopIds.length === 0) return [];
+
+  let bankTotal = 0;
+  for (const id of coopIds) bankTotal += await bankBalanceFor(id);
+
+  const providerTotal = usable.reduce((sum, b) => sum + (b.kobo ?? 0), 0);
+  const drift = providerTotal - bankTotal;
+  const threshold = Number(process.env.RECONCILE_DRIFT_THRESHOLD_KOBO ?? 100);
+  const breached = Math.abs(drift) > (Number.isFinite(threshold) ? threshold : 100);
+
+  const notes = JSON.stringify({
+    scope: "platform",
+    cooperatives: coopIds.length,
+    providers: balances.map((b) => ({
+      provider: b.provider,
+      configured: b.configured,
+      kobo: b.kobo,
+      error: b.error ?? null,
+    })),
+    providerTotal,
+    journalBankTotal: bankTotal,
+  });
+
+  await prisma.reconciliationLog.create({
+    data: {
+      cooperativeId: coopIds[0]!,
+      totalWalletBalances: providerTotal,
+      bankBalance: bankTotal,
+      discrepancy: drift,
+      status: breached ? "discrepancy" : "ok",
+      source: "provider",
+      notes,
+      performedBy: "system:provider",
+      memberCount: 0,
+      activeLoans: 0,
+      activeLoanTotal: 0,
+      pendingWithdrawals: 0,
+      pendingWithdrawalTotal: 0,
+    },
+  });
+
+  if (!breached) return [];
+
+  const message = `Provider balance drift of ${formatBalance(Math.abs(drift))} (providers ${formatBalance(providerTotal)} vs journal bank ${formatBalance(bankTotal)}) across ${coopIds.length} cooperative(s).`;
+  await alertDevelopers("Provider balance reconciliation drift", message).catch(() => {});
+  return [message];
+}
 
 /**
  * Nightly reconciliation: data-integrity checks that alert super admins.
@@ -18,6 +93,10 @@ export async function runReconciliation(): Promise<string[]> {
   const coopIds = await listActiveCooperativeIds();
   const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  // Provider holdings are platform-wide, so this runs once outside the tenant
+  // loop; it is a no-op when no provider keys are configured.
+  allAlerts.push(...(await reconcileProviderBalances()));
 
   for (const coopId of coopIds) {
     await withCoopContext(coopId, async () => {
