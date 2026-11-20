@@ -1,6 +1,7 @@
 # Auth, audit and edge hardening â€” design
 
-Status: awaiting review. No code written.
+Status: implemented. All six phases are on `fix/export-retention`; see
+"Implementation status" at the end of this document.
 
 Scope approved by owner on 2026-11-19: all six phases, in order. Magic links target
 dashboard admins and developer/owner accounts only. Anomaly alerts go to the Telegram
@@ -271,3 +272,28 @@ when (server timestamp). A request-scoped `AsyncLocalStorage` context (same patt
   defence-in-depth for any future proxy.
 - **Session epoch**: revoking old sessions on PIN change requires a `sessionEpoch`
   column on `Member` â€” included in the Phase 2 migration.
+
+## Implementation status (2026-11-20)
+
+| Phase | State | Commits / evidence |
+| --- | --- | --- |
+| 1. Lockout, generic error IDs, magic links | done | `LoginAttempt`, `LoginLock`, `MagicLinkToken`; `src/lib/login-lockout.ts`, `magic-link.ts`, `email.ts`; dashboards |
+| 2. Audit coverage and anomaly alerts | done | `078b468` request-scoped audit context (`ip`, `userAgent`, `errorId` out of chain) + `login-anomaly.ts`, `anomaly-rules.ts`, `tests/audit-context.test.ts` |
+| 3. Edge and repository hardening | done | `b2b054e` dotfile 404 + header strip at Caddy, `onSend` in `src/app.ts`, ReDoS fix, `effect` override, `tests/edge-hardening.test.ts` |
+| 4. Identity quality | done | `8a4382c` disposable-email screening, phone OTP before the first magic link (`PhoneOtp`, `PlatformAdmin.phoneVerified`, `20261119030000_phone_verification`), `tests/identity-quality.test.ts` |
+| 5. Input-surface audit | done | `421621c` `src/lib/pick.ts` deny-list, `docs/security/input-surface.md`, `tests/mass-assignment.test.ts` |
+| 6. Agent artifacts and reconciliation | done | `8e862f9` provider balances vs `assets:bank`, `ReconciliationLog.source` (`20261119040000_reconciliation_source`), `RECONCILE_DRIFT_THRESHOLD_KOBO`, `tests/provider-reconciliation.test.ts` |
+| Harness + gate | done | `7e6e5b8` `RULES.md`, `CODEBASE_MAP.md`, `npm run check` (15 files / 95 tests) |
+
+Deferred, intentionally:
+
+- Widening eslint/prettier to `tests/` and `scripts/` (21 pre-existing errors,
+  39 unformatted test files). One mechanical commit; `RULES.md` section 6 says so.
+- `prisma format` cannot be used for edits on Prisma 6.19.3 (it rewrites the
+  whole schema); schema changes are applied textually and the sync test guards
+  field order and alignment.
+- Provider reconciliation is platform-scoped because provider accounts are
+  shared; the log row is anchored to the first active cooperative and notes the
+  scope. Splitting per cooperative needs provider credentials per tenant first.
+- Deployment path (Cloudflare Containers vs Oracle Always Free) is still
+  undecided in `DEPLOY.md`; the Cloudflare Workers build check fails by design.
