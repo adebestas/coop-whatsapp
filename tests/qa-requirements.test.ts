@@ -152,7 +152,7 @@ describe("reserve fund statutory deductions (25/10/5)", () => {
 describe("edge cases", () => {
   it("rejects a withdrawal when the balance is zero (45% of ₦0 = ₦0)", async () => {
     const coop = await makeCoop("EDGE01");
-    await makeMember(PHONE, coop.id, { balance: 0 });
+    const member = await makeMember(PHONE, coop.id, { balance: 0 });
 
     const limit = await withdrawLimit(PHONE);
     expect(limit).not.toBeNull();

@@ -82,7 +82,7 @@ describe("mandate scheduler debits", () => {
     const m = await createTestMember(coop.id, { phone: "2348000300001" });
     await enableDirectDebit(coop.id);
     await setAutoSave(m.id, 300_000, new Date(Date.now() - 1000));
-    await seedMandate(coop.id, m.id, { amountCap: 100_000 });
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 100_000 });
     const adapter = fakeAdapter();
     vi.mocked(resolveProvider).mockResolvedValue(adapter);
 
@@ -187,7 +187,7 @@ describe("mandate scheduler debits", () => {
     await enableDirectDebit(coop.id);
     const due = new Date(Date.now() - 1000);
     await setAutoSave(m.id, 50_000, due);
-    await seedMandate(coop.id, m.id);
+    const mandate = await seedMandate(coop.id, m.id);
     const adapter = fakeAdapter();
     vi.mocked(resolveProvider).mockResolvedValue(adapter);
 
@@ -227,7 +227,7 @@ describe("mandate scheduler debits", () => {
     const coop = await createTestCoop("MSCH10");
     const m = await createTestMember(coop.id, { phone: "2348000300011" });
     await enableDirectDebit(coop.id);
-    await seedMandate(coop.id, m.id, { amountCap: 200_000 });
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 200_000 });
     const loan = await prisma.loan.create({
       data: {
         amount: 500_000,
@@ -267,7 +267,7 @@ describe("mandate scheduler debits", () => {
     const coop = await createTestCoop("MSCH11");
     const m = await createTestMember(coop.id, { phone: "2348000300012" });
     await enableDirectDebit(coop.id);
-    await seedMandate(coop.id, m.id, { amountCap: 100_000 });
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 100_000 });
     await prisma.loan.create({
       data: {
         amount: 300_000,
@@ -300,7 +300,7 @@ describe("mandate scheduler debits", () => {
     const coop = await createTestCoop("MSCH12");
     const m = await createTestMember(coop.id, { phone: "2348000300013" });
     await enableDirectDebit(coop.id);
-    await seedMandate(coop.id, m.id, { amountCap: 200_000 });
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 200_000 });
     await prisma.loan.create({
       data: {
         amount: 100_000,
@@ -385,7 +385,7 @@ describe("mandate scheduler group contributions", () => {
     const coop = await createTestCoop("MSCH14");
     const m = await createTestMember(coop.id, { phone: "2348000300015" });
     await enableDirectDebit(coop.id);
-    await seedMandate(coop.id, m.id, { amountCap: 300_000 });
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 300_000 });
     const { group } = await seedGroup(coop.id, m.id, { contributionAmount: 200_000 });
     await prisma.groupMember.create({
       data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
@@ -440,7 +440,7 @@ describe("mandate scheduler group contributions", () => {
     const coop = await createTestCoop("MSCH16");
     const m = await createTestMember(coop.id, { phone: "2348000300017" });
     await enableDirectDebit(coop.id);
-    await seedMandate(coop.id, m.id, { amountCap: 100_000 });
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 100_000 });
     const { group } = await seedGroup(coop.id, m.id, { contributionAmount: 200_000 });
     await prisma.groupMember.create({
       data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
@@ -483,7 +483,7 @@ describe("mandate scheduler group contributions", () => {
     const coop = await createTestCoop("MSCH18");
     const m = await createTestMember(coop.id, { phone: "2348000300019" });
     await enableDirectDebit(coop.id);
-    await seedMandate(coop.id, m.id, { amountCap: 300_000 });
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 300_000 });
     const { group } = await seedGroup(coop.id, m.id);
     await prisma.groupMember.create({
       data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
@@ -503,7 +503,7 @@ describe("mandate scheduler group contributions", () => {
     const coop = await createTestCoop("MSCH19");
     const m = await createTestMember(coop.id, { phone: "2348000300020" });
     await enableDirectDebit(coop.id);
-    await seedMandate(coop.id, m.id, { amountCap: 300_000 });
+    const mandate = await seedMandate(coop.id, m.id, { amountCap: 300_000 });
     const { group } = await seedGroup(coop.id, m.id, { cycleStatus: "closed" });
     await prisma.groupMember.create({
       data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
@@ -522,7 +522,7 @@ describe("mandate scheduler retries", () => {
   it("retries a due failed debit and advances nextRetryAt by one day", async () => {
     const coop = await createTestCoop("MSCH4");
     const m = await createTestMember(coop.id, { phone: "2348000300004" });
-    await seedMandate(coop.id, m.id);
+    const mandate = await seedMandate(coop.id, m.id);
     const debit = await prisma.mandateDebit.create({
       data: {
         mandateId: mandate.id,
@@ -555,7 +555,7 @@ describe("mandate scheduler retries", () => {
   it("fail-closes a Paystack retry when the mandate has no authorization code yet", async () => {
     const coop = await createTestCoop("MSCHPS2");
     const m = await createTestMember(coop.id, { phone: "2348000300092" });
-    await seedMandate(coop.id, m.id, {
+    const mandate = await seedMandate(coop.id, m.id, {
       provider: "paystack",
       providerMandateId: null,
     });
@@ -586,7 +586,7 @@ describe("mandate scheduler retries", () => {
   it("never selects a skipped debit for retry", async () => {
     const coop = await createTestCoop("MSCH7");
     const m = await createTestMember(coop.id, { phone: "2348000300007" });
-    await seedMandate(coop.id, m.id);
+    const mandate = await seedMandate(coop.id, m.id);
     const debit = await prisma.mandateDebit.create({
       data: {
         mandateId: mandate.id,
@@ -614,7 +614,7 @@ describe("mandate scheduler retries", () => {
   it("issues only one provider debit when two retries overlap", async () => {
     const coop = await createTestCoop("MSCH20");
     const m = await createTestMember(coop.id, { phone: "2348000300021" });
-    await seedMandate(coop.id, m.id);
+    const mandate = await seedMandate(coop.id, m.id);
     await prisma.mandateDebit.create({
       data: {
         mandateId: mandate.id,
@@ -660,7 +660,7 @@ describe("mandate scheduler stale-pending reconciliation", () => {
   it("ages a stale pending debit out to failed so it can be retried", async () => {
     const coop = await createTestCoop("MSCH21");
     const m = await createTestMember(coop.id, { phone: "2348000300022" });
-    await seedMandate(coop.id, m.id);
+    const mandate = await seedMandate(coop.id, m.id);
     const stale = await prisma.mandateDebit.create({
       data: {
         mandateId: mandate.id,

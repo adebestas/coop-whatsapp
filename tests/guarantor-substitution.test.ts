@@ -107,7 +107,7 @@ describe("guarantor substitution", () => {
   });
 
   it("only the new guarantor can confirm, which moves the swap to admin approval", async () => {
-    const { fresh, loan } = await seed();
+    const { oldG, fresh, loan } = await seed();
     await requestSubstitution(BORROWER, loan.id, oldG.code, fresh.code);
     const row = await prisma.guarantorSubstitution.findFirstOrThrow({ where: { loanId: loan.id } });
 
@@ -122,7 +122,7 @@ describe("guarantor substitution", () => {
   });
 
   it("admin approval releases the old guarantor and confirms the new one", async () => {
-    const { fresh, loan } = await seed();
+    const { oldG, fresh, loan } = await seed();
     await requestSubstitution(BORROWER, loan.id, oldG.code, fresh.code);
     const row = await prisma.guarantorSubstitution.findFirstOrThrow({ where: { loanId: loan.id } });
     await confirmSubstitution(FRESH, row.code!);
@@ -148,7 +148,7 @@ describe("guarantor substitution", () => {
   });
 
   it("refuses approval before the new guarantor confirms", async () => {
-    const { fresh, loan } = await seed();
+    const { oldG, fresh, loan } = await seed();
     await requestSubstitution(BORROWER, loan.id, oldG.code, fresh.code);
     const row = await prisma.guarantorSubstitution.findFirstOrThrow({ where: { loanId: loan.id } });
 
@@ -158,7 +158,7 @@ describe("guarantor substitution", () => {
   });
 
   it("only an admin can approve", async () => {
-    const { fresh, loan } = await seed();
+    const { oldG, fresh, loan } = await seed();
     await requestSubstitution(BORROWER, loan.id, oldG.code, fresh.code);
     const row = await prisma.guarantorSubstitution.findFirstOrThrow({ where: { loanId: loan.id } });
     await confirmSubstitution(FRESH, row.code!);
@@ -171,7 +171,7 @@ describe("guarantor substitution", () => {
   });
 
   it("rejection keeps the original guarantor liable", async () => {
-    const { fresh, loan } = await seed();
+    const { oldG, fresh, loan } = await seed();
     await requestSubstitution(BORROWER, loan.id, oldG.code, fresh.code);
     const row = await prisma.guarantorSubstitution.findFirstOrThrow({ where: { loanId: loan.id } });
     await confirmSubstitution(FRESH, row.code!);
@@ -228,14 +228,14 @@ describe("guarantor substitution", () => {
   });
 
   it("only the borrower can request a swap on their own loan", async () => {
-    const { loan } = await seed();
+    const { oldG, loan } = await seed();
     const result = await requestSubstitution(FRESH, loan.id, oldG.code, ADMIN);
     expect(result.ok).toBe(false);
     expect(result.message).toContain("doesn't belong to you");
   });
 
   it("lists pending swaps for admins only", async () => {
-    const { fresh, loan } = await seed();
+    const { oldG, fresh, loan } = await seed();
     await requestSubstitution(BORROWER, loan.id, oldG.code, fresh.code);
 
     const denied = await listSubstitutions(BORROWER);

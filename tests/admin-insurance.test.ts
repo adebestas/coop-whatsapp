@@ -116,7 +116,7 @@ describe("admin insurance claims", () => {
     });
     const member = await createTestMember(coop.id, { phone: "2348092000012", name: "Chidi Eze" });
     const policy = await seedPolicy(coop.id, member.id);
-    await seedClaim(coop.id, member.id, policy.id);
+    const claim = await seedClaim(coop.id, member.id, policy.id);
 
     const res = await app.inject({
       method: "GET",
@@ -172,7 +172,7 @@ describe("admin insurance claims", () => {
     });
     const member = await createTestMember(coop.id, { phone: "2348092000032" });
     const policy = await seedPolicy(coop.id, member.id);
-    await seedClaim(coop.id, member.id, policy.id, { amountKobo: 250000 });
+    const claim = await seedClaim(coop.id, member.id, policy.id, { amountKobo: 250000 });
 
     const res = await app.inject({
       method: "POST",
@@ -201,7 +201,7 @@ describe("admin insurance claims", () => {
     });
     const member = await createTestMember(coop.id, { phone: "2348092000042" });
     const policy = await seedPolicy(coop.id, member.id);
-    await seedClaim(coop.id, member.id, policy.id);
+    const claim = await seedClaim(coop.id, member.id, policy.id);
 
     const res = await app.inject({
       method: "POST",
@@ -227,7 +227,7 @@ describe("admin insurance claims", () => {
     });
     const member = await createTestMember(coop.id, { phone: "2348092000052" });
     const policy = await seedPolicy(coop.id, member.id);
-    await seedClaim(coop.id, member.id, policy.id);
+    const claim = await seedClaim(coop.id, member.id, policy.id);
 
     const res = await app.inject({
       method: "POST",

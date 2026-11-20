@@ -50,7 +50,7 @@ describe("employer deduction remittance", () => {
   it("builds a batch with savings AND loan-repayment items, then approval credits both", async () => {
     // adminPhone makes SUPER a super-admin; separate plain admin also exists.
     const coop = await makeCoop("DEDB01", "Remit Coop", SUPER_PHONE);
-    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
     const saver = await makeMember(M1, coop.id);
     const payer = await makeMember(M2, coop.id);
@@ -193,7 +193,7 @@ describe("employer deduction remittance", () => {
   it("full repayment via remittance closes the loan", async () => {
     const coop = await makeCoop("DEDB04", "Close Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
-    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const payer = await makeMember(M1, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${payer.code} 0`); // no savings item
     const loan = await prisma.loan.create({
@@ -235,7 +235,7 @@ describe("employer deduction remittance", () => {
   it("a concurrent deduction and repayment do not lose an update", async () => {
     const coop = await makeCoop("DEDB10", "Concurrent Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
-    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const payer = await makeMember(M1, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${payer.code} 0`); // no savings item
     const loan = await prisma.loan.create({
@@ -284,7 +284,7 @@ describe("employer deduction remittance", () => {
   it("re-approving an approved batch does not double-credit", async () => {
     const coop = await makeCoop("DEDB05", "Idem Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
-    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const saver = await makeMember(M1, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${saver.code} 5000`);
     await handleMessage(ADMIN_PHONE, "newbatch");
@@ -330,7 +330,7 @@ describe("employer deduction remittance", () => {
   it("maker-checker: an unverified maker's batch cannot be approved until confirmed", async () => {
     const coop = await makeCoop("DEDB07", "Unverified Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
-    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const m = await makeMember(M1, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${m.code} 1000`);
     await handleMessage(ADMIN_PHONE, "newbatch");
@@ -357,7 +357,7 @@ describe("employer deduction remittance", () => {
   it("a short reconciliation settles and rolls the unpaid amount forward", async () => {
     const coop = await makeCoop("DEDB08", "Short Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
-    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const m = await makeMember(M1, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${m.code} 10000`);
     await handleMessage(ADMIN_PHONE, "newbatch");
@@ -403,7 +403,7 @@ describe("employer deduction remittance", () => {
   it("partial approval applies priority per member and rolls the remainder", async () => {
     const coop = await makeCoop("DEDB10", "Partial Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
-    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const m1 = await makeMember(M1, coop.id);
     const m2 = await makeMember(M2, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${m1.code} 10000`);

@@ -615,7 +615,7 @@ describe("ombudsman remedies", () => {
   });
 
   it("refund creates a refund via the refund flow and pays the member's bank", async () => {
-    const { caseId, actor } = await seedRemedyCase({ bank: true });
+    const { member, caseId, actor } = await seedRemedyCase({ bank: true });
 
     const res = await applyRemedy(
       caseId,
@@ -751,7 +751,7 @@ describe("ombudsman remedies", () => {
   });
 
   it("does not re-pay when the payout throws after the money may have moved", async () => {
-    const { caseId, actor } = await seedRemedyCase({ bank: true });
+    const { member, caseId, actor } = await seedRemedyCase({ bank: true });
 
     // Simulate a throw AFTER the provider accepted the transfer: run the real
     // sendToBank (which calls the provider and writes the Payout row), then throw
