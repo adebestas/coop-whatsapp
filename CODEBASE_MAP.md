@@ -28,9 +28,12 @@ Dashboard SPA ───────┘            │                           
 | WhatsApp webhook + verification         | `src/routes/webhook.ts`, `src/lib/inbound*.ts`                                                           |
 | Payment/webhook adapters                | `src/routes/payments.ts`, `src/services/payments/*`                                                      |
 | Exports (CSV/XLSX/PDF)                  | `src/routes/exports.ts`, `src/services/exports.ts`                                                       |
+| Reconciler | `src/services/reconcile.ts`, `reconciliation.ts`, `provider-balances.ts` |
+| Input surface | `src/lib/pick.ts` (deny-list) plus per-route field reads |
 | Business logic                          | `src/services/*` — money, loans, savings, withdrawals, KYC, roles                                        |
 | Audit trail                             | `src/services/audit.ts` (hash-chained, per coop), `src/services/platform-audit.ts`                       |
-| Auth                                    | `src/lib/admin-auth.ts`, `src/lib/platform-auth.ts`, `src/lib/magic-link.ts`, `src/lib/login-lockout.ts` |
+| Auth                                    | `src/lib/admin-auth.ts`, `src/lib/platform-auth.ts`, `src/lib/magic-link.ts`, `src/lib/login-lockout.ts`, `src/lib/phone-otp.ts`,
+`src/lib/disposable-emails.ts` |
 | Request context (IP/UA/requestId)       | `src/lib/request-context.ts`                                                                             |
 | Alerts & anomaly rules                  | `src/lib/alerting.ts`, `src/lib/anomaly-rules.ts`, `src/lib/login-anomaly.ts`                            |
 | Cache / rate limits / claims            | `src/lib/cache.ts` (Redis + in-memory fallback)                                                          |
@@ -60,6 +63,7 @@ Dashboard SPA ───────┘            │                           
   `prisma/dev.db*`, `cookies.txt` — secrets or personal data; never read into
   context, print, commit, or paste into tickets.
 - `src/services/audit.ts` hash chain, `LoginAttempt` ledger, `LoginLock` state,
+  `PhoneOtp` hashes,
   and migration SQL are integrity-critical: no deletes, no rewrites, no
   "fix-unused" migrations.
 - `src/lib/*auth*`, `src/routes/admin.ts`, `src/routes/developer.ts` — auth and
