@@ -841,8 +841,7 @@ export async function developerApiRoutes(app: FastifyInstance) {
     const superAdmin =
       body.superAdmin && typeof body.superAdmin === "object"
         ? {
-            name:
-              typeof body.superAdmin.name === "string" ? body.superAdmin.name : undefined,
+            name: typeof body.superAdmin.name === "string" ? body.superAdmin.name : undefined,
             phone: adminPhone,
           }
         : undefined;

@@ -85,7 +85,9 @@ describe("dashboard writes reject privileged body fields", () => {
       payload: { type: "goal", name: "Holiday", ...PRIVILEGED },
     });
     expect(res.statusCode).toBe(400);
-    expect(res.json().fields).toEqual(expect.arrayContaining(["role", "isAdmin", "plan", "userId"]));
+    expect(res.json().fields).toEqual(
+      expect.arrayContaining(["role", "isAdmin", "plan", "userId"]),
+    );
 
     expect(await prisma.savingsProduct.count({ where: { name: "Holiday" } })).toBe(0);
 
