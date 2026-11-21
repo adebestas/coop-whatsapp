@@ -128,6 +128,7 @@ model ReconciliationLog {
   bankBalance         Int      // cooperative's bank balance from journal in kobo
   discrepancy         Int      // difference (bankBalance - totalWalletBalances) in kobo
   status              String   // ok | discrepancy | investigating
+  source              String   @default("internal") // internal | provider
   notes               String?
   performedBy         String   // admin phone
   memberCount         Int      // number of members in the cooperative
@@ -194,6 +195,7 @@ model Member {
   dateOfBirth             DateTime? // optional — used for birthday greetings (month/day only)
   nextOfKinName           String? // required for death claims
   nextOfKinPhone          String?
+  emailVerifiedAt         DateTime?
   phoneVerified           Boolean             @default(false) // OTP-verified real phone number
   nameVerified            Boolean             @default(false) // name confirmed by a super admin (maker-checker gate)
   name                    String
@@ -203,6 +205,7 @@ model Member {
   entityType              String              @default("individual") // individual | corporate
   rcNumber                String? // CAC RC number when the member is a corporate body
   kycVerifiedAt           DateTime?
+  kycSubmittedAt          DateTime? // when the NIN was last submitted; pruned after 90 unverified days
   role                    String              @default("member") // member | admin | superadmin
   state                   String? // member's home state/LGA grouping
   lga                     String?
@@ -245,6 +248,7 @@ model Member {
   progress                MemberProgress?
   beneficialOwners        MemberBeneficialOwner[]
   consentAt               DateTime?           // when the member opted in to messages
+  magicLinks              MagicLinkToken[]
   aiConsentAt             DateTime?           // when the member consented to AI processing (voice transcription / translation via Groq)
   screeningStatus         String              @default("unset") // unset | clear | review | matched — sanctions/PEP screening of the member name
   screeningAt             DateTime?           // when the member name was last screened
@@ -585,12 +589,18 @@ model WebhookEvent {
   provider    String
   kind        String? // credit | payout_update
   payloadHash String
-  status      String    @default("received") // received | processed | failed
+  status      String    @default("received") // received | processed | failed | dead
   error       String?
   receivedAt  DateTime  @default(now())
   processedAt DateTime?
+  endpoint    String? // credit | payout | insurance - which pipeline owns this body
+  payload     String? // raw body, kept only so a failed delivery can be replayed
+  attempts    Int       @default(0) // replay attempts made by the retry worker
+  nextAttemptAt DateTime?
+  deadAt      DateTime? // set once attempts are exhausted; no further retries
 
   @@index([provider, receivedAt])
+  @@index([status, nextAttemptAt])
 }
 
 // ---- Double-entry journal (accounting source of truth) ----
@@ -794,6 +804,9 @@ model AuditLog {
   balanceBefore Int? // wallet balance before the operation in kobo
   balanceAfter  Int? // wallet balance after the operation in kobo
   detail        String? // human-readable summary
+  ip            String? // request IP at the time (not part of the hash payload)
+  userAgent     String? // truncated request User-Agent
+  errorId       String? // requestId when the action was triggered by a failure
     prevHash      String? // hash of the previous entry (tamper-evident chain)
     hash          String? // sha256 of this entry's content + prevHash
     seq           Int // per-cooperative monotonic sequence (deterministic chain order)
@@ -2306,8 +2319,11 @@ model FxRate {
 
 // ---- Platform console (cross-coop "developer" identities) ----
 model PlatformAdmin {
+  phoneVerified    Boolean          @default(false) // proof the operator still controls this phone
   id               String    @id @default(cuid())
   name             String
+  email            String?   @unique
+  emailVerifiedAt  DateTime?
   phone            String    @unique
   role             String    @default("developer") // owner | developer | support
   pin              String?   // hashed, "<salt>:<scrypthex>"
@@ -2318,6 +2334,7 @@ model PlatformAdmin {
   tokensValidAfter DateTime?
   createdById      String?
   lastLoginAt      DateTime?
+  magicLinks       MagicLinkToken[]
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 }
@@ -2342,6 +2359,9 @@ model PlatformAuditLog {
   targetType     String?
   targetId       String?
   detail         String?
+  ip             String?
+  userAgent      String?
+  errorId        String?
   createdAt      DateTime @default(now())
   @@index([action])
   @@index([cooperativeId, createdAt])
@@ -2520,4 +2540,72 @@ model DeductionShortfall {
 
   @@unique([batchId, memberId])
   @@index([cooperativeId, status])
+}
+
+// ---- Auth security: attempts, lockout state, magic links ----
+// LoginAttempt is the immutable ledger (audit + anomaly scoring); LoginLock is
+// the small mutable state used for lockout maths. Keeping them apart means the
+// ledger is never rewritten to clear a lock.
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  surface   String   // dashboard_admin | dashboard_developer
+  memberId  String?
+  phone     String?
+  ip        String
+  outcome   String   // success | bad_credentials | totp_failed | locked | unlocked
+  errorId   String?
+  createdAt DateTime @default(now())
+
+  @@index([surface, phone, createdAt])
+  @@index([surface, ip, createdAt])
+  @@index([createdAt])
+}
+
+model LoginLock {
+  id           String    @id @default(cuid())
+  surface      String
+  subject      String    // member phone, or "ip:<address>"
+  strikes      Int       @default(0)
+  lockCount    Int       @default(0)
+  lockedUntil  DateTime?
+  lastStrikeAt DateTime  @default(now())
+
+  @@unique([surface, subject])
+  @@index([lockedUntil])
+}
+
+model MagicLinkToken {
+  id              String        @id @default(cuid())
+  memberId        String?
+  member          Member?       @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  platformAdminId String?
+  platformAdmin   PlatformAdmin? @relation(fields: [platformAdminId], references: [id], onDelete: Cascade)
+  cooperativeId   String?
+  tokenHash       String        @unique // sha256(token); plaintext is never stored
+  purpose         String        @default("dashboard_login")
+  requestedIp     String
+  requestUaHash   String?
+  expiresAt       DateTime
+  usedAt          DateTime?
+  usedIp          String?
+  revokedAt       DateTime?
+  createdAt       DateTime      @default(now())
+
+  @@index([memberId, createdAt])
+  @@index([platformAdminId, createdAt])
+  @@index([expiresAt])
+}
+
+model PhoneOtp {
+  id          String    @id @default(cuid())
+  subjectType String // member | platform_admin
+  subjectId   String
+  codeHash    String // scrypt hash; plaintext code is never stored
+  attempts    Int       @default(0)
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([subjectType, subjectId, createdAt])
+  @@index([expiresAt])
 }

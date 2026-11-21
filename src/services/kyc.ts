@@ -114,6 +114,7 @@ export async function submitNin(
     data: {
       nin,
       kycStatus: result.status,
+      kycSubmittedAt: new Date(),
       kycVerifiedAt: result.status === "verified" ? new Date() : null,
     },
   });

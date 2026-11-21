@@ -126,7 +126,7 @@ describe("employer deduction remittance", () => {
 
   it("waived members are skipped for that period and can ask for the waiver themselves", async () => {
     const coop = await makeCoop("DEDB02", "Waive Coop", SUPER_PHONE);
-    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const waver = await makeMember(M1, coop.id);
     const steady = await makeMember(M2, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${waver.code} 4000`);
@@ -160,7 +160,7 @@ describe("employer deduction remittance", () => {
   it("only supers approve or reject; rejection tells the submitting admin", async () => {
     const coop = await makeCoop("DEDB03", "Gate Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
-    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const m = await makeMember(M1, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${m.code} 1000`);
     await handleMessage(ADMIN_PHONE, "newbatch");
@@ -385,7 +385,7 @@ describe("employer deduction remittance", () => {
   it("auto-reconciles a cheque_received batch from a matching bank credit", async () => {
     const coop = await makeCoop("DEDB09", "Webhook Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
-    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const m = await makeMember(M1, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${m.code} 10000`);
     await handleMessage(ADMIN_PHONE, "newbatch");
@@ -434,7 +434,7 @@ describe("employer deduction remittance", () => {
   it("reconciles a cheque_received batch from an uploaded statement", async () => {
     const coop = await makeCoop("DEDB11", "Statement Coop", SUPER_PHONE);
     await makeMember(SUPER_PHONE, coop.id, { role: "superadmin" });
-    const admin = await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
+    await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const m = await makeMember(M1, coop.id);
     await handleMessage(ADMIN_PHONE, `setcommit ${m.code} 10000`);
     await handleMessage(ADMIN_PHONE, "newbatch");
@@ -495,7 +495,7 @@ describe("lost phone / WhatsApp recovery", () => {
 
   it("plain members cannot relink accounts", async () => {
     const coop = await makeCoop("RECO03", "Nope Coop");
-    const pleb = await makeMember(M1, coop.id, { role: "member" });
+    await makeMember(M1, coop.id, { role: "member" });
     const other = await makeMember(M2, coop.id);
 
     await handleMessage(M1, `relink ${other.code} ${M3}`);

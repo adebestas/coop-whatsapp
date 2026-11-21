@@ -57,7 +57,7 @@ describe("New Features & Bug Fixes Verification", () => {
       const coop2 = await makeCoop("Coop Beta");
       const sharedPhone = "2348077770001";
 
-      const m1 = await makeMember(sharedPhone, coop1.id, "Member Alpha", "member", 2000000); // ₦20k
+      await makeMember(sharedPhone, coop1.id, "Member Alpha", "member", 2000000); // ₦20k
       const m2 = await makeMember(sharedPhone, coop2.id, "Member Beta", "member", 8000000); // ₦80k
 
       // In coop2 context, apply for loan

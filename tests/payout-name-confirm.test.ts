@@ -82,7 +82,10 @@ describe("confirmAccountName (shared payout confirmation)", () => {
 
   it("holds on a name mismatch with the expected recipient", async () => {
     const result = await confirmAccountName({
-      provider: { name: "monnify", resolveAccount: async () => ({ ok: true, name: "SADE BALOGUN" }) } as any,
+      provider: {
+        name: "monnify",
+        resolveAccount: async () => ({ ok: true, name: "SADE BALOGUN" }),
+      } as any,
       accountNumber: "0123456789",
       bankCode: "058",
       expectedName: "Ada Obi",

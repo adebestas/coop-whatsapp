@@ -418,7 +418,7 @@ describe("mandate scheduler group contributions", () => {
     const coop = await createTestCoop("MSCH15");
     const m = await createTestMember(coop.id, { phone: "2348000300016" });
     await enableDirectDebit(coop.id);
-    const mandate = await seedMandate(coop.id, m.id, { amountCap: 300_000 });
+    await seedMandate(coop.id, m.id, { amountCap: 300_000 });
     const { group, cycle } = await seedGroup(coop.id, m.id);
     await prisma.groupMember.create({
       data: { groupId: group.id, memberId: m.id, active: true, rotationPosition: 1 },
@@ -577,9 +577,9 @@ describe("mandate scheduler retries", () => {
     const n = await runMandateRetries(new Date());
 
     expect(vi.mocked(adapter.debitMandate)).not.toHaveBeenCalled();
-    expect(
-      (await prisma.mandateDebit.findUnique({ where: { id: debit.id } }))?.status,
-    ).toBe("failed");
+    expect((await prisma.mandateDebit.findUnique({ where: { id: debit.id } }))?.status).toBe(
+      "failed",
+    );
     expect(n).toBe(0);
   });
 

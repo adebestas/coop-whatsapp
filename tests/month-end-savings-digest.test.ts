@@ -84,7 +84,7 @@ describe("Xara-style Month-End Savings Digest", () => {
         name: "Taiwo Adeleke",
         balance: 1500000,
       });
-      const memberB = await makeMember("2348080009902", coop.id, {
+      await makeMember("2348080009902", coop.id, {
         name: "Kehinde Adeleke",
         balance: 800000,
       });

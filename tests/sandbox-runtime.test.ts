@@ -45,7 +45,9 @@ describe("sandbox runtime scope", () => {
       "fetch",
       vi.fn(async () => ({
         ok: true,
-        json: async () => ({ choices: [{ message: { content: '{"command":"balance","args":[]}' } }] }),
+        json: async () => ({
+          choices: [{ message: { content: '{"command":"balance","args":[]}' } }],
+        }),
       })),
     );
 

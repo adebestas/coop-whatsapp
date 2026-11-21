@@ -13,6 +13,7 @@ import { withCoopContext, resolveCoopByMandateDebitRef } from "../lib/tenant-con
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { log } from "../lib/logger.js";
 import { incCounter } from "../lib/metrics.js";
+import { scheduleWebhookFailure, WEBHOOK_LEASE_MS } from "../lib/webhook-dlq.js";
 
 /**
  * Combined payment webhook listener.
@@ -98,7 +99,7 @@ async function recordAndProcess(params: {
   kind: string;
   rawBody: string;
   providerName: string;
-  endpoint: string;
+  endpoint: "credit" | "payout" | "insurance";
   run: () => Promise<void>;
 }): Promise<WebhookOutcome> {
   const { eventId, kind, rawBody, providerName, endpoint, run } = params;
@@ -110,6 +111,8 @@ async function recordAndProcess(params: {
         kind,
         payloadHash: createHash("sha256").update(rawBody).digest("hex"),
         status: "received",
+        endpoint,
+        payload: rawBody,
       },
     });
   } catch (err: any) {
@@ -142,18 +145,19 @@ async function recordAndProcess(params: {
     return { httpStatus: 200, body: { status: "ok", event: eventId } };
   } catch (err: any) {
     console.error(`[webhook] processing failed for ${eventId}`, err);
-    incCounter("webhook_processing_failures_total", { provider: providerName, endpoint });
     await alertSupers(
       "system",
       `Webhook processing failed for event ${eventId}\n\nError: ${err?.message ?? "unknown"}`,
       AlertSeverity.CRITICAL,
     ).catch(() => {});
-    await prisma.webhookEvent
-      .update({
-        where: { id: eventId },
-        data: { status: "failed", error: String(err?.message ?? err).slice(0, 500) },
-      })
-      .catch(() => {});
+    await scheduleWebhookFailure({
+      eventId,
+      provider: providerName,
+      kind,
+      endpoint,
+      payload: rawBody,
+      error: err,
+    });
     return { httpStatus: 500, body: { status: "failed", event: eventId } };
   }
 }
@@ -188,6 +192,20 @@ async function handleCubeCoverWebhook(
     return { httpStatus: 401, body: { error: "invalid signature" } };
   }
 
+  return processCubeCoverBody(rawBody);
+}
+
+/**
+ * Signature-free CubeCover processing, used by the live endpoint (after
+ * verification) and by the retry worker (a stored body was verified on arrival).
+ */
+async function processCubeCoverBody(rawBody: string): Promise<WebhookOutcome> {
+  const client = new CubeCoverClient({
+    apiKey: process.env.CUBECOVER_API_KEY ?? "",
+    baseUrl: process.env.CUBECOVER_BASE_URL || "https://api.cubecover.ai",
+    webhookSecret: process.env.CUBECOVER_WEBHOOK_SECRET ?? "",
+  });
+
   let parsedBody: unknown;
   try {
     parsedBody = JSON.parse(rawBody);
@@ -203,6 +221,7 @@ async function handleCubeCoverWebhook(
   const eventId = `cubecover:${notification.event}:${JSON.stringify(notification.data)}`;
   // Record the delivery BEFORE processing so a duplicate delivery is rejected by
   // the unique constraint instead of re-applying the update.
+  let existingStatus: string | undefined;
   try {
     await prisma.webhookEvent.create({
       data: {
@@ -210,26 +229,51 @@ async function handleCubeCoverWebhook(
         provider: "cubecover",
         kind: "insurance_update",
         payloadHash: createHash("sha256").update(rawBody).digest("hex"),
-        status: "processed",
+        status: "received",
+        endpoint: "insurance",
+        payload: rawBody,
       },
     });
   } catch (err: any) {
     if (err?.code === "P2002") {
-      return { httpStatus: 200, body: { status: "duplicate", event: eventId } };
+      const existing = await prisma.webhookEvent.findUnique({
+        where: { id: eventId },
+        select: { status: true },
+      });
+      existingStatus = existing?.status;
+      if (existingStatus === "processed") {
+        return { httpStatus: 200, body: { status: "duplicate", event: eventId } };
+      }
+      // failed / dead / received: fall through and retry the update.
+    } else {
+      console.error(`[webhook] failed to record insurance delivery`, err);
+      return { httpStatus: 500, body: { error: "failed to record delivery" } };
     }
-    console.error(`[webhook] failed to record insurance delivery`, err);
-    return { httpStatus: 500, body: { error: "failed to record delivery" } };
   }
 
   const insuranceService = new InsuranceService({ prisma: prisma as any, cubecover: client });
   try {
     await insuranceService.handleWebhook(notification.event, notification.data);
+    await prisma.webhookEvent.update({
+      where: { id: eventId },
+      data: { status: "processed", processedAt: new Date() },
+    });
+    return { httpStatus: 200, body: { status: "ok", event: eventId } };
   } catch (err) {
-    // Roll back the dedupe marker so the provider's retry is processed.
-    await prisma.webhookEvent.delete({ where: { id: eventId } }).catch(() => {});
-    throw err;
+    // A row that is already dead must not be resurrected by a late delivery.
+    if (existingStatus === "dead") {
+      return { httpStatus: 200, body: { status: "dead", event: eventId } };
+    }
+    await scheduleWebhookFailure({
+      eventId,
+      provider: "cubecover",
+      kind: "insurance_update",
+      endpoint: "insurance",
+      payload: rawBody,
+      error: err,
+    });
+    return { httpStatus: 500, body: { status: "failed", event: eventId } };
   }
-  return { httpStatus: 200, body: { status: "ok", event: eventId } };
 }
 
 export async function processPaymentWebhook(
@@ -264,7 +308,23 @@ export async function processPaymentWebhook(
     return { httpStatus: 401, body: { error: "invalid signature" } };
   }
 
-  // 2. Event id — the provider's transaction id is the natural dedupe key.
+  // 2. Hand off to the shared credit pipeline. The raw body was verified above
+  // and is stored on the event row so the retry worker can replay it without a
+  // provider round-trip.
+  return processCreditBody(providerName, rawBody);
+}
+
+/**
+ * Credit / mandate / debit processing for an already-verified body. Called by
+ * the live endpoint and by `replayStoredWebhook`.
+ */
+async function processCreditBody(providerName: string, rawBody: string): Promise<WebhookOutcome> {
+  const adapter = adapters[providerName];
+  if (!adapter) {
+    return { httpStatus: 400, body: { error: `unknown provider ${providerName}` } };
+  }
+
+  // Event id — the provider's transaction id is the natural dedupe key.
   let parsedBody: any;
   try {
     parsedBody = JSON.parse(rawBody);
@@ -340,6 +400,8 @@ export async function processPaymentWebhook(
         kind: notification ? "credit" : "ignored",
         payloadHash: createHash("sha256").update(rawBody).digest("hex"),
         status: "received",
+        endpoint: "credit",
+        payload: rawBody,
       },
     });
   } catch (err: any) {
@@ -396,7 +458,6 @@ export async function processPaymentWebhook(
     return { httpStatus: 200, body: { status: "ok", event: eventId } };
   } catch (err: any) {
     console.error(`[webhook] processing failed for ${eventId}`, err);
-    incCounter("webhook_processing_failures_total", { provider: providerName, endpoint: "credit" });
     // Extract cooperativeId from the notification if possible for alerting
     let cooperativeId: string | undefined;
     if (notification && "cooperativeId" in notification) {
@@ -412,12 +473,14 @@ export async function processPaymentWebhook(
       ).catch(() => {});
     }
 
-    await prisma.webhookEvent
-      .update({
-        where: { id: eventId },
-        data: { status: "failed", error: String(err?.message ?? err).slice(0, 500) },
-      })
-      .catch(() => {});
+    await scheduleWebhookFailure({
+      eventId,
+      provider: providerName,
+      kind: notification ? "credit" : "ignored",
+      endpoint: "credit",
+      payload: rawBody,
+      error: err,
+    });
     return { httpStatus: 500, body: { status: "failed", event: eventId } };
   }
 }
@@ -459,6 +522,18 @@ export async function processPayoutWebhook(
       endpoint: "payout",
     });
     return { httpStatus: 401, body: { error: "invalid signature" } };
+  }
+
+  // Verified. The raw body is stored on the event row so a failed update can be
+  // replayed by the retry worker without another provider round-trip.
+  return processPayoutBody(providerName, rawBody);
+}
+
+/** Payout processing for an already-verified body (live endpoint + replay). */
+async function processPayoutBody(providerName: string, rawBody: string): Promise<WebhookOutcome> {
+  const adapter = adapters[providerName];
+  if (!adapter) {
+    return { httpStatus: 400, body: { error: `unknown provider ${providerName}` } };
   }
 
   let parsedBody: unknown;
@@ -504,6 +579,8 @@ export async function processPayoutWebhook(
         kind: "payout_update",
         payloadHash: createHash("sha256").update(rawBody).digest("hex"),
         status: "received",
+        endpoint: "payout",
+        payload: rawBody,
       },
     });
   } catch (err: any) {
@@ -537,19 +614,103 @@ export async function processPayoutWebhook(
     return { httpStatus: 200, body: { status: "ok", event: eventId } };
   } catch (err: any) {
     console.error(`[payout-webhook] processing failed for ${eventId}`, err);
-    incCounter("webhook_processing_failures_total", { provider: providerName, endpoint: "payout" });
     // Best-effort alert: a stuck dividend reversal is a books-integrity issue.
     await alertSupers(
       "system",
       `Payout webhook processing failed for ${eventId}\n\nError: ${err?.message ?? "unknown"}`,
       AlertSeverity.CRITICAL,
     ).catch(() => {});
-    await prisma.webhookEvent
-      .update({
-        where: { id: eventId },
-        data: { status: "failed", error: String(err?.message ?? err).slice(0, 500) },
-      })
-      .catch(() => {});
+    await scheduleWebhookFailure({
+      eventId,
+      provider: providerName,
+      kind: "payout_update",
+      endpoint: "payout",
+      payload: rawBody,
+      error: err,
+    });
     return { httpStatus: 500, body: { status: "failed", event: eventId } };
   }
+}
+
+/**
+ * Replay one stored webhook delivery. Used by the BullMQ retry worker and by
+ * the 5-minute scheduler sweep. The body was signature-verified when it first
+ * arrived and is stored verbatim, so replay skips verification but still runs
+ * through the same idempotency gate (a processed row is a no-op).
+ */
+export async function replayStoredWebhook(eventId: string): Promise<void> {
+  const row = await prisma.webhookEvent.findUnique({ where: { id: eventId } });
+  if (!row || !row.payload || !row.endpoint) return;
+  if (row.status === "processed" || row.deadAt) return;
+  const now = new Date();
+  if (row.nextAttemptAt && row.nextAttemptAt > now) return;
+
+  // Claim the row for a lease window so a BullMQ retry and the scheduler sweep
+  // cannot both replay the same delivery at once.
+  const claim = await prisma.webhookEvent.updateMany({
+    where: {
+      id: eventId,
+      status: "failed",
+      deadAt: null,
+      OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+    },
+    data: { nextAttemptAt: new Date(now.getTime() + WEBHOOK_LEASE_MS) },
+  });
+  if (claim.count === 0) return;
+
+  log.info("[webhook-dlq] replaying failed delivery", {
+    eventId,
+    endpoint: row.endpoint,
+    attempt: row.attempts + 1,
+  });
+
+  // Each pipeline handles its own failure (marks failed, schedules next retry),
+  // so a replayed delivery can never throw back into the worker.
+  let outcome: WebhookOutcome;
+  if (row.endpoint === "insurance") {
+    outcome = await processCubeCoverBody(row.payload);
+  } else if (row.endpoint === "payout") {
+    outcome = await processPayoutBody(row.provider, row.payload);
+  } else {
+    outcome = await processCreditBody(row.provider, row.payload);
+  }
+
+  // A 200 means the delivery is fully handled (including "ignored" bodies that
+  // turn out not to be credits) — close the row so it leaves the retry queue.
+  if (outcome.httpStatus === 200) {
+    await prisma.webhookEvent
+      .updateMany({
+        where: { id: eventId, status: "failed" },
+        data: { status: "processed", processedAt: new Date(), nextAttemptAt: null },
+      })
+      .catch(() => {});
+  }
+  // On a 5xx the pipeline already recorded the failure and pushed the next
+  // attempt out by the backoff, overwriting the worker lease.
+}
+
+/**
+ * Backstop for retries whose BullMQ job was lost (Redis flushed) or never
+ * enqueued (Redis down when the failure was recorded).
+ */
+export async function retryDueWebhookEvents(limit = 20): Promise<number> {
+  const now = new Date();
+  const due = await prisma.webhookEvent.findMany({
+    where: {
+      status: "failed",
+      deadAt: null,
+      payload: { not: null },
+      endpoint: { not: null },
+      nextAttemptAt: { lte: now },
+    },
+    select: { id: true },
+    orderBy: { nextAttemptAt: "asc" },
+    take: limit,
+  });
+  for (const row of due) {
+    await replayStoredWebhook(row.id).catch((err) =>
+      log.error("[webhook-dlq] replay sweep item failed", { eventId: row.id, err: String(err) }),
+    );
+  }
+  return due.length;
 }

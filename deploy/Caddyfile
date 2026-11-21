@@ -5,7 +5,29 @@
 #   https://<DOMAIN>/webhook
 {$DOMAIN} {
 	encode gzip zstd
+
+	# Never serve dotfiles (.env, .git, credentials) even if a volume is mounted
+	# over the app directory by mistake.
+	@dotfiles path /.* /.env* /.git* /.htaccess /.htpasswd /credentials*
+	respond @dotfiles 404
+
+	# The app suppresses these itself; strip again in case a future plugin,
+	# upstream proxy or static file reintroduces them.
+	header -Server
+	header -X-Powered-By
+	header_down -Server
+	header_down -X-Powered-By
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		-Server
+	}
+
 	reverse_proxy app:3000
+
 	log {
 		output stdout
 		format console

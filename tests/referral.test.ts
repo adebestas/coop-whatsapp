@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import {
   recordReferral,
@@ -208,7 +208,6 @@ describe("referral reward deferral (after-commit)", () => {
   it("enqueueAfterCommit returns false with no ambient scope", async () => {
     expect(enqueueAfterCommit(async () => {})).toBe(false);
   });
-
 });
 
 describe("referral registration step", () => {
@@ -221,7 +220,12 @@ describe("referral registration step", () => {
       data: { phone, state: "awaiting_name", data: JSON.stringify({ joinCode: coop.code }) },
     });
 
-    await handleAwaitingInput(phone, "awaiting_name", "Ada Obi", JSON.stringify({ joinCode: coop.code }));
+    await handleAwaitingInput(
+      phone,
+      "awaiting_name",
+      "Ada Obi",
+      JSON.stringify({ joinCode: coop.code }),
+    );
     let session = await sessionOf(phone);
     expect(session?.state).toBe("awaiting_referral");
     expect(dataOf(session?.data).name).toBe("Ada Obi");
@@ -259,7 +263,12 @@ describe("referral registration step", () => {
     await prisma.session.create({
       data: { phone, state: "awaiting_name", data: JSON.stringify({ joinCode: coop.code }) },
     });
-    await handleAwaitingInput(phone, "awaiting_name", "Bola Adeyemi", JSON.stringify({ joinCode: coop.code }));
+    await handleAwaitingInput(
+      phone,
+      "awaiting_name",
+      "Bola Adeyemi",
+      JSON.stringify({ joinCode: coop.code }),
+    );
     let session = await sessionOf(phone);
     expect(session?.state).toBe("awaiting_referral");
 
@@ -370,7 +379,9 @@ describe("referral qualification on real money-in paths", () => {
     });
     expect(referral?.status).toBe("pending");
     expect(referral?.qualifiedAt).toBeNull();
-    expect(await prisma.contribution.count({ where: { reference: "monnify-TX-REFDUP-1" } })).toBe(0);
+    expect(await prisma.contribution.count({ where: { reference: "monnify-TX-REFDUP-1" } })).toBe(
+      0,
+    );
   });
 
   it("does not qualify on an admin manual credit (not a real money-in path)", async () => {
@@ -1027,12 +1038,7 @@ describe("referral bonus commands & guided withdrawal", () => {
     let session = await sessionOf(member.phone);
     expect(session?.state).toBe("awaiting_bonus_amount");
 
-    await handleAwaitingInput(
-      member.phone,
-      "awaiting_bonus_amount",
-      "300",
-      session?.data ?? "{}",
-    );
+    await handleAwaitingInput(member.phone, "awaiting_bonus_amount", "300", session?.data ?? "{}");
     session = await sessionOf(member.phone);
     expect(session?.state).toBe("awaiting_bonus_destination");
     expect(dataOf(session?.data).bonusAmount).toBe(30000);

@@ -26,9 +26,9 @@ describe("ledger counter-legs", () => {
     const postings = await prisma.posting.findMany({
       where: { entry: { cooperativeId: coop.id } },
     });
-    expect(
-      postings.some((p) => p.account === "member_wallet:w1" && p.direction === "DEBIT"),
-    ).toBe(true);
+    expect(postings.some((p) => p.account === "member_wallet:w1" && p.direction === "DEBIT")).toBe(
+      true,
+    );
     expect(postings.some((p) => p.account === "assets:bank")).toBe(false);
   });
 
@@ -36,7 +36,12 @@ describe("ledger counter-legs", () => {
     const coop = await prisma.cooperative.create({
       data: { name: "C", code: `C${Date.now()}`, currency: "NGN" },
     });
-    await recordLedger({ cooperativeId: coop.id, type: "income", category: "other", amount: 5_000 });
+    await recordLedger({
+      cooperativeId: coop.id,
+      type: "income",
+      category: "other",
+      amount: 5_000,
+    });
     expect(await getBankAccountBalance(coop.id)).toBe(5_000);
   });
 });

@@ -181,10 +181,12 @@ describe("insurance accounting & idempotency", () => {
     await svc.chargePremium(coop.id, member.id, 5_000, ref, "d");
     await svc.chargePremium(coop.id, member.id, 5_000, ref, "d");
 
-    expect((await prisma.wallet.findUnique({ where: { memberId: member.id } }))?.balance).toBe(5_000);
-    expect(
-      await prisma.journalEntry.count({ where: { txRef: `insurance_premium_${ref}` } }),
-    ).toBe(1);
+    expect((await prisma.wallet.findUnique({ where: { memberId: member.id } }))?.balance).toBe(
+      5_000,
+    );
+    expect(await prisma.journalEntry.count({ where: { txRef: `insurance_premium_${ref}` } })).toBe(
+      1,
+    );
   });
 });
 
@@ -221,13 +223,17 @@ describe("insurance claim payout safety", () => {
   it("never credits more than the submitted amount", async () => {
     const { member, claim } = await seedClaim({ amountKobo: 60_000, payoutKobo: 999_999 });
     await payoutInsuranceClaim(claim.cubecoverClaimId!);
-    expect((await prisma.wallet.findUnique({ where: { memberId: member.id } }))?.balance).toBe(60_000);
+    expect((await prisma.wallet.findUnique({ where: { memberId: member.id } }))?.balance).toBe(
+      60_000,
+    );
   });
 
   it("credits the provider's partial approved amount when smaller", async () => {
     const { member, claim } = await seedClaim({ amountKobo: 60_000, payoutKobo: 30_000 });
     await payoutInsuranceClaim(claim.cubecoverClaimId!);
-    expect((await prisma.wallet.findUnique({ where: { memberId: member.id } }))?.balance).toBe(30_000);
+    expect((await prisma.wallet.findUnique({ where: { memberId: member.id } }))?.balance).toBe(
+      30_000,
+    );
   });
 
   it("refuses to pay a rejected claim", async () => {

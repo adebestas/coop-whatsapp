@@ -5,6 +5,12 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { Queue } from "bullmq";
 import { prisma } from "../lib/prisma.js";
 import { checkRateLimit, getRedis, isRedisConfigured, resetRateLimit } from "../lib/cache.js";
+import { lockStatus, registerFailure, clearFailures } from "../lib/login-lockout.js";
+import { evaluateLoginAnomalies } from "../lib/login-anomaly.js";
+import { alertMagicLinkReplay } from "../lib/anomaly-rules.js";
+import { claimMagicLink, findLiveMagicLink, issuePlatformMagicLink } from "../lib/magic-link.js";
+import { requestPhoneOtp, verifyPhoneOtp } from "../lib/phone-otp.js";
+import { rejectDisposableEmail } from "../lib/disposable-emails.js";
 import { DEFAULT_JOB_OPTIONS, QUEUE_NAMES } from "../lib/queue.js";
 import { listCooperativeIds, resolveCoopsByPhone, withCoopContext } from "../lib/tenant-context.js";
 import { runInSandbox } from "../lib/sandbox.js";
@@ -240,6 +246,13 @@ function missingDiagnostic(): DiagnosticResult {
 export async function developerApiRoutes(app: FastifyInstance) {
   app.addHook("preHandler", async (req, reply) => {
     if (req.method === "POST" && req.url === "/api/developer/login") return;
+    if (
+      req.method === "POST" &&
+      (req.url === "/api/developer/magic-link/request" ||
+        req.url === "/api/developer/magic-link/verify-phone" ||
+        req.url === "/api/developer/magic-link/consume")
+    )
+      return;
 
     const method = req.method.toUpperCase();
     if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
@@ -340,11 +353,22 @@ export async function developerApiRoutes(app: FastifyInstance) {
     const pin = body.pin;
     const ip = req.ip;
 
+    const lock = await lockStatus("dashboard_developer", { phone, ip });
+    if (lock.locked) {
+      return reply.code(429).send({
+        error: "Too many login attempts. Try again later.",
+        requestId: req.id,
+        retryAfter: lock.retryAfter,
+      });
+    }
+
     const ipLimit = await checkRateLimit(`devlogin:${ip}`, MAX_IP_ATTEMPTS, IP_WINDOW_SECONDS);
     if (!ipLimit.allowed) {
-      return reply
-        .code(429)
-        .send({ error: "Too many login attempts", retryAfter: ipLimit.retryAfter });
+      return reply.code(429).send({
+        error: "Too many login attempts. Try again later.",
+        requestId: req.id,
+        retryAfter: ipLimit.retryAfter,
+      });
     }
     if (phone) {
       const acctLimit = await checkRateLimit(
@@ -353,9 +377,11 @@ export async function developerApiRoutes(app: FastifyInstance) {
         ACCOUNT_WINDOW_SECONDS,
       );
       if (!acctLimit.allowed) {
-        return reply
-          .code(429)
-          .send({ error: "Too many login attempts", retryAfter: acctLimit.retryAfter });
+        return reply.code(429).send({
+          error: "Too many login attempts. Try again later.",
+          requestId: req.id,
+          retryAfter: acctLimit.retryAfter,
+        });
       }
     }
 
@@ -371,15 +397,48 @@ export async function developerApiRoutes(app: FastifyInstance) {
     }
     if (!admin || !admin.active || !pinOk) {
       await auditAuth("auth.login_failed", phone, undefined, { reason: "credentials" });
-      return reply.code(401).send({ error: "invalid credentials" });
+      const fail = await registerFailure({
+        surface: "dashboard_developer",
+        phone,
+        ip,
+        memberId: admin?.id ?? null,
+        outcome: "bad_credentials",
+        errorId: req.id,
+      });
+      if (fail.locked) {
+        return reply.code(429).send({
+          error: "Too many login attempts. Try again later.",
+          requestId: req.id,
+          retryAfter: fail.retryAfter,
+        });
+      }
+      return reply.code(401).send({ error: "invalid credentials", requestId: req.id });
     }
 
     if (admin.totpEnabled && !safeVerifyTotp(admin.totpSecret, body.totp)) {
       await auditAuth("auth.login_failed", phone, admin, { reason: "totp" });
-      return reply.code(401).send({ error: "invalid 2FA code" });
+      const fail = await registerFailure({
+        surface: "dashboard_developer",
+        phone,
+        ip,
+        memberId: admin.id,
+        outcome: "totp_failed",
+        errorId: req.id,
+      });
+      if (fail.locked) {
+        return reply.code(429).send({
+          error: "Too many login attempts. Try again later.",
+          requestId: req.id,
+          retryAfter: fail.retryAfter,
+        });
+      }
+      return reply.code(401).send({ error: "invalid 2FA code", requestId: req.id });
     }
 
     await resetRateLimit(`devacct:${phone}`);
+    void evaluateLoginAnomalies({ surface: "dashboard_developer", phone, ip }).catch(
+      () => undefined,
+    );
     await prisma.platformAdmin.update({
       where: { id: admin.id },
       data: { lastLoginAt: new Date() },
@@ -391,6 +450,180 @@ export async function developerApiRoutes(app: FastifyInstance) {
     const mustSetup2fa = !admin.totpEnabled && TOTP_ROLES.has(admin.role);
     await auditAuth("auth.login_success", phone, admin, { totp: admin.totpEnabled });
 
+    if (admin.mustChangePin) {
+      return { mustChangePin: true, mustSetup2fa };
+    }
+    return {
+      admin: {
+        id: admin.id,
+        name: admin.name,
+        phone: admin.phone,
+        role: admin.role,
+        totpEnabled: admin.totpEnabled,
+      },
+      mustSetup2fa,
+    };
+  });
+
+  // ---- Magic-link sign-in (additional method; PIN login still works) ----
+  app.post("/api/developer/magic-link/request", async (req, reply) => {
+    const body = (req.body ?? {}) as { email?: string };
+    const email = String(body.email ?? "")
+      .trim()
+      .toLowerCase();
+    const ip = req.ip;
+    const limit = await checkRateLimit(`devmagicreq:${ip}`, 5, 900);
+
+    if (email.includes("@") && limit.allowed && rejectDisposableEmail(email).ok) {
+      try {
+        const admin = await prisma.platformAdmin.findFirst({
+          where: { email, emailVerifiedAt: { not: null }, active: true },
+        });
+        if (admin?.email) {
+          if (!admin.phoneVerified) {
+            const otp = await requestPhoneOtp({
+              subjectType: "platform_admin",
+              subjectId: admin.id,
+              phone: admin.phone,
+            });
+            await auditAuth("auth.phone_verification_sent", admin.phone, admin, {
+              surface: "developer",
+              sent: otp.sent,
+            });
+          } else {
+            await issuePlatformMagicLink({
+              platformAdminId: admin.id,
+              email: admin.email,
+              ip,
+              userAgent: req.headers["user-agent"] ?? null,
+            });
+            await auditAuth("auth.magic_link_requested", admin.phone, admin, {
+              surface: "developer",
+            });
+          }
+        }
+      } catch (err) {
+        req.log.error({ err, requestId: req.id }, "magic link request failed");
+      }
+    }
+    return reply.code(202).send({
+      ok: true,
+      message: "If that address belongs to an operator, a sign-in link is on its way.",
+    });
+  });
+
+  // Step two of a first magic-link sign-in: the account phone answers the OTP.
+  app.post("/api/developer/magic-link/verify-phone", async (req, reply) => {
+    const body = (req.body ?? {}) as { email?: string; code?: string };
+    const email = String(body.email ?? "")
+      .trim()
+      .toLowerCase();
+    const code = String(body.code ?? "").trim();
+    const ip = req.ip;
+    const limit = await checkRateLimit(`devmagicphone:${ip}`, 10, 900);
+
+    if (!email.includes("@") || !/^\d{6}$/.test(code) || !limit.allowed) {
+      return reply.code(401).send({
+        error: "That code is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    try {
+      const admin = await prisma.platformAdmin.findFirst({
+        where: { email, emailVerifiedAt: { not: null }, active: true },
+      });
+      if (admin?.email) {
+        const ok = await verifyPhoneOtp({
+          subjectType: "platform_admin",
+          subjectId: admin.id,
+          code,
+        });
+        if (ok) {
+          await issuePlatformMagicLink({
+            platformAdminId: admin.id,
+            email: admin.email,
+            ip,
+            userAgent: req.headers["user-agent"] ?? null,
+          });
+          await auditAuth("auth.phone_verified", admin.phone, admin, {
+            surface: "developer",
+          });
+          return reply.code(202).send({
+            ok: true,
+            message: "If that address belongs to an operator, a sign-in link is on its way.",
+          });
+        }
+      }
+    } catch (err) {
+      req.log.error({ err, requestId: req.id }, "phone verification failed");
+    }
+    return reply.code(401).send({
+      error: "That code is invalid or has expired.",
+      requestId: req.id,
+    });
+  });
+
+  app.post("/api/developer/magic-link/consume", async (req, reply) => {
+    const body = (req.body ?? {}) as { token?: string; totp?: string };
+    const ip = req.ip;
+    const link = await findLiveMagicLink(String(body.token ?? ""));
+    if (!link?.platformAdminId) {
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    const admin = await prisma.platformAdmin.findUnique({
+      where: { id: link.platformAdminId },
+    });
+    if (!admin || !admin.active || !admin.emailVerifiedAt) {
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    if (admin.totpEnabled) {
+      if (!body.totp) {
+        return reply.code(401).send({
+          error: "Enter your 6-digit authenticator code",
+          code: "totp_required",
+          requestId: req.id,
+        });
+      }
+      if (!safeVerifyTotp(admin.totpSecret, body.totp)) {
+        await registerFailure({
+          surface: "dashboard_developer",
+          phone: admin.phone,
+          ip,
+          memberId: admin.id,
+          outcome: "totp_failed",
+          errorId: req.id,
+        });
+        return reply.code(401).send({ error: "invalid 2FA code", requestId: req.id });
+      }
+    }
+
+    if (!(await claimMagicLink(link.id, ip))) {
+      void alertMagicLinkReplay("dashboard_developer", ip).catch(() => undefined);
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    await clearFailures("dashboard_developer", { phone: admin.phone, ip });
+    await prisma.platformAdmin.update({
+      where: { id: admin.id },
+      data: { lastLoginAt: new Date() },
+    });
+    const token = signPlatformToken({ id: admin.id, phone: admin.phone, role: admin.role });
+    setPlatformCookie(reply, token);
+    await auditAuth("auth.magic_link_used", admin.phone, admin, { surface: "developer" });
+
+    const mustSetup2fa = !admin.totpEnabled && TOTP_ROLES.has(admin.role);
     if (admin.mustChangePin) {
       return { mustChangePin: true, mustSetup2fa };
     }
@@ -603,15 +836,26 @@ export async function developerApiRoutes(app: FastifyInstance) {
     }
     // The creator's channel phone is NOT client-supplied: provisioning uses the
     // admin phone as the member identity, so a body field must not be able to
-    // point the super-admin row at an unrelated session.
-    const { sessionPhone, ...safeBody } = body as CreateCoopInput & { sessionPhone?: unknown };
-    void sessionPhone;
+    // point the super-admin row at an unrelated session. Fields are copied one
+    // by one here, so adding a field to CreateCoopInput cannot widen the surface.
+    const superAdmin =
+      body.superAdmin && typeof body.superAdmin === "object"
+        ? {
+            name: typeof body.superAdmin.name === "string" ? body.superAdmin.name : undefined,
+            phone: adminPhone,
+          }
+        : undefined;
     try {
       const result = await createCoop(
         {
-          ...safeBody,
+          name: body.name,
+          code: body.code,
+          state: body.state,
+          country: body.country,
+          registrationNumber: body.registrationNumber,
+          adminName: body.adminName ?? superAdmin?.name,
           adminPhone,
-          superAdmin: body.superAdmin ? { ...body.superAdmin, phone: adminPhone } : undefined,
+          superAdmin,
         },
         actorOf(req),
       );
@@ -1170,8 +1414,14 @@ export async function developerApiRoutes(app: FastifyInstance) {
       max?: number;
       locked?: boolean;
     };
+    const policyInput = {
+      value: body.value,
+      min: body.min,
+      max: body.max,
+      locked: body.locked,
+    };
     try {
-      await setPlatformPolicy(key, body);
+      await setPlatformPolicy(key, policyInput);
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
     }
@@ -1183,7 +1433,7 @@ export async function developerApiRoutes(app: FastifyInstance) {
       action: "policy.set",
       targetType: "platform_policy",
       targetId: key,
-      detail: JSON.stringify(body),
+      detail: JSON.stringify(policyInput),
     });
     return { ok: true };
   });
@@ -1211,6 +1461,9 @@ export async function developerApiRoutes(app: FastifyInstance) {
     } catch (err) {
       if ((err as { code?: string }).code === "P2002") {
         return reply.code(409).send({ error: "phone already registered" });
+      }
+      if (String((err as Error).message).startsWith("invalid role:")) {
+        return reply.code(400).send({ error: (err as Error).message });
       }
       req.log.error(err);
       return reply.code(500).send({ error: "failed to create admin" });
@@ -1624,6 +1877,10 @@ export async function developerApiRoutes(app: FastifyInstance) {
           payloadHash: true,
           receivedAt: true,
           processedAt: true,
+          endpoint: true,
+          attempts: true,
+          nextAttemptAt: true,
+          deadAt: true,
         },
       }),
     ]);

@@ -10,7 +10,11 @@
  *  - `resolveVtuProvider()` gating on VTU_PROVIDER + secret
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveVtuProvider, clearVtuBillerCache, networkForPhone } from "../src/services/payments/vtu.js";
+import {
+  resolveVtuProvider,
+  clearVtuBillerCache,
+  networkForPhone,
+} from "../src/services/payments/vtu.js";
 
 const FLW = "https://api.flutterwave.com/v3";
 
@@ -35,7 +39,13 @@ const BILLERS = {
   data: [
     { id: 1, name: "MTN", short_name: "MTN", biller_code: "BIL100", country_code: "NG" },
     { id: 2, name: "GLO", short_name: "Glo", biller_code: "BIL101", country_code: "NG" },
-    { id: 3, name: "Airtel Nigeria", short_name: "Airtel", biller_code: "BIL102", country_code: "NG" },
+    {
+      id: 3,
+      name: "Airtel Nigeria",
+      short_name: "Airtel",
+      biller_code: "BIL102",
+      country_code: "NG",
+    },
     { id: 4, name: "9MOBILE", short_name: "9mobile", biller_code: "BIL103", country_code: "NG" },
     // A cable biller in the same list must be ignored.
     { id: 5, name: "DSTV", short_name: "DSTV", biller_code: "BIL119", country_code: "NG" },
@@ -46,25 +56,53 @@ const ITEMS: Record<string, unknown> = {
   BIL100: {
     status: "success",
     data: [
-      { id: 1, biller_code: "BIL100", name: "MTN Airtime", is_airtime: true, item_code: "AT100", category_name: "Airtime" },
+      {
+        id: 1,
+        biller_code: "BIL100",
+        name: "MTN Airtime",
+        is_airtime: true,
+        item_code: "AT100",
+        category_name: "Airtime",
+      },
     ],
   },
   BIL101: {
     status: "success",
     data: [
-      { id: 2, biller_code: "BIL101", name: "Glo Airtime", is_airtime: true, item_code: "AT101", category_name: "Airtime" },
+      {
+        id: 2,
+        biller_code: "BIL101",
+        name: "Glo Airtime",
+        is_airtime: true,
+        item_code: "AT101",
+        category_name: "Airtime",
+      },
     ],
   },
   BIL102: {
     status: "success",
     data: [
-      { id: 3, biller_code: "BIL102", name: "Airtel Airtime", is_airtime: true, item_code: "AT102", category_name: "Airtime" },
+      {
+        id: 3,
+        biller_code: "BIL102",
+        name: "Airtel Airtime",
+        is_airtime: true,
+        item_code: "AT102",
+        category_name: "Airtime",
+      },
     ],
   },
   BIL103: {
     status: "success",
     data: [
-      { id: 4, biller_code: "BIL103", name: "9mobile Airtime", is_airtime: true, item_code: "AT103", category_name: "Airtime" },
+      {
+        id: 4,
+        biller_code: "BIL103",
+        name: "9mobile Airtime",
+        is_airtime: true,
+        item_code: "AT103",
+        category_name: "Airtime",
+      },
     ],
   },
   BIL119: {

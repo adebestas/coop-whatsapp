@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Platform Console - Sign-in link</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="dev.css">
+</head>
+<body class="login-page dev-login-page">
+  <div class="login-container dev-login-container">
+    <div class="login-card dev-login-card">
+      <div class="login-logo">
+        <h1>Platform Console</h1>
+        <p class="login-subtitle">Signing you in&hellip;</p>
+      </div>
+
+      <form id="magicConsume" class="login-form" novalidate hidden>
+        <div class="form-group" id="magicTotpGroup" hidden>
+          <label for="magicTotp">Authenticator code</label>
+          <input type="text" id="magicTotp" placeholder="6-digit code" maxlength="6" pattern="[0-9]{6}" autocomplete="one-time-code" inputmode="numeric">
+        </div>
+        <div id="magicConsumeError" class="form-error" role="alert" aria-live="assertive" hidden></div>
+        <button type="submit" class="btn btn-primary btn-full">Continue</button>
+      </form>
+
+      <div id="magicConsumeStatus" class="login-footer" role="status">Checking your link&hellip;</div>
+      <p class="login-footer"><a href="dev-login.html">Back to sign in</a></p>
+    </div>
+  </div>
+
+  <script src="magic.js"></script>
+</body>
+</html>

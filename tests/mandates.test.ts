@@ -307,9 +307,7 @@ describe("paystack mandate adapter", () => {
     });
 
     expect(result.ok).toBe(true);
-    const call = calls.find((c) =>
-      c.url.endsWith("/customer/CUS_X/directdebit-activation-charge"),
-    );
+    const call = calls.find((c) => c.url.endsWith("/customer/CUS_X/directdebit-activation-charge"));
     expect(call).toBeDefined();
     expect(call!.init?.method).toBe("PUT");
     expect(bodyOf(call!.init)).toEqual({ authorization_id: 222 });
@@ -846,9 +844,7 @@ describe("mandate admin commands", () => {
     expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe("paused");
 
     await handleAdminCommand(admin.phone, "resumemandate", [mandate.id]);
-    expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe(
-      "active",
-    );
+    expect((await prisma.mandate.findUnique({ where: { id: mandate.id } }))?.status).toBe("active");
   });
 
   it("pauses and resumes a single purpose", async () => {

@@ -228,7 +228,7 @@ describe("guarantor substitution", () => {
   });
 
   it("only the borrower can request a swap on their own loan", async () => {
-    const { oldG, fresh, loan } = await seed();
+    const { oldG, loan } = await seed();
     const result = await requestSubstitution(FRESH, loan.id, oldG.code, ADMIN);
     expect(result.ok).toBe(false);
     expect(result.message).toContain("doesn't belong to you");

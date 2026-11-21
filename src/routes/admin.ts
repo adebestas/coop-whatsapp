@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { prisma } from "../lib/prisma.js";
-import { withCoopContext, resolveCoopByPhone } from "../lib/tenant-context.js";
+import { withCoopContext, resolveCoopByPhone, resolveCoopByEmail } from "../lib/tenant-context.js";
 import { verifyPin } from "../lib/security.js";
 import { verifyTotp } from "../lib/totp.js";
 import { checkRateLimit, claimOnce, resetRateLimit } from "../lib/cache.js";
@@ -12,6 +12,13 @@ import { approveInsuranceClaim, rejectInsuranceClaim } from "../services/insuran
 import { quorumMet } from "../services/meetings.js";
 import { rejectRefund } from "../services/refunds.js";
 import { audit } from "../services/audit.js";
+import { lockStatus, registerFailure, clearFailures } from "../lib/login-lockout.js";
+import { evaluateLoginAnomalies } from "../lib/login-anomaly.js";
+import { alertMagicLinkReplay } from "../lib/anomaly-rules.js";
+import { claimMagicLink, findLiveMagicLink, issueMemberMagicLink } from "../lib/magic-link.js";
+import { requestPhoneOtp, verifyPhoneOtp } from "../lib/phone-otp.js";
+import { rejectDisposableEmail } from "../lib/disposable-emails.js";
+import { forbiddenFieldsIn } from "../lib/pick.js";
 import { notifyMember } from "../lib/messaging.js";
 import {
   sign,
@@ -67,6 +74,19 @@ function withTenant(
   return async (req, reply) => {
     const coopId = req.adminCoopId;
     if (!coopId) return handler(req, reply);
+    // No coop-dashboard write accepts a privileged field. Rejecting the body
+    // outright (instead of silently dropping the key) makes a mass-assignment
+    // attempt visible to the operator and to the audit trail.
+    const method = req.method.toUpperCase();
+    if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+      const forbidden = forbiddenFieldsIn(req.body);
+      if (forbidden.length > 0) {
+        return reply.code(400).send({
+          error: `privileged field(s) not accepted: ${forbidden.join(", ")}`,
+          fields: forbidden,
+        });
+      }
+    }
     return withCoopContext(coopId, () => handler(req, reply));
   };
 }
@@ -111,11 +131,21 @@ export async function adminApiRoutes(app: FastifyInstance) {
     const pin = body.pin;
     const ip = req.ip;
 
+    const lock = await lockStatus("dashboard_admin", { phone, ip });
+    if (lock.locked) {
+      return reply.code(429).send({
+        error: "Too many login attempts. Try again later.",
+        requestId: req.id,
+        retryAfter: lock.retryAfter,
+      });
+    }
+
     // Rate limit: max 5 attempts per minute per IP, 10 per 15 min per account
     const rateLimit = await checkLoginRateLimit(ip, phone);
     if (!rateLimit.allowed) {
       return reply.code(429).send({
-        error: "Too many login attempts",
+        error: "Too many login attempts. Try again later.",
+        requestId: req.id,
         retryAfter: rateLimit.retryAfter,
       });
     }
@@ -148,7 +178,22 @@ export async function adminApiRoutes(app: FastifyInstance) {
           autoFreeze: false,
         });
       }
-      return reply.code(401).send({ error: "invalid credentials" });
+      const fail = await registerFailure({
+        surface: "dashboard_admin",
+        phone,
+        ip,
+        memberId: member?.id ?? null,
+        outcome: "bad_credentials",
+        errorId: req.id,
+      });
+      if (fail.locked) {
+        return reply.code(429).send({
+          error: "Too many login attempts. Try again later.",
+          requestId: req.id,
+          retryAfter: fail.retryAfter,
+        });
+      }
+      return reply.code(401).send({ error: "invalid credentials", requestId: req.id });
     }
 
     // Reject suspended/deceased admins outright — they must not be able to
@@ -185,7 +230,22 @@ export async function adminApiRoutes(app: FastifyInstance) {
           detail: `Invalid 2FA code from IP ${ip}`,
           autoFreeze: false,
         });
-        return reply.code(401).send({ error: "invalid credentials" });
+        const fail = await registerFailure({
+          surface: "dashboard_admin",
+          phone,
+          ip,
+          memberId: member.id,
+          outcome: "totp_failed",
+          errorId: req.id,
+        });
+        if (fail.locked) {
+          return reply.code(429).send({
+            error: "Too many login attempts. Try again later.",
+            requestId: req.id,
+            retryAfter: fail.retryAfter,
+          });
+        }
+        return reply.code(401).send({ error: "invalid credentials", requestId: req.id });
       }
       // A TOTP stays valid for ~90 seconds. Without this claim the same code
       // can mint a second session after the password is re-entered, so an
@@ -216,6 +276,7 @@ export async function adminApiRoutes(app: FastifyInstance) {
     // (and every member behind one office NAT) cannot lock itself out.
     await resetRateLimit(`login:acct:${phone}`);
     await resetRateLimit(`login:ip:${ip}`);
+    void evaluateLoginAnomalies({ surface: "dashboard_admin", phone, ip }).catch(() => undefined);
 
     const token = sign(phone, member.cooperative.id, member.role);
     setAuthCookie(reply, token);
@@ -237,9 +298,259 @@ export async function adminApiRoutes(app: FastifyInstance) {
     };
   });
 
+  // ---- Magic-link sign-in (additional method; PIN login still works) ----
+  const MAGIC_LINK_ACCEPTED =
+    "If that address belongs to a dashboard admin, a sign-in link is on its way.";
+
+  app.post("/api/admin/magic-link/request", async (req, reply) => {
+    const body = (req.body ?? {}) as { email?: string };
+    const email = String(body.email ?? "")
+      .trim()
+      .toLowerCase();
+    const ip = req.ip;
+    const limit = await checkRateLimit(`magicreq:${ip}`, 5, 900);
+
+    if (email.includes("@") && limit.allowed && rejectDisposableEmail(email).ok) {
+      try {
+        const coopId = await resolveCoopByEmail(email);
+        if (coopId) {
+          await withCoopContext(coopId, async () => {
+            const member = await prisma.member.findFirst({
+              where: {
+                email,
+                emailVerifiedAt: { not: null },
+                role: { in: ["admin", "superadmin"] },
+                status: "active",
+              },
+            });
+            if (!member) return;
+
+            // Email possession alone is not enough while the channel number
+            // has never answered a code: a reassigned phone would otherwise
+            // hand the account to whoever holds the old SIM.
+            if (!member.phoneVerified) {
+              const otp = await requestPhoneOtp({
+                subjectType: "member",
+                subjectId: member.id,
+                phone: member.phone,
+              });
+              await audit({
+                cooperativeId: coopId,
+                actorPhone: member.phone,
+                actorId: member.id,
+                actorRole: member.role,
+                action: "auth.phone_verification_sent",
+                targetType: "member",
+                targetId: member.id,
+                detail: otp.sent ? "code sent to account phone" : "code issued; delivery failed",
+              });
+              return;
+            }
+
+            await issueMemberMagicLink({
+              memberId: member.id,
+              cooperativeId: coopId,
+              email,
+              ip,
+              userAgent: req.headers["user-agent"] ?? null,
+            });
+            await audit({
+              cooperativeId: coopId,
+              actorPhone: member.phone,
+              actorId: member.id,
+              actorRole: member.role,
+              action: "auth.magic_link_requested",
+              targetType: "member",
+              targetId: member.id,
+              detail: "dashboard sign-in link requested",
+            });
+          });
+        }
+      } catch (err) {
+        // Never disclose whether the address exists.
+        req.log.error({ err, requestId: req.id }, "magic link request failed");
+      }
+    }
+    return reply.code(202).send({ ok: true, message: MAGIC_LINK_ACCEPTED });
+  });
+
+  // Step two of a first magic-link sign-in: the account phone answers the OTP.
+  // Slots between request and consume so the link is only minted after the
+  // phone is proven, and the response is identical whether or not the address
+  // exists.
+  app.post("/api/admin/magic-link/verify-phone", async (req, reply) => {
+    const body = (req.body ?? {}) as { email?: string; code?: string };
+    const email = String(body.email ?? "")
+      .trim()
+      .toLowerCase();
+    const code = String(body.code ?? "").trim();
+    const ip = req.ip;
+    const limit = await checkRateLimit(`magicphone:${ip}`, 10, 900);
+
+    if (!email.includes("@") || !/^\d{6}$/.test(code) || !limit.allowed) {
+      return reply.code(401).send({
+        error: "That code is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    try {
+      const coopId = await resolveCoopByEmail(email);
+      if (coopId) {
+        const issued = await withCoopContext(coopId, async () => {
+          const member = await prisma.member.findFirst({
+            where: {
+              email,
+              emailVerifiedAt: { not: null },
+              role: { in: ["admin", "superadmin"] },
+              status: "active",
+            },
+          });
+          if (!member) return false;
+          const ok = await verifyPhoneOtp({
+            subjectType: "member",
+            subjectId: member.id,
+            code,
+          });
+          if (!ok) return false;
+          await issueMemberMagicLink({
+            memberId: member.id,
+            cooperativeId: coopId,
+            email,
+            ip,
+            userAgent: req.headers["user-agent"] ?? null,
+          });
+          await audit({
+            cooperativeId: coopId,
+            actorPhone: member.phone,
+            actorId: member.id,
+            actorRole: member.role,
+            action: "auth.phone_verified",
+            targetType: "member",
+            targetId: member.id,
+            detail: "account phone confirmed; sign-in link issued",
+          });
+          return true;
+        });
+        if (issued) {
+          return reply.code(202).send({ ok: true, message: MAGIC_LINK_ACCEPTED });
+        }
+      }
+    } catch (err) {
+      req.log.error({ err, requestId: req.id }, "phone verification failed");
+    }
+    return reply.code(401).send({
+      error: "That code is invalid or has expired.",
+      requestId: req.id,
+    });
+  });
+
+  app.post("/api/admin/magic-link/consume", async (req, reply) => {
+    const body = (req.body ?? {}) as { token?: string; totp?: string };
+    const ip = req.ip;
+    const link = await findLiveMagicLink(String(body.token ?? ""));
+    if (!link?.memberId || !link.cooperativeId) {
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    const member = await withCoopContext(link.cooperativeId, () =>
+      prisma.member.findUnique({
+        where: { id: link.memberId! },
+        include: { cooperative: true },
+      }),
+    );
+    if (
+      !member ||
+      member.status !== "active" ||
+      !["admin", "superadmin"].includes(member.role) ||
+      !member.emailVerifiedAt
+    ) {
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    // Possession of the link does not replace the second factor.
+    if (member.totpSecret) {
+      if (!body.totp) {
+        return reply.code(401).send({
+          error: "Enter your 6-digit authenticator code",
+          code: "totp_required",
+          requestId: req.id,
+        });
+      }
+      if (!verifyTotp(member.totpSecret, body.totp)) {
+        await registerFailure({
+          surface: "dashboard_admin",
+          phone: member.phone,
+          ip,
+          memberId: member.id,
+          outcome: "totp_failed",
+          errorId: req.id,
+        });
+        return reply.code(401).send({ error: "invalid credentials", requestId: req.id });
+      }
+      if (!(await claimOnce("totp-login", `${member.id}:${body.totp}`, 90))) {
+        return reply.code(401).send({
+          error: "That code was already used. Enter the next code from your authenticator.",
+          code: "totp_reused",
+          requestId: req.id,
+        });
+      }
+    }
+
+    if (!(await claimMagicLink(link.id, ip))) {
+      void alertMagicLinkReplay("dashboard_admin", ip).catch(() => undefined);
+      return reply.code(401).send({
+        error: "This sign-in link is invalid or has expired.",
+        requestId: req.id,
+      });
+    }
+
+    await clearFailures("dashboard_admin", { phone: member.phone, ip });
+    const token = sign(member.phone, member.cooperative.id, member.role);
+    setAuthCookie(reply, token);
+    await audit({
+      cooperativeId: member.cooperativeId,
+      actorPhone: member.phone,
+      actorId: member.id,
+      actorRole: member.role,
+      action: "auth.magic_link_used",
+      targetType: "member",
+      targetId: member.id,
+      detail: "dashboard sign-in link consumed",
+    });
+    return {
+      member: {
+        id: member.id,
+        name: member.name,
+        phone: member.phone,
+        role: member.role,
+        cooperative: {
+          id: member.cooperative.id,
+          name: member.cooperative.name,
+          code: member.cooperative.code,
+          state: member.cooperative.state,
+          country: member.cooperative.country,
+          currency: member.cooperative.currency,
+        },
+      },
+    };
+  });
+
   // ---- Authenticated routes below ----
   app.addHook("preHandler", async (req, reply) => {
-    if (req.url === "/api/admin/login") return;
+    if (
+      req.url === "/api/admin/login" ||
+      req.url === "/api/admin/magic-link/request" ||
+      req.url === "/api/admin/magic-link/verify-phone" ||
+      req.url === "/api/admin/magic-link/consume"
+    )
+      return;
 
     // CSRF protection: non-GET requests must include X-Requested-With header
     const method = req.method.toUpperCase();

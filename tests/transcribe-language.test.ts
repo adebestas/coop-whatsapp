@@ -33,9 +33,15 @@ describe("transcribeAudioMessage", () => {
     process.env.WHATSAPP_TOKEN = "test";
     global.fetch = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ url: "https://x/audio", mime_type: "audio/ogg" }) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ url: "https://x/audio", mime_type: "audio/ogg" }),
+      })
       .mockResolvedValueOnce({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ text: "bawo ni", language: "yo" }) }) as unknown as typeof fetch;
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ text: "bawo ni", language: "yo" }),
+      }) as unknown as typeof fetch;
     expect(await transcribeAudioMessage("media-1")).toEqual({ text: "bawo ni", language: "yo" });
   });
 });

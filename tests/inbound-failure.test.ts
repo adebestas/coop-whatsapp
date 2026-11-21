@@ -1,15 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { prisma } from "./setup.js";
-import {
-  claimInboundMessage,
-  releaseInboundClaim,
-  pruneInboundMessageLog,
-} from "../src/lib/inbound-dedupe.js";
-import {
-  recordWebhookFailure,
-  pruneWebhookFailures,
-} from "../src/lib/webhook-failures.js";
+import { claimInboundMessage, releaseInboundClaim } from "../src/lib/inbound-dedupe.js";
+import { recordWebhookFailure, pruneWebhookFailures } from "../src/lib/webhook-failures.js";
 
 describe("inbound failure handling", () => {
   it("releases a claim so a failed message can be retried", async () => {
@@ -52,7 +45,9 @@ describe("inbound failure handling", () => {
     const removed = await pruneWebhookFailures(30);
     expect(removed).toBeGreaterThanOrEqual(1);
     expect(await prisma.webhookFailure.findFirst({ where: { messageId: "old-1" } })).toBeNull();
-    expect(await prisma.webhookFailure.findFirst({ where: { messageId: "wa-fail-2" } })).toBeTruthy();
+    expect(
+      await prisma.webhookFailure.findFirst({ where: { messageId: "wa-fail-2" } }),
+    ).toBeTruthy();
   });
 
   it("caps stored error text so a stack trace cannot bloat the row", async () => {

@@ -1,5 +1,5 @@
 import { prisma } from "../../lib/prisma.js";
-import { sendText } from "../../lib/messaging.js";
+import { sendText, sendDocument } from "../../lib/messaging.js";
 import { normalizePhone } from "../../lib/phones.js";
 import { getMemberByPhone, formatBalance } from "../cooperative.js";
 import { showLedger, showHistory, getMonthlyStatement, getYearlyStatement } from "../statements.js";
@@ -634,4 +634,184 @@ export async function handleMyData(phone: string, cooperativeId?: string): Promi
   ];
 
   await sendText({ to: phone, text: lines.join("\n") });
+
+  // NDPA right of access: the chat summary is not the full record. Build a
+  // machine-readable extract of every personal record we hold and send it as a
+  // file. Secrets (PIN hash, TOTP seed) are never included, and the NIN is
+  // masked because the whole point of the export is that it leaves our system.
+  try {
+    const sar = await buildSubjectAccessReport(member.id, member.cooperativeId);
+    await sendDocument({
+      to: phone,
+      filename: `personal-data-${member.code}-${new Date().toISOString().slice(0, 10)}.json`,
+      mimeType: "application/json",
+      data: Buffer.from(JSON.stringify(sar, null, 2), "utf8"),
+      caption: "Complete copy of your personal data (NDPA right of access).",
+    });
+    await audit({
+      cooperativeId: member.cooperativeId,
+      actorPhone: phone,
+      actorRole: "member",
+      action: "member.data.export",
+      targetType: "member",
+      targetId: member.id,
+      detail: "Subject access report generated",
+    }).catch(() => {});
+  } catch (err) {
+    console.error("[mydata] failed to build subject access report", err);
+    await sendText({
+      to: phone,
+      text: "I could not generate the full data file just now. Please try again later or ask an admin.",
+    });
+  }
+}
+
+/** Every personal record held about a member, minus authentication secrets. */
+async function buildSubjectAccessReport(memberId: string, cooperativeId: string) {
+  const [
+    member,
+    wallet,
+    contributions,
+    loans,
+    guarantees,
+    beneficiaries,
+    withdrawals,
+    externalPayments,
+    auditTrail,
+    consents,
+  ] = await Promise.all([
+    prisma.member.findUniqueOrThrow({
+      where: { id: memberId },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        phone: true,
+        contactPhone: true,
+        email: true,
+        dateOfBirth: true,
+        role: true,
+        status: true,
+        state: true,
+        lga: true,
+        entityType: true,
+        rcNumber: true,
+        nin: true,
+        kycStatus: true,
+        kycVerifiedAt: true,
+        kycSubmittedAt: true,
+        nextOfKinName: true,
+        nextOfKinPhone: true,
+        bankAccountNumber: true,
+        bankCode: true,
+        bankName: true,
+        bankAccountName: true,
+        virtualAccountNumber: true,
+        virtualAccountBank: true,
+        preferredChannel: true,
+        locale: true,
+        optedOut: true,
+        phoneVerified: true,
+        nameVerified: true,
+        dataConsentGiven: true,
+        consentAt: true,
+        createdAt: true,
+        lastWithdrawalAt: true,
+      },
+    }),
+    prisma.wallet.findUnique({ where: { memberId } }),
+    prisma.contribution.findMany({
+      where: { memberId },
+      orderBy: { paidAt: "desc" },
+      take: 500,
+      select: {
+        id: true,
+        type: true,
+        amount: true,
+        status: true,
+        note: true,
+        reference: true,
+        paidAt: true,
+        createdAt: true,
+      },
+    }),
+    prisma.loan.findMany({
+      where: { memberId },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      select: {
+        id: true,
+        amount: true,
+        balance: true,
+        status: true,
+        monthlyPayment: true,
+        interestRate: true,
+        tenureMonths: true,
+        createdAt: true,
+        approvedAt: true,
+        disbursedAt: true,
+        repayments: {
+          orderBy: { paidAt: "desc" },
+          take: 200,
+          select: { id: true, amount: true, paidAt: true },
+        },
+      },
+    }),
+    prisma.guarantor.findMany({
+      where: { memberId },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      select: { loanId: true, status: true, confirmedAt: true, createdAt: true },
+    }),
+    prisma.beneficiary.findMany({
+      where: { memberId },
+      select: { accountNumber: true, bankCode: true, bankName: true, createdAt: true },
+    }),
+    prisma.withdrawalRequest.findMany({
+      where: { memberId },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+      select: { id: true, amount: true, status: true, createdAt: true, finalizedAt: true },
+    }),
+    prisma.externalPayment.findMany({
+      where: { initiatedById: memberId },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+      select: {
+        id: true,
+        amount: true,
+        status: true,
+        purpose: true,
+        beneficiaryName: true,
+        createdAt: true,
+      },
+    }),
+    prisma.auditLog.findMany({
+      where: { cooperativeId, targetType: "member", targetId: memberId },
+      orderBy: { createdAt: "desc" },
+      take: 500,
+      select: { action: true, detail: true, amount: true, createdAt: true },
+    }),
+    prisma.dataConsent.findMany({
+      where: { memberId },
+      orderBy: { createdAt: "desc" },
+      select: { consentType: true, granted: true, createdAt: true },
+    }),
+  ]);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    notice:
+      "Personal data held about you. Authentication secrets (transaction PIN hash, TOTP seed) are excluded from this export.",
+    member: { ...member, nin: member.nin ? `*******${member.nin.slice(-4)}` : null },
+    wallet,
+    contributions,
+    loans,
+    guarantees,
+    beneficiaries,
+    withdrawals,
+    externalPayments,
+    auditTrail,
+    consents,
+  };
 }

@@ -98,7 +98,7 @@ describe("workplaces (units)", () => {
     const coop = await makeCoop("TEST11", "Test Coop", ADMIN_PHONE);
     await makeMember(ADMIN_PHONE, coop.id, { role: "admin" });
     const a = await makeMember(PHONE, coop.id);
-    const b = await makeMember(OTHER_PHONE, coop.id);
+    await makeMember(OTHER_PHONE, coop.id);
 
     const created = await createUnit(ADMIN_PHONE, "Lagos Office", "LAG01");
     expect(created.ok).toBe(true);

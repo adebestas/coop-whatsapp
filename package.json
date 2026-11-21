@@ -16,17 +16,22 @@
     "prisma:push": "prisma db push",
     "prisma:push:local": "prisma db push --schema prisma/schema.local.prisma",
     "typecheck": "tsc --noEmit",
+    "preflight": "node scripts/production-preflight.mjs",
     "pretest": "node scripts/prisma-generate.mjs --local",
     "test": "vitest run",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
-    "format": "prettier --write \"src/**/*.ts\"",
-    "format:check": "prettier --check \"src/**/*.ts\"",
+    "lint": "eslint src/ tests/ scripts/",
+    "lint:fix": "eslint src/ tests/ scripts/ --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.{ts,mjs,js}\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"scripts/**/*.{ts,mjs,js}\"",
     "db:seed": "npx tsx src/scripts/seed-test.ts",
     "db:reset": "npx tsx src/scripts/db-reset.ts --confirm",
     "db:reset:seed": "npm run db:reset && npm run db:seed",
     "db:migrate-codes": "npx tsx src/scripts/migrate-member-codes.ts",
-    "seed:ombudsman": "npx tsx src/seed.ts --ombudsman"
+    "seed:ombudsman": "npx tsx src/seed.ts --ombudsman",
+    "check": "npm run typecheck && npm run lint && npm run audit:ci && npm run test:gate",
+    "audit:ci": "npm audit --omit=dev --audit-level=high",
+    "test:gate": "vitest run tests/admin-auth.test.ts tests/platform-auth.test.ts tests/admin-login-freeze.test.ts tests/login-lockout.test.ts tests/magic-link.test.ts tests/audit-context.test.ts tests/edge-hardening.test.ts tests/schema-sync.test.ts tests/webhook-dlq.test.ts tests/loan-repayment-reminders.test.ts tests/savings-products.test.ts tests/export-retention.test.ts tests/identity-quality.test.ts tests/mass-assignment.test.ts tests/provider-reconciliation.test.ts",
+    "check:full": "npm run typecheck && npm run lint && npm run audit:ci && npm test"
   },
   "dependencies": {
     "@fastify/compress": "^8.3.1",
@@ -66,6 +71,7 @@
   },
   "overrides": {
     "deepmerge-ts": "^8.0.2",
-    "uuid": "^11.1.1"
+    "uuid": "^11.1.1",
+    "effect": "^3.22.5"
   }
 }

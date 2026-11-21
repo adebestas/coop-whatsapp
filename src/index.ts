@@ -25,6 +25,7 @@ import { log } from "./lib/logger.js";
 import { createShutdown } from "./lib/shutdown.js";
 import { rlsEnforcementStatus } from "./lib/tenant-context.js";
 import { ensurePlatformOwner } from "./services/platform-bootstrap.js";
+import { pruneExports } from "./services/exports.js";
 
 const SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
@@ -162,6 +163,9 @@ async function main() {
   // Start BullMQ workers so async jobs (notifications, payments, exports,
   // backups, digests) are actually processed. No-op when Redis is down.
   initQueueProcessors();
+
+  // Sweep stale PII-bearing export files left by previous runs.
+  await pruneExports();
 
   // Scheduler: BullMQ repeatable jobs when Redis is available (durable across
   // restarts, exactly one worker per job); otherwise in-process loops.

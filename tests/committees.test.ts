@@ -64,11 +64,12 @@ describe("committee service", () => {
     expect(committeeMajority(1)).toBe(1);
 
     const actions = (
-      await prisma.auditLog.findMany({ where: { cooperativeId: coop.id }, select: { action: true } })
+      await prisma.auditLog.findMany({
+        where: { cooperativeId: coop.id },
+        select: { action: true },
+      })
     ).map((e) => e.action);
-    expect(actions).toEqual(
-      expect.arrayContaining(["committee.create", "committee.appoint"]),
-    );
+    expect(actions).toEqual(expect.arrayContaining(["committee.create", "committee.appoint"]));
   });
 
   it("rejects an invalid type and duplicate committees", async () => {
@@ -120,10 +121,10 @@ describe("committee service", () => {
       role: "superadmin",
     });
     const target = await createTestMember(coop.id, { phone: "2348010000020" });
-    expect((await appointMember(coop.id, "credit", target.code, "member", nonSuper)).ok).toBe(false);
-    expect(
-      (await removeMember(coop.id, "credit", target.code, nonSuper)).ok,
-    ).toBe(false);
+    expect((await appointMember(coop.id, "credit", target.code, "member", nonSuper)).ok).toBe(
+      false,
+    );
+    expect((await removeMember(coop.id, "credit", target.code, nonSuper)).ok).toBe(false);
     expect(await prisma.committeeMember.count()).toBe(0);
   });
 });
@@ -256,7 +257,9 @@ describe("credit committee loan approval", () => {
 
     const first = await approveLoan(loan.id.slice(-6), { cooperativeId: coop.id, actorId: a.id });
     expect(first.ok).toBe(true);
-    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("admin_approved");
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe(
+      "admin_approved",
+    );
     expect(await prisma.payout.count()).toBe(0);
 
     const second = await approveLoan(loan.id.slice(-6), { cooperativeId: coop.id, actorId: b.id });
@@ -276,7 +279,9 @@ describe("credit committee loan approval", () => {
 
     const res = await approveLoan(loan.id.slice(-6), { cooperativeId: coop.id, actorId: a.id });
     expect(res.ok).toBe(true);
-    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("admin_approved");
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe(
+      "admin_approved",
+    );
     expect(await prisma.payout.count()).toBe(0);
     expect(await prisma.committeeVote.count()).toBe(1);
   });
@@ -294,7 +299,9 @@ describe("credit committee loan approval", () => {
     });
     expect(res.ok).toBe(false);
     expect(res.message.toLowerCase()).toContain("committee");
-    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("admin_approved");
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe(
+      "admin_approved",
+    );
     expect(await prisma.committeeVote.count()).toBe(0);
   });
 
@@ -309,7 +316,9 @@ describe("credit committee loan approval", () => {
     const again = await approveLoan(loan.id.slice(-6), { cooperativeId: coop.id, actorId: a.id });
     expect(again.ok).toBe(false);
     expect(await prisma.committeeVote.count()).toBe(1);
-    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("admin_approved");
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe(
+      "admin_approved",
+    );
   });
 
   it("keeps the super-admin chain when the coop has no credit committee", async () => {
@@ -324,7 +333,9 @@ describe("credit committee loan approval", () => {
       actorId: super1.id,
     });
     expect(res.ok).toBe(true);
-    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("super_approved_1");
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe(
+      "super_approved_1",
+    );
   });
 
   it("decides from the actual seated majority when the committee is partly staffed", async () => {
@@ -343,7 +354,9 @@ describe("credit committee loan approval", () => {
     expect(
       (await approveLoan(loan.id.slice(-6), { cooperativeId: coop.id, actorId: a.id })).ok,
     ).toBe(true);
-    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("admin_approved");
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe(
+      "admin_approved",
+    );
     const second = await approveLoan(loan.id.slice(-6), { cooperativeId: coop.id, actorId: b.id });
     expect(second.ok).toBe(true);
     expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("disbursed");
@@ -365,7 +378,9 @@ describe("credit committee loan approval", () => {
     await handleMessage(a.phone, `cvote ${loan.id.slice(-6)} approve`);
     expect(await prisma.committeeVote.count()).toBe(0);
     expect(await prisma.payout.count()).toBe(0);
-    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("admin_approved");
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe(
+      "admin_approved",
+    );
 
     // The legacy super-admin chain still works.
     const super1 = await createTestMember(coop.id, { phone: "2348040000011", role: "superadmin" });
@@ -375,7 +390,9 @@ describe("credit committee loan approval", () => {
       actorId: super1.id,
     });
     expect(viaSuper.ok).toBe(true);
-    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("super_approved_1");
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe(
+      "super_approved_1",
+    );
   });
 
   it("lets a plain-member committee member vote via cvote and lists the queue", async () => {
@@ -392,7 +409,9 @@ describe("credit committee loan approval", () => {
     // `a` is an ordinary member (role "member"), not an admin.
     await handleMessage(a.phone, `cvote ${loan.id.slice(-6)} approve`);
     expect(await prisma.committeeVote.count()).toBe(1);
-    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe("admin_approved");
+    expect((await prisma.loan.findUnique({ where: { id: loan.id } }))!.status).toBe(
+      "admin_approved",
+    );
 
     await handleMessage(a.phone, "committeequeue");
     expect(textsSent()).toContain("Committee queue");
@@ -419,7 +438,14 @@ describe("recordCommitteeVote", () => {
     const dup = await recordCommitteeVote(coop.id, "credit", "loan", "loan-xyz", a.id, "approve");
     expect(dup.ok).toBe(false);
 
-    const non = await recordCommitteeVote(coop.id, "credit", "loan", "loan-xyz", outsider.id, "approve");
+    const non = await recordCommitteeVote(
+      coop.id,
+      "credit",
+      "loan",
+      "loan-xyz",
+      outsider.id,
+      "approve",
+    );
     expect(non.ok).toBe(false);
 
     const r2 = await recordCommitteeVote(coop.id, "credit", "loan", "loan-xyz", b.id, "approve");
@@ -434,7 +460,10 @@ describe("supervisory freeze", () => {
     const superAdmin = await createTestMember(coop.id, SUPER);
     const actor = { phone: superAdmin.phone, id: superAdmin.id, role: "superadmin" as const };
     const sup = await createTestMember(coop.id, { phone: "2348050000001", name: "Sup One" });
-    const target = await createTestMember(coop.id, { phone: "2348050000002", name: "Target Member" });
+    const target = await createTestMember(coop.id, {
+      phone: "2348050000002",
+      name: "Target Member",
+    });
 
     await createCommittee(coop.id, "supervisory", "Supervisory Committee", 3, actor);
     await appointMember(coop.id, "supervisory", sup.code, "chair", actor);

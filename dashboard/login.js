@@ -1,76 +1,111 @@
 (function () {
   // Redirect if already logged in
-  if (localStorage.getItem('coop_member')) {
-    window.location.href = 'index.html';
+  if (localStorage.getItem("coop_member")) {
+    window.location.href = "index.html";
     return;
   }
 
-  const form = document.getElementById('loginForm');
-  const phoneInput = document.getElementById('phone');
-  const pinInput = document.getElementById('pin');
-  const totpGroup = document.getElementById('totpGroup');
-  const totpInput = document.getElementById('totp');
-  const errorEl = document.getElementById('loginError');
-  const loginBtn = document.getElementById('loginBtn');
+  const form = document.getElementById("loginForm");
+  const phoneInput = document.getElementById("phone");
+  const pinInput = document.getElementById("pin");
+  const totpGroup = document.getElementById("totpGroup");
+  const totpInput = document.getElementById("totp");
+  const errorEl = document.getElementById("loginError");
+  const loginBtn = document.getElementById("loginBtn");
 
-  form.addEventListener('submit', async function (e) {
+  form.addEventListener("submit", async function (e) {
     e.preventDefault();
     errorEl.hidden = true;
 
-    const phone = phoneInput.value.replace(/[^0-9]/g, '');
+    const phone = phoneInput.value.replace(/[^0-9]/g, "");
     const pin = pinInput.value.trim();
 
     if (!phone || phone.length < 10) {
-      showError('Enter a valid phone number');
+      showError("Enter a valid phone number");
       return;
     }
     if (!pin || pin.length !== 4) {
-      showError('Enter your 4-digit PIN');
+      showError("Enter your 4-digit PIN");
       return;
     }
-    const totp = totpInput.value.replace(/[^0-9]/g, '');
+    const totp = totpInput.value.replace(/[^0-9]/g, "");
     if (!totpGroup.hidden && totp.length !== 6) {
-      showError('Enter the 6-digit code from your authenticator app');
+      showError("Enter the 6-digit code from your authenticator app");
       return;
     }
 
     setLoading(true);
 
     try {
-      const fullPhone = phone.startsWith('234') ? phone : '234' + phone;
+      const fullPhone = phone.startsWith("234") ? phone : "234" + phone;
       const payload = { phone: fullPhone, pin };
       if (!totpGroup.hidden) payload.totp = totp;
-      const res = await fetch('/api/admin/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch("/api/admin/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
       const data = await res.json();
 
       if (!res.ok) {
-        if (data.code === 'totp_required' || data.code === 'totp_reused') {
+        if (data.code === "totp_required" || data.code === "totp_reused") {
           totpGroup.hidden = false;
-          if (data.code === 'totp_reused') totpInput.value = '';
+          if (data.code === "totp_reused") totpInput.value = "";
           totpInput.focus();
-          showError(data.error || 'Enter the 6-digit code from your authenticator app');
+          showError(data.error || "Enter the 6-digit code from your authenticator app");
           return;
         }
-        showError(data.error || 'Login failed');
+        showError(data.error || "Login failed");
         return;
       }
 
       // The token is set as an httpOnly cookie by the server; only the
       // non-sensitive member profile is stored client-side.
-      localStorage.setItem('coop_member', JSON.stringify(data.member));
-      window.location.href = 'index.html';
+      localStorage.setItem("coop_member", JSON.stringify(data.member));
+      window.location.href = "index.html";
     } catch (err) {
-      showError('Network error. Please try again.');
+      showError("Network error. Please try again.");
     } finally {
       setLoading(false);
     }
   });
 
+  const magicForm = document.getElementById("magicForm");
+  const magicEmail = document.getElementById("magicEmail");
+  const magicBtn = document.getElementById("magicBtn");
+  const magicError = document.getElementById("magicError");
+  const magicNote = document.getElementById("magicNote");
+
+  if (magicForm) {
+    magicForm.addEventListener("submit", async function (e) {
+      e.preventDefault();
+      magicError.hidden = true;
+      magicNote.hidden = true;
+      const email = magicEmail.value.trim().toLowerCase();
+      if (!email || email.indexOf("@") < 1) {
+        magicError.textContent = "Enter the email address linked to your account";
+        magicError.hidden = false;
+        return;
+      }
+      magicBtn.disabled = true;
+      try {
+        await fetch("/api/admin/magic-link/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        });
+        magicNote.textContent =
+          "If that address can sign in, a link is on its way. It expires in 15 minutes.";
+        magicNote.hidden = false;
+      } catch (err) {
+        magicError.textContent = "Network error. Please try again.";
+        magicError.hidden = false;
+      } finally {
+        magicBtn.disabled = false;
+      }
+    });
+  }
   function showError(msg) {
     errorEl.textContent = msg;
     errorEl.hidden = false;
@@ -78,8 +113,8 @@
 
   function setLoading(loading) {
     loginBtn.disabled = loading;
-    loginBtn.setAttribute('aria-busy', loading ? 'true' : 'false');
-    loginBtn.querySelector('.btn-text').hidden = loading;
-    loginBtn.querySelector('.btn-loader').hidden = !loading;
+    loginBtn.setAttribute("aria-busy", loading ? "true" : "false");
+    loginBtn.querySelector(".btn-text").hidden = loading;
+    loginBtn.querySelector(".btn-loader").hidden = !loading;
   }
 })();

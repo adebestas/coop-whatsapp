@@ -17,7 +17,7 @@ function jobBlock(name: string): string {
   const start = ciYaml.indexOf(`\n  ${name}:`);
   expect(start, `job "${name}" not found in ci.yml`).toBeGreaterThan(-1);
   const rest = ciYaml.slice(start + 1);
-  const next = rest.search(/\n  [a-z0-9-]+:\n/);
+  const next = rest.search(/\n {2}[a-z0-9-]+:\n/);
   return next === -1 ? rest : rest.slice(0, next);
 }
 

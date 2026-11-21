@@ -86,11 +86,14 @@ export async function withCoopGuc<T>(
   try {
     return await fn();
   } finally {
-    if (previous) {
-      await tx.$executeRaw`SELECT set_config('app.current_cooperative_id', ${previous}, true)`.catch(
-        () => {},
-      );
-    }
+    // An unset GUC reads as NULL, but the RLS predicate is
+    // `NULLIF(current_setting(...), '')`, so an empty string is exactly as
+    // "no tenant" as NULL. Always restore: leaving the inner tenant set would
+    // silently widen the outer scope to cooperatives it never asked for.
+    const restore = previous ?? "";
+    await tx.$executeRaw`SELECT set_config('app.current_cooperative_id', ${restore}, true)`.catch(
+      () => {},
+    );
   }
 }
 
@@ -142,6 +145,27 @@ export async function resolveCoopByPhone(phone: string): Promise<string | null> 
   }
   const rows = await prisma.$queryRaw<{ coop: string | null }[]>`
     SELECT app.resolve_coop_by_phone(${phone}) AS coop
+  `;
+  return rows[0]?.coop ?? null;
+}
+
+/**
+ * Resolve the cooperative that owns a verified email address. Same fail-closed
+ * semantics as resolveCoopByPhone: unknown or ambiguous returns null. Only
+ * addresses with `emailVerifiedAt` set can own a magic link.
+ */
+export async function resolveCoopByEmail(email: string): Promise<string | null> {
+  const url = process.env.DATABASE_URL ?? "";
+  if (!url.startsWith("postgres")) {
+    const rows = await prisma.member.findMany({
+      where: { email, emailVerifiedAt: { not: null } },
+      select: { cooperativeId: true },
+      take: 2,
+    });
+    return rows.length === 1 ? rows[0].cooperativeId : null;
+  }
+  const rows = await prisma.$queryRaw<{ coop: string | null }[]>`
+    SELECT app.resolve_coop_by_email(${email}) AS coop
   `;
   return rows[0]?.coop ?? null;
 }

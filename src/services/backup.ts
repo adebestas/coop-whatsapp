@@ -52,6 +52,44 @@ export function planBackupStorage(env: {
   };
 }
 
+/**
+ * Columns removed from the JSON snapshot before it is written or uploaded.
+ * Hashes and secrets in a dump are a credential store: anyone with the file can
+ * offline-crack PINs, mint TOTP codes, or reuse KYC/bank identifiers. Restores
+ * therefore require a PIN reset and re-verification for these members, which is
+ * the intended trade-off. Keys are kept (value becomes REDACTED) so the restore
+ * shape is unchanged.
+ */
+export const REDACTED = "[redacted]";
+
+export const REDACTED_FIELDS: Record<string, readonly string[]> = {
+  members: [
+    "pin",
+    "totpSecret",
+    "nin",
+    "bvn",
+    "bankAccountNumber",
+    "bankAccountName",
+    "virtualAccountNumber",
+  ],
+  sessions: ["data"],
+};
+
+/** Replace sensitive column values with REDACTED without dropping the key. */
+export function redactTable<T extends Record<string, unknown>>(
+  table: string,
+  rows: T[],
+): Array<T | Record<string, unknown>> {
+  const fields = REDACTED_FIELDS[table];
+  if (!fields) return rows;
+  return rows.map((row) => {
+    const copy: Record<string, unknown> = { ...row };
+    for (const field of fields) {
+      if (field in copy && copy[field] !== null) copy[field] = REDACTED;
+    }
+    return copy;
+  });
+}
 interface BatchArgs {
   take: number;
   skip?: number;
@@ -138,6 +176,14 @@ async function uploadToS3(filePath: string, key: string): Promise<boolean> {
       ? `${BACKUP_ENDPOINT}/${BACKUP_BUCKET}/${key}`
       : `https://${host}/${key}`;
 
+    // SSE-S3: ask the bucket to encrypt at rest. Only for AWS endpoints: the
+    // S3-compatible providers we support (R2, B2) reject the header.
+    const useSse = !BACKUP_ENDPOINT || /amazonaws\.com/i.test(BACKUP_ENDPOINT);
+    const sseHeader = useSse ? `x-amz-server-side-encryption:AES256` : "";
+    const signedHeaders = useSse
+      ? "host;x-amz-content-sha256;x-amz-date;x-amz-server-side-encryption"
+      : "host;x-amz-content-sha256;x-amz-date";
+
     const payloadHash = createHash("sha256").update(fileContent).digest("hex");
     const canonicalRequest = [
       "PUT",
@@ -146,8 +192,9 @@ async function uploadToS3(filePath: string, key: string): Promise<boolean> {
       `host:${host}`,
       `x-amz-content-sha256:${payloadHash}`,
       `x-amz-date:${date}`,
+      ...(useSse ? [sseHeader] : []),
       "",
-      "host;x-amz-content-sha256;x-amz-date",
+      signedHeaders,
       payloadHash,
     ].join("\n");
     const credentialScope = `${dateStamp}/${BACKUP_REGION}/s3/aws4_request`;
@@ -166,7 +213,7 @@ async function uploadToS3(filePath: string, key: string): Promise<boolean> {
     );
     const signature = createHmac("sha256", signingKey).update(stringToSign).digest("hex");
 
-    const authHeader = `AWS4-HMAC-SHA256 Credential=${BACKUP_KEY}/${credentialScope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=${signature}`;
+    const authHeader = `AWS4-HMAC-SHA256 Credential=${BACKUP_KEY}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
     const res = await fetch(endpoint, {
       method: "PUT",
@@ -174,6 +221,7 @@ async function uploadToS3(filePath: string, key: string): Promise<boolean> {
         Host: host,
         "x-amz-content-sha256": payloadHash,
         "x-amz-date": date,
+        ...(useSse ? { "x-amz-server-side-encryption": "AES256" } : {}),
         Authorization: authHeader,
       },
       body: fileContent,
@@ -224,7 +272,7 @@ export async function runBackup(): Promise<{ ok: boolean; message: string; file?
     let totalRows = 0;
     for (const [name, fetch] of TABLE_FETCHERS) {
       const rows = await fetchAllBatched(fetch);
-      tables[name] = rows;
+      tables[name] = redactTable(name, rows);
       totalRows += rows.length;
       if (rows.length >= 100_000) {
         console.warn(
@@ -235,7 +283,8 @@ export async function runBackup(): Promise<{ ok: boolean; message: string; file?
 
     const dump = {
       exportedAt: new Date().toISOString(),
-      version: 3,
+      version: 4,
+      redactedFields: REDACTED_FIELDS,
       tables,
     };
 

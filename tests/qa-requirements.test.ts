@@ -70,7 +70,7 @@ describe("loan numeric rules", () => {
     expect(LOAN_ADMIN_CHARGE).toBe(200000); // ₦2,000 in kobo
 
     const coop = await makeCoop("LOAN01");
-    const member = await makeMember(PHONE, coop.id, { totalSaved: 500000, balance: 500000 });
+    await makeMember(PHONE, coop.id, { totalSaved: 500000, balance: 500000 });
     const res = await applyForLoan(PHONE, 500000, 6); // ₦5,000, within 2x savings
     expect(res.ok).toBe(true);
 

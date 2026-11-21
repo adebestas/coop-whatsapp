@@ -35,6 +35,10 @@ export interface AddCoopAdminInput {
   role: "admin" | "superadmin";
 }
 
+/** The only roles this service may ever write. Checked at runtime too: the
+ * TypeScript union is erased, and promotion is the highest-impact write here. */
+const COOP_ADMIN_ROLES: ReadonlySet<string> = new Set(["admin", "superadmin"]);
+
 export interface AddCoopAdminResult {
   memberId: string;
   created: boolean;
@@ -141,6 +145,9 @@ export async function addCoopAdmin(
   coopId: string,
   input: AddCoopAdminInput,
 ): Promise<AddCoopAdminResult> {
+  if (!COOP_ADMIN_ROLES.has(String(input.role))) {
+    throw new Error(`invalid coop admin role: ${String(input.role)}`);
+  }
   return withCoopContext(coopId, async () => {
     const existing = await prisma.member.findFirst({
       where: { cooperativeId: coopId, phone: input.phone },

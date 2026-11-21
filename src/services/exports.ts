@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
-import nodemailer from "nodemailer";
+import { sendEmail } from "../lib/email.js";
 import { prisma } from "../lib/prisma.js";
 import { computePnl } from "./ledger.js";
 import { uploadToS3 } from "../lib/s3.js";
@@ -13,6 +13,45 @@ import { audit } from "./audit.js";
 import { quorumMet, resolveMeeting } from "./meetings.js";
 
 export const EXPORT_DIR = process.env.EXPORT_DIR ?? "exports";
+
+/** Keep this many export files; older ones are removed after each write. */
+export const MAX_EXPORTS = 14;
+/** A file newer than this may still be downloading, so never unlink it. */
+const MIN_PRUNE_AGE_MS = 60_000;
+
+/**
+ * Retention for generated exports. They contain member PII, so they must not
+ * accumulate forever. The directory is the source of truth (the old Redis list
+ * was never written to, and treated filenames as keys).
+ */
+export async function pruneExports(maxExports: number = MAX_EXPORTS): Promise<void> {
+  const dir = isAbsolute(EXPORT_DIR) ? EXPORT_DIR : join(process.cwd(), EXPORT_DIR);
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return; // no exports yet / directory not created
+  }
+
+  const cutoff = Date.now() - MIN_PRUNE_AGE_MS;
+  const files: Array<{ name: string; mtimeMs: number }> = [];
+  for (const name of names) {
+    if (!/\.(xlsx|pdf)$/i.test(name)) continue;
+    try {
+      const info = await stat(join(dir, name));
+      if (!info.isFile() || info.mtimeMs > cutoff) continue;
+      files.push({ name, mtimeMs: info.mtimeMs });
+    } catch {
+      // vanished between readdir and stat; nothing to do
+    }
+  }
+  if (files.length <= maxExports) return;
+
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
+  await Promise.all(
+    files.slice(maxExports).map((f) => unlink(join(dir, f.name)).catch(() => undefined)),
+  );
+}
 
 export type ExportKind = "members" | "transactions" | "pnl";
 
@@ -69,6 +108,8 @@ export async function runExport(
     `${coop?.name ?? "Cooperative"} — ${kind.toUpperCase()} export`,
     sheets,
   );
+
+  await pruneExports();
 
   // Upload to S3 for persistent storage (if configured)
   const s3Keys: string[] = [];
@@ -148,6 +189,8 @@ export async function exportMeetingMinutes(
     `${coop?.name ?? "Cooperative"} — Minutes: ${meeting.title}`,
     sheet,
   );
+
+  await pruneExports();
 
   const s3Keys: string[] = [];
   for (const fileName of [xlsxName, pdfName]) {
@@ -542,25 +585,10 @@ export async function emailFiles(
     blockSandboxExternal("email");
     return true;
   }
-  try {
-    const transport = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT ?? "587"),
-      secure: process.env.SMTP_SECURE === "true",
-      auth: process.env.SMTP_USER
-        ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-        : undefined,
-    });
-    await transport.sendMail({
-      from: process.env.SMTP_FROM ?? process.env.SMTP_USER,
-      to,
-      subject,
-      text: body,
-      attachments: attachments.map((path) => ({ path })),
-    });
-    return true;
-  } catch (err) {
-    console.error("[exports] email failed:", err);
-    return false;
-  }
+  return sendEmail({
+    to,
+    subject,
+    text: body,
+    attachments: attachments.map((path) => ({ path })),
+  });
 }

@@ -93,7 +93,9 @@ describe("sanctions watchlist refresh", () => {
 
     const result = await refreshSanctionsList({
       sourceUrl: "https://lists.example.test/v1/sanctions",
-      fetchImpl: vi.fn().mockResolvedValue(jsonResponse({ error: "down" }, 503)) as unknown as typeof fetch,
+      fetchImpl: vi
+        .fn()
+        .mockResolvedValue(jsonResponse({ error: "down" }, 503)) as unknown as typeof fetch,
     });
 
     expect(result.ok).toBe(false);

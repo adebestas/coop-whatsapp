@@ -1,10 +1,6 @@
 // tests/country-currency.test.ts
 import { describe, it, expect, beforeEach } from "vitest";
-import {
-  currencyForCountry,
-  countryForCurrency,
-  countryFromPhone,
-} from "../src/lib/currency.js";
+import { currencyForCountry, countryForCurrency, countryFromPhone } from "../src/lib/currency.js";
 import { createCooperative, clearMemberCache } from "../src/services/cooperative.js";
 import { prisma, createTestCoop, createTestMember, cleanupDatabase } from "./setup.js";
 import { handleAdminCommand } from "../src/services/admin.js";

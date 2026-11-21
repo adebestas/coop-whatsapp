@@ -112,15 +112,11 @@ describe("platform monitoring", () => {
     const overview = await platformOverview();
     expect(overview.coops.length).toBeGreaterThanOrEqual(2);
     expect(overview.totals.coopCount).toBe(overview.coops.length);
-    expect(overview.totals.memberCount).toBe(
-      overview.coops.reduce((n, c) => n + c.memberCount, 0),
-    );
+    expect(overview.totals.memberCount).toBe(overview.coops.reduce((n, c) => n + c.memberCount, 0));
     expect(overview.totals.loanOutstanding).toBe(
       overview.coops.reduce((n, c) => n + c.loanOutstanding, 0),
     );
-    expect(overview.totals.walletFloat).toBe(
-      overview.coops.reduce((n, c) => n + c.walletFloat, 0),
-    );
+    expect(overview.totals.walletFloat).toBe(overview.coops.reduce((n, c) => n + c.walletFloat, 0));
   });
 
   it("returns the coop's recent audit entries as activity", async () => {

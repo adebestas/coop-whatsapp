@@ -721,6 +721,20 @@ A daily scheduler job dumps the database state to `backups/coop-backup-<timestam
 (kept for the newest `BACKUP_KEEP` — default 14), and optionally uploads each
 snapshot to S3-compatible object storage when `BACKUP_*` credentials are set.
 
+## Manual scheduler jobs
+
+The platform console can trigger a scheduler job by hand:
+
+```
+POST /api/developer/ops/jobs/run
+{ "job": "loan_reminders", "cooperativeId": "<coop id>" }
+```
+
+`loan_reminders` is the only job exposed for manual runs, it requires a
+cooperative scope, and every run is written to the platform audit log. The
+console also lists this job with the registered schedulers and their recent run
+history. All other jobs run only from the scheduler tick (every 15 minutes).
+
 ## Support tickets
 
 Members open tickets with `support <issue>`; customer-service agents (the

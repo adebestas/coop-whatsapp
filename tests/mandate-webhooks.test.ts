@@ -470,9 +470,9 @@ describe("mandate webhooks", () => {
 
     const postings = await prisma.posting.findMany();
     expect(postings).toHaveLength(2); // exactly one debit + one credit
-    expect(
-      postings.filter((p) => p.direction === "CREDIT").reduce((s, p) => s + p.amount, 0),
-    ).toBe(50_000);
+    expect(postings.filter((p) => p.direction === "CREDIT").reduce((s, p) => s + p.amount, 0)).toBe(
+      50_000,
+    );
 
     // A replayed delivery must not credit a second time.
     const second = await postMonnify(body);

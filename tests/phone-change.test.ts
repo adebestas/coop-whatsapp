@@ -85,9 +85,9 @@ describe("member-initiated phone change", () => {
     await handleMessage(SUPER_PHONE, `approvephone ${m.code}`);
     const moved = await prisma.member.findUnique({ where: { id: m.id } });
     expect(moved!.phone).toBe(NEW);
-    expect(
-      (await prisma.phoneChangeRequest.findFirst({ where: { memberId: m.id } }))!.status,
-    ).toBe("approved");
+    expect((await prisma.phoneChangeRequest.findFirst({ where: { memberId: m.id } }))!.status).toBe(
+      "approved",
+    );
     expect(
       await prisma.auditLog.findFirst({ where: { action: "account.phone.change.approve" } }),
     ).not.toBeNull();
@@ -108,9 +108,9 @@ describe("member-initiated phone change", () => {
 
     vi.clearAllMocks();
     await handleMessage(SUPER_PHONE, `rejectphone ${m.code} not the account holder`);
-    expect(
-      (await prisma.phoneChangeRequest.findFirst({ where: { memberId: m.id } }))!.status,
-    ).toBe("rejected");
+    expect((await prisma.phoneChangeRequest.findFirst({ where: { memberId: m.id } }))!.status).toBe(
+      "rejected",
+    );
     const still = await prisma.member.findUnique({ where: { id: m.id } });
     expect(still!.phone).toBe(M1);
     expect(

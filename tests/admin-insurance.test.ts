@@ -74,10 +74,10 @@ describe("admin insurance policies", () => {
     });
     const member = await createTestMember(coop.id, { phone: "2348092000002", name: "Bola Ade" });
     const policy = await seedPolicy(coop.id, member.id);
-    const claim = await seedClaim(coop.id, member.id, policy.id);
+    await seedClaim(coop.id, member.id, policy.id);
 
     const otherCoop = await createTestCoop("INS2");
-    const otherAdmin = await createTestMember(otherCoop.id, { phone: "2348092000003" });
+    await createTestMember(otherCoop.id, { phone: "2348092000003" });
     const otherMember = await createTestMember(otherCoop.id, { phone: "2348092000004" });
     const otherPolicy = await seedPolicy(otherCoop.id, otherMember.id);
     await seedClaim(otherCoop.id, otherMember.id, otherPolicy.id);
