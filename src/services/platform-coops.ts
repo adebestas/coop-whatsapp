@@ -388,9 +388,21 @@ export async function setCoopAdminRole(
   role: "admin" | "superadmin",
   actor?: PlatformActor,
 ): Promise<void> {
-  await withCoopContext(coopId, () =>
-    prisma.member.update({ where: { id: memberId }, data: { role } }),
+  if (role !== "admin" && role !== "superadmin") {
+    throw new ComplianceInputError("role must be admin or superadmin");
+  }
+  // Scope the write to BOTH ids: the route's `:id` is the cooperative the
+  // caller believes they are editing, and a member id from another tenant must
+  // not be promotable through it (RLS is off on SQLite/dev).
+  const updated = await withCoopContext(coopId, () =>
+    prisma.member.updateMany({
+      where: { id: memberId, cooperativeId: coopId },
+      data: { role },
+    }),
   );
+  if (updated.count === 0) {
+    throw Object.assign(new Error("member not found"), { code: "P2025" });
+  }
   if (actor) {
     await writePlatformAudit({
       actorId: actor.id,

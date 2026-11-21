@@ -836,15 +836,27 @@ export async function developerApiRoutes(app: FastifyInstance) {
     }
     // The creator's channel phone is NOT client-supplied: provisioning uses the
     // admin phone as the member identity, so a body field must not be able to
-    // point the super-admin row at an unrelated session.
-    const { sessionPhone, ...safeBody } = body as CreateCoopInput & { sessionPhone?: unknown };
-    void sessionPhone;
+    // point the super-admin row at an unrelated session. Fields are copied one
+    // by one here, so adding a field to CreateCoopInput cannot widen the surface.
+    const superAdmin =
+      body.superAdmin && typeof body.superAdmin === "object"
+        ? {
+            name:
+              typeof body.superAdmin.name === "string" ? body.superAdmin.name : undefined,
+            phone: adminPhone,
+          }
+        : undefined;
     try {
       const result = await createCoop(
         {
-          ...safeBody,
+          name: body.name,
+          code: body.code,
+          state: body.state,
+          country: body.country,
+          registrationNumber: body.registrationNumber,
+          adminName: body.adminName ?? superAdmin?.name,
           adminPhone,
-          superAdmin: body.superAdmin ? { ...body.superAdmin, phone: adminPhone } : undefined,
+          superAdmin,
         },
         actorOf(req),
       );
@@ -1403,8 +1415,14 @@ export async function developerApiRoutes(app: FastifyInstance) {
       max?: number;
       locked?: boolean;
     };
+    const policyInput = {
+      value: body.value,
+      min: body.min,
+      max: body.max,
+      locked: body.locked,
+    };
     try {
-      await setPlatformPolicy(key, body);
+      await setPlatformPolicy(key, policyInput);
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
     }
@@ -1416,7 +1434,7 @@ export async function developerApiRoutes(app: FastifyInstance) {
       action: "policy.set",
       targetType: "platform_policy",
       targetId: key,
-      detail: JSON.stringify(body),
+      detail: JSON.stringify(policyInput),
     });
     return { ok: true };
   });
@@ -1444,6 +1462,9 @@ export async function developerApiRoutes(app: FastifyInstance) {
     } catch (err) {
       if ((err as { code?: string }).code === "P2002") {
         return reply.code(409).send({ error: "phone already registered" });
+      }
+      if (String((err as Error).message).startsWith("invalid role:")) {
+        return reply.code(400).send({ error: (err as Error).message });
       }
       req.log.error(err);
       return reply.code(500).send({ error: "failed to create admin" });

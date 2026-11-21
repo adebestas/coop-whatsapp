@@ -18,6 +18,7 @@ import { alertMagicLinkReplay } from "../lib/anomaly-rules.js";
 import { claimMagicLink, findLiveMagicLink, issueMemberMagicLink } from "../lib/magic-link.js";
 import { requestPhoneOtp, verifyPhoneOtp } from "../lib/phone-otp.js";
 import { rejectDisposableEmail } from "../lib/disposable-emails.js";
+import { forbiddenFieldsIn } from "../lib/pick.js";
 import { notifyMember } from "../lib/messaging.js";
 import {
   sign,
@@ -73,6 +74,19 @@ function withTenant(
   return async (req, reply) => {
     const coopId = req.adminCoopId;
     if (!coopId) return handler(req, reply);
+    // No coop-dashboard write accepts a privileged field. Rejecting the body
+    // outright (instead of silently dropping the key) makes a mass-assignment
+    // attempt visible to the operator and to the audit trail.
+    const method = req.method.toUpperCase();
+    if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+      const forbidden = forbiddenFieldsIn(req.body);
+      if (forbidden.length > 0) {
+        return reply.code(400).send({
+          error: `privileged field(s) not accepted: ${forbidden.join(", ")}`,
+          fields: forbidden,
+        });
+      }
+    }
     return withCoopContext(coopId, () => handler(req, reply));
   };
 }

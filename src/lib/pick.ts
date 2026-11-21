@@ -13,15 +13,20 @@
  */
 export const FORBIDDEN_INPUT_FIELDS: ReadonlySet<string> = new Set([
   "id",
+  "userId",
+  "ownerId",
+  "createdById",
   "role",
   "isAdmin",
   "plan",
+  "subscriptionPlan",
   "cooperativeId",
   "status",
   "balance",
   "pin",
   "totpSecret",
   "phoneVerified",
+  "mustChangePin",
   "createdAt",
   "updatedAt",
 ]);

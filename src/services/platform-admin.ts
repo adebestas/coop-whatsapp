@@ -65,7 +65,13 @@ export async function createPlatformAdmin(
   input: CreatePlatformAdminInput,
   actor?: PlatformActor,
 ): Promise<CreatePlatformAdminResult> {
-  const role = input.role && ROLES.has(input.role) ? input.role : "developer";
+  // Missing role keeps the schema default ("developer"); an explicit but
+  // unknown role is rejected rather than silently downgraded, so a typo cannot
+  // quietly grant a different tier of access.
+  if (input.role !== undefined && !ROLES.has(input.role)) {
+    throw new Error(`invalid role: ${input.role}`);
+  }
+  const role = input.role ?? "developer";
   const phone = normalizePhone(input.phone);
   if (!phone) throw new Error("invalid phone number");
   const tempPin = String(randomInt(100000, 1000000));
