@@ -40,8 +40,8 @@ function stubFetch(respond: (url: string, init?: RequestInit) => unknown): Call[
   return calls;
 }
 
-function bodyOf(call: Call): any {
-  return call.init?.body ? JSON.parse(String(call.init.body)) : undefined;
+function bodyOf(call: Call): Record<string, unknown> {
+  return call.init?.body ? (JSON.parse(String(call.init.body)) as Record<string, unknown>) : {};
 }
 
 function headersOf(call: Call): Record<string, string> {

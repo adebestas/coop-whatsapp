@@ -74,10 +74,14 @@ export async function uploadToS3(filePath: string, key: string): Promise<boolean
     }
     console.log(`[S3] uploaded to s3://${BACKUP_BUCKET}/${key}`);
     return true;
-  } catch (err: any) {
-    console.error("[S3] upload error:", err?.message ?? err);
+  } catch (err) {
+    console.error("[S3] upload error:", errorText(err));
     return false;
   }
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err ?? "unknown");
 }
 
 function s3Configured(): boolean {
@@ -152,8 +156,8 @@ export async function uploadBufferToS3(
     }
     console.log(`[S3] uploaded buffer to s3://${BACKUP_BUCKET}/${key}`);
     return true;
-  } catch (err: any) {
-    console.error("[S3] buffer upload error:", err?.message ?? err);
+  } catch (err) {
+    console.error("[S3] buffer upload error:", errorText(err));
     return false;
   }
 }

@@ -13,6 +13,7 @@ import { LIMITS } from "../lib/money.js";
 import { flagTransaction } from "./aml.js";
 import { screenAndRecord, isBlocking } from "./screening.js";
 import { blockSandboxExternal, sandboxBlocksProvider } from "../lib/sandbox.js";
+import { isUniqueViolation, errorMessage } from "../lib/errors.js";
 
 export interface PayAnyoneResult {
   ok: boolean;
@@ -433,8 +434,8 @@ async function payExternal(
           },
         }),
       ]);
-    } catch (err: any) {
-      if (err?.code === "P2002") {
+    } catch (err) {
+      if (isUniqueViolation(err)) {
         console.error(`[payanyone] duplicate blocked: ${reference} already paid`);
         return {
           ok: false,
@@ -485,16 +486,16 @@ async function payExternal(
     if (limit.warning) await notifySupers(payment.cooperativeId, limit.warning);
 
     return { ok: true, message: doneMsg + "\n\nAll 3 super approvals complete — money sent ✅" };
-  } catch (err: any) {
+  } catch (err) {
     // Unknown provider state — revert to approved2 so a human can retry
     // deliberately; reconciliation will flag repeated attempts.
     await prisma.externalPayment.updateMany({
       where: { id: payment.id, status: "processing" },
-      data: { status: "approved2", payoutReference: String(err?.message ?? err).slice(0, 200) },
+      data: { status: "approved2", payoutReference: errorMessage(err).slice(0, 200) },
     });
     return {
       ok: false,
-      message: `Transfer failed (${err?.message ?? "provider error"}). No money confirmed moved — retry the final approval if unsure.`,
+      message: `Transfer failed (${errorMessage(err, "provider error")}). No money confirmed moved — retry the final approval if unsure.`,
     };
   }
 }

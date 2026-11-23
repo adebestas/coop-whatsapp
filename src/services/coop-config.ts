@@ -111,23 +111,22 @@ export async function getCoopConfig(cooperativeId: string): Promise<CoopConfig> 
         autoApproveLoans: config.autoApproveLoans,
         requireGuarantors: config.requireGuarantors,
         minGuarantors: config.minGuarantors,
-        largeTxThreshold: (config as any).largeTxThreshold ?? DEFAULT_CONFIG.largeTxThreshold,
-        reportingThreshold: (config as any).reportingThreshold ?? DEFAULT_CONFIG.reportingThreshold,
-        pendingDividendRate: (config as any).pendingDividendRate ?? null,
-        lastDividendRate: (config as any).lastDividendRate ?? null,
-        nextAGMDate: (config as any).nextAGMDate ?? null,
+        // AML thresholds are platform-policy keys, not CooperativeConfig
+        // columns; `applyPlatformPolicy` supplies the effective value below.
+        largeTxThreshold: DEFAULT_CONFIG.largeTxThreshold,
+        reportingThreshold: DEFAULT_CONFIG.reportingThreshold,
+        pendingDividendRate: config.pendingDividendRate ?? null,
+        lastDividendRate: config.lastDividendRate ?? null,
+        nextAGMDate: config.nextAGMDate ?? null,
         literacyCertificationEnabled:
-          (config as any).literacyCertificationEnabled ??
-          DEFAULT_CONFIG.literacyCertificationEnabled,
-        literacyQuizPassMark:
-          (config as any).literacyQuizPassMark ?? DEFAULT_CONFIG.literacyQuizPassMark,
+          config.literacyCertificationEnabled ?? DEFAULT_CONFIG.literacyCertificationEnabled,
+        literacyQuizPassMark: config.literacyQuizPassMark ?? DEFAULT_CONFIG.literacyQuizPassMark,
         literacyQuizQuestionCount:
-          (config as any).literacyQuizQuestionCount ?? DEFAULT_CONFIG.literacyQuizQuestionCount,
-        certifiedLoanBoost: (config as any).certifiedLoanBoost ?? DEFAULT_CONFIG.certifiedLoanBoost,
-        reserveFundPercent: (config as any).reserveFundPercent ?? DEFAULT_CONFIG.reserveFundPercent,
-        educationFundPercent:
-          (config as any).educationFundPercent ?? DEFAULT_CONFIG.educationFundPercent,
-        dividendCapPercent: (config as any).dividendCapPercent ?? DEFAULT_CONFIG.dividendCapPercent,
+          config.literacyQuizQuestionCount ?? DEFAULT_CONFIG.literacyQuizQuestionCount,
+        certifiedLoanBoost: config.certifiedLoanBoost ?? DEFAULT_CONFIG.certifiedLoanBoost,
+        reserveFundPercent: config.reserveFundPercent ?? DEFAULT_CONFIG.reserveFundPercent,
+        educationFundPercent: config.educationFundPercent ?? DEFAULT_CONFIG.educationFundPercent,
+        dividendCapPercent: config.dividendCapPercent ?? DEFAULT_CONFIG.dividendCapPercent,
       }
     : { ...DEFAULT_CONFIG };
 

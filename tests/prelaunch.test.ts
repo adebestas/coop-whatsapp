@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
-import { prisma } from "../tests/setup.js";
+import { Prisma } from "@prisma/client";
+import { prisma, deleteTables } from "../tests/setup.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { totpAt } from "../src/lib/totp.js";
@@ -75,7 +76,7 @@ async function makeMember(
   while (await prisma.member.findUnique({ where: { code } })) {
     code = generateMemberCode();
   }
-  const data: any = {
+  const data: Prisma.MemberUncheckedCreateInput = {
     code,
     phone,
     name: opts.name ?? `Member ${phone.slice(-4)}`,
@@ -94,7 +95,7 @@ async function makeMember(
 }
 
 beforeEach(async () => {
-  for (const m of [
+  await deleteTables([
     "posting",
     "journalEntry",
     "coopPost",
@@ -134,9 +135,7 @@ beforeEach(async () => {
     "unit",
     "cooperative",
     "session",
-  ] as any[]) {
-    await prisma[m].deleteMany();
-  }
+  ]);
 });
 
 describe("TOTP two-factor authentication", () => {
@@ -570,7 +569,7 @@ describe("startup environment validation", () => {
     const report = validateEnvironment({
       WHATSAPP_TOKEN: "",
       WHATSAPP_PHONE_NUMBER_ID: "",
-    } as any);
+    } as Parameters<typeof validateEnvironment>[0]);
     expect(report.ok).toBe(false);
     expect(report.problems.some((p) => p.includes("FATAL"))).toBe(true);
   });
@@ -588,7 +587,7 @@ describe("startup environment validation", () => {
         ADMIN_JWT_SECRET: "a-real-secret-key-that-is-not-a-placeholder-1234567890ab",
         // FATAL in production since the PostgreSQL migration.
         DATABASE_URL: "postgresql://user:pass@localhost:5432/coop",
-      } as any);
+      } as Parameters<typeof validateEnvironment>[0]);
       expect(report.ok).toBe(true);
       expect(report.problems.some((p) => p.includes("No payment provider"))).toBe(true);
     } finally {

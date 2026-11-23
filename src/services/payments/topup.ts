@@ -16,6 +16,7 @@ import {
 } from "../../lib/tenant-context.js";
 import { getCurrency } from "../../lib/runtime-context.js";
 import { maskId } from "../../lib/security.js";
+import { isUniqueViolation } from "../../lib/errors.js";
 
 /**
  * Create a virtual account for a member so they can receive transfers.
@@ -185,7 +186,7 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
               },
             ],
           },
-          tx as any,
+          tx,
         );
         if (!posted.posted) {
           console.log(`[topup] credit not posted (${posted.reason}): ${reference}`);
@@ -274,8 +275,8 @@ export async function handlePaymentNotification(n: PaymentNotification): Promise
         console.error("[topup] credit audit failed:", err);
       }
     });
-  } catch (err: any) {
-    if (err?.code === "P2002") {
+  } catch (err) {
+    if (isUniqueViolation(err)) {
       console.log(
         `[topup] duplicate delivery (concurrent) blocked: ${n.provider}-${n.transactionId}`,
       );

@@ -579,7 +579,7 @@ export async function confirmDividendDistribution(
       await updateCoopConfig(admin.cooperativeId, {
         lastDividendRate: rate,
         pendingDividendRate: null,
-      } as any).catch(() => {});
+      }).catch(() => {});
       const approvedVote = await prisma.dividendVote.findFirst({
         where: { cooperativeId: admin.cooperativeId, proposedRate: rate, status: "approved" },
         orderBy: { closedAt: "desc" },
@@ -781,7 +781,7 @@ export async function distributeDividend(
             { account: "liabilities:reserve_fund", direction: "CREDIT", amount: totalDeductions },
           ],
         },
-        tx as any,
+        tx,
       );
     }
 
@@ -796,7 +796,7 @@ export async function distributeDividend(
           { account: "liabilities:dividend_payable", direction: "CREDIT", amount: pool },
         ],
       },
-      tx as any,
+      tx,
     );
 
     // Per-member payout legs (bank out), committed atomically with the claim so
@@ -813,7 +813,7 @@ export async function distributeDividend(
             { account: "assets:bank", direction: "CREDIT", amount },
           ],
         },
-        tx as any,
+        tx,
       );
     }
 

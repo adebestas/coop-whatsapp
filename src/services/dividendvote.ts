@@ -56,7 +56,7 @@ export async function startDividendVote(
       status: "open",
     },
   });
-  await updateCoopConfig(actor.cooperativeId, { pendingDividendRate: rate } as any);
+  await updateCoopConfig(actor.cooperativeId, { pendingDividendRate: rate });
   await audit({
     cooperativeId: actor.cooperativeId,
     actorPhone: actor.phone,

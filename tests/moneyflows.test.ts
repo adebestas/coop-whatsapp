@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma } from "../tests/setup.js";
+import { Prisma } from "@prisma/client";
+import { prisma, deleteTables } from "../tests/setup.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 
 /** Union of chat texts from both channels-aware senders. */
@@ -46,7 +47,7 @@ async function makeMember(
   while (await prisma.member.findUnique({ where: { code } })) {
     code = generateMemberCode();
   }
-  const data: any = {
+  const data: Prisma.MemberUncheckedCreateInput = {
     code,
     phone,
     name: opts.name ?? `Member ${phone.slice(-4)}`,
@@ -74,7 +75,7 @@ beforeEach(async () => {
   paymentState.payoutFails = false;
   paymentState.payoutPending = false;
   paymentState.transferStatus = "unknown";
-  for (const m of [
+  await deleteTables([
     "coopPost",
     "deductionItem",
     "deductionWaiver",
@@ -110,9 +111,7 @@ beforeEach(async () => {
     "unit",
     "cooperative",
     "session",
-  ] as any[]) {
-    await prisma[m].deleteMany();
-  }
+  ]);
 });
 
 describe("pay anyone (3-super approval)", () => {

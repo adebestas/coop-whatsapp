@@ -11,6 +11,7 @@ import { checkTenureLimit } from "../lib/security-hardening.js";
 import { flagTransaction } from "./aml.js";
 import { assertNotRevoked } from "./revocation.js";
 import { getCoopId } from "../lib/runtime-context.js";
+import { errorMessage } from "../lib/errors.js";
 
 /** Maximum share of savings a member can withdraw at once. */
 export const WITHDRAW_LIMIT_RATIO = 0.45;
@@ -613,7 +614,7 @@ export async function finalizeWithdrawal(
       ok: true,
       message: `✅ *${formatBalance(request.amount)}* sent to ${request.member.name} (${request.bankName ?? request.bankCode} ****${request.bankAccountNumber.slice(-4)}). Wallet debited.`,
     };
-  } catch (err: any) {
+  } catch (err) {
     // Crash safety — any throw after the debit must be handled WITHOUT
     // double-paying. Once money has been sent (paid), never auto-refund:
     // flag for manual reconciliation instead.
@@ -647,7 +648,7 @@ export async function finalizeWithdrawal(
     console.error(`[withdrawal] finalized threw (unconfirmed outcome): ${request.id}`, err);
     return {
       ok: false,
-      message: `Withdrawal hit an unexpected error with an *unconfirmed* outcome and was flagged for reconciliation (${String(err?.message ?? err).slice(0, 120)}).`,
+      message: `Withdrawal hit an unexpected error with an *unconfirmed* outcome and was flagged for reconciliation (${errorMessage(err).slice(0, 120)}).`,
     };
   }
 }

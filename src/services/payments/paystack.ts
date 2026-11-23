@@ -22,6 +22,7 @@ import type {
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
 import { forProvider } from "../../lib/money.js";
+import { errorMessage } from "../../lib/errors.js";
 
 const API_BASE = "https://api.paystack.co";
 
@@ -82,11 +83,19 @@ async function api<T>(
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
-  const json = (await res.json()) as any;
+  const json = (await res.json()) as { status?: boolean } & Record<string, unknown>;
   if (!res.ok || json.status !== true) {
     throw new Error(`Paystack ${method} ${path} failed: ${JSON.stringify(json)}`);
   }
   return json as T;
+}
+
+interface PaystackRecipient {
+  account_number?: string;
+  bank_code?: string;
+  currency?: string;
+  active?: boolean;
+  recipient_code?: string;
 }
 
 /**
@@ -100,22 +109,25 @@ export const paystackAdapter: ProviderAdapter = {
 
   async resolveAccount(params: ResolveAccountParams): Promise<ResolveAccountResult> {
     try {
-      const res = await api<any>(
+      const res = await api<{ data?: { account_name?: string } }>(
         `/bank/resolve?account_number=${encodeURIComponent(params.accountNumber)}&bank_code=${encodeURIComponent(params.bankCode)}`,
         "GET",
       );
       return { ok: true, name: res.data?.account_name ?? undefined };
-    } catch (err: any) {
-      return { ok: false, error: err.message ?? "account resolution failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "account resolution failed") };
     }
   },
 
   async listBanks(currency?: string): Promise<Bank[]> {
     try {
-      const res = await api<any>(`/bank?currency=${currency ?? "NGN"}`, "GET");
+      const res = await api<{ data?: Array<{ code?: string | number; name?: string }> }>(
+        `/bank?currency=${currency ?? "NGN"}`,
+        "GET",
+      );
       if (!Array.isArray(res.data)) return [];
       return res.data
-        .map((b: any) => ({ code: String(b.code ?? ""), name: String(b.name ?? "") }))
+        .map((b) => ({ code: String(b.code ?? ""), name: String(b.name ?? "") }))
         .filter((b: Bank) => b.code && b.name);
     } catch {
       return [];
@@ -127,12 +139,12 @@ export const paystackAdapter: ProviderAdapter = {
       // 1. Check for existing recipient to avoid duplicates
       let recipientCode: string | undefined;
       try {
-        const listRes = await api<any>(
+        const listRes = await api<{ data?: PaystackRecipient[] }>(
           `/transferrecipient?account_number=${encodeURIComponent(params.bankAccountNumber)}&bank_code=${encodeURIComponent(params.bankCode)}&currency=${params.currency ?? "NGN"}`,
           "GET",
         );
         const existing = listRes.data?.find(
-          (r: any) =>
+          (r) =>
             r.account_number === params.bankAccountNumber &&
             r.bank_code === params.bankCode &&
             r.currency === (params.currency ?? "NGN") &&
@@ -147,13 +159,17 @@ export const paystackAdapter: ProviderAdapter = {
 
       // 2. Create transfer recipient if none found
       if (!recipientCode) {
-        const recipientRes = await api<any>("/transferrecipient", "POST", {
-          type: "nuban",
-          name: params.recipientName || "Coop Member",
-          account_number: params.bankAccountNumber,
-          bank_code: params.bankCode,
-          currency: params.currency ?? "NGN",
-        });
+        const recipientRes = await api<{ data?: { recipient_code?: string } }>(
+          "/transferrecipient",
+          "POST",
+          {
+            type: "nuban",
+            name: params.recipientName || "Coop Member",
+            account_number: params.bankAccountNumber,
+            bank_code: params.bankCode,
+            currency: params.currency ?? "NGN",
+          },
+        );
         recipientCode = recipientRes.data?.recipient_code;
       }
       if (!recipientCode) {
@@ -161,7 +177,7 @@ export const paystackAdapter: ProviderAdapter = {
       }
 
       // 2. Initiate transfer with recipient code
-      const res = await api<any>("/transfer", "POST", {
+      const res = await api<{ data?: { transfer_code?: string } }>("/transfer", "POST", {
         source: process.env.PAYSTACK_TRANSFER_SOURCE ?? "balance",
         amount: forProvider(params.amount, "paystack"),
         reference: params.reference,
@@ -169,8 +185,8 @@ export const paystackAdapter: ProviderAdapter = {
         reason: `Coop payout ${params.reference}`,
       });
       return { ok: true, providerRef: res.data?.transfer_code };
-    } catch (err: any) {
-      return { ok: false, error: err.message ?? "payout failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "payout failed") };
     }
   },
 
@@ -179,31 +195,39 @@ export const paystackAdapter: ProviderAdapter = {
     const existingEmail = `${params.reference}@coop.local`;
     let customerCode: string;
     try {
-      const searchRes = await api<any>(`/customer/${encodeURIComponent(existingEmail)}`, "GET");
-      customerCode = searchRes.data?.customer_code;
+      const searchRes = await api<{ data?: { customer_code?: string } }>(
+        `/customer/${encodeURIComponent(existingEmail)}`,
+        "GET",
+      );
+      customerCode = searchRes.data?.customer_code ?? "";
     } catch {
       customerCode = "";
     }
 
     // 2. Create customer only if not found.
     if (!customerCode) {
-      const cust = await api<any>("/customer", "POST", {
+      const cust = await api<{ data?: { customer_code?: string } }>("/customer", "POST", {
         email: existingEmail,
         phone: params.phone,
         first_name: params.name.split(" ")[0] ?? params.name,
         last_name: params.name.split(" ").slice(1).join(" ") || "Member",
       });
-      customerCode = cust.data?.customer_code;
+      customerCode = cust.data?.customer_code ?? "";
       if (!customerCode) throw new Error("Paystack customer creation returned no code");
     }
 
     // 3. Assign a dedicated virtual account.
-    const dva = await api<any>("/dedicated_account", "POST", {
+    const dva = await api<{
+      data?: { bank?: { name?: string }; assignments?: Array<{ account_number?: string }> };
+    }>("/dedicated_account", "POST", {
       customer: customerCode,
       preferred_bank: process.env.PAYSTACK_PREFERRED_BANK,
     });
 
-    const assignment = dva.data?.assignments?.[0] ?? {};
+    const assignment = dva.data?.assignments?.[0];
+    if (!assignment?.account_number) {
+      throw new Error("Paystack DVA assignment returned no account number");
+    }
     return {
       accountNumber: assignment.account_number,
       bank: dva.data?.bank?.name ?? "Paystack",
@@ -226,7 +250,7 @@ export const paystackAdapter: ProviderAdapter = {
     return signaturesMatch(expected, signature);
   },
 
-  parseNotification(body: any): PaymentNotification | null {
+  parseNotification(body: unknown): PaymentNotification | null {
     // Fail-closed on shape drift: a charge.success whose payload doesn't match
     // the expected schema is dropped rather than mis-credited.
     const parsed = PaystackChargeSchema.safeParse(body);
@@ -255,7 +279,7 @@ export const paystackAdapter: ProviderAdapter = {
     };
   },
 
-  parsePayoutNotification(body: any): PayoutNotification | null {
+  parsePayoutNotification(body: unknown): PayoutNotification | null {
     const parsed = PaystackTransferSchema.safeParse(body);
     if (!parsed.success) return null;
     const event = parsed.data.event.toLowerCase();
@@ -296,9 +320,9 @@ export const paystackAdapter: ProviderAdapter = {
         providerRef:
           res.data?.transfer_code ?? (res.data?.id !== undefined ? String(res.data.id) : undefined),
       };
-    } catch (err: any) {
+    } catch (err) {
       // Unconfigured or HTTP error — treat as unknown, never guess.
-      return { status: "unknown", error: String(err?.message ?? err) };
+      return { status: "unknown", error: errorMessage(err, "status lookup failed") };
     }
   },
 
@@ -308,11 +332,15 @@ export const paystackAdapter: ProviderAdapter = {
       // `data.customer.email`, so we pass a DETERMINISTIC email derived from our
       // reference. The webhook handler derives the reference back from that email
       // and joins the authorization to our mandate.
-      const res = await api<any>("/customer/authorization/initialize", "POST", {
-        email: `${params.reference}@coop.local`,
-        channel: "direct_debit",
-        callback_url: params.redirectUrl,
-      });
+      const res = await api<{ data?: { redirect_url?: string } }>(
+        "/customer/authorization/initialize",
+        "POST",
+        {
+          email: `${params.reference}@coop.local`,
+          channel: "direct_debit",
+          callback_url: params.redirectUrl,
+        },
+      );
       // No providerMandateId: the authorization_code only arrives on the
       // webhook. The mandate stays fail-closed for debits until then.
       return {
@@ -320,8 +348,8 @@ export const paystackAdapter: ProviderAdapter = {
         authorizationUrl: res.data?.redirect_url,
         status: "pending",
       };
-    } catch (err: any) {
-      return { ok: false, error: err.message ?? "mandate failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "mandate failed") };
     }
   },
 
@@ -333,24 +361,23 @@ export const paystackAdapter: ProviderAdapter = {
       }
       // Paystack's activation endpoints are customer-scoped and take the numeric
       // authorization_id, which we resolve from the mandate-authorizations list.
-      const list = await api<any>(
-        `/customer/${encodeURIComponent(customerId)}/directdebit-mandate-authorizations`,
-        "GET",
-      );
+      const list = await api<{
+        data?: Array<{ authorization_id?: unknown; authorization_code?: string }>;
+      }>(`/customer/${encodeURIComponent(customerId)}/directdebit-mandate-authorizations`, "GET");
       const entries: Array<{ authorization_id?: unknown; authorization_code?: string }> =
         Array.isArray(list.data) ? list.data : [];
       const match = entries.find((e) => e.authorization_code === params.providerMandateId);
       if (!match?.authorization_id) {
         return { ok: false, error: "authorization not found for activation charge" };
       }
-      await api<any>(
+      await api<unknown>(
         `/customer/${encodeURIComponent(customerId)}/directdebit-activation-charge`,
         "PUT",
         { authorization_id: match.authorization_id },
       );
       return { ok: true };
-    } catch (err: any) {
-      return { ok: false, error: err.message ?? "activation charge failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "activation charge failed") };
     }
   },
 
@@ -362,35 +389,46 @@ export const paystackAdapter: ProviderAdapter = {
       if (!params.providerMandateId?.trim()) {
         return { ok: false, error: "mandate has no resolved authorization code" };
       }
-      const res = await api<any>("/transaction/partial_debit", "POST", {
-        authorization_code: params.providerMandateId,
-        currency: params.currency ?? "NGN",
-        amount: forProvider(params.amount, "paystack"),
-        email: params.memberEmail ?? "member@coop.local",
-        // Our deterministic debit reference doubles as the idempotency key and
-        // is what the debit webhook echoes back, so settleDebit can match it.
-        reference: params.reference,
-      });
+      const res = await api<{ data?: { reference?: string; status?: string } }>(
+        "/transaction/partial_debit",
+        "POST",
+        {
+          authorization_code: params.providerMandateId,
+          currency: params.currency ?? "NGN",
+          amount: forProvider(params.amount, "paystack"),
+          email: params.memberEmail ?? "member@coop.local",
+          // Our deterministic debit reference doubles as the idempotency key and
+          // is what the debit webhook echoes back, so settleDebit can match it.
+          reference: params.reference,
+        },
+      );
       return { ok: true, providerRef: res.data?.reference, status: res.data?.status };
-    } catch (err: any) {
-      return { ok: false, error: err.message ?? "debit failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "debit failed") };
     }
   },
 
   async cancelMandate(params: CancelMandateParams): Promise<{ ok: boolean; error?: string }> {
     try {
-      await api<any>(
+      await api<unknown>(
         `/customer/authorization/${encodeURIComponent(params.providerMandateId)}`,
         "DELETE",
       );
       return { ok: true };
-    } catch (err: any) {
-      return { ok: false, error: err.message ?? "cancel failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "cancel failed") };
     }
   },
 
   parseMandateNotification(body: unknown): MandateNotification | null {
-    const b: any = body;
+    const b = body as {
+      event?: string;
+      data?: {
+        authorization_code?: string;
+        active?: boolean;
+        customer?: { email?: string; code?: string };
+      };
+    };
     if (b?.event !== "direct_debit.authorization.created") return null;
     const code = b.data?.authorization_code;
     if (!code) return null;
@@ -414,7 +452,10 @@ export const paystackAdapter: ProviderAdapter = {
   },
 
   parseDebitNotification(body: unknown): DebitNotification | null {
-    const b: any = body;
+    const b = body as {
+      event?: string;
+      data?: { reference?: string; id?: string | number };
+    };
     const event = String(b?.event ?? "").toLowerCase();
     if (!event.includes("partial_debit") && !event.includes("charge")) return null;
     const reference = b.data?.reference;

@@ -4,6 +4,12 @@ import { recordReferral } from "./referrals.js";
 import { screenAndRecord } from "./screening.js";
 import { getRedis } from "../lib/cache.js";
 import { countryFromPhone, currencyForCountry } from "../lib/currency.js";
+import type { Prisma } from "@prisma/client";
+
+/** Shape returned by `getMemberByPhone` (and therefore cached). */
+type CachedMember = Prisma.MemberGetPayload<{
+  include: { cooperative: true; wallet: true };
+}>;
 
 export { formatBalance } from "../lib/money.js";
 
@@ -165,7 +171,7 @@ export async function findOrCreateMember(
   };
 }
 
-const memberCache = new Map<string, { data: any; expires: number }>();
+const memberCache = new Map<string, { data: CachedMember; expires: number }>();
 const CACHE_TTL = 30_000; // ms
 const MEMBER_CACHE_PREFIX = "membercache:";
 
@@ -181,12 +187,12 @@ function reviveDates(_key: string, value: unknown): unknown {
  * instance is seen by the others); the in-memory map is a fallback when Redis
  * is unavailable. Returns null on a miss.
  */
-async function readMemberCache(key: string): Promise<any | null> {
+async function readMemberCache(key: string): Promise<CachedMember | null> {
   const redis = getRedis();
   if (redis) {
     try {
       const raw = await redis.get(MEMBER_CACHE_PREFIX + key);
-      if (raw) return JSON.parse(raw, reviveDates);
+      if (raw) return JSON.parse(raw, reviveDates) as CachedMember;
     } catch {
       /* fall through to the in-memory cache */
     }
@@ -196,7 +202,7 @@ async function readMemberCache(key: string): Promise<any | null> {
   return null;
 }
 
-async function writeMemberCache(key: string, data: unknown): Promise<void> {
+async function writeMemberCache(key: string, data: CachedMember): Promise<void> {
   const redis = getRedis();
   if (redis) {
     try {

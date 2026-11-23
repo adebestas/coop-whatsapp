@@ -87,13 +87,15 @@ export function buildApp() {
     { parseAs: "string" },
     (req, body, done) => {
       const raw = typeof body === "string" ? body : body.toString("utf8");
-      (req as any).rawBody = raw;
+      req.rawBody = raw;
       if (req.headers["content-type"]?.includes("application/json")) {
         try {
           done(null, JSON.parse(raw));
-        } catch (err: any) {
-          err.statusCode = 400;
-          done(err, undefined);
+        } catch (err) {
+          if (err && typeof err === "object") {
+            (err as { statusCode?: number }).statusCode = 400;
+          }
+          done(err as Error, undefined);
         }
       } else {
         done(null, raw);

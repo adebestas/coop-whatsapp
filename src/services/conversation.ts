@@ -247,6 +247,7 @@ import {
   listMotions,
 } from "./meetings.js";
 import { appendTrend } from "./live-trends.js";
+import { errorMessage } from "../lib/errors.js";
 
 export type BotState =
   | "idle"
@@ -905,11 +906,11 @@ async function handleMessageInner(
           to: phone,
           text: `✅ Contributed *${formatBalance(amount)}* to *${fed.name}*.`,
         });
-      } catch (err: any) {
+      } catch (err) {
         await sendText({
           to: phone,
           text:
-            err?.message === "INSUFFICIENT_BALANCE"
+            errorMessage(err, "") === "INSUFFICIENT_BALANCE"
               ? "Insufficient wallet balance."
               : "Could not contribute right now.",
         });
@@ -950,11 +951,11 @@ async function handleMessageInner(
           to: phone,
           text: `✅ Loan request *${loan.id.slice(0, 8)}* for *${formatBalance(amount)}* over ${months} months is pending federation approval.`,
         });
-      } catch (err: any) {
+      } catch (err) {
         const msg =
-          err?.message === "INSUFFICIENT_POOL_LIQUIDITY"
+          errorMessage(err, "") === "INSUFFICIENT_POOL_LIQUIDITY"
             ? "The federation pool does not have enough liquidity."
-            : err?.message === "INSUFFICIENT_LENDER_STAKE"
+            : errorMessage(err, "") === "INSUFFICIENT_LENDER_STAKE"
               ? "The chosen lender does not have enough available stake."
               : "Could not request the loan right now.";
         await sendText({ to: phone, text: msg });
@@ -973,11 +974,11 @@ async function handleMessageInner(
           to: phone,
           text: `✅ Funded *${fed.name}* with *${formatBalance(amount)}* from your reserve fund.`,
         });
-      } catch (err: any) {
+      } catch (err) {
         await sendText({
           to: phone,
           text:
-            err?.message === "INSUFFICIENT_RESERVE"
+            errorMessage(err, "") === "INSUFFICIENT_RESERVE"
               ? "Insufficient reserve fund to fund the federation."
               : "Could not fund the federation right now.",
         });
@@ -997,13 +998,13 @@ async function handleMessageInner(
           to: phone,
           text: `✅ Repaid *${formatBalance(amount)}* to *${fed.name}*.`,
         });
-      } catch (err: any) {
+      } catch (err) {
         const msg =
-          err?.message === "INSUFFICIENT_BALANCE"
+          errorMessage(err, "") === "INSUFFICIENT_BALANCE"
             ? "Insufficient federation fund balance to repay."
-            : err?.message === "NOT_YOUR_LOAN"
+            : errorMessage(err, "") === "NOT_YOUR_LOAN"
               ? "That loan does not belong to your cooperative."
-              : err?.message === "LOAN_NOT_REPAYABLE"
+              : errorMessage(err, "") === "LOAN_NOT_REPAYABLE"
                 ? "That loan is not open for repayment."
                 : "Could not repay the federation loan right now.";
         await sendText({ to: phone, text: msg });
@@ -1313,6 +1314,13 @@ async function handleMessageInner(
 
     case "myguarantees":
     case "guarantees": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
       const summary = await getMemberGuarantees(member.id, member.cooperativeId);
       await sendText({ to: phone, text: formatMyGuarantees(summary, member.name) });
       break;
@@ -1408,12 +1416,26 @@ async function handleMessageInner(
 
     case "trend":
     case "sparkline": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
       const trend = await getBalanceTrend(member.id, member.cooperativeId);
       await sendText({ to: phone, text: trend });
       break;
     }
 
     case "goal": {
+      if (!member) {
+        await sendText({
+          to: phone,
+          text: "You need to join a cooperative first. Reply *join <code>*.",
+        });
+        break;
+      }
       const amountNaira = Number(args[0]);
       if (!amountNaira || amountNaira <= 0) {
         await sendText({

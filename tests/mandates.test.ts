@@ -51,8 +51,8 @@ function stubFetch(respond: (url: string, init?: RequestInit) => unknown) {
   return calls;
 }
 
-function bodyOf(init?: RequestInit): any {
-  return init?.body ? JSON.parse(String(init.body)) : undefined;
+function bodyOf(init?: RequestInit): Record<string, unknown> {
+  return init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
 }
 
 beforeEach(() => {

@@ -97,7 +97,7 @@ describe("nightly reconciliation & wallet-bank financial integrity", () => {
     const notifyCalls = vi.mocked(notifyMember).mock.calls;
     const alertSentToAdmin = notifyCalls.some(
       (c) =>
-        String((c[0] as any).phone ?? c[0]) === superadmin.phone &&
+        String(c[0].phone ?? c[0]) === superadmin.phone &&
         String(c[1]).includes("Balance discrepancy detected"),
     );
     expect(alertSentToAdmin).toBe(true);

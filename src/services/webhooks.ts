@@ -14,6 +14,7 @@ import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { log } from "../lib/logger.js";
 import { incCounter } from "../lib/metrics.js";
 import { scheduleWebhookFailure, WEBHOOK_LEASE_MS } from "../lib/webhook-dlq.js";
+import { isUniqueViolation, errorMessage } from "../lib/errors.js";
 
 /**
  * Combined payment webhook listener.
@@ -115,8 +116,8 @@ async function recordAndProcess(params: {
         payload: rawBody,
       },
     });
-  } catch (err: any) {
-    if (err?.code !== "P2002") {
+  } catch (err) {
+    if (!isUniqueViolation(err)) {
       console.error(`[webhook] failed to record delivery ${eventId}:`, err);
       return {
         httpStatus: 500,
@@ -143,11 +144,11 @@ async function recordAndProcess(params: {
       data: { status: "processed", processedAt: new Date() },
     });
     return { httpStatus: 200, body: { status: "ok", event: eventId } };
-  } catch (err: any) {
+  } catch (err) {
     console.error(`[webhook] processing failed for ${eventId}`, err);
     await alertSupers(
       "system",
-      `Webhook processing failed for event ${eventId}\n\nError: ${err?.message ?? "unknown"}`,
+      `Webhook processing failed for event ${eventId}\n\nError: ${errorMessage(err)}`,
       AlertSeverity.CRITICAL,
     ).catch(() => {});
     await scheduleWebhookFailure({
@@ -234,8 +235,8 @@ async function processCubeCoverBody(rawBody: string): Promise<WebhookOutcome> {
         payload: rawBody,
       },
     });
-  } catch (err: any) {
-    if (err?.code === "P2002") {
+  } catch (err) {
+    if (isUniqueViolation(err)) {
       const existing = await prisma.webhookEvent.findUnique({
         where: { id: eventId },
         select: { status: true },
@@ -251,7 +252,7 @@ async function processCubeCoverBody(rawBody: string): Promise<WebhookOutcome> {
     }
   }
 
-  const insuranceService = new InsuranceService({ prisma: prisma as any, cubecover: client });
+  const insuranceService = new InsuranceService({ prisma, cubecover: client });
   try {
     await insuranceService.handleWebhook(notification.event, notification.data);
     await prisma.webhookEvent.update({
@@ -325,7 +326,7 @@ async function processCreditBody(providerName: string, rawBody: string): Promise
   }
 
   // Event id — the provider's transaction id is the natural dedupe key.
-  let parsedBody: any;
+  let parsedBody: unknown;
   try {
     parsedBody = JSON.parse(rawBody);
   } catch {
@@ -404,8 +405,8 @@ async function processCreditBody(providerName: string, rawBody: string): Promise
         payload: rawBody,
       },
     });
-  } catch (err: any) {
-    if (err?.code !== "P2002") {
+  } catch (err) {
+    if (!isUniqueViolation(err)) {
       // Recording the delivery itself failed (transient DB outage). Return a
       // structured 5xx so the provider retries — never throw, which would
       // surface as a bare 500 with no trace of the attempt.
@@ -456,19 +457,20 @@ async function processCreditBody(providerName: string, rawBody: string): Promise
       data: { status: "processed", processedAt: new Date() },
     });
     return { httpStatus: 200, body: { status: "ok", event: eventId } };
-  } catch (err: any) {
+  } catch (err) {
     console.error(`[webhook] processing failed for ${eventId}`, err);
     // Extract cooperativeId from the notification if possible for alerting
     let cooperativeId: string | undefined;
     if (notification && "cooperativeId" in notification) {
-      cooperativeId = (notification as any).cooperativeId;
+      const candidate = (notification as { cooperativeId?: unknown }).cooperativeId;
+      if (typeof candidate === "string") cooperativeId = candidate;
     }
 
     // Alert super admins if we have cooperative context
     if (cooperativeId) {
       await alertSupers(
         cooperativeId,
-        `Webhook processing failed for event ${eventId}\n\nError: ${err?.message ?? "unknown"}`,
+        `Webhook processing failed for event ${eventId}\n\nError: ${errorMessage(err)}`,
         AlertSeverity.CRITICAL,
       ).catch(() => {});
     }
@@ -583,8 +585,8 @@ async function processPayoutBody(providerName: string, rawBody: string): Promise
         payload: rawBody,
       },
     });
-  } catch (err: any) {
-    if (err?.code !== "P2002") {
+  } catch (err) {
+    if (!isUniqueViolation(err)) {
       console.error(`[payout-webhook] failed to record delivery ${eventId}:`, err);
       return {
         httpStatus: 500,
@@ -612,12 +614,12 @@ async function processPayoutBody(providerName: string, rawBody: string): Promise
       data: { status: "processed", processedAt: new Date() },
     });
     return { httpStatus: 200, body: { status: "ok", event: eventId } };
-  } catch (err: any) {
+  } catch (err) {
     console.error(`[payout-webhook] processing failed for ${eventId}`, err);
     // Best-effort alert: a stuck dividend reversal is a books-integrity issue.
     await alertSupers(
       "system",
-      `Payout webhook processing failed for ${eventId}\n\nError: ${err?.message ?? "unknown"}`,
+      `Payout webhook processing failed for ${eventId}\n\nError: ${errorMessage(err)}`,
       AlertSeverity.CRITICAL,
     ).catch(() => {});
     await scheduleWebhookFailure({

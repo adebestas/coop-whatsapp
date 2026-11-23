@@ -5,6 +5,7 @@
  * WARNING: This will DELETE ALL DATA!
  */
 import { prisma } from "../lib/prisma.js";
+import { errorMessage } from "../lib/errors.js";
 
 async function reset() {
   const confirm = process.argv.includes("--confirm");
@@ -52,10 +53,11 @@ async function reset() {
     try {
       await prisma.$executeRawUnsafe(`DELETE FROM "${table}"`);
       console.log(`  ✅ Cleared ${table}`);
-    } catch (err: any) {
+    } catch (err) {
       // Table might not exist yet
-      if (!err.message?.includes("does not exist")) {
-        console.error(`  ❌ Failed to clear ${table}:`, err.message);
+      const message = errorMessage(err);
+      if (!message.includes("does not exist")) {
+        console.error(`  ❌ Failed to clear ${table}:`, message);
       }
     }
   }

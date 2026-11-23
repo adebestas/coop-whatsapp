@@ -188,7 +188,7 @@ export async function handleDividendAdminCommand(
       await recordLedger({
         cooperativeId: coopId,
         type: "expense",
-        category: category as any,
+        category,
         amount,
         note: description,
         reference: `EXP-${Date.now()}`,
@@ -581,7 +581,7 @@ export async function handleDividendAdminCommand(
         orderBy: { closedAt: "desc" },
       });
       if (lastRate !== null && Math.abs(rate - lastRate) > 5 && !approvedVote) {
-        await updateCoopConfig(coopId, { pendingDividendRate: rate } as any);
+        await updateCoopConfig(coopId, { pendingDividendRate: rate });
         await audit({
           cooperativeId: coopId,
           actorPhone: phone,

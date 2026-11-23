@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma } from "../tests/setup.js";
+import { prisma, deleteTables } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { sendText } from "../src/lib/messaging.js";
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
@@ -24,7 +24,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   delete process.env.GROQ_API_KEY;
   delete process.env.GROQ_MODEL;
-  const tables = [
+  await deleteTables([
     "coopPost",
     "deductionItem",
     "deductionWaiver",
@@ -38,8 +38,7 @@ beforeEach(async () => {
     "unit",
     "cooperative",
     "session",
-  ] as any[];
-  for (const t of tables) await prisma[t].deleteMany();
+  ]);
 });
 
 afterEach(() => {

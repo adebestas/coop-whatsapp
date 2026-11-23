@@ -8,6 +8,7 @@ import { notifySupers } from "./payanyone.js";
 import { applyDividendPayoutUpdate } from "./dividends.js";
 import { forEachCoop } from "../lib/tenant-context.js";
 import { getCurrency } from "../lib/runtime-context.js";
+import { errorMessage } from "../lib/errors.js";
 
 /**
  * Transfer status polling — the safety net for the "crash after the provider
@@ -41,8 +42,8 @@ async function statusFor(reference: string): Promise<TransferStatus> {
     return { status: "unknown", error: "provider has no getTransferStatus" };
   try {
     return await provider.getTransferStatus(reference);
-  } catch (err: any) {
-    return { status: "unknown", error: String(err?.message ?? err) };
+  } catch (err) {
+    return { status: "unknown", error: errorMessage(err) };
   }
 }
 

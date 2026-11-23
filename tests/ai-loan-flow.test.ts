@@ -28,7 +28,10 @@ function aiFetch(
 }
 
 async function textsSent(): Promise<string> {
-  return (sendText as any).mock.calls.map((c: any[]) => String(c[0].text)).join("\n");
+  return vi
+    .mocked(sendText)
+    .mock.calls.map((c) => String(c[0].text))
+    .join("\n");
 }
 
 async function seed(opts: { suspended?: boolean } = {}) {
@@ -83,7 +86,7 @@ async function sessionOf(phone: string) {
 }
 
 async function lastText(): Promise<string> {
-  const calls = (sendText as any).mock.calls;
+  const calls = vi.mocked(sendText).mock.calls;
   return calls.length ? String(calls[calls.length - 1][0].text) : "";
 }
 

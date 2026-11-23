@@ -1,5 +1,6 @@
 import { prisma } from "../lib/prisma.js";
 import ExcelJS from "exceljs";
+import { errorMessage } from "../lib/errors.js";
 
 export interface ImportRow {
   name: string;
@@ -41,7 +42,9 @@ function parseCsv(buffer: Buffer): ImportRow[] {
 
 async function parseExcel(buffer: Buffer): Promise<ImportRow[]> {
   const wb = new ExcelJS.Workbook();
-  await (wb.xlsx as any).load(buffer);
+  // ExcelJS's bundled Node typings predate the generic `Buffer<ArrayBufferLike>`;
+  // the runtime value is a Node Buffer, so only the static type needs narrowing.
+  await wb.xlsx.load(buffer as unknown as Parameters<typeof wb.xlsx.load>[0]);
   const ws = wb.worksheets[0];
   if (!ws || ws.rowCount < 1) return [];
   const rows: ImportRow[] = [];
@@ -161,8 +164,8 @@ export async function bulkImportMembers(
 
       existingPhones.add(phone);
       imported += 1;
-    } catch (err: any) {
-      errors.push(`"${row.name}" — ${err.message?.slice(0, 60) ?? "unknown error"}`);
+    } catch (err) {
+      errors.push(`"${row.name}" — ${errorMessage(err).slice(0, 60)}`);
     }
   }
 

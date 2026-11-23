@@ -87,8 +87,10 @@ export async function webhookRoutes(app: FastifyInstance) {
     "/webhook",
     { config: { rateLimit: { max: 600, timeWindow: "1 minute" } } },
     async (req, reply) => {
-      const body = req.body as any;
-      const rawBody = (req as any).rawBody as string;
+      const body = req.body as {
+        entry?: Array<{ changes?: Array<{ value?: unknown }> }>;
+      };
+      const rawBody = req.rawBody ?? "";
       const signature = req.headers["x-hub-signature-256"] as string;
 
       // Verify webhook signature — blocks fake messages from attackers
@@ -98,9 +100,9 @@ export async function webhookRoutes(app: FastifyInstance) {
       }
 
       // Only process messages, ignore status updates etc.
-      const entries: any[] = body?.entry ?? [];
+      const entries = body?.entry ?? [];
       for (const entry of entries) {
-        const changes: any[] = entry.changes ?? [];
+        const changes = entry.changes ?? [];
         for (const change of changes) {
           for (const inbound of extractWhatsAppMessages(change?.value)) {
             if (!isAllowed(inbound.from)) continue;

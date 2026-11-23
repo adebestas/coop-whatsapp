@@ -22,6 +22,7 @@ import type {
 } from "./index.js";
 import { signaturesMatch } from "./index.js";
 import { forProvider } from "../../lib/money.js";
+import { errorMessage } from "../../lib/errors.js";
 
 /**
  * Monnify adapter — primary payment provider.
@@ -157,17 +158,17 @@ export const monnifyAdapter: ProviderAdapter = {
     const b = parsed.data;
     const eventType: string | undefined = b.eventType ?? b.type;
     if (!eventType?.toUpperCase().includes("SUCCESSFUL_TRANSACTION")) return null;
-    const payload: any = b.eventData ?? {};
-    const account = payload.destinationAccountInformation?.accountNumber ?? payload.accountNumber;
+    const payload = b.eventData;
+    const account = payload?.destinationAccountInformation?.accountNumber ?? payload?.accountNumber;
     if (!account) return null;
     return {
-      transactionId: String(payload.transactionReference ?? payload.transactionId ?? ""),
-      reference: payload.product?.reference ?? payload.paymentReference,
+      transactionId: String(payload?.transactionReference ?? payload?.transactionId ?? ""),
+      reference: payload?.product?.reference ?? payload?.paymentReference,
       accountNumber: String(account),
       // Monnify reports amounts in NAIRA; the wallet stores kobo — convert here so
       // every PaymentNotification.amount is uniformly in kobo (mirrors Paystack).
-      amount: Math.round(Number(payload.amountPaid ?? payload.amount ?? 0) * 100),
-      currency: String(payload.currencyCode ?? "NGN"),
+      amount: Math.round(Number(payload?.amountPaid ?? payload?.amount ?? 0) * 100),
+      currency: String(payload?.currencyCode ?? "NGN"),
       status: "successful",
       provider: "monnify",
       raw: body,
@@ -219,8 +220,8 @@ export const monnifyAdapter: ProviderAdapter = {
               ? "pending"
               : "unknown";
       return { status, providerRef: res.responseBody?.providerReference };
-    } catch (err: any) {
-      return { status: "unknown", error: String(err?.message ?? err) };
+    } catch (err) {
+      return { status: "unknown", error: errorMessage(err, "status lookup failed") };
     }
   },
 
@@ -266,8 +267,8 @@ export const monnifyAdapter: ProviderAdapter = {
         return { ok: false, error: res.responseMessage ?? "account not found" };
       }
       return { ok: true, name: res.responseBody.accountName };
-    } catch (err: any) {
-      return { ok: false, error: err?.message ?? "resolution failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "resolution failed") };
     }
   },
 
@@ -354,13 +355,13 @@ export const monnifyAdapter: ProviderAdapter = {
         return { ok: false, error: validate.responseMessage ?? "transfer validation failed" };
       }
       return { ok: true, providerRef: init.responseBody.reference };
-    } catch (err: any) {
+    } catch (err) {
       // If the transfer was already initiated, an exception (network/timeout)
       // leaves its outcome unknown — report `pending`, not failed.
       return {
         ok: false,
         pending: initiated,
-        error: err?.message ?? "monnify payout failed",
+        error: errorMessage(err, "monnify payout failed"),
       };
     }
   },
@@ -397,8 +398,8 @@ export const monnifyAdapter: ProviderAdapter = {
         authorizationUrl: res.responseBody.authorizationLink,
         status: res.responseBody.mandateStatus,
       };
-    } catch (err: any) {
-      return { ok: false, error: err?.message ?? "mandate failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "mandate failed") };
     }
   },
 
@@ -423,8 +424,8 @@ export const monnifyAdapter: ProviderAdapter = {
         providerRef: res.responseBody.transactionReference,
         status: res.responseBody.debitStatus,
       };
-    } catch (err: any) {
-      return { ok: false, error: err?.message ?? "debit failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "debit failed") };
     }
   },
 
@@ -440,13 +441,16 @@ export const monnifyAdapter: ProviderAdapter = {
         ok: res.requestSuccessful,
         error: res.requestSuccessful ? undefined : res.responseMessage,
       };
-    } catch (err: any) {
-      return { ok: false, error: err?.message ?? "cancel failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "cancel failed") };
     }
   },
 
   parseMandateNotification(body: unknown): MandateNotification | null {
-    const b: any = body;
+    const b = body as {
+      eventType?: string;
+      eventData?: { mandateStatus?: string; mandateCode?: string };
+    };
     if (String(b?.eventType ?? "").toUpperCase() !== "MANDATE_UPDATE") return null;
     const d = b.eventData ?? {};
     const map: Record<string, MandateNotification["status"]> = {
@@ -466,7 +470,16 @@ export const monnifyAdapter: ProviderAdapter = {
   },
 
   parseDebitNotification(body: unknown): DebitNotification | null {
-    const b: any = body;
+    const b = body as {
+      eventType?: string;
+      type?: string;
+      eventData?: {
+        reference?: string;
+        paymentReference?: string;
+        providerReference?: string;
+        status?: string;
+      };
+    };
     const eventType = String(b?.eventType ?? b?.type ?? "").toUpperCase();
     if (!eventType.includes("DISBURSEMENT")) return null;
     const d = b.eventData ?? {};

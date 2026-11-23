@@ -244,14 +244,14 @@ describe("AI Integration in Conversation", () => {
   it("insights command requires admin role", async () => {
     await handleMessage(PHONE, "insights");
     expect(sendText).toHaveBeenCalled();
-    const lastCall = (sendText as any).mock.calls[(sendText as any).mock.calls.length - 1];
+    const lastCall = vi.mocked(sendText).mock.calls[vi.mocked(sendText).mock.calls.length - 1];
     expect(lastCall[0].text).toContain("Only admins");
   });
 
   it("risk command requires admin role", async () => {
     await handleMessage(PHONE, "risk");
     expect(sendText).toHaveBeenCalled();
-    const lastCall = (sendText as any).mock.calls[(sendText as any).mock.calls.length - 1];
+    const lastCall = vi.mocked(sendText).mock.calls[vi.mocked(sendText).mock.calls.length - 1];
     expect(lastCall[0].text).toContain("Only admins");
   });
 
@@ -261,7 +261,7 @@ describe("AI Integration in Conversation", () => {
     await makeCoopAndMember();
     await handleMessage(PHONE, "contexthelp");
     expect(sendText).toHaveBeenCalled();
-    const lastCall = (sendText as any).mock.calls[(sendText as any).mock.calls.length - 1];
+    const lastCall = vi.mocked(sendText).mock.calls[vi.mocked(sendText).mock.calls.length - 1];
     expect(lastCall[0].text).toContain("Alice");
   });
 });
