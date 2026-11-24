@@ -138,6 +138,24 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO coop_app;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA app TO coop_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE ${PG_USER} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO coop_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE ${PG_USER} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO coop_app;
+-- Audit tables are append-only for the runtime role. On a re-run of this script
+-- the tables already exist, so undo the blanket UPDATE/DELETE grant; on a fresh
+-- database the migrations have not run yet and this block is a no-op (the same
+-- revokes are applied by scripts/db-migrate.mjs at every container boot).
+-- WebhookEvent keeps UPDATE for the retry/DLQ paths but never needs DELETE.
+DO \$do\$
+BEGIN
+  IF to_regclass('public."AuditLog"') IS NOT NULL THEN
+    EXECUTE 'REVOKE UPDATE, DELETE ON public."AuditLog" FROM coop_app';
+  END IF;
+  IF to_regclass('public."LoginAttempt"') IS NOT NULL THEN
+    EXECUTE 'REVOKE UPDATE, DELETE ON public."LoginAttempt" FROM coop_app';
+  END IF;
+  IF to_regclass('public."WebhookEvent"') IS NOT NULL THEN
+    EXECUTE 'REVOKE DELETE ON public."WebhookEvent" FROM coop_app';
+  END IF;
+END
+\$do\$;
 SQL
 
 # ---- 7. Build & start --------------------------------------------------------

@@ -74,6 +74,53 @@ async function inspect() {
   }
 }
 
+/**
+ * Audit tables must be append-only for the runtime role. The app connects as
+ * `coop_app`, which bootstrap.sh grants UPDATE/DELETE on every table so normal
+ * business writes work. That same grant would let a bug or a compromised
+ * dependency rewrite or erase its tenant's audit history, so those privileges
+ * are revoked here (as the owner, after migrations). WebhookEvent keeps UPDATE
+ * because the retry/DLQ paths mutate delivery state; it never needs DELETE.
+ *
+ * Idempotent and safe on a fresh database (tables or role may not exist yet).
+ */
+const AUDIT_TABLE_REVOKES = [
+  {
+    table: "AuditLog",
+    sql: 'REVOKE UPDATE, DELETE ON public."AuditLog" FROM coop_app',
+  },
+  {
+    table: "LoginAttempt",
+    sql: 'REVOKE UPDATE, DELETE ON public."LoginAttempt" FROM coop_app',
+  },
+  {
+    table: "WebhookEvent",
+    sql: 'REVOKE DELETE ON public."WebhookEvent" FROM coop_app',
+  },
+];
+
+async function hardenAuditTables() {
+  const client = new PrismaClient({ log: [] });
+  try {
+    const role = await client.$queryRawUnsafe(`SELECT 1 FROM pg_roles WHERE rolname = 'coop_app'`);
+    if (role.length === 0) {
+      log("coop_app role absent; skipping audit-table privilege hardening");
+      return;
+    }
+    for (const { table, sql } of AUDIT_TABLE_REVOKES) {
+      const exists = await client.$queryRawUnsafe(
+        `SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1`,
+        table,
+      );
+      if (exists.length === 0) continue;
+      await client.$executeRawUnsafe(sql);
+      log(sql);
+    }
+  } finally {
+    await client.$disconnect();
+  }
+}
+
 async function main() {
   // Migrations need the table owner: RLS policies and DDL fail for coop_app.
   // The app itself connects with DATABASE_URL (non-owner), which is what makes
@@ -141,6 +188,7 @@ async function main() {
   }
 
   prisma(["migrate", "deploy"]);
+  await hardenAuditTables();
   log("done");
 }
 

@@ -103,6 +103,23 @@ export function buildApp() {
     },
   );
 
+  // Browsers POST CSP violation reports with `Content-Type: application/csp-report`
+  // (and the newer Reporting API uses `application/reports+json`). Fastify has no
+  // parser for either, so without this the reports are rejected 415 and a CSP
+  // bypass would go unseen. Reports are untrusted client input: parsed
+  // defensively and only ever logged as truncated strings.
+  app.addContentTypeParser(
+    ["application/csp-report", "application/reports+json"],
+    { parseAs: "string", bodyLimit: 64 * 1024 },
+    (_req, body, done) => {
+      try {
+        done(null, JSON.parse(typeof body === "string" ? body : body.toString("utf8")));
+      } catch {
+        done(null, undefined);
+      }
+    },
+  );
+
   // Restrict CORS to actual dashboard origin (prevents cross-site attacks)
   const dashboardOrigin = process.env.DASHBOARD_ORIGIN;
   void app.register(cors, {
@@ -127,6 +144,9 @@ export function buildApp() {
         frameAncestors: ["'none'"],
         baseUri: ["'self'"],
         formAction: ["'self'"],
+        // Feed violations to /api/csp-report so a regression (e.g. a new inline
+        // handler blocked by scriptSrcAttr) is visible instead of silent.
+        reportUri: ["/api/csp-report"],
       },
     },
     crossOriginEmbedderPolicy: false, // Allow WhatsApp webhook images
@@ -219,6 +239,30 @@ export function buildApp() {
       return reply.code(401).send({ error: "unauthorized" });
     }
     return reply.type("text/plain; version=0.0.4").send(renderMetrics());
+  });
+
+  // CSP violation collector. Never trusts or echoes the payload; only the
+  // directive and blocked URI are logged (truncated) so a wall of injected
+  // reports cannot pollute logs or bloat memory. 204 is the expected reply.
+  app.post("/api/csp-report", async (req, reply) => {
+    const body = req.body as Record<string, unknown> | Record<string, unknown>[] | undefined;
+    const entry = Array.isArray(body)
+      ? (body[0] as { body?: Record<string, unknown> } | undefined)
+      : undefined;
+    const report = (!Array.isArray(body) ? body?.["csp-report"] : (entry?.body ?? entry)) as
+      Record<string, unknown> | undefined;
+    if (report) {
+      const pick = (key: string, max: number): string => String(report[key] ?? "").slice(0, max);
+      app.log.debug(
+        {
+          directive: pick("effective-directive", 100) || pick("violated-directive", 100),
+          blocked: pick("blocked-uri", 200),
+          document: pick("document-uri", 200),
+        },
+        "csp violation",
+      );
+    }
+    return reply.code(204).send();
   });
 
   // Count every response by method + status for the metrics endpoint.

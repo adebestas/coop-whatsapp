@@ -30,7 +30,7 @@
     "seed:ombudsman": "npx tsx src/seed.ts --ombudsman",
     "check": "npm run typecheck && npm run lint && npm run audit:ci && npm run test:gate",
     "audit:ci": "npm audit --omit=dev --audit-level=high",
-    "test:gate": "vitest run tests/admin-auth.test.ts tests/platform-auth.test.ts tests/admin-login-freeze.test.ts tests/login-lockout.test.ts tests/magic-link.test.ts tests/audit-context.test.ts tests/edge-hardening.test.ts tests/schema-sync.test.ts tests/webhook-dlq.test.ts tests/loan-repayment-reminders.test.ts tests/savings-products.test.ts tests/export-retention.test.ts tests/identity-quality.test.ts tests/mass-assignment.test.ts tests/provider-reconciliation.test.ts",
+    "test:gate": "vitest run tests/admin-auth.test.ts tests/platform-auth.test.ts tests/admin-login-freeze.test.ts tests/login-lockout.test.ts tests/magic-link.test.ts tests/audit-context.test.ts tests/edge-hardening.test.ts tests/schema-sync.test.ts tests/webhook-dlq.test.ts tests/loan-repayment-reminders.test.ts tests/savings-products.test.ts tests/export-retention.test.ts tests/identity-quality.test.ts tests/mass-assignment.test.ts tests/provider-reconciliation.test.ts tests/pre-deploy-hardening.test.ts",
     "check:full": "npm run typecheck && npm run lint && npm run audit:ci && npm test"
   },
   "dependencies": {
