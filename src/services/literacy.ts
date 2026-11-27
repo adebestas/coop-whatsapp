@@ -25,7 +25,7 @@ Here's exactly how it works, no hidden math:
 
 • You can borrow up to *2x your current savings balance*
 • Interest is *declining balance* (interest calculated on remaining balance only, so it decreases as you repay)
-• Rates by tenure: up to 3 months = 20% APR, 4-6 months = 16% APR, 7-9 months = 12% APR, 10-12 months = 10% APR
+• Rates by tenure: up to 3 months = 6% APR, 4-6 months = 8% APR, 7-9 months = 9% APR, 10-12 months = 10% APR
 • There's a one-time *₦2,000 service charge*
 • You choose a duration: *6 months* or *11 months*
 

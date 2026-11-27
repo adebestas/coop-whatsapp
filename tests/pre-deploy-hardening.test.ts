@@ -133,3 +133,32 @@ describe("CSP violation reporting", () => {
     expect(res.statusCode).toBe(204);
   });
 });
+
+describe("kobo integer-math guard", () => {
+  // Non-monetary percentage rounding (ownershipPct sum) is explicitly allowlisted.
+  const PERCENTAGE_ALLOWLIST = new Set(["src/services/beneficial-owners.ts"]);
+
+  it("never uses Naira-style Math.round(x * 100) / 100 float division in services", () => {
+    const floatPattern = /Math\.round\([^)\n]*\*\s*100\s*\)\s*\/\s*100/;
+    const offenders: string[] = [];
+    for (const file of walk(path.join(repoRoot, "src", "services"))) {
+      const rel = path.relative(repoRoot, file).replace(/\\/g, "/");
+      if (PERCENTAGE_ALLOWLIST.has(rel)) continue;
+      const source = readFileSync(file, "utf8");
+      if (floatPattern.test(source)) {
+        offenders.push(rel);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe("backup script fail-closed guard", () => {
+  it("requires BACKUP_ENCRYPTION_KEY unless BACKUP_ALLOW_PLAINTEXT=1 is set", () => {
+    const backupSh = readFileSync(path.join(repoRoot, "deploy", "backup.sh"), "utf8");
+    expect(backupSh).toContain(`if [ -z "$ENCRYPTION_KEY" ] && [ "$ALLOW_PLAINTEXT" != "1" ]; then`);
+    expect(backupSh).toContain("exit 1");
+    expect(backupSh).toContain("openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt");
+    expect(backupSh).toContain("chmod 600");
+  });
+});
