@@ -271,6 +271,15 @@ export async function cleanupDatabase(): Promise<void> {
 }
 
 /**
+ * Delete every row from the named Prisma models, in the order given.
+ * Callers list children before parents so foreign keys stay satisfied.
+ */
+export async function deleteTables(tables: readonly string[]): Promise<void> {
+  const delegates = prisma as unknown as Record<string, { deleteMany: () => Promise<unknown> }>;
+  for (const table of tables) await delegates[table].deleteMany();
+}
+
+/**
  * Reset auto-increment IDs (PostgreSQL only)
  */
 export async function resetAutoIncrement(): Promise<void> {
@@ -310,9 +319,10 @@ export async function expectError(
   try {
     await fn();
     throw new Error("Expected an error to be thrown");
-  } catch (err: any) {
-    if (expectedMessage && !err.message.includes(expectedMessage)) {
-      throw new Error(`Expected "${expectedMessage}" but got "${err.message}"`, { cause: err });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (expectedMessage && !message.includes(expectedMessage)) {
+      throw new Error(`Expected "${expectedMessage}" but got "${message}"`, { cause: err });
     }
   }
 }

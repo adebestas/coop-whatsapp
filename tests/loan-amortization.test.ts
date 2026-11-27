@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { calculateMonthlyPayment, calculateInterestPortion } from "../src/services/loans.js";
+import {
+  calculateMonthlyPayment,
+  calculateInterestPortion,
+  calculatePrincipalPortion,
+  totalRepayable,
+} from "../src/services/loans.js";
 
 /**
  * Declining-balance amortization: `balance` is the OUTSTANDING PRINCIPAL, and
@@ -30,5 +35,31 @@ describe("loan amortization (declining balance)", () => {
       balance -= principalPortion;
     }
     expect(balance).toBeGreaterThan(0);
+  });
+
+  it("returns integer kobo and closes across all tenure tiers and odd principals", () => {
+    const principals = [50_000, 333_333, 1_000_001, 10_000_000];
+    const tenures = [1, 3, 4, 6, 7, 9, 10, 11, 12];
+
+    for (const p of principals) {
+      for (const t of tenures) {
+        const monthly = calculateMonthlyPayment(p, t);
+        const total = totalRepayable(p, t);
+        expect(Number.isInteger(monthly)).toBe(true);
+        expect(Number.isInteger(total)).toBe(true);
+        expect(monthly).toBeGreaterThan(0);
+        expect(total).toBe(monthly * t);
+
+        let balance = p;
+        for (let i = 0; i < t; i++) {
+          const interest = calculateInterestPortion(balance, t);
+          const principalPortion = calculatePrincipalPortion(monthly, balance, t);
+          expect(Number.isInteger(interest)).toBe(true);
+          expect(Number.isInteger(principalPortion)).toBe(true);
+          balance -= Math.min(principalPortion, balance);
+        }
+        expect(balance).toBeLessThanOrEqual(0);
+      }
+    }
   });
 });

@@ -83,6 +83,15 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: cross-cooperative isolation at
     await owner.$executeRawUnsafe(
       `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${APP_ROLE}`,
     );
+    await owner.$executeRawUnsafe(
+      `REVOKE UPDATE, DELETE ON public."AuditLog" FROM ${APP_ROLE}`,
+    );
+    await owner.$executeRawUnsafe(
+      `REVOKE UPDATE, DELETE ON public."LoginAttempt" FROM ${APP_ROLE}`,
+    );
+    await owner.$executeRawUnsafe(
+      `REVOKE DELETE ON public."WebhookEvent" FROM ${APP_ROLE}`,
+    );
     await owner.$executeRawUnsafe(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA app TO ${APP_ROLE}`);
 
     // Defensive: remove leftovers from a previous run against a DB that wasn't
@@ -504,5 +513,42 @@ describe.skipIf(!rlsEnabled)("Row-Level Security: cross-cooperative isolation at
       if (Number(rows[0]?.n ?? 0) === 0) missing.push(table_name);
     }
     expect(missing).toEqual([]);
+  });
+
+  it("enforces append-only privileges on AuditLog, LoginAttempt, and WebhookEvent for coop_app", async () => {
+    const auditRow = await asCoop(coopA.id, (tx) =>
+      tx.auditLog.create({
+        data: {
+          cooperativeId: coopA.id,
+          actor: "test-actor",
+          action: "test.rls.append",
+          target: "test",
+          hash: `h-${Date.now()}`,
+        },
+      }),
+    );
+
+    await expect(
+      asCoop(coopA.id, (tx) =>
+        tx.auditLog.update({
+          where: { id: auditRow.id },
+          data: { action: "tampered" },
+        }),
+      ),
+    ).rejects.toThrow();
+
+    await expect(
+      asCoop(coopA.id, (tx) => tx.auditLog.delete({ where: { id: auditRow.id } })),
+    ).rejects.toThrow();
+
+    await expect(
+      asNoContext((tx) => tx.loginAttempt.deleteMany({})),
+    ).rejects.toThrow();
+
+    await expect(
+      asNoContext((tx) => tx.webhookEvent.deleteMany({})),
+    ).rejects.toThrow();
+
+    await owner.auditLog.delete({ where: { id: auditRow.id } });
   });
 });

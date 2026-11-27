@@ -79,11 +79,14 @@ describe("hardening: compiled output and backups", () => {
     expect(tsconfig.compilerOptions?.sourceMap).toBe(false);
   });
 
-  it("encrypts backups when configured and refuses plaintext in production", () => {
+  it("encrypts backups and refuses plaintext unless explicitly opted out", () => {
     const script = readFileSync(path.join(repoRoot, "deploy", "backup.sh"), "utf8");
     expect(script).toContain("BACKUP_ENCRYPTION_KEY");
     expect(script).toMatch(/openssl enc -aes-256-cbc/);
-    expect(script).toContain("REQUIRE_ENCRYPTED_BACKUPS");
+    // The cron job runs without NODE_ENV, so the guard must be key-driven and
+    // opt-out must be explicit.
+    expect(script).toContain("BACKUP_ALLOW_PLAINTEXT");
+    expect(script).toMatch(/refusing to write an unencrypted dump/);
     expect(script).toMatch(/\.dump\.enc/);
   });
 

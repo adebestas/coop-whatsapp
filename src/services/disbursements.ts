@@ -15,6 +15,7 @@ import { postJournal } from "./journal.js";
 import { alertSupers, AlertSeverity } from "../lib/alerting.js";
 import { blockSandboxExternal, sandboxBlocksProvider } from "../lib/sandbox.js";
 import { screenAndRecord, isBlocking } from "./screening.js";
+import { isUniqueViolation, errorMessage } from "../lib/errors.js";
 
 export interface DisbursementResult {
   ok: boolean;
@@ -285,8 +286,8 @@ async function payOut(
         },
       });
       payoutId = payout.id;
-    } catch (err: any) {
-      if (err?.code === "P2002") {
+    } catch (err) {
+      if (isUniqueViolation(err)) {
         // Lost the race with a concurrent identical payout — treat as duplicate.
         console.error(`[payout] duplicate blocked for ${reference}`);
         return {
@@ -341,18 +342,18 @@ async function payOut(
       verifiedName: verifiedName ?? undefined,
       payoutId,
     };
-  } catch (err: any) {
+  } catch (err) {
     if (submitted) {
       // The provider accepted the transfer but a later bookkeeping step failed.
       // We do not know whether the money actually left, so the caller must NOT
       // auto-refund — flag for manual reconciliation instead.
-      const msg = `⚠️ The payout may have been submitted but could not be confirmed (${err?.message ?? "error"}). Check with the payment provider before retrying.`;
-      await opts.onFailure?.("failed", err?.message ?? "payout threw (possible submission)");
+      const msg = `⚠️ The payout may have been submitted but could not be confirmed (${errorMessage(err, "error")}). Check with the payment provider before retrying.`;
+      await opts.onFailure?.("failed", errorMessage(err, "payout threw (possible submission)"));
       await notify(member, msg);
       return { ok: false, status: "unsure", message: msg };
     }
-    const msg = `Could not pay out right now (${err?.message ?? "provider error"}). No money moved.`;
-    await opts.onFailure?.("failed", err?.message ?? "payout threw");
+    const msg = `Could not pay out right now (${errorMessage(err, "provider error")}). No money moved.`;
+    await opts.onFailure?.("failed", errorMessage(err, "payout threw"));
     await notify(member, msg);
     return { ok: false, status: "failed", message: msg };
   }

@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
-import { prisma } from "../tests/setup.js";
+import { Prisma } from "@prisma/client";
+import { prisma, deleteTables } from "../tests/setup.js";
 
 import { generateMemberCode, hashPin } from "../src/lib/security.js";
 import { paystackAdapter } from "../src/services/payments/paystack.js";
@@ -79,7 +80,7 @@ async function makeMember(
   while (await prisma.member.findUnique({ where: { code } })) {
     code = generateMemberCode();
   }
-  const data: any = {
+  const data: Prisma.MemberUncheckedCreateInput = {
     code,
     phone,
     name: opts.name ?? `Member ${phone.slice(-4)}`,
@@ -98,7 +99,7 @@ async function makeMember(
 }
 
 beforeEach(async () => {
-  for (const m of [
+  await deleteTables([
     "dataConsent",
     "posting",
     "journalEntry",
@@ -139,9 +140,7 @@ beforeEach(async () => {
     "unit",
     "cooperative",
     "session",
-  ] as any[]) {
-    await prisma[m].deleteMany();
-  }
+  ]);
 });
 
 describe("cryptographic webhook verification", () => {

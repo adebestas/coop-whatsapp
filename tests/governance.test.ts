@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { prisma } from "../tests/setup.js";
+import { prisma, deleteTables } from "../tests/setup.js";
 import { handleMessage } from "../src/services/conversation.js";
 import { sendText, notifyMember } from "../src/lib/messaging.js";
 
@@ -62,7 +62,7 @@ async function makeMember(
 
 beforeEach(async () => {
   vi.clearAllMocks();
-  for (const m of [
+  await deleteTables([
     "dataConsent",
     "coopPost",
     "deductionItem",
@@ -100,9 +100,7 @@ beforeEach(async () => {
     "unit",
     "cooperative",
     "session",
-  ] as any[]) {
-    await prisma[m].deleteMany();
-  }
+  ]);
 });
 
 describe("fraud hardening", () => {

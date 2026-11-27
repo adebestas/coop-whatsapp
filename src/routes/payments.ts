@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { processPaymentWebhook, processPayoutWebhook } from "../services/webhooks.js";
 
 /**
@@ -10,8 +10,8 @@ import { processPaymentWebhook, processPayoutWebhook } from "../services/webhook
  * aliased onto the same handler.
  */
 export async function paymentWebhookRoutes(app: FastifyInstance) {
-  async function handle(req: any, reply: any) {
-    const rawBody = (req as any).rawBody;
+  async function handle(req: FastifyRequest, reply: FastifyReply) {
+    const rawBody = req.rawBody;
     if (typeof rawBody !== "string") {
       return reply.code(400).send({ error: "raw body unavailable" });
     }

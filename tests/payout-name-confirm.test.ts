@@ -69,7 +69,7 @@ describe("confirmAccountName (shared payout confirmation)", () => {
       resolveAccount: vi.fn(async () => ({ ok: true, name: "ADA OBI" })),
     };
     const result = await confirmAccountName({
-      provider: provider as any,
+      provider,
       accountNumber: "0123456789",
       bankCode: "058",
       expectedName: "Ada Obi",
@@ -85,7 +85,7 @@ describe("confirmAccountName (shared payout confirmation)", () => {
       provider: {
         name: "monnify",
         resolveAccount: async () => ({ ok: true, name: "SADE BALOGUN" }),
-      } as any,
+      },
       accountNumber: "0123456789",
       bankCode: "058",
       expectedName: "Ada Obi",
@@ -100,7 +100,7 @@ describe("confirmAccountName (shared payout confirmation)", () => {
       provider: {
         name: "monnify",
         resolveAccount: async () => ({ ok: false, error: "account not found" }),
-      } as any,
+      },
       accountNumber: "0123456789",
       bankCode: "058",
       expectedName: "Ada Obi",
@@ -112,7 +112,7 @@ describe("confirmAccountName (shared payout confirmation)", () => {
 
   it("holds (fail-closed) when the provider has no resolver", async () => {
     const result = await confirmAccountName({
-      provider: { name: "legacy" } as any,
+      provider: { name: "legacy" },
       accountNumber: "0123456789",
       bankCode: "058",
       expectedName: "Ada Obi",
@@ -124,7 +124,7 @@ describe("confirmAccountName (shared payout confirmation)", () => {
   it("uses the provider's own resolve path (Paystack)", async () => {
     const resolveAccount = vi.fn(async () => ({ ok: true, name: "VIC VENTURES" }));
     const result = await confirmAccountName({
-      provider: { name: "paystack", resolveAccount } as any,
+      provider: { name: "paystack", resolveAccount },
       accountNumber: "0123456789",
       bankCode: "058",
       expectedName: "Vic Ventures",
@@ -139,7 +139,7 @@ describe("confirmAccountName (shared payout confirmation)", () => {
       provider: {
         name: "monnify",
         resolveAccount: async () => ({ ok: true, name: "SADE BALOGUN" }),
-      } as any,
+      },
       accountNumber: "0123456789",
       bankCode: "058",
       expectedName: "Ada Obi",

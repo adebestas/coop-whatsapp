@@ -16,6 +16,7 @@ import type {
 import { signaturesMatch } from "./index.js";
 import { forProvider } from "../../lib/money.js";
 import { countryForCurrency } from "../../lib/currency.js";
+import { errorMessage } from "../../lib/errors.js";
 
 const API_BASE = "https://api.flutterwave.com/v3";
 
@@ -128,7 +129,7 @@ async function api<T>(
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
-  const json = (await res.json()) as any;
+  const json = (await res.json()) as { status?: string } & Record<string, unknown>;
   if (!res.ok || json.status !== "success") {
     throw new Error(
       `Flutterwave ${method} ${path} failed (${res.status}): ${JSON.stringify(json)}`,
@@ -194,7 +195,10 @@ export const flutterwaveAdapter: ProviderAdapter = {
 
   async getTransferStatus(reference: string): Promise<TransferStatus> {
     try {
-      const res = await api<any>("GET", `/transfers/${encodeURIComponent(reference)}/verify`);
+      const res = await api<{ data: { status?: string; flw_ref?: string } }>(
+        "GET",
+        `/transfers/${encodeURIComponent(reference)}/verify`,
+      );
       const d = res.data;
       const status: TransferStatus["status"] =
         d.status === "SUCCESSFUL"
@@ -205,8 +209,8 @@ export const flutterwaveAdapter: ProviderAdapter = {
               ? "pending"
               : "unknown";
       return { status, providerRef: d.flw_ref };
-    } catch (err: any) {
-      return { status: "unknown", error: String(err?.message ?? err) };
+    } catch (err) {
+      return { status: "unknown", error: errorMessage(err, "status lookup failed") };
     }
   },
 
@@ -248,8 +252,8 @@ export const flutterwaveAdapter: ProviderAdapter = {
         account_bank: params.bankCode,
       });
       return { ok: true, name: res.data.account_name };
-    } catch (err: any) {
-      return { ok: false, error: err?.message ?? "account resolution failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "account resolution failed") };
     }
   },
 
@@ -293,8 +297,8 @@ export const flutterwaveAdapter: ProviderAdapter = {
         providerRef: d.flw_ref,
         error: d.status === "SUCCESSFUL" ? undefined : "Transfer failed",
       };
-    } catch (err: any) {
-      return { ok: false, error: err?.message ?? "payout failed" };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "payout failed") };
     }
   },
 };

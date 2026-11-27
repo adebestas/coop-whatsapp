@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "../lib/prisma.js";
 import { roundMoney } from "./money.js";
+import { isUniqueViolation } from "../lib/errors.js";
 
 export type PostingInput = {
   account: string;
@@ -75,9 +76,9 @@ export async function postJournal(
       },
     });
     return { posted: true, entryId: entry.id };
-  } catch (err: any) {
+  } catch (err) {
     // P2002 unique violation on txRef => duplicate delivery.
-    if (err?.code === "P2002") {
+    if (isUniqueViolation(err)) {
       if (opts.throwOnDuplicate) throw err;
       return { posted: false, reason: "duplicate" };
     }

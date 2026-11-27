@@ -5,6 +5,7 @@ import { normalizePhone } from "../lib/phones.js";
 import { recordLedger } from "./ledger.js";
 import { audit } from "./audit.js";
 import { getCoopId } from "../lib/runtime-context.js";
+import { errorMessage } from "../lib/errors.js";
 
 export interface CashCollectionResult {
   ok: boolean;
@@ -150,10 +151,10 @@ export async function collectCashDeposit(
 
       return wallet.balance + amountKobo;
     });
-  } catch (err: any) {
+  } catch (err) {
     return {
       ok: false,
-      message: `Failed to process cash collection: ${err?.message || "Internal database error"}`,
+      message: `Failed to process cash collection: ${errorMessage(err, "Internal database error")}`,
     };
   }
 

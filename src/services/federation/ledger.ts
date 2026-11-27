@@ -1,5 +1,6 @@
 import { prisma } from "../../lib/prisma.js";
 import { roundMoney } from "../money.js";
+import { isUniqueViolation } from "../../lib/errors.js";
 
 export interface FederationPostingInput {
   account: string;
@@ -46,8 +47,8 @@ export async function postFederationJournal(
       },
     });
     return { posted: true };
-  } catch (err: any) {
-    if (err?.code === "P2002") return { posted: false, reason: "duplicate" };
+  } catch (err) {
+    if (isUniqueViolation(err)) return { posted: false, reason: "duplicate" };
     throw err;
   }
 }

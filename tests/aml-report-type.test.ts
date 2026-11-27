@@ -110,12 +110,12 @@ describe("AML report labelling (STR vs CTR)", () => {
 describe("CBN payload reports the true amount", () => {
   it("sends and stores the aggregate reported amount, not the single-tx amount", async () => {
     process.env.CBN_STR_WEBHOOK = "https://cbn.test/str";
-    const captured: any[] = [];
+    const captured: Record<string, unknown>[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: string, init: { body: string }) => {
         captured.push(JSON.parse(init.body));
-        return { ok: true, status: 200, text: async () => "ok" } as any;
+        return { ok: true, status: 200, text: async () => "ok" } as unknown as Response;
       }),
     );
 

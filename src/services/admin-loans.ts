@@ -20,6 +20,7 @@ import {
 import { checkVelocity, checkDailyPayoutLimit } from "./fraud.js";
 import { sendToBank } from "./disbursements.js";
 import { AdminContext, roleLabel, guardFailed } from "./admin-context.js";
+import { errorMessage } from "../lib/errors.js";
 
 export async function sendPendingLoans(
   phone: string,
@@ -271,7 +272,7 @@ export async function handlePayout(
       to: admin.phone,
       text: `Payout of ${formatBalance(amount)} to *${target.name}* was sent ✅ and their wallet debited.`,
     });
-  } catch (err: any) {
+  } catch (err) {
     // Crash safety — any throw after the debit must be handled WITHOUT
     // double-paying. Once money has been sent (paid), never auto-refund:
     // flag for manual reconciliation instead.
@@ -307,7 +308,7 @@ export async function handlePayout(
     console.error(`[payout] threw (unconfirmed outcome): ${claimed.request.id}`, err);
     await sendText({
       to: admin.phone,
-      text: `⚠️ Payout hit an unexpected error with an *unconfirmed* outcome and was flagged for reconciliation (${String(err?.message ?? err).slice(0, 120)}). Do NOT retry or refund until the provider is checked.`,
+      text: `⚠️ Payout hit an unexpected error with an *unconfirmed* outcome and was flagged for reconciliation (${errorMessage(err).slice(0, 120)}). Do NOT retry or refund until the provider is checked.`,
     });
   }
 }

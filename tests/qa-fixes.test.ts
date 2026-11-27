@@ -239,7 +239,7 @@ describe("reconciliation tenant isolation", () => {
     const alerted = vi
       .mocked(notifyMember)
       .mock.calls.filter((c) => String(c[1]).includes("NEGATIVE"))
-      .map((c) => String((c[0] as any).phone ?? c[0]));
+      .map((c) => String(c[0].phone ?? c[0]));
 
     expect(alerted).toContain(superA.phone);
     expect(alerted).not.toContain(superB.phone);

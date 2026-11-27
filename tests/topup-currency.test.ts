@@ -39,4 +39,49 @@ describe("topup currency", () => {
     expect(creditAlert).toContain("New balance");
     expect(creditAlert).toContain("Total saved");
   });
+
+  it("credits once under duplicate/concurrent webhook replay and rejects currency mismatch or failed status", async () => {
+    const suffix = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    const coop = await prisma.cooperative.create({
+      data: { name: "Replay Coop", code: `RP${suffix}`, currency: "NGN" },
+    });
+    const member = await prisma.member.create({
+      data: {
+        code: `MR${suffix}`,
+        phone: `+234809${suffix.slice(-7)}`,
+        name: "Tunde",
+        cooperativeId: coop.id,
+        virtualAccountNumber: `VAR${suffix}`,
+        wallet: { create: { balance: 0 } },
+      },
+    });
+
+    const payload = {
+      transactionId: `tx-replay-${suffix}`,
+      accountNumber: member.virtualAccountNumber!,
+      amount: 250000,
+      currency: "NGN",
+      status: "successful" as const,
+      provider: "monnify" as const,
+      raw: {},
+    };
+
+    // Concurrent + sequential replay of the exact same provider transaction.
+    await Promise.all([handlePaymentNotification(payload), handlePaymentNotification(payload)]);
+    await handlePaymentNotification(payload);
+
+    // Wrong currency, non-successful status, and non-positive amount must all no-op.
+    await handlePaymentNotification({ ...payload, transactionId: `tx-usd-${suffix}`, currency: "USD" });
+    await handlePaymentNotification({ ...payload, transactionId: `tx-fail-${suffix}`, status: "failed" });
+    await handlePaymentNotification({ ...payload, transactionId: `tx-zero-${suffix}`, amount: 0 });
+
+    const wallet = await prisma.wallet.findUnique({ where: { memberId: member.id } });
+    expect(wallet?.balance).toBe(250000);
+    expect(wallet?.totalSaved).toBe(250000);
+    expect(
+      await prisma.contribution.count({
+        where: { cooperativeId: coop.id, memberId: member.id, type: "topup" },
+      }),
+    ).toBe(1);
+  });
 });

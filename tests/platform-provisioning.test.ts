@@ -29,7 +29,7 @@ beforeEach(async () => {
   });
   cookie = (r.headers["set-cookie"] as string).split(";")[0];
 });
-const mut = (url: string, payload: any) =>
+const mut = (url: string, payload: Record<string, unknown>) =>
   app.inject({
     method: "POST",
     url,

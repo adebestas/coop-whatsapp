@@ -97,7 +97,11 @@ async function checkRapidSequence(
   if (direction !== "out") return null;
 
   const since = new Date(Date.now() - RAPID_SEQUENCE_WINDOW_MS);
-  const where: any = {
+  const where: {
+    memberId: string;
+    createdAt: { gte: Date };
+    status: { in: string[] };
+  } = {
     memberId,
     createdAt: { gte: since },
     status: { in: ["paid", "successful", "approved", "processing"] },

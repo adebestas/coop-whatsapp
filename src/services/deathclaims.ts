@@ -7,6 +7,7 @@ import { resolveBankCode } from "../lib/banks.js";
 import { audit } from "./audit.js";
 import { hashOtp, verifyOtp } from "../lib/security.js";
 import { writeOffProtection } from "./loan-protection.js";
+import { errorMessage } from "../lib/errors.js";
 
 /** Number of validations (by guarantors) a death claim needs. */
 export const REQUIRED_DEATH_VALIDATIONS = 2;
@@ -570,7 +571,7 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
       ok: true,
       message: `🕊️ *${formatBalance(balance)}* paid to the family of ${claim.member.name} (${claim.familyBankName ?? claim.familyBankCode} ****${claim.familyAccountNumber.slice(-4)}). Claim *${claim.id.slice(-6)}* closed.${writeOffNote}`,
     };
-  } catch (err: any) {
+  } catch (err) {
     // Crash safety — any throw after the debit must be handled WITHOUT
     // double-paying. Once money has been sent (paid), never auto-refund:
     // flag for manual reconciliation instead.
@@ -604,7 +605,7 @@ export async function approveClaim(actorPhone: string, claimCode: string): Promi
     console.error(`[claim] payout threw, refunded: ${claim.id}`, err);
     return {
       ok: false,
-      message: `Claim payout failed and the wallet was refunded (${String(err?.message ?? err).slice(0, 120)}).`,
+      message: `Claim payout failed and the wallet was refunded (${errorMessage(err).slice(0, 120)}).`,
     };
   }
 }

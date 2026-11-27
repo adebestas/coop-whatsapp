@@ -73,7 +73,9 @@ describe("Developer Console â€” Cooperative WhatsApp Bot Simulator", () => 
     const body = JSON.parse(res.payload);
     expect(body.members).toBeInstanceOf(Array);
     expect(body.members.length).toBeGreaterThanOrEqual(1);
-    const found = body.members.find((m: any) => m.phone === member.phone);
+    const found = body.members.find(
+      (m: { phone: string; name: string }) => m.phone === member.phone,
+    );
     expect(found).toBeDefined();
     expect(found.name).toBe("Tunde Simulator");
   });

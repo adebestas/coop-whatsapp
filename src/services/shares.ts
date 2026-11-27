@@ -114,7 +114,7 @@ export async function buyShares(
             { account: "equity:share_capital", direction: "CREDIT", amount: cost },
           ],
         },
-        tx as any,
+        tx,
       );
       if (!posted.posted)
         throw new Error(`share journal not posted: ${posted.reason ?? "unknown"}`);

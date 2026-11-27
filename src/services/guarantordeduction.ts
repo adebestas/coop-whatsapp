@@ -5,6 +5,7 @@ import { audit } from "./audit.js";
 import { recordLedger } from "./ledger.js";
 import { totalRepayable } from "./loans.js";
 import { forEachCoop } from "../lib/tenant-context.js";
+import { roundMoney } from "./money.js";
 
 /** How many months of default trigger guarantor liability. */
 export const DEFAULT_GRACE_MONTHS = 2;
@@ -41,7 +42,7 @@ export async function scanGuarantorDefaults(): Promise<number> {
       // Calculate total interest for declining balance loan
       const totalRepayableAmount = totalRepayable(loan.amount, loan.tenureMonths);
       const totalInterest = totalRepayableAmount - loan.amount;
-      const rawShare = Math.round(totalInterest * GUARANTOR_INTEREST_SHARE * 100) / 100;
+      const rawShare = roundMoney(totalInterest * GUARANTOR_INTEREST_SHARE);
       // A guarantor can never be debited more than what is still owed on the loan.
       const share = Math.min(rawShare, loan.balance);
       if (share <= 0) continue;

@@ -4,6 +4,7 @@ import { formatBalance, getMemberByPhone } from "./cooperative.js";
 import { audit } from "./audit.js";
 import { qualifyReferral } from "./referrals.js";
 import { notifySuperAdmins } from "./withdrawals.js";
+import { roundMoney } from "./money.js";
 
 type DraftItem = {
   memberId: string;
@@ -44,7 +45,7 @@ async function commodityDraftItems(coopId: string): Promise<DraftItem[]> {
         memberId: loan.memberId,
         kind: "commodity" as const,
         loanId: loan.id,
-        amount: Math.round(installment * 100) / 100,
+        amount: roundMoney(installment),
       };
     });
 }
@@ -109,7 +110,7 @@ export async function buildBatch(
         memberId: m.id,
         kind: "loan",
         loanId: loan.id,
-        amount: Math.round(installment * 100) / 100,
+        amount: roundMoney(installment),
       });
     }
   }
@@ -203,7 +204,7 @@ export async function buildBatchFromRows(
         memberId: m.id,
         kind: "loan",
         loanId: loan.id,
-        amount: Math.round(installment * 100) / 100,
+        amount: roundMoney(installment),
       });
     }
   }

@@ -2568,7 +2568,7 @@ export async function handleAwaitingInput(
         });
         return;
       }
-      const prevData3 = safeParse(dataJson) as any;
+      const prevData3 = safeParse(dataJson);
       const coopNameVal = prevData3.name ?? prevData3.coopName ?? "";
       const coopCodeVal = prevData3.coopCode ?? "";
       const coopStateVal = prevData3.coopState ?? null;
@@ -2576,7 +2576,7 @@ export async function handleAwaitingInput(
       await provisionCooperative({
         name: coopNameVal,
         code: coopCodeVal,
-        state: coopStateVal,
+        state: coopStateVal ?? undefined,
         adminPhone,
         sessionPhone: phone,
       });

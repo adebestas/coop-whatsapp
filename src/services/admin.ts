@@ -1639,25 +1639,26 @@ export async function handleAdminCommand(
           });
           return true;
         }
-        let parsedValue: any;
+        let parsedValue: number | boolean;
         if (rule.type === "bool") {
           parsedValue = value.toLowerCase() === "true" || value === "1";
         } else {
-          parsedValue = Number(value);
-          if (!Number.isFinite(parsedValue)) {
+          const numeric = Number(value);
+          if (!Number.isFinite(numeric)) {
             await sendText({ to: phone, text: `Value must be a number for *${key}*.` });
             return true;
           }
           // Registry-driven bounds — reject out-of-range values before persisting.
           const lo = rule.min;
           const hi = rule.max;
-          if ((lo !== undefined && parsedValue < lo) || (hi !== undefined && parsedValue > hi)) {
+          if ((lo !== undefined && numeric < lo) || (hi !== undefined && numeric > hi)) {
             await sendText({
               to: phone,
               text: `*${key}* must be between *${lo ?? "-∞"}* and *${hi ?? "∞"}*.`,
             });
             return true;
           }
+          parsedValue = numeric;
         }
         await updateCoopConfig(coopId, { [key]: parsedValue });
         await audit({

@@ -11,6 +11,10 @@ import { addCoopAdmin } from "../src/services/cooperative-provisioning.js";
 import { setCoopAdminRole } from "../src/services/platform-coops.js";
 import { createPlatformAdmin } from "../src/services/platform-admin.js";
 import { bulkImportMembers } from "../src/services/bulk-import.js";
+import { signPlatformToken } from "../src/lib/platform-auth.js";
+import { hashPin } from "../src/lib/security.js";
+
+process.env.ADMIN_JWT_SECRET ||= "test-platform-secret-0123456789";
 
 const PRIVILEGED = {
   id: "attacker-chosen-id",
@@ -37,6 +41,28 @@ async function adminSession(coopId: string, phone: string) {
   expect(login.statusCode).toBe(200);
   const token = String(login.headers["set-cookie"]).split("coop_token=")[1].split(";")[0];
   return { app, admin, cookie: `coop_token=${token}` };
+}
+
+async function devSession(role: "owner" | "developer" = "owner") {
+  const admin = await prisma.platformAdmin.create({
+    data: {
+      name: "Platform Admin",
+      phone: `2348071${Math.floor(100000 + Math.random() * 899999)}`,
+      role,
+      pin: hashPin("123456"),
+      mustChangePin: false,
+      totpSecret: "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+      totpEnabled: true,
+    },
+  });
+  const token = signPlatformToken({ id: admin.id, phone: admin.phone, role: admin.role });
+  return {
+    admin,
+    headers: {
+      cookie: `coop_dev_token=${token}`,
+      "x-requested-with": "xmlhttprequest",
+    },
+  };
 }
 
 beforeEach(async () => {
@@ -216,5 +242,123 @@ describe("role changes are enforced server-side", () => {
       where: { cooperativeId_phone: { cooperativeId: coop.id, phone: "2348070000015" } },
     });
     expect(imported?.role).toBe("member");
+  });
+});
+
+describe("developer console ignores privileged body fields", () => {
+  it("creates a coop admin from explicit fields only", async () => {
+    const coop = await createTestCoop("MASS10");
+    const app = await createTestApp();
+    const { headers } = await devSession();
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/developer/coops/${coop.id}/admins`,
+      headers,
+      payload: { ...PRIVILEGED, phone: "2348070000020", name: "Mallory", role: "owner" },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const member = await prisma.member.findUnique({
+      where: { cooperativeId_phone: { cooperativeId: coop.id, phone: "2348070000020" } },
+    });
+    expect(member?.id).not.toBe("attacker-chosen-id");
+    expect(member?.role).toBe("admin");
+    expect(member?.status).toBe("active");
+    expect(member?.phoneVerified).toBe(false);
+    expect(member?.pin).not.toBe("0000");
+    expect(member?.cooperativeId).toBe(coop.id);
+
+    const wallet = await prisma.wallet.findUnique({ where: { memberId: member!.id } });
+    expect(wallet?.balance ?? 0).toBe(0);
+  });
+
+  it("changes only the role when privileged extras ride along", async () => {
+    const coop = await createTestCoop("MASS11");
+    const app = await createTestApp();
+    const { headers } = await devSession();
+    const target = await createTestMember(coop.id, { phone: "2348070000021" });
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/developer/coops/${coop.id}/admins/${target.id}`,
+      headers,
+      payload: { ...PRIVILEGED, role: "admin" },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const after = await prisma.member.findUnique({ where: { id: target.id } });
+    expect(after?.role).toBe("admin");
+    expect(after?.status).toBe("active");
+    expect(after?.phoneVerified).toBe(false);
+
+    const wallet = await prisma.wallet.findUnique({ where: { memberId: target.id } });
+    expect(wallet?.balance ?? 0).toBe(0);
+  });
+
+  it("ignores a client-chosen id, pin and flags on platform admin creation", async () => {
+    const app = await createTestApp();
+    const { admin: owner, headers } = await devSession();
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/developer/admins",
+      headers,
+      payload: {
+        ...PRIVILEGED,
+        name: "Mallory",
+        phone: "2348070000022",
+        role: "developer",
+        active: false,
+        mustChangePin: false,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const created = await prisma.platformAdmin.findUnique({ where: { phone: "2348070000022" } });
+    expect(created).not.toBeNull();
+    expect(created?.id).not.toBe("attacker-chosen-id");
+    expect(created?.role).toBe("developer");
+    expect(created?.active).toBe(true);
+    expect(created?.mustChangePin).toBe(true);
+    expect(created?.phoneVerified).toBe(false);
+    expect(created?.totpSecret).toBeNull();
+    expect(created?.pin).not.toBe("0000");
+    expect(created?.createdById).toBe(owner.id);
+  });
+
+  it("ignores role, plan and ownership fields on coop config updates", async () => {
+    const coop = await createTestCoop("MASS12");
+    const app = await createTestApp();
+    const { headers } = await devSession();
+
+    const extras = {
+      id: PRIVILEGED.id,
+      userId: PRIVILEGED.userId,
+      role: PRIVILEGED.role,
+      isAdmin: PRIVILEGED.isAdmin,
+      plan: PRIVILEGED.plan,
+      cooperativeId: PRIVILEGED.cooperativeId,
+      balance: PRIVILEGED.balance,
+      pin: PRIVILEGED.pin,
+      totpSecret: PRIVILEGED.totpSecret,
+      phoneVerified: PRIVILEGED.phoneVerified,
+    };
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/developer/coops/${coop.id}/config`,
+      headers,
+      payload: { ...extras, status: "active", loanInterestRate: 15 },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const after = await prisma.cooperative.findUnique({ where: { id: coop.id } });
+    expect(after?.status).toBe("active");
+    expect(await prisma.subscription.findUnique({ where: { cooperativeId: coop.id } })).toBeNull();
+    expect(await prisma.member.count({ where: { cooperativeId: coop.id } })).toBe(0);
+
+    const cfg = await prisma.cooperativeConfig.findUnique({ where: { cooperativeId: coop.id } });
+    expect(cfg?.loanInterestRate).toBe(15);
   });
 });
